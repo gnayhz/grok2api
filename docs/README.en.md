@@ -1,6 +1,6 @@
 # Grok2API
 
-[中文](../readme.md) | **English**
+[中文](../readme.md) | **English** | [Docs](https://blog.cheny.me/blog/posts/grok2api)
 
 > [!NOTE]
 > This project is for learning and research only. You must comply with Grok **Terms of Use** and **local laws and regulations**. Do not use for illegal purposes.
@@ -15,22 +15,34 @@ Grok2API rebuilt with **FastAPI**, fully aligned with the latest web call format
 <br>
 
 ## Quick Start
+> [Docs](https://blog.cheny.me/blog/posts/grok2api)
 
 ### Local
 
 ```bash
 uv sync
-uv run main.py
+
+uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 main:app
 ```
 
 ### Docker Compose
 
 ```bash
 git clone https://github.com/chenyme/grok2api
+
 cd grok2api
 
 docker compose up -d
 ```
+
+> Docker Compose port variables:
+>
+> - `SERVER_PORT`: app listening port inside the container
+> - `HOST_PORT`: host-side published port (Docker Compose only)
+>
+> Tip: mapping follows `HOST_PORT:SERVER_PORT` - users connect to `HOST_PORT`, while the app listens on `SERVER_PORT` inside the container.
+>
+> Example: `HOST_PORT=9000 SERVER_PORT=8011 docker compose up -d`, then access `http://localhost:9000`.
 
 ### Vercel
 
@@ -52,7 +64,7 @@ docker compose up -d
 
 ## Admin Panel
 
-- Access: `http://<host>:8000/admin`
+- Access: `http://<host>:<port>/admin` (use `SERVER_PORT` for local run and `HOST_PORT` for Docker Compose; both default to `8000`)
 - Default password: `grok2api` (config `app.app_key`, recommended to change)
 
 **Features**:
@@ -77,7 +89,8 @@ docker compose up -d
 | `DATA_DIR` | Data dir (config/tokens/locks) | `./data` | `/data` |
 | `SERVER_HOST` | Bind address | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | Server port | `8000` | `8000` |
-| `SERVER_WORKERS` | Uvicorn worker count | `1` | `2` |
+| `HOST_PORT` | Host published port for Docker Compose | `8000` | `9000` |
+| `SERVER_WORKERS` | Server worker count | `1` | `2` |
 | `SERVER_STORAGE_TYPE` | Storage type (`local`/`redis`/`mysql`/`pgsql`) | `local` | `pgsql` |
 | `SERVER_STORAGE_URL` | Storage DSN (optional for local) | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
 
@@ -100,7 +113,6 @@ docker compose up -d
 | `grok-3-mini` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-3-thinking` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-4` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4-mini` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-4-thinking` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-4-heavy` | 4 | Super | Yes | Yes | - |
 | `grok-4.1-mini` | 1 | Basic/Super | Yes | Yes | - |
@@ -116,6 +128,8 @@ docker compose up -d
 <br>
 
 ## API
+
+> The examples below use `localhost:8000` by default; if you set `HOST_PORT` in Docker Compose, replace the port accordingly.
 
 ### `POST /v1/chat/completions`
 
@@ -149,7 +163,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `parallel_tool_calls` | boolean | Allow parallel tool calls | `true`, `false` |
 | `video_config` | object | **Video model only** | Supported: `grok-imagine-1.0-video` |
 | └─ `aspect_ratio` | string | Video aspect ratio | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`, `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
-| └─ `video_length` | integer | Video length (seconds) | `6`, `10`, `15` |
+| └─ `video_length` | integer | Video length (seconds) | `6` ~ `30` |
 | └─ `resolution_name` | string | Resolution | `480p`, `720p` |
 | └─ `preset` | string | Style preset | `fun`, `normal`, `spicy`, `custom` |
 | `image_config` | object | **Image models only** | Supported: `grok-imagine-1.0` / `grok-imagine-1.0-fast` / `grok-imagine-1.0-edit` |
@@ -318,6 +332,51 @@ curl http://localhost:8000/v1/images/edits \
 
 <br>
 
+### `POST /v1/videos`
+
+> Video generation endpoint (OpenAI videos.create compatible)
+
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -d '{
+    "model": "grok-imagine-1.0-video",
+    "prompt": "Neon rainy street at night, cinematic slow tracking shot",
+    "size": "1792x1024",
+    "seconds": 18,
+    "quality": "standard"
+  }'
+```
+
+<details>
+<summary>Supported request parameters</summary>
+
+<br>
+
+| Field | Type | Description | Allowed values |
+| :-- | :-- | :-- | :-- |
+| `model` | string | Video model | `grok-imagine-1.0-video` |
+| `prompt` | string | Video prompt | - |
+| `size` | string | Frame size (mapped to aspect_ratio) | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
+| `seconds` | integer | Target duration (seconds) | `6` ~ `30` |
+| `quality` | string | Video quality (mapped to resolution) | `standard`, `high` |
+| `image_reference` | object/string | Reference image (optional) | `{"image_url":"https://..."}` or Data URI |
+| `input_reference` | file | multipart reference image (optional) | `png`, `jpg`, `webp` |
+
+**Notes**:
+
+- Server-side chain extension now supports 6~30 seconds automatically, so **`/v1/video/extend` is not required**.
+- `quality=standard` maps to `480p`; `quality=high` maps to `720p`.
+- For basic-pool requests at `720p`, generation falls back to `480p` first, then upscales according to `video.upscale_timing`.
+- If both `image_reference` and `input_reference` are provided, references are processed in order; the video pipeline uses the first image only.
+
+<br>
+
+</details>
+
+<br>
+
 ## Configuration
 
 Config file: `data/config.toml`
@@ -335,8 +394,8 @@ Config file: `data/config.toml`
 | **app** | `app_url` | App URL | External base URL used for file links. | `""` |
 |  | `app_key` | Admin password | Login password for admin panel. | `grok2api` |
 |  | `api_key` | API key | Optional API key for access (comma-separated string or array). | `""` |
-|  | `public_enabled` | Public mode | Enable public features. | `false` |
-|  | `public_key` | Public key | Public access key (optional). | `""` |
+|  | `function_enabled` | Function mode | Enable function pages/features. | `false` |
+|  | `function_key` | Function key | Access key for function endpoints/pages (optional). | `""` |
 |  | `image_format` | Image format | `url` or `base64`. | `url` |
 |  | `video_format` | Video format | `html` or `url` (processed link). | `html` |
 |  | `temporary` | Temporary chat | Enable temporary chat mode. | `true` |
@@ -344,9 +403,12 @@ Config file: `data/config.toml`
 |  | `stream` | Stream | Enable streaming by default. | `true` |
 |  | `thinking` | Thinking | Enable reasoning output by default. | `true` |
 |  | `dynamic_statsig` | Dynamic statsig | Generate dynamic Statsig values. | `true` |
+|  | `custom_instruction` | Custom instruction | Multi-line text passed through as Grok `customPersonality`. | `""` |
 |  | `filter_tags` | Filter tags | Filter special tags in responses. | `["xaiartifact","xai:tool_usage_card","grok:render"]` |
 | **proxy** | `base_proxy_url` | Base proxy URL | Proxy to Grok web. | `""` |
 |  | `asset_proxy_url` | Asset proxy URL | Proxy to Grok assets (img/video). | `""` |
+|  | `cf_cookies` | CF cookies | Full cookie string written by FlareSolverr refresh. | `""` |
+|  | `skip_proxy_ssl_verify` | Skip proxy SSL verify | Enable when proxy uses a self-signed cert (proxy only; upstream TLS is still verified). | `false` |
 |  | `enabled` | CF auto refresh | Enable Cloudflare auto refresh. | `false` |
 |  | `flaresolverr_url` | FlareSolverr URL | FlareSolverr HTTP endpoint. | `""` |
 |  | `refresh_interval` | Refresh interval | Refresh cf_clearance interval (seconds). | `3600` |
@@ -356,6 +418,7 @@ Config file: `data/config.toml`
 |  | `user_agent` | User-Agent | HTTP User-Agent string. | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36` |
 | **retry** | `max_retry` | Max retry | Max retries for upstream failures. | `3` |
 |  | `retry_status_codes` | Retry codes | HTTP status codes that trigger retry. | `[401, 429, 403]` |
+|  | `reset_session_status_codes` | Reset session codes | HTTP status codes that trigger session reset (proxy rotation). | `[403]` |
 |  | `retry_backoff_base` | Backoff base | Retry backoff base seconds. | `0.5` |
 |  | `retry_backoff_factor` | Backoff factor | Exponential backoff factor. | `2.0` |
 |  | `retry_backoff_max` | Backoff max | Max delay per retry (seconds). | `20.0` |
@@ -387,6 +450,7 @@ Config file: `data/config.toml`
 | **video** | `concurrent` | Concurrency | Reverse video concurrency limit. | `100` |
 |  | `timeout` | Timeout | Reverse video timeout (seconds). | `60` |
 |  | `stream_timeout` | Stream timeout | Stream idle timeout (seconds). | `60` |
+|  | `upscale_timing` | Upscale timing | Basic-pool 720p upscale mode: `single` (after each extension round) / `complete` (after all rounds). | `complete` |
 | **voice** | `timeout` | Timeout | Voice request timeout (seconds). | `60` |
 | **asset** | `upload_concurrent` | Upload concurrency | Upload concurrency. | `100` |
 |  | `upload_timeout` | Upload timeout | Upload timeout (seconds). | `60` |

@@ -34,6 +34,18 @@ class AppChatReverse:
     """/rest/app-chat/conversations/new reverse interface."""
 
     @staticmethod
+    def _resolve_custom_personality() -> Optional[str]:
+        """Resolve optional custom personality from app config."""
+        value = get_config("app.custom_instruction", "")
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        if not value.strip():
+            return None
+        return value
+
+    @staticmethod
     def build_payload(
         message: str,
         model: str,
@@ -51,10 +63,10 @@ class AppChatReverse:
             "deviceEnvInfo": {
                 "darkModeEnabled": False,
                 "devicePixelRatio": 2,
-                "screenWidth": 2056,
                 "screenHeight": 1329,
-                "viewportWidth": 2056,
+                "screenWidth": 2056,
                 "viewportHeight": 1083,
+                "viewportWidth": 2056,
             },
             "disableMemory": get_config("app.disable_memory"),
             "disableSearch": False,
@@ -83,10 +95,20 @@ class AppChatReverse:
             "toolOverrides": tool_overrides or {},
         }
 
+        if model == "grok-420":
+            payload["enable420"] = True
+
+        custom_personality = AppChatReverse._resolve_custom_personality()
+        if custom_personality is not None:
+            payload["customPersonality"] = custom_personality
+
         if model_config_override:
             payload["responseMetadata"]["modelConfigOverride"] = model_config_override
 
         payload["deepsearchPreset"] = deepsearch_preset or ""
+
+        import json
+        logger.debug(f"AppChatReverse payload: {json.dumps(payload, indent=4, ensure_ascii=False)}")
 
         return payload
 
@@ -154,6 +176,17 @@ class AppChatReverse:
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
                 deepsearch_preset=deepsearch_preset,
+            )
+            payload_summary = {
+                "model": payload.get("modelName"),
+                "mode": payload.get("modelMode"),
+                "message_len": payload.get("message") or "",
+                "file_attachments": len(payload.get("fileAttachments") or []),
+                "custom_personality_len": len(payload.get("customPersonality") or ""),
+            }
+            logger.debug(
+                "AppChatReverse final Grok params (redacted)",
+                extra={"grok_payload": payload_summary},
             )
 
             # Curl Config
