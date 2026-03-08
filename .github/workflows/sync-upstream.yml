@@ -14,7 +14,7 @@ jobs:
       - name: Checkout 代码
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
       - name: 配置 Git 用户
