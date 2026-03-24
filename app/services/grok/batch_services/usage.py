@@ -55,13 +55,14 @@ class UsageService:
                     remaining = data.get("remainingQueries")
                     if remaining is not None:
                         data["remainingTokens"] = remaining
-                logger.info(
+                logger.debug(
                     f"Usage sync success: remaining={remaining}, token={token[:10]}..."
                 )
                 return data
 
-            except Exception:
+            except Exception as e:
                 # 最后一次失败已经被记录
+                logger.debug(f"UsageService.get failed for token {token[:10]}...: {str(e)}")
                 raise
 
 
