@@ -880,8 +880,6 @@ async def chat_completions(request: ChatCompletionRequest):
                 preset=v_conf.preset,
             )
         except Exception as e:
-            if request.stream is not False:
-                return _streaming_error_response(e)
             raise
     else:
         try:
