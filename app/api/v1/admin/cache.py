@@ -1,12 +1,70 @@
+import asyncio
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.core.auth import verify_app_key
 from app.core.batch import create_task, expire_task
-from app.services.grok.batch_services.assets import ListService, DeleteService
-from app.services.token.manager import get_token_manager
+from app.services.account.commands import ListAccountsQuery
+from app.services.account.coordinator import get_account_management_service
+from app.services.account.models import AccountRecord
+from app.services.grok.batch_services.assets import DeleteService, ListService
+
 router = APIRouter()
+
+
+def _mask_token(token: str) -> str:
+    return f"{token[:8]}...{token[-16:]}" if len(token) > 24 else token
+
+
+async def _list_all_accounts() -> list[AccountRecord]:
+    service = await get_account_management_service()
+    page = 1
+    records: list[AccountRecord] = []
+    while True:
+        result = await service.list_accounts(
+            ListAccountsQuery(
+                page=page,
+                page_size=2000,
+                include_deleted=False,
+            )
+        )
+        records.extend(result.items)
+        if page >= result.total_pages:
+            break
+        page += 1
+    return records
+
+
+async def _build_online_accounts() -> list[dict]:
+    accounts = await _list_all_accounts()
+    return [
+        {
+            "token": record.token,
+            "token_masked": _mask_token(record.token),
+            "pool": record.pool_name,
+            "status": record.status.value,
+            "last_asset_clear_at": record.last_asset_clear_at,
+        }
+        for record in accounts
+    ]
+
+
+def _query_tokens(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [token.strip() for token in value.split(",") if token.strip()]
+
+
+def _detail_from_error(token: str, account_map: dict, error: str) -> dict:
+    account = account_map.get(token)
+    return {
+        "token": token,
+        "token_masked": account["token_masked"] if account else token,
+        "count": 0,
+        "status": f"error: {error}",
+        "last_asset_clear_at": account["last_asset_clear_at"] if account else None,
+    }
 
 
 @router.get("/cache", dependencies=[Depends(verify_app_key)])
@@ -19,35 +77,11 @@ async def cache_stats(request: Request):
         image_stats = cache_service.get_stats("image")
         video_stats = cache_service.get_stats("video")
 
-        mgr = await get_token_manager()
-        pools = mgr.pools
-        accounts = []
-        for pool_name, pool in pools.items():
-            for info in pool.list():
-                raw_token = (
-                    info.token[4:] if info.token.startswith("sso=") else info.token
-                )
-                masked = (
-                    f"{raw_token[:8]}...{raw_token[-16:]}"
-                    if len(raw_token) > 24
-                    else raw_token
-                )
-                accounts.append(
-                    {
-                        "token": raw_token,
-                        "token_masked": masked,
-                        "pool": pool_name,
-                        "status": info.status,
-                        "last_asset_clear_at": info.last_asset_clear_at,
-                    }
-                )
-
+        accounts = await _build_online_accounts()
+        account_map = {account["token"]: account for account in accounts}
         scope = request.query_params.get("scope")
         selected_token = request.query_params.get("token")
-        tokens_param = request.query_params.get("tokens")
-        selected_tokens = []
-        if tokens_param:
-            selected_tokens = [t.strip() for t in tokens_param.split(",") if t.strip()]
+        selected_tokens = _query_tokens(request.query_params.get("tokens"))
 
         online_stats = {
             "count": 0,
@@ -56,29 +90,17 @@ async def cache_stats(request: Request):
             "last_asset_clear_at": None,
         }
         online_details = []
-        account_map = {a["token"]: a for a in accounts}
+
         if selected_tokens:
             total = 0
-            raw_results = await ListService.fetch_assets_details(
-                selected_tokens,
-                account_map,
-            )
+            raw_results = await ListService.fetch_assets_details(selected_tokens, account_map)
             for token, res in raw_results.items():
                 if res.get("ok"):
                     data = res.get("data", {})
                     detail = data.get("detail")
                     total += data.get("count", 0)
                 else:
-                    account = account_map.get(token)
-                    detail = {
-                        "token": token,
-                        "token_masked": account["token_masked"] if account else token,
-                        "count": 0,
-                        "status": f"error: {res.get('error')}",
-                        "last_asset_clear_at": account["last_asset_clear_at"]
-                        if account
-                        else None,
-                    }
+                    detail = _detail_from_error(token, account_map, str(res.get("error")))
                 if detail:
                     online_details.append(detail)
             online_stats = {
@@ -90,27 +112,15 @@ async def cache_stats(request: Request):
             scope = "selected"
         elif scope == "all":
             total = 0
-            tokens = list(dict.fromkeys([account["token"] for account in accounts]))
-            raw_results = await ListService.fetch_assets_details(
-                tokens,
-                account_map,
-            )
+            tokens = list(dict.fromkeys(account["token"] for account in accounts))
+            raw_results = await ListService.fetch_assets_details(tokens, account_map)
             for token, res in raw_results.items():
                 if res.get("ok"):
                     data = res.get("data", {})
                     detail = data.get("detail")
                     total += data.get("count", 0)
                 else:
-                    account = account_map.get(token)
-                    detail = {
-                        "token": token,
-                        "token_masked": account["token_masked"] if account else token,
-                        "count": 0,
-                        "status": f"error: {res.get('error')}",
-                        "last_asset_clear_at": account["last_asset_clear_at"]
-                        if account
-                        else None,
-                    }
+                    detail = _detail_from_error(token, account_map, str(res.get("error")))
                 if detail:
                     online_details.append(detail)
             online_stats = {
@@ -119,44 +129,37 @@ async def cache_stats(request: Request):
                 "token": None,
                 "last_asset_clear_at": None,
             }
-        else:
-            token = selected_token
-            if token:
-                raw_results = await ListService.fetch_assets_details(
-                    [token],
-                    account_map,
-                )
-                res = raw_results.get(token, {})
-                data = res.get("data", {})
-                detail = data.get("detail") if res.get("ok") else None
-                if detail:
-                    online_stats = {
-                        "count": data.get("count", 0),
-                        "status": detail.get("status", "ok"),
-                        "token": detail.get("token"),
-                        "token_masked": detail.get("token_masked"),
-                        "last_asset_clear_at": detail.get("last_asset_clear_at"),
-                    }
-                else:
-                    match = next((a for a in accounts if a["token"] == token), None)
-                    online_stats = {
-                        "count": 0,
-                        "status": f"error: {res.get('error')}",
-                        "token": token,
-                        "token_masked": match["token_masked"] if match else token,
-                        "last_asset_clear_at": match["last_asset_clear_at"]
-                        if match
-                        else None,
-                    }
+        elif selected_token:
+            raw_results = await ListService.fetch_assets_details([selected_token], account_map)
+            res = raw_results.get(selected_token, {})
+            data = res.get("data", {})
+            detail = data.get("detail") if res.get("ok") else None
+            if detail:
+                online_stats = {
+                    "count": data.get("count", 0),
+                    "status": detail.get("status", "ok"),
+                    "token": detail.get("token"),
+                    "token_masked": detail.get("token_masked"),
+                    "last_asset_clear_at": detail.get("last_asset_clear_at"),
+                }
             else:
+                match = account_map.get(selected_token)
                 online_stats = {
                     "count": 0,
-                    "status": "not_loaded",
-                    "token": None,
-                    "last_asset_clear_at": None,
+                    "status": f"error: {res.get('error')}",
+                    "token": selected_token,
+                    "token_masked": match["token_masked"] if match else selected_token,
+                    "last_asset_clear_at": match["last_asset_clear_at"] if match else None,
                 }
+        else:
+            online_stats = {
+                "count": 0,
+                "status": "not_loaded",
+                "token": None,
+                "last_asset_clear_at": None,
+            }
 
-        response = {
+        return {
             "local_image": image_stats,
             "local_video": video_stats,
             "online": online_stats,
@@ -164,9 +167,8 @@ async def cache_stats(request: Request):
             "online_scope": scope or "none",
             "online_details": online_details,
         }
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.get("/cache/list", dependencies=[Depends(verify_app_key)])
@@ -185,8 +187,8 @@ async def list_local(
         cache_service = CacheService()
         result = cache_service.list_files(cache_type, page, page_size)
         return {"status": "success", **result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/cache/clear", dependencies=[Depends(verify_app_key)])
@@ -200,8 +202,8 @@ async def clear_local(data: dict):
         cache_service = CacheService()
         result = cache_service.clear(cache_type)
         return {"status": "success", "result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/cache/item/delete", dependencies=[Depends(verify_app_key)])
@@ -217,65 +219,58 @@ async def delete_local_item(data: dict):
         cache_service = CacheService()
         result = cache_service.delete_file(cache_type, name)
         return {"status": "success", "result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/cache/online/clear", dependencies=[Depends(verify_app_key)])
 async def clear_online(data: dict):
     """清理在线缓存"""
     try:
-        mgr = await get_token_manager()
         tokens = data.get("tokens")
-
         if isinstance(tokens, list):
-            token_list = [t.strip() for t in tokens if isinstance(t, str) and t.strip()]
+            token_list = [token.strip() for token in tokens if isinstance(token, str) and token.strip()]
             if not token_list:
                 raise HTTPException(status_code=400, detail="No tokens provided")
 
-            token_list = list(dict.fromkeys(token_list))
-
+            raw_results = await DeleteService.clear_assets(list(dict.fromkeys(token_list)))
             results = {}
-            raw_results = await DeleteService.clear_assets(
-                token_list,
-                mgr,
-            )
             for token, res in raw_results.items():
                 if res.get("ok"):
                     results[token] = res.get("data", {})
                 else:
                     results[token] = {"status": "error", "error": res.get("error")}
-
             return {"status": "success", "results": results}
 
-        token = data.get("token") or mgr.get_token()
+        token = data.get("token")
+        if not token:
+            accounts = await _list_all_accounts()
+            token = accounts[0].token if accounts else None
         if not token:
             raise HTTPException(
                 status_code=400, detail="No available token to perform cleanup"
             )
 
-        raw_results = await DeleteService.clear_assets(
-            [token],
-            mgr,
-        )
+        raw_results = await DeleteService.clear_assets([token])
         res = raw_results.get(token, {})
-        data = res.get("data", {})
-        if res.get("ok") and data.get("status") == "success":
-            return {"status": "success", "result": data.get("result")}
-        return {"status": "error", "error": data.get("error") or res.get("error")}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        payload = res.get("data", {})
+        if res.get("ok") and payload.get("status") == "success":
+            return {"status": "success", "result": payload.get("result")}
+        return {"status": "error", "error": payload.get("error") or res.get("error")}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/cache/online/clear/async", dependencies=[Depends(verify_app_key)])
 async def clear_online_async(data: dict):
     """清理在线缓存（异步批量 + SSE 进度）"""
-    mgr = await get_token_manager()
     tokens = data.get("tokens")
     if not isinstance(tokens, list):
         raise HTTPException(status_code=400, detail="No tokens provided")
 
-    token_list = [t.strip() for t in tokens if isinstance(t, str) and t.strip()]
+    token_list = [token.strip() for token in tokens if isinstance(token, str) and token.strip()]
     if not token_list:
         raise HTTPException(status_code=400, detail="No tokens provided")
 
@@ -289,7 +284,6 @@ async def clear_online_async(data: dict):
 
             raw_results = await DeleteService.clear_assets(
                 token_list,
-                mgr,
                 include_ok=True,
                 on_item=_on_item,
                 should_cancel=lambda: task.cancelled,
@@ -303,38 +297,32 @@ async def clear_online_async(data: dict):
             ok_count = 0
             fail_count = 0
             for token, res in raw_results.items():
-                data = res.get("data", {})
-                if data.get("ok"):
+                payload = res.get("data", {})
+                if payload.get("ok"):
                     ok_count += 1
-                    results[token] = {"status": "success", "result": data.get("result")}
+                    results[token] = {"status": "success", "result": payload.get("result")}
                 else:
                     fail_count += 1
-                    results[token] = {"status": "error", "error": data.get("error")}
+                    results[token] = {"status": "error", "error": payload.get("error")}
 
-            result = {
-                "status": "success",
-                "summary": {
-                    "total": len(token_list),
-                    "ok": ok_count,
-                    "fail": fail_count,
-                },
-                "results": results,
-            }
-            task.finish(result)
-        except Exception as e:
-            task.fail_task(str(e))
+            task.finish(
+                {
+                    "status": "success",
+                    "summary": {
+                        "total": len(token_list),
+                        "ok": ok_count,
+                        "fail": fail_count,
+                    },
+                    "results": results,
+                }
+            )
+        except Exception as error:
+            task.fail_task(str(error))
         finally:
-            import asyncio
             asyncio.create_task(expire_task(task.id, 300))
 
-    import asyncio
     asyncio.create_task(_run())
-
-    return {
-        "status": "success",
-        "task_id": task.id,
-        "total": len(token_list),
-    }
+    return {"status": "success", "task_id": task.id, "total": len(token_list)}
 
 
 @router.post("/cache/online/load/async", dependencies=[Depends(verify_app_key)])
@@ -342,34 +330,14 @@ async def load_cache_async(data: dict):
     """在线资产统计（异步批量 + SSE 进度）"""
     from app.services.grok.utils.cache import CacheService
 
-    mgr = await get_token_manager()
-
-    accounts = []
-    for pool_name, pool in mgr.pools.items():
-        for info in pool.list():
-            raw_token = info.token[4:] if info.token.startswith("sso=") else info.token
-            masked = (
-                f"{raw_token[:8]}...{raw_token[-16:]}"
-                if len(raw_token) > 24
-                else raw_token
-            )
-            accounts.append(
-                {
-                    "token": raw_token,
-                    "token_masked": masked,
-                    "pool": pool_name,
-                    "status": info.status,
-                    "last_asset_clear_at": info.last_asset_clear_at,
-                }
-            )
-
-    account_map = {a["token"]: a for a in accounts}
+    accounts = await _build_online_accounts()
+    account_map = {account["token"]: account for account in accounts}
 
     tokens = data.get("tokens")
     scope = data.get("scope")
     selected_tokens: List[str] = []
     if isinstance(tokens, list):
-        selected_tokens = [str(t).strip() for t in tokens if str(t).strip()]
+        selected_tokens = [str(token).strip() for token in tokens if str(token).strip()]
 
     if not selected_tokens and scope == "all":
         selected_tokens = [account["token"] for account in accounts]
@@ -406,40 +374,31 @@ async def load_cache_async(data: dict):
             online_details = []
             total = 0
             for token, res in raw_results.items():
-                data = res.get("data", {})
-                detail = data.get("detail")
+                payload = res.get("data", {})
+                detail = payload.get("detail")
                 if detail:
                     online_details.append(detail)
-                total += data.get("count", 0)
+                total += payload.get("count", 0)
 
-            online_stats = {
-                "count": total,
-                "status": "ok" if selected_tokens else "no_token",
-                "token": None,
-                "last_asset_clear_at": None,
-            }
-
-            result = {
-                "local_image": image_stats,
-                "local_video": video_stats,
-                "online": online_stats,
-                "online_accounts": accounts,
-                "online_scope": scope or "none",
-                "online_details": online_details,
-            }
-            task.finish(result)
-        except Exception as e:
-            task.fail_task(str(e))
+            task.finish(
+                {
+                    "local_image": image_stats,
+                    "local_video": video_stats,
+                    "online": {
+                        "count": total,
+                        "status": "ok" if selected_tokens else "no_token",
+                        "token": None,
+                        "last_asset_clear_at": None,
+                    },
+                    "online_accounts": accounts,
+                    "online_scope": scope or "none",
+                    "online_details": online_details,
+                }
+            )
+        except Exception as error:
+            task.fail_task(str(error))
         finally:
-            import asyncio
             asyncio.create_task(expire_task(task.id, 300))
 
-    import asyncio
     asyncio.create_task(_run())
-
-    return {
-        "status": "success",
-        "task_id": task.id,
-        "total": len(selected_tokens),
-    }
-
+    return {"status": "success", "task_id": task.id, "total": len(selected_tokens)}

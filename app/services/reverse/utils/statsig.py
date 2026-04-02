@@ -7,7 +7,7 @@ import random
 import string
 
 from app.core.logger import logger
-from app.core.config import get_config
+from app.services.config import get_config
 
 
 class StatsigGenerator:

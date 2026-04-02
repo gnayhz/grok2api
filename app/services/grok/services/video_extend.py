@@ -9,11 +9,12 @@ from typing import Any, Dict, Optional
 
 from app.core.exceptions import AppException, ErrorType, UpstreamException, ValidationException
 from app.core.logger import logger
+from app.services.account.models import EffortType
 from app.services.grok.services.model import ModelService
 from app.services.grok.services.video import VideoCollectProcessor
 from app.services.reverse.app_chat import AppChatReverse
 from app.services.reverse.utils.session import ResettableSession
-from app.services.token import EffortType, get_token_manager
+from app.services.account.token_service import TokenService
 
 
 VIDEO_MODEL_ID = "grok-imagine-1.0-video"
@@ -120,25 +121,22 @@ class VideoExtendService:
             )
         resolution_name = _normalize_resolution(resolution)
 
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
-        token_info = token_mgr.get_token_for_video(
-            resolution=resolution_name,
-            video_length=video_length,
-            pool_candidates=ModelService.pool_candidates_for_model(VIDEO_MODEL_ID),
+        pool_candidates = list(ModelService.pool_candidates_for_model(VIDEO_MODEL_ID))
+        primary_pool = "ssoSuper" if resolution_name == "720p" or video_length > 6 else "ssoBasic"
+        if primary_pool in pool_candidates:
+            pool_candidates.remove(primary_pool)
+        pool_candidates.insert(0, primary_pool)
+        token = await TokenService.select_token(
+            pool_candidates,
+            exclude=None,
         )
-        if not token_info:
+        if not token:
             raise AppException(
                 message="No available tokens. Please try again later.",
                 error_type=ErrorType.RATE_LIMIT.value,
                 code="rate_limit_exceeded",
                 status_code=429,
             )
-
-        token = token_info.token
-        if token.startswith("sso="):
-            token = token[4:]
 
         model_config_override = {
             "modelMap": {
@@ -189,7 +187,7 @@ class VideoExtendService:
             else EffortType.LOW
         )
         try:
-            await token_mgr.consume(token, effort)
+            await TokenService.consume(token, effort)
         except Exception as e:
             logger.warning(f"Failed to record video usage: {e}")
 

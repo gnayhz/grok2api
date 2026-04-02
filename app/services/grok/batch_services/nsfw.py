@@ -6,13 +6,14 @@ import asyncio
 from typing import Callable, Awaitable, Dict, Any, Optional
 
 from app.core.logger import logger
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.exceptions import UpstreamException
 from app.services.reverse.accept_tos import AcceptTosReverse
 from app.services.reverse.nsfw_mgmt import NsfwMgmtReverse
 from app.services.reverse.set_birth import SetBirthReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.core.batch import run_batch
+from app.services.account.token_service import TokenService
 
 
 _NSFW_SEMAPHORE = None
@@ -30,16 +31,17 @@ def _get_nsfw_semaphore() -> asyncio.Semaphore:
 
 class NSFWService:
     """NSFW 模式服务"""
+
     @staticmethod
     async def batch(
         tokens: list[str],
-        mgr,
         *,
         on_item: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Batch enable NSFW."""
         batch_size = get_config("nsfw.batch_size")
+
         async def _enable(token: str):
             try:
                 browser = get_config("proxy.browser")
@@ -51,7 +53,7 @@ class NSFWService:
                         else:
                             status = getattr(err, "status_code", None)
                         if status == 401:
-                            await mgr.record_fail(token, status, reason)
+                            await TokenService.record_fail(token, status, reason)
                         return status or 0
 
                     try:
@@ -88,7 +90,7 @@ class NSFWService:
                             "error": f"NSFW enable failed: {str(e)}",
                         }
                     if success:
-                        await mgr.add_tag(token, "nsfw")
+                        await TokenService.add_tag(token, "nsfw")
                     return {
                         "success": success,
                         "http_status": 200,

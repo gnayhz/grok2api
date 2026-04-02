@@ -6,10 +6,10 @@ from typing import Optional, Set
 
 from app.core.exceptions import UpstreamException
 from app.services.grok.services.model import ModelService
+from app.services.account.token_service import TokenService
 
 
 async def pick_token(
-    token_mgr,
     model_id: str,
     tried: Set[str],
     preferred: Optional[str] = None,
@@ -18,22 +18,20 @@ async def pick_token(
     if preferred and preferred not in tried:
         return preferred
 
-    token = None
-    for pool_name in ModelService.pool_candidates_for_model(model_id):
-        token = token_mgr.get_token(pool_name, exclude=tried, prefer_tags=prefer_tags)
-        if token:
-            break
+    pool_candidates = ModelService.pool_candidates_for_model(model_id)
+    token = await TokenService.select_token(
+        pool_candidates,
+        exclude=tried,
+        prefer_tags=prefer_tags,
+    )
 
     if not token and not tried:
-        await token_mgr.refresh_cooling_tokens_on_demand()
-        for pool_name in ModelService.pool_candidates_for_model(model_id):
-            token = token_mgr.get_token(
-                pool_name,
-                exclude=tried,
-                prefer_tags=prefer_tags,
-            )
-            if token:
-                break
+        await TokenService.refresh_tokens_on_demand()
+        token = await TokenService.select_token(
+            pool_candidates,
+            exclude=tried,
+            prefer_tags=prefer_tags,
+        )
 
     return token
 

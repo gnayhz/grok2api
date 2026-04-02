@@ -11,9 +11,17 @@ from typing import AsyncGenerator, Dict, Optional
 
 import aiohttp
 
-from app.core.config import get_config
+from app.services.config import get_config
+from app.core.exceptions import UpstreamException
 from app.core.logger import logger
+from app.services.proxy.models import ProxyLease, ProxyScope, RequestKind
+from app.services.proxy.service import get_proxy_service
 from app.services.reverse.utils.headers import build_ws_headers
+from app.services.reverse.utils.proxy import (
+    classify_proxy_error,
+    release_proxy_lease,
+    report_proxy_lease,
+)
 from app.services.reverse.utils.websocket import WebSocketClient
 
 WS_IMAGINE_URL = "wss://grok.com/ws/imagine/listen"
@@ -177,7 +185,6 @@ class ImagineWebSocketReverse:
         enable_nsfw: bool,
     ) -> AsyncGenerator[Dict[str, object], None]:
         request_id = str(uuid.uuid4())
-        headers = build_ws_headers(token=token)
         timeout = float(get_config("image.timeout"))
         stream_timeout = float(get_config("image.stream_timeout"))
         final_timeout = float(get_config("image.final_timeout"))
@@ -186,6 +193,16 @@ class ImagineWebSocketReverse:
         blocked_grace = max(1.0, min(blocked_grace, final_timeout))
         final_min_bytes = int(get_config("image.final_min_bytes"))
         medium_min_bytes = int(get_config("image.medium_min_bytes"))
+        proxy_service = get_proxy_service()
+        active_lease: ProxyLease | None = await proxy_service.acquire(
+            scope=ProxyScope.APP,
+            request_kind=RequestKind.WS,
+        )
+        if active_lease is None:
+            raise UpstreamException(
+                "ImagineWebSocketReverse: connect failed, proxy_lease_unavailable"
+            )
+        headers = build_ws_headers(token=token, lease=active_lease)
 
         try:
             conn = await self._client.connect(
@@ -196,9 +213,23 @@ class ImagineWebSocketReverse:
                     "heartbeat": 20,
                     "receive_timeout": stream_timeout,
                 },
+                lease=active_lease,
+                on_close=lambda: release_proxy_lease(
+                    proxy_service,
+                    active_lease,
+                    label="ImagineWebSocketReverse",
+                ),
             )
         except Exception as e:
             status = getattr(e, "status", None)
+            await report_proxy_lease(
+                proxy_service,
+                active_lease,
+                label="ImagineWebSocketReverse",
+                kind=classify_proxy_error(e, status),
+                status_code=status or 502,
+                reason=type(e).__name__,
+            )
             error_code = (
                 "rate_limit_exceeded" if status == 429 else "connection_failed"
             )

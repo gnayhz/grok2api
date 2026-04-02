@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.storage import DATA_DIR
 
 try:

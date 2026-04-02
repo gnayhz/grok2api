@@ -10,7 +10,7 @@ import uuid
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.logger import logger
 
 

@@ -408,13 +408,13 @@ Config file: `data/config.toml`
 |  | `filter_tags` | Filter tags | Filter special tags in responses. | `["xaiartifact","xai:tool_usage_card","grok:render"]` |
 | **proxy** | `base_proxy_url` | Base proxy URL | Proxy to Grok web. | `""` |
 |  | `asset_proxy_url` | Asset proxy URL | Proxy to Grok assets (img/video). | `""` |
-|  | `cf_cookies` | CF cookies | Full cookie string written by FlareSolverr refresh. | `""` |
+|  | `cf_cookies` | CF cookies | Full Cloudflare cookie string, set manually or by managed clearance refresh. | `""` |
 |  | `skip_proxy_ssl_verify` | Skip proxy SSL verify | Enable when proxy uses a self-signed cert (proxy only; upstream TLS is still verified). | `false` |
-|  | `enabled` | CF auto refresh | Enable Cloudflare auto refresh. | `false` |
-|  | `flaresolverr_url` | FlareSolverr URL | FlareSolverr HTTP endpoint. | `""` |
-|  | `refresh_interval` | Refresh interval | Refresh cf_clearance interval (seconds). | `3600` |
-|  | `timeout` | Challenge timeout | CF challenge timeout (seconds). | `60` |
-|  | `cf_clearance` | CF clearance | Cloudflare clearance cookie. | `""` |
+|  | `enabled` | Managed clearance | Enable FlareSolverr-backed managed clearance. | `false` |
+|  | `flaresolverr_url` | FlareSolverr URL | HTTP endpoint for the managed clearance provider. | `""` |
+|  | `refresh_interval` | Refresh interval | Background managed-clearance warmup interval (seconds). | `3600` |
+|  | `timeout` | Challenge timeout | FlareSolverr challenge timeout (seconds). | `60` |
+|  | `cf_clearance` | CF clearance | Cloudflare clearance cookie, set manually or by managed refresh. | `""` |
 |  | `browser` | Browser fingerprint | curl_cffi fingerprint (e.g. chrome136). | `chrome136` |
 |  | `user_agent` | User-Agent | HTTP User-Agent string. | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36` |
 | **retry** | `max_retry` | Max retry | Max retries for upstream failures. | `3` |

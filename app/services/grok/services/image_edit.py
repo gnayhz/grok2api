@@ -3,17 +3,14 @@ Grok image edit service.
 """
 
 import asyncio
-import os
-import random
-import re
 import time
 from dataclasses import dataclass
-from typing import AsyncGenerator, AsyncIterable, Dict, List, Tuple, Union, Any
+from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Union
 
 import orjson
 from curl_cffi.requests.errors import RequestsError
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.exceptions import (
     AppException,
     ErrorType,
@@ -21,6 +18,11 @@ from app.core.exceptions import (
     StreamIdleTimeoutError,
 )
 from app.core.logger import logger
+from app.services.account.coordinator import (
+    maybe_get_account_feedback_coordinator,
+    safe_account_feedback,
+)
+from app.services.account.models import EffortType
 from app.services.grok.utils.process import (
     BaseProcessor,
     _with_idle_timeout,
@@ -33,7 +35,7 @@ from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.grok.utils.response import make_response_id, make_chat_chunk, wrap_image_content
 from app.services.grok.services.chat import GrokChatService
 from app.services.grok.utils.stream import wrap_stream_with_usage
-from app.services.token import EffortType
+from app.services.account.token_service import TokenService
 
 _EDIT_UPSTREAM_MODEL = "grok-4"
 _EDIT_UPSTREAM_MODE = "MODEL_MODE_AUTO"
@@ -55,7 +57,6 @@ class ImageEditService:
     async def edit(
         self,
         *,
-        token_mgr: Any,
         token: str,
         model_info: Any,
         prompt: str,
@@ -79,7 +80,7 @@ class ImageEditService:
         for attempt in range(max_token_retries):
             preferred = token if attempt == 0 else None
             current_token = await pick_token(
-                token_mgr, model_info.model_id, tried_tokens, preferred=preferred
+                model_info.model_id, tried_tokens, preferred=preferred
             )
             if not current_token:
                 if last_error:
@@ -119,7 +120,6 @@ class ImageEditService:
                         stream=True,
                         data=wrap_stream_with_usage(
                             processor.process(response),
-                            token_mgr,
                             current_token,
                             model_info.model_id,
                         ),
@@ -139,7 +139,7 @@ class ImageEditService:
                         if (model_info and model_info.cost.value == "high")
                         else EffortType.LOW
                     )
-                    await token_mgr.consume(current_token, effort)
+                    await TokenService.consume(current_token, effort)
                     logger.debug(
                         f"Image edit completed, recorded usage (effort={effort.value})"
                     )
@@ -150,12 +150,23 @@ class ImageEditService:
             except UpstreamException as e:
                 last_error = e
                 if rate_limited(e):
-                    await token_mgr.mark_rate_limited(current_token)
+                    await TokenService.mark_rate_limited(
+                        current_token,
+                        reason="image_edit_rate_limited",
+                    )
                     logger.warning(
                         f"Token {current_token[:10]}... rate limited (429), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
+                coordinator = await maybe_get_account_feedback_coordinator()
+                if coordinator is not None:
+                    await safe_account_feedback(
+                        coordinator.report_upstream_exception,
+                        current_token,
+                        e,
+                        reason="image_edit_upstream_error",
+                    )
                 raise
 
         if last_error:

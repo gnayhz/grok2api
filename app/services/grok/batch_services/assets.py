@@ -5,12 +5,13 @@ Batch assets service.
 import asyncio
 from typing import Dict, List, Optional
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.logger import logger
 from app.services.reverse.assets_list import AssetsListReverse
 from app.services.reverse.assets_delete import AssetsDeleteReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.core.batch import run_batch
+from app.services.account.token_service import TokenService
 
 
 class BaseAssetsService:
@@ -193,7 +194,6 @@ class DeleteService(BaseAssetsService):
     @staticmethod
     async def clear_assets(
         tokens: List[str],
-        mgr,
         *,
         include_ok: bool = False,
         on_item=None,
@@ -209,7 +209,7 @@ class DeleteService(BaseAssetsService):
                 result = await list_service.list(token)
                 asset_ids = result.get("asset_ids", [])
                 result = await delete_service.delete(token, asset_ids)
-                await mgr.mark_asset_clear(token)
+                await TokenService.mark_asset_clear(token)
                 if include_ok:
                     return {"ok": True, "result": result}
                 return {"status": "success", "result": result}

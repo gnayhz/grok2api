@@ -2,16 +2,19 @@
 WebSocket helpers for reverse interfaces.
 """
 
+from __future__ import annotations
+
 import ssl
-import certifi
-import aiohttp
-from aiohttp_socks import ProxyConnector
-from typing import Mapping, Optional, Any
+from typing import Any, Awaitable, Callable, Mapping, Optional
 from urllib.parse import urlparse
 
+import aiohttp
+import certifi
+from aiohttp_socks import ProxyConnector
+
 from app.core.logger import logger
-from app.core.config import get_config
-from app.core.proxy_pool import get_current_proxy_from, rotate_proxy
+from app.services.config import get_config
+from app.services.proxy.models import ProxyLease
 
 
 def _default_ssl_context() -> ssl.SSLContext:
@@ -38,16 +41,10 @@ def _normalize_socks_proxy(proxy_url: str) -> tuple[str, Optional[bool]]:
     return proxy_url, rdns
 
 
-def resolve_proxy(proxy_url: Optional[str] = None, ssl_context: ssl.SSLContext = _default_ssl_context()) -> tuple[aiohttp.BaseConnector, Optional[str]]:
-    """Resolve proxy connector.
-    
-    Args:
-        proxy_url: Optional[str], the proxy URL. Defaults to None.
-        ssl_context: ssl.SSLContext, the SSL context. Defaults to _default_ssl_context().
-
-    Returns:
-        tuple[aiohttp.BaseConnector, Optional[str]]: The proxy connector and the proxy URL.
-    """
+def resolve_proxy(
+    proxy_url: Optional[str] = None,
+    ssl_context: ssl.SSLContext = _default_ssl_context(),
+) -> tuple[aiohttp.BaseConnector, Optional[str]]:
     if not proxy_url:
         return aiohttp.TCPConnector(ssl=ssl_context), None
 
@@ -72,14 +69,24 @@ def resolve_proxy(proxy_url: Optional[str] = None, ssl_context: ssl.SSLContext =
 class WebSocketConnection:
     """WebSocket connection wrapper."""
 
-    def __init__(self, session: aiohttp.ClientSession, ws: aiohttp.ClientWebSocketResponse) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        ws: aiohttp.ClientWebSocketResponse,
+        *,
+        on_close: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.session = session
         self.ws = ws
+        self._on_close = on_close
 
     async def close(self) -> None:
         if not self.ws.closed:
             await self.ws.close()
         await self.session.close()
+        if self._on_close is not None:
+            await self._on_close()
+            self._on_close = None
 
     async def __aenter__(self) -> aiohttp.ClientWebSocketResponse:
         return self.ws
@@ -101,66 +108,46 @@ class WebSocketClient:
         headers: Optional[Mapping[str, str]] = None,
         timeout: Optional[float] = None,
         ws_kwargs: Optional[Mapping[str, object]] = None,
+        *,
+        lease: ProxyLease | None = None,
+        on_close: Callable[[], Awaitable[None]] | None = None,
     ) -> WebSocketConnection:
-        """Connect to the WebSocket.
-        
-        Args:
-            url: str, the URL to connect to.
-            headers: Optional[Mapping[str, str]], the headers to send. Defaults to None.
-            ws_kwargs: Optional[Mapping[str, object]], extra ws_connect kwargs. Defaults to None.
+        proxy_url = self._proxy_override or (lease.proxy_url if lease is not None else "")
+        connector, resolved_proxy = resolve_proxy(proxy_url, self._ssl_context)
+        logger.debug(
+            "WebSocket connect: proxy_url={} resolved_proxy={} connector={}",
+            proxy_url,
+            resolved_proxy,
+            type(connector).__name__,
+        )
 
-        Returns:
-            WebSocketConnection: The WebSocket connection.
-        """
-        max_retry = max(0, int(get_config("retry.max_retry") or 0))
-        last_error: Optional[Exception] = None
-
-        for attempt in range(max_retry + 1):
-            active_proxy_key = None
-            proxy_url = self._proxy_override
-            if not proxy_url:
-                active_proxy_key, proxy_url = get_current_proxy_from("proxy.base_proxy_url")
-            connector, resolved_proxy = resolve_proxy(proxy_url, self._ssl_context)
-            logger.debug(
-                f"WebSocket connect: proxy_url={proxy_url}, resolved_proxy={resolved_proxy}, connector={type(connector).__name__}"
-            )
-
-            total_timeout = (
-                float(timeout)
-                if timeout is not None
-                else float(get_config("voice.timeout") or 120)
-            )
-            client_timeout = aiohttp.ClientTimeout(total=total_timeout)
-            session = aiohttp.ClientSession(connector=connector, timeout=client_timeout)
-            try:
-                # Cast to Any to avoid Pylance errors with **extra_kwargs
-                extra_kwargs: dict[str, Any] = dict(ws_kwargs or {})
-                skip_proxy_ssl = bool(get_config("proxy.skip_proxy_ssl_verify")) and bool(proxy_url)
-                if skip_proxy_ssl and urlparse(proxy_url).scheme.lower() == "https":
-                    proxy_ssl_context = ssl.create_default_context()
-                    proxy_ssl_context.check_hostname = False
-                    proxy_ssl_context.verify_mode = ssl.CERT_NONE
-                    try:
-                        ws = await session.ws_connect(
-                            url,
-                            headers=headers,
-                            proxy=resolved_proxy,
-                            ssl=self._ssl_context,
-                            proxy_ssl=proxy_ssl_context,
-                            **extra_kwargs,
-                        )
-                    except TypeError:
-                        logger.warning(
-                            "proxy.skip_proxy_ssl_verify is enabled, but aiohttp does not support proxy_ssl; keeping proxy SSL verification enabled"
-                        )
-                        ws = await session.ws_connect(
-                            url,
-                            headers=headers,
-                            proxy=resolved_proxy,
-                            ssl=self._ssl_context,
-                            **extra_kwargs,
-                        )
-                else:
+        total_timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(get_config("voice.timeout") or 120)
+        )
+        client_timeout = aiohttp.ClientTimeout(total=total_timeout)
+        session = aiohttp.ClientSession(connector=connector, timeout=client_timeout)
+        try:
+            extra_kwargs: dict[str, Any] = dict(ws_kwargs or {})
+            skip_proxy_ssl = bool(get_config("proxy.skip_proxy_ssl_verify")) and bool(proxy_url)
+            if skip_proxy_ssl and urlparse(proxy_url).scheme.lower() == "https":
+                proxy_ssl_context = ssl.create_default_context()
+                proxy_ssl_context.check_hostname = False
+                proxy_ssl_context.verify_mode = ssl.CERT_NONE
+                try:
+                    ws = await session.ws_connect(
+                        url,
+                        headers=headers,
+                        proxy=resolved_proxy,
+                        ssl=self._ssl_context,
+                        proxy_ssl=proxy_ssl_context,
+                        **extra_kwargs,
+                    )
+                except TypeError:
+                    logger.warning(
+                        "proxy.skip_proxy_ssl_verify is enabled, but aiohttp does not support proxy_ssl; keeping proxy SSL verification enabled"
+                    )
                     ws = await session.ws_connect(
                         url,
                         headers=headers,
@@ -168,20 +155,18 @@ class WebSocketClient:
                         ssl=self._ssl_context,
                         **extra_kwargs,
                     )
-                return WebSocketConnection(session, ws)
-            except Exception as exc:
-                last_error = exc
-                await session.close()
-                if self._proxy_override or not active_proxy_key or attempt >= max_retry:
-                    raise
-                rotate_proxy(active_proxy_key)
-                logger.warning(
-                    f"WebSocket connect failed via {active_proxy_key}, rotating proxy and retrying ({attempt + 1}/{max_retry})"
+            else:
+                ws = await session.ws_connect(
+                    url,
+                    headers=headers,
+                    proxy=resolved_proxy,
+                    ssl=self._ssl_context,
+                    **extra_kwargs,
                 )
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("WebSocket connect failed without error")
+            return WebSocketConnection(session, ws, on_close=on_close)
+        except Exception:
+            await session.close()
+            raise
 
 
 __all__ = ["WebSocketClient", "WebSocketConnection", "resolve_proxy"]

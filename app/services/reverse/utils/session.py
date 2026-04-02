@@ -6,16 +6,11 @@ import asyncio
 from typing import Any, Iterable, Optional
 
 from curl_cffi.requests import AsyncSession
-from curl_cffi.const import CurlOpt
 
-from app.core.config import get_config
 from app.core.logger import logger
-
-
-def _should_skip_proxy_ssl() -> bool:
-    return bool(get_config("proxy.skip_proxy_ssl_verify")) and bool(
-        get_config("proxy.base_proxy_url")
-    )
+from app.services.config import get_config
+from app.services.proxy.models import ProxyLease
+from app.services.proxy.session import build_session_kwargs
 
 
 class ResettableSession:
@@ -24,14 +19,19 @@ class ResettableSession:
     def __init__(
         self,
         *,
+        lease: ProxyLease | None = None,
+        proxy_url: str | None = None,
         reset_on_status: Optional[Iterable[int]] = None,
         **session_kwargs: Any,
     ):
-        self._session_kwargs = dict(session_kwargs)
-        if not self._session_kwargs.get("impersonate"):
-            browser = get_config("proxy.browser")
-            if browser:
-                self._session_kwargs["impersonate"] = browser
+        self._lease = lease
+        self._proxy_url = proxy_url or (lease.proxy_url if lease is not None else "")
+        if self._proxy_url and "proxy" not in session_kwargs and "proxies" not in session_kwargs:
+            session_kwargs["proxy"] = self._proxy_url
+        self._session_kwargs = build_session_kwargs(
+            lease=lease,
+            kwargs=session_kwargs,
+        )
         config_codes = get_config("retry.reset_session_status_codes")
         if reset_on_status is None:
             reset_on_status = config_codes if config_codes is not None else [403]
@@ -40,19 +40,12 @@ class ResettableSession:
         self._reset_on_status = (
             {int(code) for code in reset_on_status} if reset_on_status else set()
         )
-        self._skip_proxy_ssl = _should_skip_proxy_ssl()
         self._reset_requested = False
         self._reset_lock = asyncio.Lock()
         self._session = self._create_session()
 
     def _create_session(self) -> AsyncSession:
-        kwargs = dict(self._session_kwargs)
-        if self._skip_proxy_ssl:
-            opts = kwargs.get("curl_options", {})
-            opts[CurlOpt.PROXY_SSL_VERIFYPEER] = 0
-            opts[CurlOpt.PROXY_SSL_VERIFYHOST] = 0
-            kwargs["curl_options"] = opts
-        return AsyncSession(**kwargs)
+        return AsyncSession(**dict(self._session_kwargs))
 
     async def _maybe_reset(self) -> None:
         if not self._reset_requested:

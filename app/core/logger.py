@@ -176,7 +176,7 @@ def reload_logging_from_config(
 ):
     """根据运行时配置重新加载日志设置。"""
     try:
-        from app.core.config import get_config
+        from app.services.config import get_config
 
         return setup_logging(
             level=default_level,

@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Tup
 import orjson
 from curl_cffi.requests.errors import RequestsError
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.exceptions import (
     AppException,
     ErrorType,
@@ -22,6 +22,11 @@ from app.core.exceptions import (
     ValidationException,
 )
 from app.core.logger import logger
+from app.services.account.coordinator import (
+    maybe_get_account_feedback_coordinator,
+    safe_account_feedback,
+)
+from app.services.account.models import EffortType
 from app.services.grok.services.model import ModelService
 from app.services.grok.utils.download import DownloadService
 from app.services.grok.utils.process import (
@@ -36,14 +41,32 @@ from app.services.reverse.media_post import MediaPostReverse
 from app.services.reverse.media_post_link import MediaPostLinkReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.services.reverse.video_upscale import VideoUpscaleReverse
-from app.services.token import EffortType, get_token_manager
-from app.services.token.manager import BASIC_POOL_NAME
+from app.services.account.token_service import TokenService
 
 _VIDEO_SEMAPHORE = None
 _VIDEO_SEM_VALUE = 0
 _APP_CHAT_MODEL = "grok-3"
+_BASIC_POOL_NAME = "ssoBasic"
 _POST_ID_URL_PATTERN = r"/generated/([0-9a-fA-F-]{32,36})/"
 _REFERENCE_PLACEHOLDER_RE = re.compile(r"@(?:(?:图|image|img)\s*(\d+))", re.IGNORECASE)
+
+
+def _video_pool_candidates(
+    model: str,
+    *,
+    resolution: str,
+    video_length: int,
+) -> list[str]:
+    ordered = list(ModelService.pool_candidates_for_model(model))
+    primary_pool = "ssoSuper" if resolution == "720p" or video_length > 6 else _BASIC_POOL_NAME
+    if primary_pool in ordered:
+        ordered.remove(primary_pool)
+    ordered.insert(0, primary_pool)
+    deduped: list[str] = []
+    for pool_name in ordered:
+        if pool_name not in deduped:
+            deduped.append(pool_name)
+    return deduped
 
 
 @dataclass(frozen=True)
@@ -907,9 +930,6 @@ class VideoService:
         resolution: str = "480p",
         preset: str = "normal",
     ):
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
         is_stream = stream if stream is not None else get_config("app.stream")
         if reasoning_effort is None:
             show_think = bool(get_config("app.thinking"))
@@ -922,16 +942,19 @@ class VideoService:
 
         max_token_retries = max(1, int(get_config("retry.max_retry") or 1))
         last_error: Exception | None = None
+        tried_tokens: set[str] = set()
 
         for attempt in range(max_token_retries):
-            pool_candidates = ModelService.pool_candidates_for_model(model)
-            token_info = token_mgr.get_token_for_video(
+            pool_candidates = _video_pool_candidates(
+                model,
                 resolution=resolution,
                 video_length=video_length,
-                pool_candidates=pool_candidates,
             )
-
-            if not token_info:
+            token = await TokenService.select_token(
+                pool_candidates,
+                exclude=tried_tokens,
+            )
+            if not token:
                 if last_error:
                     raise last_error
                 raise AppException(
@@ -941,16 +964,14 @@ class VideoService:
                     status_code=429,
                 )
 
-            token = token_info.token
-            if token.startswith("sso="):
-                token = token[4:]
-
-            pool_name = token_mgr.get_pool_name_for_token(token) or BASIC_POOL_NAME
-            is_super_pool = pool_name != BASIC_POOL_NAME
+            tried_tokens.add(token)
+            account = await TokenService.get_account(token)
+            pool_name = account.pool_name if account else _BASIC_POOL_NAME
+            is_super_pool = pool_name != _BASIC_POOL_NAME
 
             requested_resolution = resolution
             should_upscale = (
-                requested_resolution == "720p" and pool_name == BASIC_POOL_NAME
+                requested_resolution == "720p" and pool_name == _BASIC_POOL_NAME
             )
             generation_resolution = "480p" if should_upscale else requested_resolution
             upscale_timing = _resolve_upscale_timing() if should_upscale else "complete"
@@ -1156,7 +1177,10 @@ class VideoService:
                         raise
                     except UpstreamException as e:
                         if rate_limited(e):
-                            await token_mgr.mark_rate_limited(token)
+                            await TokenService.mark_rate_limited(
+                                token,
+                                reason="video_stream_rate_limited",
+                            )
                         raise
 
                 async def _collect_chain() -> Dict[str, Any]:
@@ -1261,18 +1285,21 @@ class VideoService:
 
                 if is_stream:
                     return wrap_stream_with_usage(
-                        _stream_chain(), token_mgr, token, model
+                        _stream_chain(), None, token, model
                     )
 
                 try:
                     result = await _collect_chain()
                 except UpstreamException as e:
                     if rate_limited(e):
-                        await token_mgr.mark_rate_limited(token)
+                        await TokenService.mark_rate_limited(
+                            token,
+                            reason="video_collect_rate_limited",
+                        )
                     raise
 
                 try:
-                    await token_mgr.consume(token, effort)
+                    await TokenService.consume(token, effort)
                     logger.debug(
                         f"Video completed, recorded usage (effort={effort.value})"
                     )
@@ -1283,12 +1310,23 @@ class VideoService:
             except UpstreamException as e:
                 last_error = e
                 if rate_limited(e):
-                    await token_mgr.mark_rate_limited(token)
+                    await TokenService.mark_rate_limited(
+                        token,
+                        reason="video_request_rate_limited",
+                    )
                     logger.warning(
                         f"Token {token[:10]}... rate limited (429), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
+                coordinator = await maybe_get_account_feedback_coordinator()
+                if coordinator is not None:
+                    await safe_account_feedback(
+                        coordinator.report_upstream_exception,
+                        token,
+                        e,
+                        reason="video_upstream_error",
+                    )
                 raise
 
         if last_error:

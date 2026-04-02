@@ -6,10 +6,11 @@ import asyncio
 from typing import Callable, Awaitable, Dict, Any, Optional, List
 
 from app.core.logger import logger
-from app.core.config import get_config
+from app.services.config import get_config
 from app.services.reverse.rate_limits import RateLimitsReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.core.batch import run_batch
+from app.services.account.token_service import TokenService
 
 _USAGE_SEMAPHORE = None
 _USAGE_SEM_VALUE = None
@@ -69,14 +70,14 @@ class UsageService:
     @staticmethod
     async def batch(
         tokens: List[str],
-        mgr,
         *,
         on_item: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         batch_size = get_config("usage.batch_size")
+
         async def _refresh_one(t: str):
-            return await mgr.sync_usage(t, consume_on_fail=False, is_usage=False)
+            return await TokenService.sync_usage(t)
 
         return await run_batch(
             tokens,

@@ -12,10 +12,15 @@ from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Uni
 
 import orjson
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.logger import logger
 from app.core.storage import DATA_DIR
 from app.core.exceptions import AppException, ErrorType, UpstreamException
+from app.services.account.coordinator import (
+    maybe_get_account_feedback_coordinator,
+    safe_account_feedback,
+)
+from app.services.account.models import EffortType
 from app.services.grok.utils.process import BaseProcessor
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.grok.utils.response import make_response_id, make_chat_chunk, wrap_image_content
@@ -25,7 +30,7 @@ from app.services.grok.services.image_edit import (
     ImageStreamProcessor as AppChatImageStreamProcessor,
     ImageCollectProcessor as AppChatImageCollectProcessor,
 )
-from app.services.token import EffortType
+from app.services.account.token_service import TokenService
 from app.services.reverse.ws_imagine import ImagineWebSocketReverse
 
 
@@ -57,7 +62,6 @@ class ImageGenerationService:
     async def generate(
         self,
         *,
-        token_mgr: Any,
         token: str,
         model_info: Any,
         prompt: str,
@@ -85,7 +89,6 @@ class ImageGenerationService:
                 for attempt in range(max_token_retries):
                     preferred = token if (attempt == 0 and not prefer_tags) else None
                     current_token = await pick_token(
-                        token_mgr,
                         model_info.model_id,
                         tried_tokens,
                         preferred=preferred,
@@ -106,7 +109,6 @@ class ImageGenerationService:
                     try:
                         try:
                             result = await self._stream_app_chat(
-                                token_mgr=token_mgr,
                                 token=current_token,
                                 model_info=model_info,
                                 prompt=prompt,
@@ -123,7 +125,6 @@ class ImageGenerationService:
                                 app_chat_error,
                             )
                             result = await self._stream_ws(
-                                token_mgr=token_mgr,
                                 token=current_token,
                                 model_info=model_info,
                                 prompt=prompt,
@@ -143,12 +144,23 @@ class ImageGenerationService:
                         if rate_limited(e):
                             if yielded:
                                 raise
-                            await token_mgr.mark_rate_limited(current_token)
+                            await TokenService.mark_rate_limited(
+                                current_token,
+                                reason="image_stream_rate_limited",
+                            )
                             logger.warning(
                                 f"Token {current_token[:10]}... rate limited (429), "
                                 f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                             )
                             continue
+                        coordinator = await maybe_get_account_feedback_coordinator()
+                        if coordinator is not None:
+                            await safe_account_feedback(
+                                coordinator.report_upstream_exception,
+                                current_token,
+                                e,
+                                reason="image_stream_upstream_error",
+                            )
                         raise
 
                 if last_error:
@@ -165,7 +177,6 @@ class ImageGenerationService:
         for attempt in range(max_token_retries):
             preferred = token if (attempt == 0 and not prefer_tags) else None
             current_token = await pick_token(
-                token_mgr,
                 model_info.model_id,
                 tried_tokens,
                 preferred=preferred,
@@ -185,7 +196,6 @@ class ImageGenerationService:
             try:
                 try:
                     return await self._collect_app_chat(
-                        token_mgr=token_mgr,
                         token=current_token,
                         model_info=model_info,
                         prompt=prompt,
@@ -201,7 +211,6 @@ class ImageGenerationService:
                         app_chat_error,
                     )
                     return await self._collect_ws(
-                        token_mgr=token_mgr,
                         token=current_token,
                         model_info=model_info,
                         tried_tokens=tried_tokens,
@@ -214,12 +223,23 @@ class ImageGenerationService:
             except UpstreamException as e:
                 last_error = e
                 if rate_limited(e):
-                    await token_mgr.mark_rate_limited(current_token)
+                    await TokenService.mark_rate_limited(
+                        current_token,
+                        reason="image_collect_rate_limited",
+                    )
                     logger.warning(
                         f"Token {current_token[:10]}... rate limited (429), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
+                coordinator = await maybe_get_account_feedback_coordinator()
+                if coordinator is not None:
+                    await safe_account_feedback(
+                        coordinator.report_upstream_exception,
+                        current_token,
+                        e,
+                        reason="image_collect_upstream_error",
+                    )
                 raise
 
         if last_error:
@@ -234,7 +254,6 @@ class ImageGenerationService:
     async def _stream_ws(
         self,
         *,
-        token_mgr: Any,
         token: str,
         model_info: Any,
         prompt: str,
@@ -267,7 +286,6 @@ class ImageGenerationService:
         )
         stream = wrap_stream_with_usage(
             processor.process(upstream),
-            token_mgr,
             token,
             model_info.model_id,
         )
@@ -276,7 +294,6 @@ class ImageGenerationService:
     async def _stream_app_chat(
         self,
         *,
-        token_mgr: Any,
         token: str,
         model_info: Any,
         prompt: str,
@@ -303,7 +320,6 @@ class ImageGenerationService:
         )
         stream = wrap_stream_with_usage(
             processor.process(response),
-            token_mgr,
             token,
             model_info.model_id,
         )
@@ -312,7 +328,6 @@ class ImageGenerationService:
     async def _collect_app_chat(
         self,
         *,
-        token_mgr: Any,
         token: str,
         model_info: Any,
         prompt: str,
@@ -377,7 +392,7 @@ class ImageGenerationService:
             )
 
         try:
-            await token_mgr.consume(token, self._get_effort(model_info))
+            await TokenService.consume(token, self._get_effort(model_info))
         except Exception as e:
             logger.warning(f"Failed to consume token: {e}")
 
@@ -395,7 +410,6 @@ class ImageGenerationService:
     async def _collect_ws(
         self,
         *,
-        token_mgr: Any,
         token: str,
         model_info: Any,
         tried_tokens: set[str],
@@ -471,7 +485,6 @@ class ImageGenerationService:
                     recovery_tokens: List[str] = []
                     for _ in range(extra_attempts):
                         recovery_token = await pick_token(
-                            token_mgr,
                             model_info.model_id,
                             recovery_tried,
                         )
@@ -531,7 +544,7 @@ class ImageGenerationService:
             )
 
         try:
-            await token_mgr.consume(token, self._get_effort(model_info))
+            await TokenService.consume(token, self._get_effort(model_info))
         except Exception as e:
             logger.warning(f"Failed to consume token: {e}")
 

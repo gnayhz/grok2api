@@ -5,8 +5,6 @@ Chat Completions API 路由
 from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Union
 import base64
 import binascii
-import time
-import uuid
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -19,8 +17,8 @@ from app.services.grok.services.image_edit import ImageEditService
 from app.services.grok.services.model import ModelService
 from app.services.grok.services.video import VideoService
 from app.services.grok.utils.response import make_chat_response
-from app.services.token import get_token_manager
-from app.core.config import get_config
+from app.services.account.token_service import TokenService
+from app.services.config import get_config
 from app.core.exceptions import ValidationException, AppException, ErrorType
 
 
@@ -725,17 +723,11 @@ async def chat_completions(request: ChatCompletionRequest):
         image_conf = request.image_config or ImageConfig()
         _validate_image_config(image_conf, stream=bool(is_stream))
         response_format = _resolve_image_format(image_conf.response_format)
-        response_field = _image_field(response_format)
         n = image_conf.n or 1
 
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
-        token = None
-        for pool_name in ModelService.pool_candidates_for_model(request.model):
-            token = token_mgr.get_token(pool_name)
-            if token:
-                break
+        token = await TokenService.select_token(
+            ModelService.pool_candidates_for_model(request.model)
+        )
 
         if not token:
             raise AppException(
@@ -746,7 +738,6 @@ async def chat_completions(request: ChatCompletionRequest):
             )
 
         result = await ImageEditService().edit(
-            token_mgr=token_mgr,
             token=token,
             model_info=model_info,
             prompt=prompt,
@@ -778,7 +769,6 @@ async def chat_completions(request: ChatCompletionRequest):
         image_conf = _imagine_fast_server_image_config() if request.model == IMAGINE_FAST_MODEL_ID else (request.image_config or ImageConfig())
         _validate_image_config(image_conf, stream=bool(is_stream))
         response_format = _resolve_image_format(image_conf.response_format)
-        response_field = _image_field(response_format)
         n = image_conf.n or 1
         size = image_conf.size or "1024x1024"
         aspect_ratio_map = {
@@ -790,14 +780,9 @@ async def chat_completions(request: ChatCompletionRequest):
         }
         aspect_ratio = aspect_ratio_map.get(size, "2:3")
 
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
-        token = None
-        for pool_name in ModelService.pool_candidates_for_model(request.model):
-            token = token_mgr.get_token(pool_name)
-            if token:
-                break
+        token = await TokenService.select_token(
+            ModelService.pool_candidates_for_model(request.model)
+        )
 
         if not token:
             raise AppException(
@@ -808,7 +793,6 @@ async def chat_completions(request: ChatCompletionRequest):
             )
 
         result = await ImageGenerationService().generate(
-            token_mgr=token_mgr,
             token=token,
             model_info=model_info,
             prompt=prompt,

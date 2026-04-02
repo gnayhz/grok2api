@@ -12,6 +12,7 @@ from typing import Any, Dict
 import tomllib
 
 from app.core.logger import logger
+from app.migrate.config import migrate_deprecated_config
 
 DEFAULT_CONFIG_FILE = Path(__file__).parent.parent.parent / "config.defaults.toml"
 
@@ -31,150 +32,6 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
         else:
             result[key] = val
     return result
-
-
-def _migrate_deprecated_config(
-    config: Dict[str, Any], valid_sections: set
-) -> tuple[Dict[str, Any], set]:
-    """
-    迁移废弃的配置节到新配置结构
-
-    Returns:
-        (迁移后的配置, 废弃的配置节集合)
-    """
-    # 配置映射规则：旧配置 -> 新配置
-    MIGRATION_MAP = {
-        # grok.* -> 对应的新配置节
-        "grok.temporary": "app.temporary",
-        "grok.disable_memory": "app.disable_memory",
-        "grok.stream": "app.stream",
-        "grok.thinking": "app.thinking",
-        "grok.dynamic_statsig": "app.dynamic_statsig",
-        "grok.filter_tags": "app.filter_tags",
-        "grok.timeout": "voice.timeout",
-        "grok.base_proxy_url": "proxy.base_proxy_url",
-        "grok.asset_proxy_url": "proxy.asset_proxy_url",
-        "network.base_proxy_url": "proxy.base_proxy_url",
-        "network.asset_proxy_url": "proxy.asset_proxy_url",
-        "grok.cf_clearance": "proxy.cf_clearance",
-        "grok.browser": "proxy.browser",
-        "grok.user_agent": "proxy.user_agent",
-        "security.cf_clearance": "proxy.cf_clearance",
-        "security.browser": "proxy.browser",
-        "security.user_agent": "proxy.user_agent",
-        "grok.max_retry": "retry.max_retry",
-        "grok.retry_status_codes": "retry.retry_status_codes",
-        "grok.retry_backoff_base": "retry.retry_backoff_base",
-        "grok.retry_backoff_factor": "retry.retry_backoff_factor",
-        "grok.retry_backoff_max": "retry.retry_backoff_max",
-        "grok.retry_budget": "retry.retry_budget",
-        "grok.video_idle_timeout": "video.stream_timeout",
-        "grok.image_ws_nsfw": "image.nsfw",
-        "grok.image_ws_blocked_seconds": "image.final_timeout",
-        "grok.image_ws_final_min_bytes": "image.final_min_bytes",
-        "grok.image_ws_medium_min_bytes": "image.medium_min_bytes",
-        # legacy sections
-        "network.base_proxy_url": "proxy.base_proxy_url",
-        "network.asset_proxy_url": "proxy.asset_proxy_url",
-        "network.timeout": [
-            "chat.timeout",
-            "image.timeout",
-            "video.timeout",
-            "voice.timeout",
-        ],
-        "security.cf_clearance": "proxy.cf_clearance",
-        "security.browser": "proxy.browser",
-        "security.user_agent": "proxy.user_agent",
-        "timeout.stream_idle_timeout": [
-            "chat.stream_timeout",
-            "image.stream_timeout",
-            "video.stream_timeout",
-        ],
-        "timeout.video_idle_timeout": "video.stream_timeout",
-        "image.image_ws_nsfw": "image.nsfw",
-        "image.image_ws_blocked_seconds": "image.final_timeout",
-        "image.image_ws_final_min_bytes": "image.final_min_bytes",
-        "image.image_ws_medium_min_bytes": "image.medium_min_bytes",
-        "performance.assets_max_concurrent": [
-            "asset.upload_concurrent",
-            "asset.download_concurrent",
-            "asset.list_concurrent",
-            "asset.delete_concurrent",
-        ],
-        "performance.assets_delete_batch_size": "asset.delete_batch_size",
-        "performance.assets_batch_size": "asset.list_batch_size",
-        "performance.media_max_concurrent": ["chat.concurrent", "video.concurrent"],
-        "performance.usage_max_concurrent": "usage.concurrent",
-        "performance.usage_batch_size": "usage.batch_size",
-        "performance.nsfw_max_concurrent": "nsfw.concurrent",
-        "performance.nsfw_batch_size": "nsfw.batch_size",
-    }
-
-    deprecated_sections = set(config.keys()) - valid_sections
-    if not deprecated_sections:
-        return config, set()
-
-    result = {k: deepcopy(v) for k, v in config.items() if k in valid_sections}
-    migrated_count = 0
-
-    # 处理废弃配置节或旧配置键
-    for old_section, old_values in config.items():
-        if not isinstance(old_values, dict):
-            continue
-        for old_key, old_value in old_values.items():
-            old_path = f"{old_section}.{old_key}"
-            new_paths = MIGRATION_MAP.get(old_path)
-            if not new_paths:
-                continue
-            if isinstance(new_paths, str):
-                new_paths = [new_paths]
-            for new_path in new_paths:
-                try:
-                    new_section, new_key = new_path.split(".", 1)
-                    if new_section not in result:
-                        result[new_section] = {}
-                    if new_key not in result[new_section]:
-                        result[new_section][new_key] = old_value
-                    migrated_count += 1
-                    logger.debug(
-                        f"Migrated config: {old_path} -> {new_path} = {old_value}"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Skip config migration for {old_path}: {e}"
-                    )
-                    continue
-            if isinstance(result.get(old_section), dict):
-                result[old_section].pop(old_key, None)
-
-    # 兼容旧 chat.* 配置键迁移到 app.*
-    legacy_chat_map = {
-        "temporary": "temporary",
-        "disable_memory": "disable_memory",
-        "stream": "stream",
-        "thinking": "thinking",
-        "dynamic_statsig": "dynamic_statsig",
-        "filter_tags": "filter_tags",
-    }
-    chat_section = config.get("chat")
-    if isinstance(chat_section, dict):
-        app_section = result.setdefault("app", {})
-        for old_key, new_key in legacy_chat_map.items():
-            if old_key in chat_section and new_key not in app_section:
-                app_section[new_key] = chat_section[old_key]
-                if isinstance(result.get("chat"), dict):
-                    result["chat"].pop(old_key, None)
-                migrated_count += 1
-                logger.debug(
-                    f"Migrated config: chat.{old_key} -> app.{new_key} = {chat_section[old_key]}"
-                )
-
-    if migrated_count > 0:
-        logger.info(
-            f"Migrated {migrated_count} config items from deprecated/legacy sections"
-        )
-
-    return result, deprecated_sections
 
 
 def _prune_unknown_config(
@@ -286,7 +143,7 @@ class Config:
 
             # 检查是否有废弃的配置节
             valid_sections = set(self._defaults.keys())
-            config_data, deprecated_sections = _migrate_deprecated_config(
+            config_data, deprecated_sections = migrate_deprecated_config(
                 config_data, valid_sections
             )
             if deprecated_sections:

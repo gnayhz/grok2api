@@ -2,20 +2,24 @@
 Reverse interface: accept ToS (gRPC-Web).
 """
 
+from __future__ import annotations
+
 from curl_cffi.requests import AsyncSession
 
-from app.core.logger import logger
-from app.core.config import get_config
-from app.core.proxy_pool import (
-    build_http_proxies,
-    get_current_proxy_from,
-    rotate_proxy,
-    should_rotate_proxy,
-)
 from app.core.exceptions import UpstreamException
-from app.services.reverse.utils.headers import build_headers
-from app.services.reverse.utils.retry import retry_on_status
+from app.core.logger import logger
+from app.services.config import get_config
+from app.services.proxy.models import ProxyFeedbackKind, ProxyLease, ProxyScope, RequestKind
+from app.services.proxy.service import get_proxy_service
+from app.services.proxy.session import build_http_proxies, build_session_kwargs
 from app.services.reverse.utils.grpc import GrpcClient, GrpcStatus
+from app.services.reverse.utils.headers import build_headers
+from app.services.reverse.utils.proxy import (
+    classify_proxy_error,
+    get_upstream_status,
+    report_proxy_lease,
+)
+from app.services.reverse.utils.retry import retry_on_status
 
 ACCEPT_TOS_API = "https://accounts.x.ai/auth_mgmt.AuthManagement/SetTosAcceptedVersion"
 
@@ -25,49 +29,52 @@ class AcceptTosReverse:
 
     @staticmethod
     async def request(session: AsyncSession, token: str) -> GrpcStatus:
-        """Accept ToS via gRPC-Web.
-
-        Args:
-            session: AsyncSession, the session to use for the request.
-            token: str, the SSO token.
-
-        Returns:
-            GrpcStatus: Parsed gRPC status.
-        """
+        """Accept ToS via gRPC-Web."""
         try:
-            # Build headers
-            headers = build_headers(
-                cookie_token=token,
-                origin="https://accounts.x.ai",
-                referer="https://accounts.x.ai/accept-tos",
-            )
-            headers["Content-Type"] = "application/grpc-web+proto"
-            headers["Accept"] = "*/*"
-            headers["Sec-Fetch-Dest"] = "empty"
-            headers["x-grpc-web"] = "1"
-            headers["x-user-agent"] = "connect-es/2.1.1"
-            headers["Cache-Control"] = "no-cache"
-            headers["Pragma"] = "no-cache"
-
-            # Build payload
             payload = GrpcClient.encode_payload(b"\x10\x01")
-
-            # Curl Config
             timeout = get_config("nsfw.timeout")
-            browser = get_config("proxy.browser")
-            active_proxy_key = None
+            default_browser = get_config("proxy.browser")
+            proxy_service = get_proxy_service()
+            active_lease: ProxyLease | None = None
 
             async def _do_request():
-                nonlocal active_proxy_key
-                active_proxy_key, proxy_url = get_current_proxy_from("proxy.base_proxy_url")
-                proxies = build_http_proxies(proxy_url)
+                nonlocal active_lease
+                active_lease = await proxy_service.acquire(
+                    scope=ProxyScope.APP,
+                    request_kind=RequestKind.HTTP,
+                )
+                if active_lease is None:
+                    raise UpstreamException(
+                        message="AcceptTosReverse: unable to acquire proxy lease",
+                        details={"status": 502, "error": "proxy_lease_unavailable"},
+                    )
+
+                headers = build_headers(
+                    cookie_token=token,
+                    origin="https://accounts.x.ai",
+                    referer="https://accounts.x.ai/accept-tos",
+                    lease=active_lease,
+                )
+                headers["Content-Type"] = "application/grpc-web+proto"
+                headers["Accept"] = "*/*"
+                headers["Sec-Fetch-Dest"] = "empty"
+                headers["x-grpc-web"] = "1"
+                headers["x-user-agent"] = "connect-es/2.1.1"
+                headers["Cache-Control"] = "no-cache"
+                headers["Pragma"] = "no-cache"
+
                 response = await session.post(
                     ACCEPT_TOS_API,
                     headers=headers,
                     data=payload,
-                    timeout=timeout,
-                    proxies=proxies,
-                    impersonate=browser,
+                    **build_session_kwargs(
+                        lease=active_lease,
+                        browser_override=default_browser,
+                        kwargs={
+                            "timeout": timeout,
+                            "proxies": build_http_proxies(active_lease.proxy_url),
+                        },
+                    ),
                 )
 
                 if response.status_code != 200:
@@ -77,16 +84,27 @@ class AcceptTosReverse:
                     )
                     raise UpstreamException(
                         message=f"AcceptTosReverse: Request failed, {response.status_code}",
-                        details={"status": response.status_code},
+                        details={
+                            "status": response.status_code,
+                            "headers": dict(response.headers or {}),
+                        },
                     )
 
                 logger.debug(f"AcceptTosReverse: Request successful, {response.status_code}")
-
                 return response
 
             async def _on_retry(attempt: int, status_code: int, error: Exception, delay: float):
-                if active_proxy_key and should_rotate_proxy(status_code):
-                    rotate_proxy(active_proxy_key)
+                nonlocal active_lease
+                await report_proxy_lease(
+                    proxy_service,
+                    active_lease,
+                    label="AcceptTosReverse",
+                    kind=classify_proxy_error(error, status_code),
+                    status_code=status_code,
+                    reason=f"retry_attempt_{attempt}",
+                    retry_after_ms=int(delay * 1000),
+                )
+                active_lease = None
 
             response = await retry_on_status(_do_request, on_retry=_on_retry)
 
@@ -96,7 +114,6 @@ class AcceptTosReverse:
                 headers=response.headers,
             )
             grpc_status = GrpcClient.get_status(trailers)
-
             if grpc_status.code not in (-1, 0):
                 raise UpstreamException(
                     message=f"AcceptTosReverse: gRPC failed, {grpc_status.code}",
@@ -107,17 +124,42 @@ class AcceptTosReverse:
                     },
                 )
 
+            await report_proxy_lease(
+                proxy_service,
+                active_lease,
+                label="AcceptTosReverse",
+                kind=ProxyFeedbackKind.SUCCESS,
+                status_code=200,
+            )
+            active_lease = None
             return grpc_status
 
         except Exception as e:
-            # Handle upstream exception
             if isinstance(e, UpstreamException):
+                status = get_upstream_status(e)
+                if status is not None:
+                    await report_proxy_lease(
+                        proxy_service,
+                        active_lease,
+                        label="AcceptTosReverse",
+                        kind=classify_proxy_error(e, status),
+                        status_code=status,
+                        reason="request_failed",
+                    )
+                    active_lease = None
                 raise
 
-            # Handle other non-upstream exceptions
             logger.error(
                 f"AcceptTosReverse: Request failed, {str(e)}",
                 extra={"error_type": type(e).__name__},
+            )
+            await report_proxy_lease(
+                proxy_service,
+                active_lease,
+                label="AcceptTosReverse",
+                kind=ProxyFeedbackKind.TRANSPORT_ERROR,
+                status_code=502,
+                reason=type(e).__name__,
             )
             raise UpstreamException(
                 message=f"AcceptTosReverse: Request failed, {str(e)}",

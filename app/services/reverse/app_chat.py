@@ -9,10 +9,17 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 
 from app.core.logger import logger
-from app.core.config import get_config
-from app.core.proxy_pool import get_current_proxy_from, rotate_proxy, should_rotate_proxy
+from app.services.config import get_config
 from app.core.exceptions import UpstreamException
-from app.services.token.service import TokenService
+from app.services.account.token_service import TokenService
+from app.services.proxy.feedback import build_feedback, classify_status_code
+from app.services.proxy.models import (
+    ProxyFeedbackKind,
+    ProxyLease,
+    ProxyScope,
+    RequestKind,
+)
+from app.services.proxy.service import get_proxy_service
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import extract_status_for_retry, retry_on_status
 
@@ -216,29 +223,6 @@ class AppChatReverse:
             Any: The response from the request.
         """
         try:
-            # Get proxies
-            base_proxy = get_config("proxy.base_proxy_url")
-            proxy = None
-            proxies = None
-            if base_proxy:
-                normalized_proxy = _normalize_chat_proxy(base_proxy)
-                scheme = urlparse(normalized_proxy).scheme.lower()
-                if scheme.startswith("socks"):
-                    # curl_cffi 对 SOCKS 代理优先使用 proxy 参数，避免被按 HTTP CONNECT 处理
-                    proxy = normalized_proxy
-                else:
-                    proxies = {"http": normalized_proxy, "https": normalized_proxy}
-                _log_proxy_state_once(base_proxy, normalized_proxy, scheme)
-            else:
-                _log_proxy_state_once("")
-            # Build headers
-            headers = build_headers(
-                cookie_token=token,
-                content_type="application/json",
-                origin="https://grok.com",
-                referer="https://grok.com/",
-            )
-
             # Build payload
             payload = AppChatReverse.build_payload(
                 message=message,
@@ -268,12 +252,54 @@ class AppChatReverse:
                     float(get_config("video.timeout") or 0),
                     float(get_config("image.timeout") or 0),
                 )
-            browser = get_config("proxy.browser")
-            active_proxy_key = None
+            default_browser = get_config("proxy.browser")
+            proxy_service = get_proxy_service()
+            active_lease: ProxyLease | None = None
+
+            async def _report_active_lease(
+                kind: ProxyFeedbackKind,
+                *,
+                status_code: int | None = None,
+                reason: str = "",
+            ) -> None:
+                nonlocal active_lease
+                if active_lease is None:
+                    return
+                try:
+                    await proxy_service.report(
+                        active_lease.lease_id,
+                        build_feedback(
+                            kind,
+                            status_code=status_code,
+                            reason=reason,
+                        ),
+                    )
+                except Exception as error:
+                    logger.debug("AppChatReverse proxy report failed: {}", error)
+                finally:
+                    active_lease = None
 
             async def _do_request():
-                nonlocal active_proxy_key
-                active_proxy_key, base_proxy = get_current_proxy_from("proxy.base_proxy_url")
+                nonlocal active_lease
+                active_lease = await proxy_service.acquire(
+                    scope=ProxyScope.APP,
+                    request_kind=RequestKind.HTTP,
+                )
+                if active_lease is None:
+                    raise UpstreamException(
+                        message="AppChatReverse: unable to acquire proxy lease",
+                        details={"status": 502, "error": "proxy_lease_unavailable"},
+                    )
+
+                headers = build_headers(
+                    cookie_token=token,
+                    content_type="application/json",
+                    origin="https://grok.com",
+                    referer="https://grok.com/",
+                    lease=active_lease,
+                )
+
+                base_proxy = active_lease.proxy_url
                 proxy = None
                 proxies = None
                 if base_proxy:
@@ -295,7 +321,7 @@ class AppChatReverse:
                     stream=True,
                     proxy=proxy,
                     proxies=proxies,
-                    impersonate=browser,
+                    impersonate=active_lease.browser or default_browser,
                 )
 
                 if response.status_code != 200:
@@ -323,14 +349,22 @@ class AppChatReverse:
                 return status
 
             async def _on_retry(attempt: int, status_code: int, error: Exception, delay: float):
-                if active_proxy_key and should_rotate_proxy(status_code):
-                    rotate_proxy(active_proxy_key)
+                if isinstance(error, UpstreamException):
+                    kind = classify_status_code(status_code)
+                else:
+                    kind = ProxyFeedbackKind.TRANSPORT_ERROR
+                await _report_active_lease(
+                    kind,
+                    status_code=status_code,
+                    reason=f"retry_attempt_{attempt}",
+                )
 
             response = await retry_on_status(
                 _do_request,
                 extract_status=extract_status,
                 on_retry=_on_retry,
             )
+            await _report_active_lease(ProxyFeedbackKind.SUCCESS, status_code=200)
 
             # Stream response
             async def stream_response():
@@ -350,6 +384,12 @@ class AppChatReverse:
                     status = e.details["status"]
                 else:
                     status = getattr(e, "status_code", None)
+                if status is not None:
+                    await _report_active_lease(
+                        classify_status_code(status),
+                        status_code=status,
+                        reason="request_failed",
+                    )
                 if status == 401:
                     try:
                         await TokenService.record_fail(
@@ -363,6 +403,11 @@ class AppChatReverse:
             logger.error(
                 f"AppChatReverse: Chat failed, {str(e)}",
                 extra={"error_type": type(e).__name__},
+            )
+            await _report_active_lease(
+                ProxyFeedbackKind.TRANSPORT_ERROR,
+                status_code=502,
+                reason=type(e).__name__,
             )
             raise UpstreamException(
                 message=f"AppChatReverse: Chat failed, {str(e)}",

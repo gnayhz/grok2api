@@ -14,9 +14,9 @@ from pydantic import BaseModel, Field, ValidationError
 from app.services.grok.services.image import ImageGenerationService
 from app.services.grok.services.image_edit import ImageEditService
 from app.services.grok.services.model import ModelService
-from app.services.token import get_token_manager
+from app.services.account.token_service import TokenService
 from app.core.exceptions import ValidationException, AppException, ErrorType
-from app.core.config import get_config
+from app.services.config import get_config
 
 
 router = APIRouter(tags=["Images"])
@@ -223,16 +223,9 @@ def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
         )
 
 
-async def _get_token(model: str):
+async def _select_token(model: str) -> str:
     """获取可用 token"""
-    token_mgr = await get_token_manager()
-    await token_mgr.reload_if_stale()
-
-    token = None
-    for pool_name in ModelService.pool_candidates_for_model(model):
-        token = token_mgr.get_token(pool_name)
-        if token:
-            break
+    token = await TokenService.select_token(ModelService.pool_candidates_for_model(model))
 
     if not token:
         raise AppException(
@@ -242,7 +235,7 @@ async def _get_token(model: str):
             status_code=429,
         )
 
-    return token_mgr, token
+    return token
 
 
 @router.post("/images/generations")
@@ -275,12 +268,11 @@ async def create_image(request: ImageGenerationRequest):
     response_field = response_field_name(response_format)
 
     # 获取 token 和模型信息
-    token_mgr, token = await _get_token(request.model)
+    token = await _select_token(request.model)
     model_info = ModelService.get(request.model)
     aspect_ratio = resolve_aspect_ratio(request.size)
 
     result = await ImageGenerationService().generate(
-        token_mgr=token_mgr,
         token=token,
         model_info=model_info,
         prompt=request.prompt,
@@ -412,11 +404,10 @@ async def edit_image(
         images.append(f"data:{mime};base64,{b64}")
 
     # 获取 token 和模型信息
-    token_mgr, token = await _get_token(edit_request.model)
+    token = await _select_token(edit_request.model)
     model_info = ModelService.get(edit_request.model)
 
     result = await ImageEditService().edit(
-        token_mgr=token_mgr,
         token=token,
         model_info=model_info,
         prompt=edit_request.prompt,

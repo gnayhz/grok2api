@@ -4,7 +4,7 @@ Grok Voice Mode Service
 
 from typing import Any, Dict
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.services.reverse.ws_livekit import LivekitTokenReverse
 from app.services.reverse.utils.session import ResettableSession
 

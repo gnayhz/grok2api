@@ -3,18 +3,17 @@ Reverse interface: upload asset.
 """
 
 from typing import Any
+
 from curl_cffi.requests import AsyncSession
 
-from app.core.logger import logger
-from app.core.config import get_config
-from app.core.proxy_pool import (
-    build_http_proxies,
-    get_current_proxy_from,
-    rotate_proxy,
-    should_rotate_proxy,
-)
 from app.core.exceptions import UpstreamException
-from app.services.token.service import TokenService
+from app.core.logger import logger
+from app.services.account.token_service import TokenService
+from app.services.config import get_config
+from app.services.proxy.feedback import build_feedback, classify_status_code
+from app.services.proxy.models import ProxyFeedbackKind, ProxyLease, ProxyScope, RequestKind
+from app.services.proxy.service import get_proxy_service
+from app.services.proxy.session import build_http_proxies, build_session_kwargs
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
 
@@ -25,54 +24,81 @@ class AssetsUploadReverse:
     """/rest/app-chat/upload-file reverse interface."""
 
     @staticmethod
-    async def request(session: AsyncSession, token: str, fileName: str, fileMimeType: str, content: str) -> Any:
-        """Upload asset to Grok.
-
-        Args:
-            session: AsyncSession, the session to use for the request.
-            token: str, the SSO token.
-            fileName: str, the name of the file.
-            fileMimeType: str, the MIME type of the file.
-            content: str, the content of the file.
-
-        Returns:
-            Any: The response from the request.
-        """
+    async def request(
+        session: AsyncSession,
+        token: str,
+        fileName: str,
+        fileMimeType: str,
+        content: str,
+    ) -> Any:
+        """Upload asset to Grok."""
         try:
-            # Build headers
-            headers = build_headers(
-                cookie_token=token,
-                content_type="application/json",
-                origin="https://grok.com",
-                referer="https://grok.com/",
-            )
-
-            # Build payload
             payload = {
                 "fileName": fileName,
                 "fileMimeType": fileMimeType,
                 "content": content,
             }
-
-            # Curl Config
             timeout = get_config("asset.upload_timeout")
-            browser = get_config("proxy.browser")
-            active_proxy_key = None
+            default_browser = get_config("proxy.browser")
+            proxy_service = get_proxy_service()
+            active_lease: ProxyLease | None = None
+
+            async def _report_active_lease(
+                kind: ProxyFeedbackKind,
+                *,
+                status_code: int | None = None,
+                reason: str = "",
+                retry_after_ms: int | None = None,
+            ) -> None:
+                nonlocal active_lease
+                if active_lease is None:
+                    return
+                try:
+                    await proxy_service.report(
+                        active_lease.lease_id,
+                        build_feedback(
+                            kind,
+                            status_code=status_code,
+                            reason=reason,
+                            retry_after_ms=retry_after_ms,
+                        ),
+                    )
+                except Exception as error:
+                    logger.debug("AssetsUploadReverse proxy report failed: {}", error)
+                finally:
+                    active_lease = None
 
             async def _do_request():
-                nonlocal active_proxy_key
-                active_proxy_key, proxy_url = get_current_proxy_from(
-                    "proxy.asset_proxy_url",
-                    "proxy.base_proxy_url",
+                nonlocal active_lease
+                active_lease = await proxy_service.acquire(
+                    scope=ProxyScope.ASSET,
+                    request_kind=RequestKind.HTTP,
                 )
-                proxies = build_http_proxies(proxy_url)
+                if active_lease is None:
+                    raise UpstreamException(
+                        message="AssetsUploadReverse: unable to acquire proxy lease",
+                        details={"status": 502, "error": "proxy_lease_unavailable"},
+                    )
+
+                headers = build_headers(
+                    cookie_token=token,
+                    content_type="application/json",
+                    origin="https://grok.com",
+                    referer="https://grok.com/",
+                    lease=active_lease,
+                )
                 response = await session.post(
                     UPLOAD_API,
                     headers=headers,
                     json=payload,
-                    proxies=proxies,
-                    timeout=timeout,
-                    impersonate=browser,
+                    **build_session_kwargs(
+                        lease=active_lease,
+                        browser_override=default_browser,
+                        kwargs={
+                            "proxies": build_http_proxies(active_lease.proxy_url),
+                            "timeout": timeout,
+                        },
+                    ),
                 )
                 if response.status_code != 200:
                     logger.error(
@@ -81,24 +107,43 @@ class AssetsUploadReverse:
                     )
                     raise UpstreamException(
                         message=f"AssetsUploadReverse: Upload failed, {response.status_code}",
-                        details={"status": response.status_code},
+                        details={
+                            "status": response.status_code,
+                            "headers": dict(response.headers or {}),
+                        },
                     )
                 return response
 
             async def _on_retry(attempt: int, status_code: int, error: Exception, delay: float):
-                if active_proxy_key and should_rotate_proxy(status_code):
-                    rotate_proxy(active_proxy_key)
+                kind = (
+                    classify_status_code(status_code)
+                    if isinstance(error, UpstreamException)
+                    else ProxyFeedbackKind.TRANSPORT_ERROR
+                )
+                await _report_active_lease(
+                    kind,
+                    status_code=status_code,
+                    reason=f"retry_attempt_{attempt}",
+                    retry_after_ms=int(delay * 1000),
+                )
 
-            return await retry_on_status(_do_request, on_retry=_on_retry)
+            response = await retry_on_status(_do_request, on_retry=_on_retry)
+            await _report_active_lease(ProxyFeedbackKind.SUCCESS, status_code=200)
+            return response
 
         except Exception as e:
-            # Handle upstream exception
             if isinstance(e, UpstreamException):
                 status = None
                 if e.details and "status" in e.details:
                     status = e.details["status"]
                 else:
                     status = getattr(e, "status_code", None)
+                if status is not None:
+                    await _report_active_lease(
+                        classify_status_code(status),
+                        status_code=status,
+                        reason="request_failed",
+                    )
                 if status == 401:
                     try:
                         await TokenService.record_fail(token, status, "assets_upload_auth_failed")
@@ -106,10 +151,14 @@ class AssetsUploadReverse:
                         pass
                 raise
 
-            # Handle other non-upstream exceptions
             logger.error(
                 f"AssetsUploadReverse: Upload failed, {str(e)}",
                 extra={"error_type": type(e).__name__},
+            )
+            await _report_active_lease(
+                ProxyFeedbackKind.TRANSPORT_ERROR,
+                status_code=502,
+                reason=type(e).__name__,
             )
             raise UpstreamException(
                 message=f"AssetsUploadReverse: Upload failed, {str(e)}",

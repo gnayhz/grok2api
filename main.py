@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi import Depends  # noqa: E402
 
 from app.core.auth import verify_api_key  # noqa: E402
-from app.core.config import config, get_config  # noqa: E402
+from app.services.config import config, get_config  # noqa: E402
 from app.core.logger import logger, reload_logging_from_config, setup_logging  # noqa: E402
 from app.core.exceptions import register_exception_handlers  # noqa: E402
 from app.core.response_middleware import ResponseLoggerMiddleware  # noqa: E402
@@ -38,7 +38,9 @@ from app.api.v1.video import router as video_router  # noqa: E402
 from app.api.v1.files import router as files_router  # noqa: E402
 from app.api.v1.models import router as models_router  # noqa: E402
 from app.api.v1.response import router as responses_router  # noqa: E402
-from app.services.token import get_scheduler  # noqa: E402
+from app.services.account.coordinator import get_account_domain_context  # noqa: E402
+from app.services.account.scheduler import get_account_refresh_scheduler  # noqa: E402
+from app.services.proxy import get_proxy_refresh_scheduler  # noqa: E402
 from app.api.v1.admin import router as admin_router  # noqa: E402
 from app.api.v1.function import router as function_router  # noqa: E402
 from app.api.pages import router as pages_router  # noqa: E402
@@ -55,7 +57,7 @@ setup_logging(
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 1. 注册服务默认配置
-    from app.core.config import register_defaults
+    from app.services.config import register_defaults
     from app.services.grok.defaults import get_grok_defaults
 
     register_defaults(get_grok_defaults())
@@ -72,17 +74,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Platform: {platform.system()} {platform.release()}")
     logger.info(f"Python: {sys.version.split()[0]}")
 
-    # 4. 启动 Token 刷新调度器
-    refresh_enabled = get_config("token.auto_refresh", True)
+    # 4. 初始化 account 域并启动新的刷新调度器
+    await get_account_domain_context()
+    refresh_enabled = get_config("account.refresh.enabled", True)
     if refresh_enabled:
-        basic_interval = get_config("token.refresh_interval_hours", 8)
-        super_interval = get_config("token.super_refresh_interval_hours", 2)
-        interval = min(basic_interval, super_interval)
-        scheduler = get_scheduler(interval)
+        account_context = await get_account_domain_context()
+        scheduler = get_account_refresh_scheduler(account_context.refresh_service)
         scheduler.start()
 
-    # 5. 启动 cf_clearance 自动刷新
-    #    环境变量 FLARESOLVERR_URL 会作为初始值写入配置（兼容旧部署方式）
+    # 5. 启动 proxy 域的 managed clearance 预热调度
+    #    环境变量 FLARESOLVERR_URL 会作为初始值写入配置
     _flaresolverr_env = os.getenv("FLARESOLVERR_URL", "")
     if _flaresolverr_env and not get_config("proxy.flaresolverr_url"):
         await config.update({
@@ -94,8 +95,8 @@ async def lifespan(app: FastAPI):
             }
         })
 
-    from app.services.cf_refresh import start as cf_refresh_start
-    cf_refresh_start()
+    proxy_scheduler = get_proxy_refresh_scheduler()
+    proxy_scheduler.start()
 
     logger.info("Application startup complete.")
     yield
@@ -103,8 +104,7 @@ async def lifespan(app: FastAPI):
     # 关闭
     logger.info("Shutting down Grok2API...")
 
-    from app.services.cf_refresh import stop as cf_refresh_stop
-    cf_refresh_stop()
+    proxy_scheduler.stop()
 
     from app.core.storage import StorageFactory
 
@@ -112,7 +112,9 @@ async def lifespan(app: FastAPI):
         await StorageFactory._instance.close()
 
     if refresh_enabled:
-        scheduler = get_scheduler()
+        scheduler = get_account_refresh_scheduler(
+            (await get_account_domain_context()).refresh_service
+        )
         scheduler.stop()
 
 

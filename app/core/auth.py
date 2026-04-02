@@ -7,7 +7,7 @@ from typing import Optional, Iterable
 from fastapi import HTTPException, status, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from app.core.config import get_config
+from app.services.config import get_config
 
 DEFAULT_API_KEY = ""
 DEFAULT_APP_KEY = "grok2api"

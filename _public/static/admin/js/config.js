@@ -8,14 +8,12 @@ const NUMERIC_FIELDS = new Set([
   'retry_backoff_factor',
   'retry_backoff_max',
   'retry_budget',
-  'refresh_interval_hours',
-  'super_refresh_interval_hours',
-  'fail_threshold',
+  'refresh.interval_hours',
+  'refresh.super_interval_hours',
+  'runtime.fail_threshold',
   'limit_mb',
-  'save_delay_ms',
-  'usage_flush_interval_sec',
-  'on_demand_refresh_min_interval_sec',
-  'on_demand_refresh_max_tokens',
+  'refresh.on_demand_min_interval_sec',
+  'refresh.on_demand_max_tokens',
   'upload_concurrent',
   'upload_timeout',
   'download_concurrent',
@@ -65,13 +63,13 @@ const LOCALE_MAP = {
     "base_proxy_url": { title: "基础代理 URL", desc: "代理请求到 Grok 官网的基础服务地址。" },
     "asset_proxy_url": { title: "资源代理 URL", desc: "代理请求到 Grok 官网的静态资源（图片/视频）地址。" },
     "skip_proxy_ssl_verify": { title: "跳过代理 SSL 校验", desc: "代理使用自签名证书时启用（仅放行代理证书校验）。" },
-    "enabled": { title: "启用 CF 自动刷新", desc: "启用后将通过 FlareSolverr 自动获取 cf_clearance。" },
-    "flaresolverr_url": { title: "FlareSolverr 地址", desc: "FlareSolverr 服务的 HTTP 地址（如 http://flaresolverr:8191）。" },
-    "refresh_interval": { title: "刷新间隔（秒）", desc: "自动刷新 cf_clearance 的时间间隔，建议不低于 300 秒。" },
-    "timeout": { title: "挑战超时（秒）", desc: "等待 FlareSolverr 解决 CF 挑战的最大时间。" },
-    "cf_clearance": { title: "CF Clearance", desc: "Cloudflare Clearance Cookie，用于绕过反爬虫验证。启用自动刷新时由系统自动管理。" },
-    "browser": { title: "浏览器指纹", desc: "curl_cffi 浏览器指纹标识（如 chrome136）。启用自动刷新时由系统自动管理。" },
-    "user_agent": { title: "User-Agent", desc: "HTTP 请求的 User-Agent 字符串。启用自动刷新时由系统自动管理。" }
+    "enabled": { title: "启用 Managed Clearance", desc: "启用后将通过 FlareSolverr 维护 Cloudflare clearance 与相关指纹。" },
+    "flaresolverr_url": { title: "FlareSolverr 地址", desc: "Managed clearance provider 的 HTTP 地址（如 http://flaresolverr:8191）。" },
+    "refresh_interval": { title: "预热间隔（秒）", desc: "后台预热 managed clearance 的时间间隔，建议不低于 300 秒。" },
+    "timeout": { title: "挑战超时（秒）", desc: "等待 FlareSolverr 解决挑战的最大时间。" },
+    "cf_clearance": { title: "Cloudflare Clearance", desc: "手动配置的 Cloudflare clearance cookie。启用 managed clearance 时由系统自动管理。" },
+    "browser": { title: "浏览器指纹", desc: "curl_cffi 浏览器指纹标识（如 chrome136）。启用 managed clearance 时由系统自动管理。" },
+    "user_agent": { title: "User-Agent", desc: "HTTP 请求的 User-Agent 字符串。启用 managed clearance 时由系统自动管理。" }
   },
 
 
@@ -148,19 +146,16 @@ const LOCALE_MAP = {
   },
 
 
-  "token": {
-    "label": "Token 池管理",
-    "auto_refresh": { title: "自动刷新", desc: "是否开启 Token 自动刷新机制。" },
-    "refresh_interval_hours": { title: "刷新间隔", desc: "普通 Token 刷新的时间间隔（小时）。" },
-    "super_refresh_interval_hours": { title: "Super 刷新间隔", desc: "Super Token 刷新的时间间隔（小时）。" },
-    "fail_threshold": { title: "失败阈值", desc: "单个 Token 连续失败多少次后被标记为不可用。" },
-    "save_delay_ms": { title: "保存延迟", desc: "Token 变更合并写入的延迟（毫秒）。" },
-    "usage_flush_interval_sec": { title: "用量落库间隔", desc: "用量类字段写入数据库的最小间隔（秒）。" },
-    "reload_interval_sec": { title: "同步间隔", desc: "多 worker 场景下 Token 状态刷新间隔（秒）。" },
-    "on_demand_refresh_enabled": { title: "按需刷新", desc: "当请求拿不到可用 Token 时，是否允许触发受限的按需刷新。" },
-    "on_demand_refresh_min_interval_sec": { title: "按需刷新最小间隔", desc: "请求侧按需刷新之间的最小间隔（秒），用于避免刷新风暴。" },
-    "on_demand_refresh_max_tokens": { title: "按需刷新最大数量", desc: "单次请求侧按需刷新最多检查多少个 cooling Token。" },
-    "consumed_mode_enabled": { title: "启用消耗模式", desc: "启用新额度管理逻辑：使用本地消耗记录而非 API 返回值，支持更均衡的负载分配。（试验性功能，默认关闭）" }
+  "account": {
+    "label": "Account 配置",
+    "runtime.consumed_mode_enabled": { title: "启用消耗模式", desc: "是否按 consumed 模式选号；关闭时默认按 quota 模式运行。" },
+    "runtime.fail_threshold": { title: "失败阈值", desc: "单个账号连续失败多少次后被视为不可继续使用。" },
+    "refresh.enabled": { title: "启用刷新调度", desc: "是否启用 account 域自己的周期 refresh 调度。" },
+    "refresh.interval_hours": { title: "普通池刷新间隔", desc: "普通池账号的刷新时间间隔（小时）。" },
+    "refresh.super_interval_hours": { title: "Super 池刷新间隔", desc: "Super 池账号的刷新时间间隔（小时）。" },
+    "refresh.on_demand_enabled": { title: "启用按需刷新", desc: "当请求拿不到可用账号时，是否允许触发受限的按需 refresh。" },
+    "refresh.on_demand_min_interval_sec": { title: "按需刷新最小间隔", desc: "请求侧按需 refresh 之间的最小间隔（秒），用于避免刷新风暴。" },
+    "refresh.on_demand_max_tokens": { title: "按需刷新最大数量", desc: "单次请求侧按需 refresh 最多检查多少个账号。" }
   },
 
   "log": {
@@ -198,12 +193,12 @@ const LOCALE_MAP = {
 
 // 配置部分说明（可选）
 const SECTION_DESCRIPTIONS = {
-  "proxy": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。"
+  "proxy": "配置不正确会显著提升 403 概率。启用 managed clearance 时，请求出口与 FlareSolverr 获取 clearance 时的出口应保持一致。"
 };
 
-// CF 自动刷新联动禁用字段（全部在 proxy section 内）
-const CF_MANAGED_PROXY_KEYS = ['cf_clearance', 'browser', 'user_agent'];
-const CF_REFRESH_SUB_KEYS = ['flaresolverr_url', 'refresh_interval', 'timeout'];
+// Managed clearance 联动禁用字段（全部在 proxy section 内）
+const MANAGED_CLEARANCE_LOCKED_KEYS = ['cf_clearance', 'browser', 'user_agent'];
+const MANAGED_CLEARANCE_PROVIDER_KEYS = ['flaresolverr_url', 'refresh_interval', 'timeout'];
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 
@@ -433,12 +428,12 @@ function renderConfig(data) {
 
   container.appendChild(fragment);
 
-  // 初始化 CF 自动刷新联动状态
-  const cfEnabled = data.proxy && data.proxy.enabled;
-  applyCfRefreshState(cfEnabled);
+  // 初始化 managed clearance 联动状态
+  const managedEnabled = data.proxy && data.proxy.enabled;
+  applyManagedClearanceState(managedEnabled);
 }
 
-function applyCfRefreshState(enabled) {
+function applyManagedClearanceState(enabled) {
   // 设置字段禁用状态的辅助函数
   function setFieldDisabled(section, key, disabled) {
     const input = document.querySelector(
@@ -456,10 +451,10 @@ function applyCfRefreshState(enabled) {
     }
   }
 
-  // enabled=true → 灰掉 cf_clearance/browser/user_agent
-  CF_MANAGED_PROXY_KEYS.forEach(k => setFieldDisabled('proxy', k, !!enabled));
-  // enabled=false → 灰掉 flaresolverr_url/refresh_interval/timeout
-  CF_REFRESH_SUB_KEYS.forEach(k => setFieldDisabled('proxy', k, !enabled));
+  // enabled=true -> 灰掉手动 clearance 字段
+  MANAGED_CLEARANCE_LOCKED_KEYS.forEach(k => setFieldDisabled('proxy', k, !!enabled));
+  // enabled=false -> 灰掉 managed provider 字段
+  MANAGED_CLEARANCE_PROVIDER_KEYS.forEach(k => setFieldDisabled('proxy', k, !enabled));
 }
 
 function buildFieldCard(section, key, val) {
@@ -544,12 +539,12 @@ function buildFieldCard(section, key, val) {
   }
   fieldCard.appendChild(inputWrapper);
 
-  // proxy.enabled (CF 自动刷新) 联动（toggle 本身始终可交互）
+  // proxy.enabled (managed clearance) 联动（toggle 本身始终可交互）
   if (section === 'proxy' && key === 'enabled' && built && built.input) {
     fieldCard.style.pointerEvents = 'auto';
     fieldCard.style.opacity = '';
     built.input.addEventListener('change', () => {
-      applyCfRefreshState(built.input.checked);
+      applyManagedClearanceState(built.input.checked);
     });
   }
 

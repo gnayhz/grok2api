@@ -11,7 +11,7 @@ import orjson
 from curl_cffi.requests.errors import RequestsError
 
 from app.core.logger import logger
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.exceptions import (
     AppException,
     ValidationException,
@@ -19,6 +19,11 @@ from app.core.exceptions import (
     UpstreamException,
     StreamIdleTimeoutError,
 )
+from app.services.account.coordinator import (
+    maybe_get_account_feedback_coordinator,
+    safe_account_feedback,
+)
+from app.services.account.models import EffortType
 from app.services.grok.services.model import ModelService
 from app.services.grok.utils.upload import UploadService
 from app.services.grok.utils import process as proc_base
@@ -33,7 +38,7 @@ from app.services.grok.utils.tool_call import (
     format_tool_history,
 )
 from app.services.grok.utils.usage import estimate_chat_usage, estimate_prompt_tokens
-from app.services.token import get_token_manager, EffortType
+from app.services.account.token_service import TokenService
 
 
 _CHAT_SEMAPHORE = None
@@ -397,9 +402,6 @@ class ChatService:
     ):
         """Chat Completions 入口"""
         # 获取 token
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
         # 解析参数
         if reasoning_effort is None:
             show_think = get_config("app.thinking")
@@ -414,7 +416,7 @@ class ChatService:
 
         for attempt in range(max_token_retries):
             # 选择 token
-            token = await pick_token(token_mgr, model, tried_tokens)
+            token = await pick_token(model, tried_tokens)
             if not token:
                 if last_error:
                     raise last_error
@@ -455,7 +457,7 @@ class ChatService:
                         prompt_tokens=prompt_tokens,
                     )
                     return wrap_stream_with_usage(
-                        processor.process(response), token_mgr, token, model
+                        processor.process(response), None, token, model
                     )
 
                 # 非流式
@@ -474,7 +476,7 @@ class ChatService:
                         if (model_info and model_info.cost.value == "high")
                         else EffortType.LOW
                     )
-                    await token_mgr.consume(token, effort)
+                    await TokenService.consume(token, effort)
                     logger.info(f"Chat completed: model={model}, effort={effort.value}")
                 except Exception as e:
                     logger.warning(f"Failed to record usage: {e}")
@@ -485,20 +487,28 @@ class ChatService:
 
                 if rate_limited(e):
                     # 配额不足，标记 token 为 cooling 并换 token 重试
-                    await token_mgr.mark_rate_limited(token)
+                    await TokenService.mark_rate_limited(token, reason="chat_rate_limited")
                     logger.warning(
                         f"Token {token[:10]}... rate limited (429), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
 
+                coordinator = await maybe_get_account_feedback_coordinator()
+                if coordinator is not None:
+                    await safe_account_feedback(
+                        coordinator.report_upstream_exception,
+                        token,
+                        e,
+                        reason="chat_upstream_error",
+                    )
+
                 if transient_upstream(e):
-                    has_alternative_token = False
-                    for pool_name in ModelService.pool_candidates_for_model(model):
-                        if token_mgr.get_token(pool_name, exclude=tried_tokens):
-                            has_alternative_token = True
-                            break
-                    if not has_alternative_token:
+                    alternative_token = await TokenService.select_token(
+                        ModelService.pool_candidates_for_model(model),
+                        exclude=tried_tokens,
+                    )
+                    if not alternative_token:
                         raise
                     logger.warning(
                         f"Transient upstream error for token {token[:10]}..., "

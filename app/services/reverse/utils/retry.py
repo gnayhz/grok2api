@@ -16,7 +16,7 @@ from curl_cffi.requests.exceptions import (
 )
 
 from app.core.logger import logger
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.exceptions import UpstreamException
 
 

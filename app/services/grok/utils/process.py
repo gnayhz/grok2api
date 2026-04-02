@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any, AsyncGenerator, Optional, AsyncIterable, List, TypeVar
 
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.logger import logger
 from app.core.exceptions import StreamIdleTimeoutError
 from app.services.grok.utils.download import DownloadService

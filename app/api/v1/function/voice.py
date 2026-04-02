@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.core.auth import verify_function_key
 from app.core.exceptions import AppException
 from app.services.grok.services.voice import VoiceService
-from app.services.token.manager import get_token_manager
+from app.services.account.token_service import TokenService
 
 router = APIRouter()
 
@@ -27,12 +27,7 @@ async def function_voice_token(
     speed: float = 1.0,
 ):
     """获取 Grok Voice Mode (LiveKit) Token"""
-    token_mgr = await get_token_manager()
-    sso_token = None
-    for pool_name in ("ssoBasic", "ssoSuper"):
-        sso_token = token_mgr.get_token(pool_name)
-        if sso_token:
-            break
+    sso_token = await TokenService.select_token(["ssoBasic", "ssoSuper"])
 
     if not sso_token:
         raise AppException(

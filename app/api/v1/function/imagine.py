@@ -13,12 +13,12 @@ from app.core.auth import (
     get_function_api_key,
     is_function_enabled,
 )
-from app.core.config import get_config
+from app.services.config import get_config
 from app.core.logger import logger
 from app.api.v1.image import resolve_aspect_ratio
 from app.services.grok.services.image import ImageGenerationService
 from app.services.grok.services.model import ModelService
-from app.services.token.manager import get_token_manager
+from app.services.account.token_service import TokenService
 
 router = APIRouter()
 
@@ -173,7 +173,6 @@ async def function_imagine_ws(websocket: WebSocket):
             )
             return
 
-        token_mgr = await get_token_manager()
         run_id = uuid.uuid4().hex
 
         await _send(
@@ -188,14 +187,9 @@ async def function_imagine_ws(websocket: WebSocket):
 
         while not stop_event.is_set():
             try:
-                await token_mgr.reload_if_stale()
-                token = None
-                for pool_name in ModelService.pool_candidates_for_model(
-                    model_info.model_id
-                ):
-                    token = token_mgr.get_token(pool_name)
-                    if token:
-                        break
+                token = await TokenService.select_token(
+                    ModelService.pool_candidates_for_model(model_info.model_id)
+                )
 
                 if not token:
                     await _send(
@@ -209,7 +203,6 @@ async def function_imagine_ws(websocket: WebSocket):
                     continue
 
                 result = await ImageGenerationService().generate(
-                    token_mgr=token_mgr,
                     token=token,
                     model_info=model_info,
                     prompt=prompt,
@@ -380,7 +373,6 @@ async def function_imagine_sse(
                 )
                 return
 
-            token_mgr = await get_token_manager()
             sequence = 0
             run_id = uuid.uuid4().hex
 
@@ -397,14 +389,9 @@ async def function_imagine_sse(
                         break
 
                 try:
-                    await token_mgr.reload_if_stale()
-                    token = None
-                    for pool_name in ModelService.pool_candidates_for_model(
-                        model_info.model_id
-                    ):
-                        token = token_mgr.get_token(pool_name)
-                        if token:
-                            break
+                    token = await TokenService.select_token(
+                        ModelService.pool_candidates_for_model(model_info.model_id)
+                    )
 
                     if not token:
                         yield (
@@ -414,7 +401,6 @@ async def function_imagine_sse(
                         continue
 
                     result = await ImageGenerationService().generate(
-                        token_mgr=token_mgr,
                         token=token,
                         model_info=model_info,
                         prompt=prompt,

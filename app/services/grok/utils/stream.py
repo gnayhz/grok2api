@@ -5,21 +5,23 @@
 from typing import AsyncGenerator
 
 from app.core.logger import logger
+from app.services.account.models import EffortType
 from app.services.grok.services.model import ModelService
-from app.services.token import EffortType
+from app.services.account.token_service import TokenService
 
 
 async def wrap_stream_with_usage(
-    stream: AsyncGenerator, token_mgr, token: str, model: str
+    stream: AsyncGenerator,
+    token: str,
+    model: str,
 ) -> AsyncGenerator:
     """
     包装流式响应，在完成时记录使用
 
     Args:
         stream: 原始 AsyncGenerator
-        token_mgr: TokenManager 实例
         token: Token 字符串
-        model: 模型名称
+        model: 模型名称，用于推导消耗等级
     """
     success = False
     try:
@@ -35,7 +37,7 @@ async def wrap_stream_with_usage(
                     if (model_info and model_info.cost.value == "high")
                     else EffortType.LOW
                 )
-                await token_mgr.consume(token, effort)
+                await TokenService.consume(token, effort)
                 logger.debug(
                     f"Stream completed, recorded usage for token {token[:10]}... (effort={effort.value})"
                 )

@@ -7,11 +7,17 @@ from fastapi.responses import StreamingResponse
 
 from app.core.auth import get_app_key, verify_app_key
 from app.core.batch import create_task, expire_task, get_task
+from app.services.config import get_config
 from app.core.logger import logger
 from app.core.storage import get_storage
-from app.services.grok.batch_services.usage import UsageService
+from app.services.account.commands import BulkReplacePoolCommand, ListAccountsQuery
+from app.services.account.coordinator import (
+    get_account_domain_context,
+    get_account_management_service,
+)
+from app.services.account.models import AccountRecord
 from app.services.grok.batch_services.nsfw import NSFWService
-from app.services.token.manager import get_token_manager
+from app.services.grok.batch_services.usage import UsageService
 
 router = APIRouter()
 
@@ -43,156 +49,211 @@ def _sanitize_token_text(value) -> str:
     return token.encode("ascii", errors="ignore").decode("ascii")
 
 
+def _mask_token(token: str) -> str:
+    return f"{token[:8]}...{token[-8:]}" if len(token) > 20 else token
+
+
+def _record_to_token_payload(record: AccountRecord) -> dict:
+    return {
+        "token": record.token,
+        "status": record.status.value,
+        "quota": record.quota,
+        "consumed": record.consumed,
+        "created_at": record.created_at,
+        "last_used_at": record.last_used_at,
+        "use_count": record.use_count,
+        "fail_count": record.fail_count,
+        "last_fail_at": record.last_fail_at,
+        "last_fail_reason": record.last_fail_reason,
+        "last_sync_at": record.last_sync_at,
+        "tags": list(record.tags),
+        "note": record.note,
+        "last_asset_clear_at": record.last_asset_clear_at,
+    }
+
+
+def _normalize_status(value):
+    if isinstance(value, str):
+        return value.strip().lower()
+    return value
+
+
+def _normalize_token_payload(payload: dict) -> dict | None:
+    token_value = _sanitize_token_text(payload.get("token"))
+    if not token_value:
+        return None
+
+    normalized = dict(payload)
+    normalized["token"] = token_value
+    normalized["status"] = _normalize_status(normalized.get("status", "active"))
+    normalized["quota"] = int(normalized.get("quota", 80) or 0)
+    normalized["consumed"] = int(normalized.get("consumed", 0) or 0)
+    normalized["use_count"] = int(normalized.get("use_count", 0) or 0)
+    normalized["fail_count"] = int(normalized.get("fail_count", 0) or 0)
+    raw_tags = normalized.get("tags") or []
+    if isinstance(raw_tags, str):
+        raw_tags = raw_tags.split(",")
+    normalized["tags"] = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+    normalized["note"] = str(normalized.get("note", "") or "")
+    return normalized
+
+
+def _payload_to_token_list(data: dict) -> list[str]:
+    tokens: list[str] = []
+    if isinstance(data.get("token"), str) and data["token"].strip():
+        tokens.append(_sanitize_token_text(data["token"]))
+    if isinstance(data.get("tokens"), list):
+        tokens.extend(
+            _sanitize_token_text(item)
+            for item in data["tokens"]
+            if _sanitize_token_text(item)
+        )
+    return list(dict.fromkeys(token for token in tokens if token))
+
+
+async def _list_all_accounts(*, include_deleted: bool = False) -> list[AccountRecord]:
+    service = await get_account_management_service()
+    page = 1
+    records: list[AccountRecord] = []
+    while True:
+        result = await service.list_accounts(
+            ListAccountsQuery(
+                page=page,
+                page_size=2000,
+                include_deleted=include_deleted,
+            )
+        )
+        records.extend(result.items)
+        if page >= result.total_pages:
+            break
+        page += 1
+    return records
+
+
 @router.get("/tokens", dependencies=[Depends(verify_app_key)])
 async def get_tokens():
     """获取所有 Token"""
-    # 获取消耗模式配置
-    from app.core.config import get_config
-    mgr = await get_token_manager()
-    results = {}
-    for pool_name, pool in mgr.pools.items():
-        results[pool_name] = [t.model_dump() for t in pool.list()]
-    consumed_mode = get_config("token.consumed_mode_enabled", False)
+    accounts = await _list_all_accounts(include_deleted=False)
+    results: dict[str, list[dict]] = {}
+    for record in accounts:
+        results.setdefault(record.pool_name, []).append(_record_to_token_payload(record))
     return {
-        "tokens": results or {},
-        "consumed_mode_enabled": consumed_mode,
+        "tokens": results,
+        "consumed_mode_enabled": get_config(
+            "account.runtime.consumed_mode_enabled",
+            False,
+        ),
     }
 
 
 @router.post("/tokens", dependencies=[Depends(verify_app_key)])
 async def update_tokens(data: dict):
-    """更新 Token 信息"""
+    """全量替换号池到最新 account 格式。"""
     storage = get_storage()
     try:
-        from app.services.token.models import TokenInfo
+        service = await get_account_management_service()
+        current_accounts = await _list_all_accounts(include_deleted=False)
+        current_map: dict[str, dict[str, AccountRecord]] = {}
+        for record in current_accounts:
+            current_map.setdefault(record.pool_name, {})[record.token] = record
 
-        async with storage.acquire_lock("tokens_save", timeout=10):
-            existing = await storage.load_tokens() or {}
-            normalized = {}
-            allowed_fields = set(TokenInfo.model_fields.keys())
-            existing_map = {}
-            for pool_name, tokens in existing.items():
-                if not isinstance(tokens, list):
+        normalized: dict[str, list] = {}
+        for pool_name, tokens in (data or {}).items():
+            if not isinstance(tokens, list):
+                continue
+            pool_items = []
+            for item in tokens:
+                token_data = {"token": item} if isinstance(item, str) else dict(item or {})
+                normalized_item = _normalize_token_payload(token_data)
+                if normalized_item is None:
+                    logger.warning("Skip empty token in pool '{}'", pool_name)
                     continue
-                pool_map = {}
-                for item in tokens:
-                    if isinstance(item, str):
-                        token_data = {"token": item}
-                    elif isinstance(item, dict):
-                        token_data = dict(item)
-                    else:
-                        continue
-                    raw_token = token_data.get("token")
-                    if raw_token is not None:
-                        token_data["token"] = _sanitize_token_text(raw_token)
-                    token_key = token_data.get("token")
-                    if isinstance(token_key, str):
-                        pool_map[token_key] = token_data
-                existing_map[pool_name] = pool_map
-            for pool_name, tokens in (data or {}).items():
-                if not isinstance(tokens, list):
-                    continue
-                pool_list = []
-                for item in tokens:
-                    if isinstance(item, str):
-                        token_data = {"token": item}
-                    elif isinstance(item, dict):
-                        token_data = dict(item)
-                    else:
-                        continue
 
-                    raw_token = token_data.get("token")
-                    if raw_token is not None:
-                        token_data["token"] = _sanitize_token_text(raw_token)
-                    if not token_data.get("token"):
-                        logger.warning(f"Skip empty token in pool '{pool_name}'")
-                        continue
+                existing = current_map.get(pool_name, {}).get(normalized_item["token"])
+                merged = _record_to_token_payload(existing) if existing else {}
+                merged.update(normalized_item)
+                if merged.get("tags") is None:
+                    merged["tags"] = []
+                pool_items.append(merged)
+            normalized[pool_name] = pool_items
 
-                    base = existing_map.get(pool_name, {}).get(
-                        token_data.get("token"), {}
-                    )
-                    merged = dict(base)
-                    merged.update(token_data)
-                    if merged.get("tags") is None:
-                        merged["tags"] = []
+        async with storage.acquire_lock("account_pool_replace", timeout=10):
+            target_pools = set(current_map) | set(normalized)
+            for pool_name in target_pools:
+                items = [
+                    item if isinstance(item, dict) else {"token": item}
+                    for item in normalized.get(pool_name, [])
+                ]
+                command = BulkReplacePoolCommand(
+                    pool_name=pool_name,
+                    items=[
+                        {
+                            "token": item.get("token"),
+                            "pool_name": pool_name,
+                            "status": _normalize_status(item.get("status", "active")),
+                            "quota": item.get("quota", 80),
+                            "consumed": item.get("consumed", 0),
+                            "created_at": item.get("created_at"),
+                            "last_used_at": item.get("last_used_at"),
+                            "use_count": item.get("use_count", 0),
+                            "fail_count": item.get("fail_count", 0),
+                            "last_fail_at": item.get("last_fail_at"),
+                            "last_fail_reason": item.get("last_fail_reason"),
+                            "last_sync_at": item.get("last_sync_at"),
+                            "tags": item.get("tags") or [],
+                            "note": item.get("note", ""),
+                            "last_asset_clear_at": item.get("last_asset_clear_at"),
+                        }
+                        for item in items
+                    ],
+                )
+                await service.replace_pool(command)
 
-                    filtered = {k: v for k, v in merged.items() if k in allowed_fields}
-                    try:
-                        info = TokenInfo(**filtered)
-                        pool_list.append(info.model_dump())
-                    except Exception as e:
-                        logger.warning(f"Skip invalid token in pool '{pool_name}': {e}")
-                        continue
-                normalized[pool_name] = pool_list
-
-            await storage.save_tokens(normalized)
-            mgr = await get_token_manager()
-            await mgr.reload()
+        context = await get_account_domain_context()
+        await context.runtime_service.refresh_if_changed()
         return {"status": "success", "message": "Token 已更新"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/tokens/refresh", dependencies=[Depends(verify_app_key)])
 async def refresh_tokens(data: dict):
     """刷新 Token 状态"""
     try:
-        mgr = await get_token_manager()
-        tokens = []
-        if isinstance(data.get("token"), str) and data["token"].strip():
-            tokens.append(data["token"].strip())
-        if isinstance(data.get("tokens"), list):
-            tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
-
-        if not tokens:
+        unique_tokens = _payload_to_token_list(data)
+        if not unique_tokens:
             raise HTTPException(status_code=400, detail="No tokens provided")
 
-        unique_tokens = list(dict.fromkeys(tokens))
-
-        raw_results = await UsageService.batch(
-            unique_tokens,
-            mgr,
-        )
-
-        # 强制保存变更到存储
-        await mgr._save(force=True)
-
-        results = {}
-        for token, res in raw_results.items():
-            results[token] = bool(res.get("ok")) and res.get("data") is True
-
-        response = {"status": "success", "results": results}
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raw_results = await UsageService.batch(unique_tokens)
+        return {
+            "status": "success",
+            "results": {
+                token: bool(res.get("ok")) and res.get("data") is True
+                for token, res in raw_results.items()
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/tokens/refresh/async", dependencies=[Depends(verify_app_key)])
 async def refresh_tokens_async(data: dict):
     """刷新 Token 状态（异步批量 + SSE 进度）"""
-    mgr = await get_token_manager()
-    tokens = []
-    if isinstance(data.get("token"), str) and data["token"].strip():
-        tokens.append(data["token"].strip())
-    if isinstance(data.get("tokens"), list):
-        tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
-
-    if not tokens:
+    unique_tokens = _payload_to_token_list(data)
+    if not unique_tokens:
         raise HTTPException(status_code=400, detail="No tokens provided")
-
-    unique_tokens = list(dict.fromkeys(tokens))
 
     task = create_task(len(unique_tokens))
 
     async def _run():
         try:
-
             async def _on_item(item: str, res: dict):
                 task.record(bool(res.get("ok")) and res.get("data") is True)
 
             raw_results = await UsageService.batch(
                 unique_tokens,
-                mgr,
                 on_item=_on_item,
                 should_cancel=lambda: task.cancelled,
             )
@@ -205,39 +266,31 @@ async def refresh_tokens_async(data: dict):
             ok_count = 0
             fail_count = 0
             for token, res in raw_results.items():
-                if res.get("ok") and res.get("data") is True:
+                ok = bool(res.get("ok")) and res.get("data") is True
+                if ok:
                     ok_count += 1
-                    results[token] = True
                 else:
                     fail_count += 1
-                    results[token] = False
+                results[token] = ok
 
-            await mgr._save(force=True)
-
-            result = {
-                "status": "success",
-                "summary": {
-                    "total": len(unique_tokens),
-                    "ok": ok_count,
-                    "fail": fail_count,
-                },
-                "results": results,
-            }
-            task.finish(result)
-        except Exception as e:
-            task.fail_task(str(e))
+            task.finish(
+                {
+                    "status": "success",
+                    "summary": {
+                        "total": len(unique_tokens),
+                        "ok": ok_count,
+                        "fail": fail_count,
+                    },
+                    "results": results,
+                }
+            )
+        except Exception as error:
+            task.fail_task(str(error))
         finally:
-            import asyncio
             asyncio.create_task(expire_task(task.id, 300))
 
-    import asyncio
     asyncio.create_task(_run())
-
-    return {
-        "status": "success",
-        "task_id": task.id,
-        "total": len(unique_tokens),
-    }
+    return {"status": "success", "task_id": task.id, "total": len(unique_tokens)}
 
 
 @router.get("/batch/{task_id}/stream")
@@ -294,46 +347,27 @@ async def batch_cancel(task_id: str):
 async def enable_nsfw(data: dict):
     """批量开启 NSFW (Unhinged) 模式"""
     try:
-        mgr = await get_token_manager()
-
-        tokens = []
-        if isinstance(data.get("token"), str) and data["token"].strip():
-            tokens.append(data["token"].strip())
-        if isinstance(data.get("tokens"), list):
-            tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
-
-        if not tokens:
-            for pool_name, pool in mgr.pools.items():
-                for info in pool.list():
-                    raw = (
-                        info.token[4:] if info.token.startswith("sso=") else info.token
-                    )
-                    tokens.append(raw)
-
-        if not tokens:
+        unique_tokens = _payload_to_token_list(data)
+        if not unique_tokens:
+            unique_tokens = [record.token for record in await _list_all_accounts()]
+        if not unique_tokens:
             raise HTTPException(status_code=400, detail="No tokens available")
 
-        unique_tokens = list(dict.fromkeys(tokens))
-
-        raw_results = await NSFWService.batch(
-            unique_tokens,
-            mgr,
-        )
-
+        raw_results = await NSFWService.batch(unique_tokens)
         results = {}
         ok_count = 0
         fail_count = 0
-
         for token, res in raw_results.items():
-            masked = f"{token[:8]}...{token[-8:]}" if len(token) > 20 else token
-            if res.get("ok") and res.get("data", {}).get("success"):
+            masked = _mask_token(token)
+            ok = bool(res.get("ok")) and res.get("data", {}).get("success")
+            if ok:
                 ok_count += 1
                 results[masked] = res.get("data", {})
             else:
                 fail_count += 1
                 results[masked] = res.get("data") or {"error": res.get("error")}
 
-        response = {
+        return {
             "status": "success",
             "summary": {
                 "total": len(unique_tokens),
@@ -342,50 +376,32 @@ async def enable_nsfw(data: dict):
             },
             "results": results,
         }
-
-        return response
-
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Enable NSFW failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        logger.error("Enable NSFW failed: {}", error)
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/tokens/nsfw/enable/async", dependencies=[Depends(verify_app_key)])
 async def enable_nsfw_async(data: dict):
     """批量开启 NSFW (Unhinged) 模式（异步批量 + SSE 进度）"""
-    mgr = await get_token_manager()
-
-    tokens = []
-    if isinstance(data.get("token"), str) and data["token"].strip():
-        tokens.append(data["token"].strip())
-    if isinstance(data.get("tokens"), list):
-        tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
-
-    if not tokens:
-        for pool_name, pool in mgr.pools.items():
-            for info in pool.list():
-                raw = info.token[4:] if info.token.startswith("sso=") else info.token
-                tokens.append(raw)
-
-    if not tokens:
+    unique_tokens = _payload_to_token_list(data)
+    if not unique_tokens:
+        unique_tokens = [record.token for record in await _list_all_accounts()]
+    if not unique_tokens:
         raise HTTPException(status_code=400, detail="No tokens available")
-
-    unique_tokens = list(dict.fromkeys(tokens))
 
     task = create_task(len(unique_tokens))
 
     async def _run():
         try:
-
             async def _on_item(item: str, res: dict):
                 ok = bool(res.get("ok") and res.get("data", {}).get("success"))
                 task.record(ok)
 
             raw_results = await NSFWService.batch(
                 unique_tokens,
-                mgr,
                 on_item=_on_item,
                 should_cancel=lambda: task.cancelled,
             )
@@ -398,37 +414,30 @@ async def enable_nsfw_async(data: dict):
             ok_count = 0
             fail_count = 0
             for token, res in raw_results.items():
-                masked = f"{token[:8]}...{token[-8:]}" if len(token) > 20 else token
-                if res.get("ok") and res.get("data", {}).get("success"):
+                masked = _mask_token(token)
+                ok = bool(res.get("ok")) and res.get("data", {}).get("success")
+                if ok:
                     ok_count += 1
                     results[masked] = res.get("data", {})
                 else:
                     fail_count += 1
                     results[masked] = res.get("data") or {"error": res.get("error")}
 
-            await mgr._save(force=True)
-
-            result = {
-                "status": "success",
-                "summary": {
-                    "total": len(unique_tokens),
-                    "ok": ok_count,
-                    "fail": fail_count,
-                },
-                "results": results,
-            }
-            task.finish(result)
-        except Exception as e:
-            task.fail_task(str(e))
+            task.finish(
+                {
+                    "status": "success",
+                    "summary": {
+                        "total": len(unique_tokens),
+                        "ok": ok_count,
+                        "fail": fail_count,
+                    },
+                    "results": results,
+                }
+            )
+        except Exception as error:
+            task.fail_task(str(error))
         finally:
-            import asyncio
             asyncio.create_task(expire_task(task.id, 300))
 
-    import asyncio
     asyncio.create_task(_run())
-
-    return {
-        "status": "success",
-        "task_id": task.id,
-        "total": len(unique_tokens),
-    }
+    return {"status": "success", "task_id": task.id, "total": len(unique_tokens)}
