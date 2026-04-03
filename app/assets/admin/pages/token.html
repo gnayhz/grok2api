@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="token.pageTitle">Grok2API - Token 管理</title>
+  <link rel="icon" href="/favicon.ico">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
+  <link href="/static/css/app.css" rel="stylesheet">
+</head>
+<body>
+  <div class="page">
+    <div id="app-header" data-type="admin"></div>
+
+    <main class="page-body fade-in">
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h2 class="text-2xl font-semibold" data-i18n="token.title">Token 列表</h2>
+          <p class="text-sm text-muted mt-1" data-i18n="token.subtitle">管理 Grok2API 的 Token 服务号池。</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="openImportModal()" class="btn btn-outline gap-2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span data-i18n="token.import">导入</span>
+          </button>
+          <button onclick="addToken()" class="btn btn-primary gap-2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            <span data-i18n="token.add">添加</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Stats -->
+      <div class="grid-4 mb-6" id="stats-container">
+        <div class="card stat-card"><div class="stat-value" id="stat-total">-</div><div class="stat-label" data-i18n="token.statTotal">Token 总数</div></div>
+        <div class="card stat-card"><div class="stat-value text-success" id="stat-active">-</div><div class="stat-label" data-i18n="token.statActive">正常</div></div>
+        <div class="card stat-card"><div class="stat-value text-orange" id="stat-cooling">-</div><div class="stat-label" data-i18n="token.statCooling">限流</div></div>
+        <div class="card stat-card"><div class="stat-value text-error" id="stat-invalid">-</div><div class="stat-label" data-i18n="token.statInvalid">失效</div></div>
+        <div class="card stat-card"><div class="stat-value" id="stat-chat-quota">-</div><div class="stat-label" data-i18n="token.statChatQuota">Chat 剩余</div></div>
+        <div class="card stat-card"><div class="stat-value text-blue" id="stat-image-quota">-</div><div class="stat-label" data-i18n="token.statImageQuota">Image 剩余</div></div>
+        <div class="card stat-card"><div class="stat-value text-subtle" data-i18n="token.statVideoUnavailable">-</div><div class="stat-label" data-i18n="token.statVideoQuota">Video 剩余</div></div>
+        <div class="card stat-card"><div class="stat-value" id="stat-total-calls">-</div><div class="stat-label" data-i18n="token.statTotalCalls">总调用</div></div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs mb-4" id="status-tabs">
+        <button class="tab-item active" data-filter="all" onclick="filterByStatus('all')"><span data-i18n="token.tabAll">全部</span> <span class="badge" id="tab-count-all">0</span></button>
+        <button class="tab-item" data-filter="active" onclick="filterByStatus('active')"><span data-i18n="token.tabActive">正常</span> <span class="badge badge-green" id="tab-count-active">0</span></button>
+        <button class="tab-item" data-filter="cooling" onclick="filterByStatus('cooling')"><span data-i18n="token.tabCooling">限流</span> <span class="badge badge-orange" id="tab-count-cooling">0</span></button>
+        <button class="tab-item" data-filter="expired" onclick="filterByStatus('expired')"><span data-i18n="token.tabExpired">失效</span> <span class="badge badge-red" id="tab-count-expired">0</span></button>
+        <span class="tab-sep"></span>
+        <button class="tab-item" data-filter="nsfw" onclick="filterByStatus('nsfw')"><span data-i18n="token.tabNsfw">NSFW</span> <span class="badge badge-purple" id="tab-count-nsfw">0</span></button>
+        <button class="tab-item" data-filter="no-nsfw" onclick="filterByStatus('no-nsfw')"><span data-i18n="token.tabNoNsfw">未开NSFW</span> <span class="badge" id="tab-count-no-nsfw">0</span></button>
+      </div>
+
+      <!-- Table -->
+      <div class="table-shell mb-4">
+        <div class="pagination-bar">
+          <div class="pagination-left">
+            <button id="page-prev" class="pagination-icon-btn" onclick="goPrevPage()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></button>
+            <div id="pagination-info" class="pagination-info">0 / 0</div>
+            <button id="page-next" class="pagination-icon-btn" onclick="goNextPage()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></button>
+          </div>
+          <div class="pagination-right">
+            <div id="select-all-wrap" class="select-menu-wrap">
+              <button id="select-all-trigger" class="pagination-action-btn" onclick="handleSelectAllPrimary(event)">
+                <span id="select-all-label" data-i18n="common.selectAll">全选</span>
+                <svg id="select-all-caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div id="select-all-popover" class="select-all-popover hidden">
+                <button class="select-all-option" onclick="selectVisibleAllFromMenu()" data-i18n="token.selectPage">本页</button>
+                <button class="select-all-option" onclick="selectAllFilteredFromMenu()" data-i18n="token.selectAllFiltered">全部</button>
+              </div>
+            </div>
+            <select id="page-size" class="pagination-size-select" onchange="changePageSize()">
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+            </select>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table style="min-width:860px">
+            <thead><tr>
+              <th style="width:40px;text-align:center"><input type="checkbox" id="select-all" class="checkbox" onclick="toggleSelectAll()"></th>
+              <th style="width:220px" data-i18n="token.tableToken">Token</th>
+              <th style="width:80px;text-align:center" data-i18n="token.tableType">类型</th>
+              <th style="width:100px;text-align:center" data-i18n="token.tableStatus">状态</th>
+              <th style="width:60px;text-align:center" id="th-quota" data-i18n="token.tableQuota">额度</th>
+              <th data-i18n="token.tableNote">备注</th>
+              <th style="width:160px;text-align:center" data-i18n="token.tableActions">操作</th>
+            </tr></thead>
+            <tbody id="token-table-body"></tbody>
+          </table>
+        </div>
+        <div id="loading" class="text-center py-2 text-muted" data-i18n="common.loading">加载中...</div>
+        <div id="empty-state" class="hidden table-empty" data-i18n="token.emptyState">暂无 Token</div>
+      </div>
+    </main>
+
+    <!-- Batch Toolbar -->
+    <div id="batch-actions" class="batch-toolbar">
+      <div class="flex items-center gap-2 text-xs">
+        <span class="text-muted" data-i18n="common.selected">已选</span>
+        <span class="badge" id="selected-count">0</span>
+      </div>
+      <span class="toolbar-sep"></span>
+      <div class="flex items-center gap-2">
+        <button id="btn-batch-export" onclick="batchExport()" class="btn btn-ghost btn-sm" data-i18n="token.batchExport">导出</button>
+        <button id="btn-batch-update" onclick="batchUpdate()" class="btn btn-ghost btn-sm" data-i18n="token.batchRefresh">刷新</button>
+        <button id="btn-batch-disable" onclick="batchDisableTokens()" class="btn btn-ghost btn-sm" data-i18n="token.batchDisable">禁用</button>
+        <button id="btn-batch-enable" onclick="batchEnableTokens()" class="btn btn-ghost btn-sm" data-i18n="token.batchEnable">启用</button>
+        <button id="btn-batch-nsfw" onclick="batchEnableNSFW()" class="btn btn-ghost btn-sm" disabled>NSFW</button>
+        <button id="btn-batch-delete" onclick="batchDelete()" class="btn btn-danger btn-sm" data-i18n="token.batchDelete">删除</button>
+      </div>
+      <div id="batch-progress" class="hidden flex items-center gap-2 text-xs text-muted">
+        <span class="toolbar-sep"></span>
+        <span id="batch-progress-text"></span>
+        <button id="btn-stop-action" class="batch-link hidden" onclick="stopBatchRefresh()" data-i18n="common.stop">终止</button>
+      </div>
+    </div>
+
+    <!-- Import Modal -->
+    <div id="import-modal" class="modal-overlay hidden">
+      <div class="modal-content modal-lg">
+        <div class="modal-header">
+          <h3 class="modal-title" data-i18n="token.importTitle">批量导入</h3>
+          <button onclick="closeImportModal()" class="modal-close"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+        <div class="space-y-4">
+          <div><label class="modal-label mb-2" data-i18n="token.importTargetPool">目标 Pool</label><select id="import-pool" class="input"><option value="ssoBasic">ssoBasic</option><option value="ssoSuper">ssoSuper</option></select></div>
+          <div><label class="modal-label mb-2" data-i18n="token.importTokenList">Token 列表</label><textarea id="import-text" class="input font-mono" rows="8" placeholder="一行一个" data-i18n-placeholder="token.importPlaceholder"></textarea></div>
+          <div class="flex justify-end gap-2"><button onclick="closeImportModal()" class="btn btn-outline btn-sm" data-i18n="common.cancel">取消</button><button onclick="submitImport()" class="btn btn-primary btn-sm" data-i18n="token.startImport">开始导入</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit Modal -->
+    <div id="edit-modal" class="modal-overlay hidden">
+      <div class="modal-content modal-md">
+        <div class="modal-header">
+          <h3 class="modal-title" data-i18n="token.editTitle">编辑 Token</h3>
+          <button onclick="closeEditModal()" class="modal-close"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+        <div class="space-y-4">
+          <input type="hidden" id="edit-original-token"><input type="hidden" id="edit-original-pool">
+          <div><label class="modal-label mb-2" data-i18n="token.tableToken">Token</label><input type="text" id="edit-token-display" class="input font-mono" disabled></div>
+          <div><label class="modal-label mb-2" data-i18n="token.editType">类型</label><select id="edit-pool" class="input"><option value="ssoBasic">ssoBasic</option><option value="ssoSuper">ssoSuper</option></select></div>
+          <div><label class="modal-label mb-2" data-i18n="token.editQuota">额度</label><input type="number" id="edit-quota" class="input" min="0"></div>
+          <div><label class="modal-label mb-2" data-i18n="token.editNote">备注</label><input type="text" id="edit-note" class="input" maxlength="50" placeholder="可选"></div>
+          <div class="flex justify-end gap-2"><button onclick="closeEditModal()" class="btn btn-outline btn-sm" data-i18n="common.cancel">取消</button><button onclick="saveEdit()" class="btn btn-primary btn-sm" data-i18n="common.save">保存</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirm Dialog -->
+    <div id="confirm-dialog" class="modal-overlay hidden">
+      <div class="modal-content modal-md">
+        <div style="padding:8px 0">
+          <div class="font-semibold mb-2" data-i18n="common.pleaseConfirm">请确认</div>
+          <div id="confirm-message" class="text-sm text-muted"></div>
+          <div class="flex justify-end gap-2 mt-4">
+            <button id="confirm-cancel" class="btn btn-outline btn-sm" data-i18n="common.cancel">取消</button>
+            <button id="confirm-ok" class="btn btn-danger btn-sm" data-i18n="common.ok">确定</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="app-footer"></div>
+  </div>
+
+  <script src="/static/i18n/i18n.js"></script>
+  <script src="/static/js/core/auth.js"></script>
+  <script src="/static/js/core/toast.js"></script>
+  <script src="/static/js/core/ui.js"></script>
+  <script src="/static/js/core/sse.js"></script>
+  <script src="/static/js/core/header.js"></script>
+  <script src="/static/js/admin/token.js"></script>
+</body>
+</html>

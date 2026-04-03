@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="cache.pageTitle">Grok2API - 缓存管理</title>
+  <link rel="icon" href="/favicon.ico">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
+  <link href="/static/css/app.css" rel="stylesheet">
+</head>
+<body>
+  <div class="page">
+    <div id="app-header" data-type="admin"></div>
+
+    <main class="page-body fade-in">
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h2 class="text-2xl font-semibold" data-i18n="cache.title">缓存管理</h2>
+          <p class="text-sm text-muted mt-1" data-i18n="cache.subtitle">查看和管理本地缓存文件。</p>
+        </div>
+        <button onclick="loadStats()" class="btn btn-outline gap-2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          <span data-i18n="common.refresh">刷新</span>
+        </button>
+      </div>
+      <div class="divider"></div>
+
+      <div class="grid-4 mb-6">
+        <div class="card stat-card"><div class="stat-value" id="img-count">-</div><div class="stat-label">图片数量</div></div>
+        <div class="card stat-card"><div class="stat-value" id="img-size">-</div><div class="stat-label">图片大小</div></div>
+        <div class="card stat-card"><div class="stat-value" id="video-count">-</div><div class="stat-label">视频数量</div></div>
+        <div class="card stat-card"><div class="stat-value" id="video-size">-</div><div class="stat-label">视频大小</div></div>
+      </div>
+
+      <div class="tabs mb-4">
+        <button class="tab-item active" data-tab="image" onclick="switchTab('image')">图片</button>
+        <button class="tab-item" data-tab="video" onclick="switchTab('video')">视频</button>
+      </div>
+
+      <div class="table-shell mb-4">
+        <div class="pagination-bar">
+          <div class="pagination-left">
+            <button id="list-prev" class="pagination-icon-btn" onclick="listPrev()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></button>
+            <span id="list-info" class="pagination-info">-</span>
+            <button id="list-next" class="pagination-icon-btn" onclick="listNext()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></button>
+          </div>
+          <div class="pagination-right">
+            <button onclick="clearLocalCache()" class="btn btn-danger btn-sm">清理全部</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table><thead><tr>
+            <th>文件名</th><th style="width:100px;text-align:right">大小</th><th style="width:80px;text-align:center">操作</th>
+          </tr></thead><tbody id="file-list-body"></tbody></table>
+        </div>
+        <div id="file-empty" class="table-empty hidden">暂无文件</div>
+      </div>
+    </main>
+
+    <div id="confirm-dialog" class="modal-overlay hidden">
+      <div class="modal-content modal-md"><div style="padding:8px 0">
+        <div class="font-semibold mb-2">请确认</div>
+        <div id="confirm-message" class="text-sm text-muted"></div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button id="confirm-cancel" class="btn btn-outline btn-sm">取消</button>
+          <button id="confirm-ok" class="btn btn-danger btn-sm">确定</button>
+        </div>
+      </div></div>
+    </div>
+
+    <div id="app-footer"></div>
+  </div>
+  <script src="/static/i18n/i18n.js"></script>
+  <script src="/static/js/core/auth.js"></script>
+  <script src="/static/js/core/toast.js"></script>
+  <script src="/static/js/core/ui.js"></script>
+  <script src="/static/js/core/header.js"></script>
+  <script src="/static/js/admin/cache.js"></script>
+</body>
+</html>

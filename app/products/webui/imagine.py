@@ -1,0 +1,389 @@
+"""Imagine function — WebSocket, SSE fallback, config, session management."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+import uuid
+from typing import Any, Dict, List, Optional
+
+import orjson
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from app.platform.auth.middleware import get_function_api_key, is_function_enabled
+from app.platform.config.snapshot import get_config
+from app.platform.errors import RateLimitError
+from app.platform.logging.logger import logger
+from app.platform.runtime.clock import now_s
+from app.products.openai.image import resolve_aspect_ratio
+
+router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Session store (in-memory)
+# ---------------------------------------------------------------------------
+
+IMAGINE_SESSION_TTL = 600
+_SESSIONS: dict[str, dict] = {}
+_SESSIONS_LOCK = asyncio.Lock()
+
+
+async def _clean_sessions(now: float) -> None:
+    expired = [k for k, v in _SESSIONS.items() if now - float(v.get("created_at") or 0) > IMAGINE_SESSION_TTL]
+    for k in expired:
+        _SESSIONS.pop(k, None)
+
+
+async def _new_session(prompt: str, aspect_ratio: str, nsfw: Optional[bool]) -> str:
+    task_id = uuid.uuid4().hex
+    now = time.time()
+    async with _SESSIONS_LOCK:
+        await _clean_sessions(now)
+        _SESSIONS[task_id] = {"prompt": prompt, "aspect_ratio": aspect_ratio, "nsfw": nsfw, "created_at": now}
+    return task_id
+
+
+async def _get_session(task_id: str) -> Optional[dict]:
+    if not task_id:
+        return None
+    now = time.time()
+    async with _SESSIONS_LOCK:
+        await _clean_sessions(now)
+        info = _SESSIONS.get(task_id)
+        if not info:
+            return None
+        if now - float(info.get("created_at") or 0) > IMAGINE_SESSION_TTL:
+            _SESSIONS.pop(task_id, None)
+            return None
+        return dict(info)
+
+
+async def _drop_session(task_id: str) -> None:
+    if task_id:
+        async with _SESSIONS_LOCK:
+            _SESSIONS.pop(task_id, None)
+
+
+async def _drop_sessions(task_ids: List[str]) -> int:
+    if not task_ids:
+        return 0
+    removed = 0
+    async with _SESSIONS_LOCK:
+        for tid in task_ids:
+            if tid and tid in _SESSIONS:
+                _SESSIONS.pop(tid, None)
+                removed += 1
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# SSE chunk parser
+# ---------------------------------------------------------------------------
+
+def _parse_sse_chunk(chunk: str) -> Optional[Dict[str, Any]]:
+    if not chunk:
+        return None
+    event = None
+    data_lines: List[str] = []
+    for raw in str(chunk).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("event:"):
+            event = line[6:].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+    if not data_lines:
+        return None
+    data_str = "\n".join(data_lines)
+    if data_str == "[DONE]":
+        return None
+    try:
+        payload = orjson.loads(data_str)
+    except orjson.JSONDecodeError:
+        return None
+    if event and isinstance(payload, dict) and "type" not in payload:
+        payload["type"] = event
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Account acquisition helper
+# ---------------------------------------------------------------------------
+
+async def _acquire_token():
+    from app.dataplane.account import _directory as _acct_dir
+    if _acct_dir is None:
+        return None, None
+    from app.control.model.registry import get as get_model
+    spec = get_model("grok-image")
+    if spec is None:
+        return None, None
+    ts = now_s()
+    acct = await _acct_dir.reserve(pool_id=spec.pool_id(), mode_id=int(spec.mode_id), now_s_override=ts)
+    if acct is None:
+        return None, None
+    return acct.token, acct
+
+
+# ---------------------------------------------------------------------------
+# WebSocket endpoint
+# ---------------------------------------------------------------------------
+
+@router.websocket("/imagine/ws")
+async def imagine_ws(websocket: WebSocket):
+    session_id = None
+    task_id = websocket.query_params.get("task_id")
+    if task_id:
+        info = await _get_session(task_id)
+        if info:
+            session_id = task_id
+
+    ok = True
+    if session_id is None:
+        function_key = get_function_api_key()
+        function_enabled = is_function_enabled()
+        if not function_key:
+            ok = function_enabled
+        else:
+            key = websocket.query_params.get("function_key")
+            ok = key == function_key
+
+    if not ok:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    stop_event = asyncio.Event()
+    run_task: Optional[asyncio.Task] = None
+
+    async def _send(payload: dict) -> bool:
+        try:
+            await websocket.send_text(orjson.dumps(payload).decode())
+            return True
+        except Exception:
+            return False
+
+    async def _stop_run():
+        nonlocal run_task
+        stop_event.set()
+        if run_task and not run_task.done():
+            run_task.cancel()
+            try:
+                await run_task
+            except Exception:
+                pass
+        run_task = None
+        stop_event.clear()
+
+    async def _run(prompt: str, aspect_ratio: str, nsfw: Optional[bool]):
+        from app.dataplane.reverse.transport.imagine_ws import stream_images
+        from app.dataplane.account import _directory as _acct_dir
+
+        run_id = uuid.uuid4().hex
+        await _send({"type": "status", "status": "running", "prompt": prompt, "aspect_ratio": aspect_ratio, "run_id": run_id})
+
+        while not stop_event.is_set():
+            try:
+                token, acct = await _acquire_token()
+                if not token:
+                    await _send({"type": "error", "message": "No available tokens.", "code": "rate_limit_exceeded"})
+                    await asyncio.sleep(2)
+                    continue
+
+                enable_nsfw = nsfw if nsfw is not None else get_config().get_bool("app.enable_nsfw", True)
+                async for ev in stream_images(token, prompt, aspect_ratio=aspect_ratio, n=6, enable_nsfw=enable_nsfw):
+                    if isinstance(ev, dict):
+                        ev.setdefault("run_id", run_id)
+                    await _send(ev)
+
+                if acct and _acct_dir:
+                    await _acct_dir.release(acct)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Imagine stream error: {}", e)
+                await _send({"type": "error", "message": str(e), "code": "internal_error"})
+                await asyncio.sleep(1.5)
+
+        await _send({"type": "status", "status": "stopped", "run_id": run_id})
+
+    try:
+        while True:
+            try:
+                raw = await websocket.receive_text()
+            except (RuntimeError, WebSocketDisconnect):
+                break
+
+            try:
+                payload = orjson.loads(raw)
+            except Exception:
+                await _send({"type": "error", "message": "Invalid message format.", "code": "invalid_payload"})
+                continue
+
+            action = payload.get("type")
+            if action == "start":
+                prompt = str(payload.get("prompt") or "").strip()
+                if not prompt:
+                    await _send({"type": "error", "message": "Prompt cannot be empty.", "code": "invalid_prompt"})
+                    continue
+                aspect_ratio = resolve_aspect_ratio(str(payload.get("aspect_ratio") or "2:3").strip() or "2:3")
+                nsfw = payload.get("nsfw")
+                if nsfw is not None:
+                    nsfw = bool(nsfw)
+                await _stop_run()
+                run_task = asyncio.create_task(_run(prompt, aspect_ratio, nsfw))
+            elif action == "stop":
+                await _stop_run()
+            else:
+                await _send({"type": "error", "message": "Unknown action.", "code": "invalid_action"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("WebSocket error: {}", e)
+    finally:
+        await _stop_run()
+        try:
+            from starlette.websockets import WebSocketState
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.close(code=1000, reason="Server closing connection")
+        except Exception:
+            pass
+        if session_id:
+            await _drop_session(session_id)
+
+
+# ---------------------------------------------------------------------------
+# SSE endpoint
+# ---------------------------------------------------------------------------
+
+@router.get("/imagine/sse")
+async def imagine_sse(
+    request: Request,
+    task_id: str = Query(""),
+    prompt: str = Query(""),
+    aspect_ratio: str = Query("2:3"),
+):
+    session = None
+    if task_id:
+        session = await _get_session(task_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Task not found")
+    else:
+        function_key = get_function_api_key()
+        function_enabled = is_function_enabled()
+        if not function_key:
+            if not function_enabled:
+                raise HTTPException(status_code=401, detail="Function access is disabled")
+        else:
+            key = request.query_params.get("function_key")
+            if key != function_key:
+                raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    if session:
+        prompt = str(session.get("prompt") or "").strip()
+        ratio = str(session.get("aspect_ratio") or "2:3").strip() or "2:3"
+        nsfw = session.get("nsfw")
+    else:
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+        ratio = resolve_aspect_ratio(str(aspect_ratio or "2:3").strip() or "2:3")
+        nsfw = request.query_params.get("nsfw")
+        if nsfw is not None:
+            nsfw = str(nsfw).lower() in ("1", "true", "yes", "on")
+
+    async def event_stream():
+        from app.dataplane.reverse.transport.imagine_ws import stream_images
+        from app.dataplane.account import _directory as _acct_dir
+
+        try:
+            run_id = uuid.uuid4().hex
+            yield f"data: {orjson.dumps({'type': 'status', 'status': 'running', 'prompt': prompt, 'aspect_ratio': ratio, 'run_id': run_id}).decode()}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                if task_id:
+                    alive = await _get_session(task_id)
+                    if not alive:
+                        break
+
+                try:
+                    token, acct = await _acquire_token()
+                    if not token:
+                        yield f"data: {orjson.dumps({'type': 'error', 'message': 'No available tokens.', 'code': 'rate_limit_exceeded'}).decode()}\n\n"
+                        await asyncio.sleep(2)
+                        continue
+
+                    enable_nsfw = nsfw if nsfw is not None else get_config().get_bool("app.enable_nsfw", True)
+                    async for ev in stream_images(token, prompt, aspect_ratio=ratio, n=6, enable_nsfw=enable_nsfw):
+                        if isinstance(ev, dict):
+                            ev.setdefault("run_id", run_id)
+                        yield f"data: {orjson.dumps(ev).decode()}\n\n"
+
+                    if acct and _acct_dir:
+                        await _acct_dir.release(acct)
+
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning("Imagine SSE error: {}", e)
+                    yield f"data: {orjson.dumps({'type': 'error', 'message': str(e), 'code': 'internal_error'}).decode()}\n\n"
+                    await asyncio.sleep(1.5)
+
+            yield f"data: {orjson.dumps({'type': 'status', 'status': 'stopped', 'run_id': run_id}).decode()}\n\n"
+        finally:
+            if task_id:
+                await _drop_session(task_id)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config / session management
+# ---------------------------------------------------------------------------
+
+@router.get("/imagine/config")
+async def imagine_config():
+    cfg = get_config()
+    return {
+        "final_min_bytes": cfg.get_int("image.final_min_bytes", 0),
+        "medium_min_bytes": cfg.get_int("image.medium_min_bytes", 0),
+        "nsfw": cfg.get_bool("image.nsfw"),
+    }
+
+
+class ImagineStartRequest(BaseModel):
+    prompt: str
+    aspect_ratio: Optional[str] = "2:3"
+    nsfw: Optional[bool] = None
+
+
+@router.post("/imagine/start")
+async def imagine_start(data: ImagineStartRequest):
+    prompt = (data.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    ratio = resolve_aspect_ratio(str(data.aspect_ratio or "2:3").strip() or "2:3")
+    task_id = await _new_session(prompt, ratio, data.nsfw)
+    return {"task_id": task_id, "aspect_ratio": ratio}
+
+
+class ImagineStopRequest(BaseModel):
+    task_ids: List[str]
+
+
+@router.post("/imagine/stop")
+async def imagine_stop(data: ImagineStopRequest):
+    removed = await _drop_sessions(data.task_ids or [])
+    return {"status": "success", "removed": removed}
