@@ -1,16 +1,26 @@
-"""XAI Imagine WebSocket protocol — message builders and image classifier."""
-
-from __future__ import annotations
+"""XAI Imagine WebSocket protocol — message builders and frame parsers."""
 
 import re
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any
 
-
-_URL_PATTERN = re.compile(r"/images/([a-f0-9-]+)\.(png|jpg|jpeg)", re.IGNORECASE)
+_URL_PATTERN = re.compile(r"/images/([a-f0-9\-]+)\.(png|jpg|jpeg)", re.IGNORECASE)
 
 WS_IMAGINE_URL = "wss://grok.com/ws/imagine/listen"
+
+
+# ---------------------------------------------------------------------------
+# Client message builders
+# ---------------------------------------------------------------------------
+
+def build_reset_message() -> dict[str, Any]:
+    """Build the reset message that must be sent before each prompt."""
+    return {
+        "type": "conversation.item.create",
+        "timestamp": int(time.time() * 1000),
+        "item": {"type": "message", "content": [{"type": "reset"}]},
+    }
 
 
 def build_request_message(
@@ -18,10 +28,11 @@ def build_request_message(
     prompt:       str,
     aspect_ratio: str  = "2:3",
     enable_nsfw:  bool = True,
+    enable_pro:   bool = False,
 ) -> dict[str, Any]:
-    """Build the WebSocket conversation.item.create message."""
+    """Build the image generation request message."""
     return {
-        "type":      "conversation.item.create",
+        "type": "conversation.item.create",
         "timestamp": int(time.time() * 1000),
         "item": {
             "type": "message",
@@ -30,56 +41,72 @@ def build_request_message(
                 "text":      prompt,
                 "type":      "input_text",
                 "properties": {
-                    "section_count":   0,
-                    "is_kids_mode":    False,
-                    "enable_nsfw":     enable_nsfw,
-                    "skip_upsampler":  False,
-                    "is_initial":      False,
-                    "aspect_ratio":    aspect_ratio,
+                    "section_count":       0,
+                    "is_kids_mode":        False,
+                    "enable_nsfw":         enable_nsfw,
+                    "skip_upsampler":      False,
+                    "enable_side_by_side": True,
+                    "is_initial":          False,
+                    "aspect_ratio":        aspect_ratio,
+                    "enable_pro":          enable_pro,
                 },
             }],
         },
     }
 
 
-def classify_image(
-    url:              str,
-    blob:             str,
-    *,
-    final_min_bytes:  int = 50_000,
-    medium_min_bytes: int = 5_000,
-) -> dict[str, Any] | None:
-    """Classify a WebSocket image message into stage metadata.
+# ---------------------------------------------------------------------------
+# Server frame parsers
+# ---------------------------------------------------------------------------
 
-    Returns a dict with keys: type, image_id, ext, stage, blob, blob_size, url, is_final.
-    Returns None if url or blob are empty.
+def parse_image_url(url: str) -> tuple[str, str]:
+    """Extract (image_id, ext) from a /images/{id}.{ext} URL.
+
+    Falls back to a random UUID and 'jpg' if pattern not found.
     """
-    if not url or not blob:
+    match = _URL_PATTERN.search(url or "")
+    if match:
+        return match.group(1), match.group(2).lower()
+    return uuid.uuid4().hex, "jpg"
+
+
+def parse_json_frame(msg: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse a {type: "json"} frame.
+
+    Returns a normalised dict on success, None if unrecognised status.
+
+    Returned keys:
+        status      "start_stage" | "completed"
+        image_id    str
+        order       int
+        width       int
+        height      int
+        moderated   bool   (only meaningful for "completed")
+        r_rated     bool   (only meaningful for "completed")
+    """
+    status = msg.get("current_status")
+    if status not in ("start_stage", "completed"):
         return None
 
-    match     = _URL_PATTERN.search(url)
-    image_id  = match.group(1) if match else uuid.uuid4().hex
-    ext       = match.group(2).lower() if match else "png"
-    blob_size = len(blob)
-    is_final  = blob_size >= final_min_bytes
-
-    if is_final:
-        stage = "final"
-    elif blob_size > medium_min_bytes:
-        stage = "medium"
-    else:
-        stage = "preview"
+    image_id = str(msg.get("image_id") or msg.get("job_id") or "")
+    if not image_id:
+        return None
 
     return {
-        "type":      "image",
+        "status":    status,
         "image_id":  image_id,
-        "ext":       ext,
-        "stage":     stage,
-        "blob":      blob,
-        "blob_size": blob_size,
-        "url":       url,
-        "is_final":  is_final,
+        "order":     int(msg.get("order") or 0),
+        "width":     int(msg.get("width") or 0),
+        "height":    int(msg.get("height") or 0),
+        "moderated": bool(msg.get("moderated")),
+        "r_rated":   bool(msg.get("r_rated")),
     }
 
 
-__all__ = ["WS_IMAGINE_URL", "build_request_message", "classify_image"]
+__all__ = [
+    "WS_IMAGINE_URL",
+    "build_reset_message",
+    "build_request_message",
+    "parse_image_url",
+    "parse_json_frame",
+]

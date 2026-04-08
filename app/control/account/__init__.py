@@ -16,6 +16,7 @@ from .repository import AccountRepository
 from .state_machine import AccountFeedback, StatePolicy, apply_feedback, clear_failures, derive_status, is_selectable
 from .quota_defaults import BASIC_QUOTA_DEFAULTS, SUPER_QUOTA_DEFAULTS, default_quota_set
 from .refresh import AccountRefreshService, RefreshResult
+from .runtime import get_refresh_service, set_refresh_service
 from .scheduler import AccountRefreshScheduler, get_account_refresh_scheduler
 from .backends.factory import create_repository
 
@@ -30,6 +31,7 @@ __all__ = [
     "derive_status", "is_selectable",
     "BASIC_QUOTA_DEFAULTS", "SUPER_QUOTA_DEFAULTS", "default_quota_set",
     "AccountRefreshService", "RefreshResult",
+    "get_refresh_service", "set_refresh_service",
     "AccountRefreshScheduler", "get_account_refresh_scheduler",
     "create_repository",
 ]

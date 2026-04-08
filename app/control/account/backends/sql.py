@@ -4,8 +4,6 @@ Both dialects share the same table schema and query logic;
 only the DDL fragments and upsert syntax differ.
 """
 
-from __future__ import annotations
-
 import json
 from typing import Any
 
@@ -41,6 +39,7 @@ accounts_table = sa.Table(
     sa.Column("quota_auto",       sa.Text,    nullable=False, default="{}"),
     sa.Column("quota_fast",       sa.Text,    nullable=False, default="{}"),
     sa.Column("quota_expert",     sa.Text,    nullable=False, default="{}"),
+    sa.Column("quota_heavy",      sa.Text,    nullable=False, default="{}"),
     sa.Column("usage_use_count",  sa.Integer, nullable=False, default=0),
     sa.Column("usage_fail_count", sa.Integer, nullable=False, default=0),
     sa.Column("usage_sync_count", sa.Integer, nullable=False, default=0),
@@ -66,10 +65,13 @@ meta_table = sa.Table(
 def _row_to_record(row: Any) -> AccountRecord:
     d = dict(row._mapping)
     d["tags"]  = json.loads(d.get("tags")  or "[]")
+    heavy_raw  = d.pop("quota_heavy", "{}") or "{}"
+    heavy_dict = json.loads(heavy_raw)
     d["quota"] = {
         "auto":   json.loads(d.pop("quota_auto",   "{}") or "{}"),
         "fast":   json.loads(d.pop("quota_fast",   "{}") or "{}"),
         "expert": json.loads(d.pop("quota_expert", "{}") or "{}"),
+        **({"heavy": heavy_dict} if heavy_dict else {}),
     }
     d["ext"] = json.loads(d.get("ext") or "{}")
     return AccountRecord.model_validate(d)
@@ -203,7 +205,7 @@ class SqlAccountRepository:
                     token = AccountRecord.model_validate({"token": item.token, "pool": item.pool}).token
                 except Exception:
                     continue
-                pool = item.pool if item.pool in ("basic", "super") else "basic"
+                pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
                 qs   = default_quota_set(pool)
                 row  = {
                     "token":            token,
@@ -211,10 +213,12 @@ class SqlAccountRepository:
                     "status":           "active",
                     "created_at":       ts,
                     "updated_at":       ts,
+                    "deleted_at":       None,   # clear soft-delete on re-import
                     "tags":             json.dumps(item.tags),
                     "quota_auto":       json.dumps(qs.auto.to_dict()),
                     "quota_fast":       json.dumps(qs.fast.to_dict()),
                     "quota_expert":     json.dumps(qs.expert.to_dict()),
+                    "quota_heavy":      json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
                     "usage_use_count":  0,
                     "usage_fail_count": 0,
                     "usage_sync_count": 0,
@@ -245,6 +249,8 @@ class SqlAccountRepository:
                 qs = record.quota_set()
 
                 updates: dict[str, Any] = {"updated_at": ts, "revision": rev}
+                if patch.pool is not None:
+                    updates["pool"] = patch.pool
                 if patch.status is not None:
                     updates["status"] = patch.status.value
                 if patch.state_reason is not None:
@@ -265,6 +271,8 @@ class SqlAccountRepository:
                     updates["quota_fast"] = json.dumps(patch.quota_fast)
                 if patch.quota_expert is not None:
                     updates["quota_expert"] = json.dumps(patch.quota_expert)
+                if patch.quota_heavy is not None:
+                    updates["quota_heavy"] = json.dumps(patch.quota_heavy)
                 if patch.usage_use_delta is not None:
                     updates["usage_use_count"] = max(0, record.usage_use_count + patch.usage_use_delta)
                 if patch.usage_fail_delta is not None:

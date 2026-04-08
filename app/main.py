@@ -4,8 +4,6 @@ Start with:
   uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 app.main:app
 """
 
-from __future__ import annotations
-
 import os
 import platform
 import sys
@@ -20,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from app.platform.logging.logger import logger, setup_logging, reload_logging
 from app.platform.config.snapshot import config as _config
 from app.platform.errors import AppError
+from app.platform.meta import get_project_version
 
 # ---------------------------------------------------------------------------
 # Early logging setup (before config is loaded)
@@ -44,9 +43,13 @@ async def lifespan(app: FastAPI):
     )
 
     # 2. Initialise account repository and bootstrap runtime table.
-    from app.control.account.backends.factory import create_repository
+    from app.control.account.backends.factory import create_repository, describe_repository_target
+    from app.control.account.runtime import set_refresh_service
     from app.control.account.scheduler import get_account_refresh_scheduler
     from app.dataplane.account import get_account_directory
+
+    storage_backend, storage_target = describe_repository_target()
+    logger.info("Account storage: backend={} target={}", storage_backend, storage_target)
 
     repo      = create_repository()
     await repo.initialize()
@@ -64,6 +67,7 @@ async def lifespan(app: FastAPI):
 
     # Expose refresh service for fire-and-forget post-call quota sync.
     app.state.refresh_service = refresh_svc
+    set_refresh_service(refresh_svc)
 
     # 4. Initialise proxy directory.
     from app.control.proxy import get_proxy_directory
@@ -77,6 +81,7 @@ async def lifespan(app: FastAPI):
     # -----------
     logger.info("Grok2API shutting down.")
     scheduler.stop()
+    set_refresh_service(None)
     await repo.close()
 
 
@@ -87,7 +92,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title       = "Grok2API",
-        version     = "2.0.0",
+        version     = get_project_version(),
         description = "OpenAI-compatible API gateway for Grok",
         lifespan    = lifespan,
     )
@@ -120,7 +125,7 @@ def create_app() -> FastAPI:
         )
 
     # Routers.
-    from app.products.web.routes    import router as web_router
+    from app.products.web           import router as web_router
     from app.products.openai.router import router as openai_router
 
     app.include_router(web_router)

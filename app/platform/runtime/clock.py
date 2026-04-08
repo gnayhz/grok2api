@@ -1,7 +1,5 @@
 """Monotonic-safe time utilities for hot-path and control-plane use."""
 
-from __future__ import annotations
-
 import time
 
 

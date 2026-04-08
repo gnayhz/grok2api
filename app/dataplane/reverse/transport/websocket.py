@@ -1,7 +1,5 @@
 """WebSocket transport with proxy and SOCKS support."""
 
-from __future__ import annotations
-
 import ssl
 from typing import Any, Awaitable, Callable, Mapping, Optional
 from urllib.parse import urlparse
@@ -108,7 +106,8 @@ class WebSocketClient:
 
         try:
             extra: dict[str, Any] = dict(ws_kwargs or {})
-            skip_ssl = cfg.get_bool("proxy.skip_proxy_ssl_verify", False) and bool(proxy_url)
+            skip_ssl = cfg.get_bool("proxy.egress.skip_ssl_verify",
+                                    cfg.get_bool("proxy.skip_proxy_ssl_verify", False)) and bool(proxy_url)
 
             if skip_ssl and urlparse(proxy_url).scheme.lower() == "https":
                 proxy_ssl = ssl.create_default_context()

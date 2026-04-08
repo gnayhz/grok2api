@@ -4,8 +4,7 @@ Calls POST /rest/app-chat/upload-file with base64-encoded content and
 returns the file metadata ID used as a file attachment reference in chat.
 """
 
-from __future__ import annotations
-
+import asyncio
 import base64
 import mimetypes
 import re
@@ -17,11 +16,25 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError, ValidationError
 from app.dataplane.proxy import get_proxy_runtime
+from app.dataplane.proxy.adapters.headers import build_sso_cookie
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.reverse.protocol.xai_assets import resolve_asset_reference
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 
 _UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
+_X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
+
+# Global semaphore — limits concurrent upload_file() calls across all requests.
+# Initialised lazily on first call so the event loop is guaranteed to be running.
+_upload_sem: asyncio.Semaphore | None = None
+
+def _get_upload_sem() -> asyncio.Semaphore:
+    global _upload_sem
+    if _upload_sem is None:
+        n = max(1, int(get_config("batch.asset_upload_concurrency", 10)))
+        _upload_sem = asyncio.Semaphore(n)
+    return _upload_sem
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +103,16 @@ async def upload_file(
     Raises:
         ``UpstreamError`` on HTTP failure.
     """
+    async with _get_upload_sem():
+        return await _upload_file_inner(token, filename, mime, b64)
+
+
+async def _upload_file_inner(
+    token:    str,
+    filename: str,
+    mime:     str,
+    b64:      str,
+) -> tuple[str, str]:
     cfg       = get_config()
     timeout_s = cfg.get_float("asset.upload_timeout", 60.0)
 
@@ -113,7 +136,7 @@ async def upload_file(
                 timeout = timeout_s,
             )
 
-        body_bytes = await response.aread()
+        body_bytes = response.content
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:300]
             logger.error(
@@ -169,7 +192,7 @@ async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
             kwargs  = build_session_kwargs(lease=lease)
             async with ResettableSession(**kwargs) as session:
                 resp = await session.get(file_input, headers=headers, timeout=30.0)
-            raw  = await resp.aread()
+            raw  = resp.content
             if resp.status_code != 200:
                 raise UpstreamError(
                     f"Failed to fetch input URL: {resp.status_code}",
@@ -189,4 +212,26 @@ async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
     return await upload_file(token, filename, mime, b64)
 
 
-__all__ = ["upload_file", "upload_from_input", "parse_data_uri"]
+def resolve_uploaded_asset_reference(token: str, file_id: str, file_uri: str) -> str:
+    """Resolve an uploaded asset to the content URL required by image-edit."""
+    user_id = _extract_user_id(token)
+    url = resolve_asset_reference(file_id, file_uri, user_id=user_id)
+    if url:
+        return url
+    raise UpstreamError("Could not resolve uploaded asset reference URL")
+
+
+def _extract_user_id(token: str) -> str | None:
+    cookie = build_sso_cookie(token)
+    match = _X_USER_ID_RE.search(cookie)
+    if match:
+        return match.group(1)
+    return None
+
+
+__all__ = [
+    "upload_file",
+    "upload_from_input",
+    "parse_data_uri",
+    "resolve_uploaded_asset_reference",
+]

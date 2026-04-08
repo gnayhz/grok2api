@@ -4,8 +4,6 @@ Pre-built profiles eliminate per-request config lookups in the hot path.
 Each profile specifies timeout, max retries, and retry-eligible status codes.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 
 

@@ -7,8 +7,6 @@ directly continues to work; the executor wraps the same pattern with
 structured feedback and classification.
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 
@@ -57,7 +55,7 @@ async def execute(
     # Step 2: Acquire account
     directory = await get_account_directory()
 
-    lease = await directory.reserve(plan.pool_id, plan.mode_id)
+    lease = await directory.reserve(plan.pool_candidates, plan.mode_id)
     if lease is None:
         return ReverseResult(
             category=ResultCategory.RATE_LIMITED,

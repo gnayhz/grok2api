@@ -3,8 +3,6 @@
 Called after every upstream call to update account health/quota and proxy state.
 """
 
-from __future__ import annotations
-
 from app.control.account.commands import AccountPatch
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 from app.platform.runtime.clock import now_ms

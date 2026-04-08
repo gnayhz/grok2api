@@ -1,7 +1,5 @@
 """ModelSpec — the single source of truth for model metadata."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 from .enums import Capability, ModeId, Tier
@@ -35,12 +33,26 @@ class ModelSpec:
     def is_voice(self)      -> bool: return bool(self.capability & Capability.VOICE)
 
     def pool_name(self) -> str:
-        """Return the pool string expected by the account selector."""
-        return "super" if self.tier == Tier.SUPER else "basic"
+        """Return the canonical pool string for this tier."""
+        if self.tier == Tier.SUPER:  return "super"
+        if self.tier == Tier.HEAVY:  return "heavy"
+        return "basic"
 
     def pool_id(self) -> int:
         """Return the integer PoolId for the dataplane account table."""
         return int(self.tier)
+
+    def pool_candidates(self) -> tuple[int, ...]:
+        """Return pool IDs to try in priority order.
+
+        A higher-tier account can always serve a lower-tier model:
+          BASIC tier  → try basic first, then super, then heavy
+          SUPER tier  → try super first, then heavy
+          HEAVY tier  → heavy only
+        """
+        if self.tier == Tier.BASIC:  return (0, 1, 2)   # basic, super, heavy
+        if self.tier == Tier.SUPER:  return (1, 2)       # super, heavy
+        return (2,)                                       # heavy only
 
 
 __all__ = ["ModelSpec"]

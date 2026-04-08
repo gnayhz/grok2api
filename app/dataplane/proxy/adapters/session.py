@@ -1,7 +1,5 @@
 """curl_cffi session builder for reverse-proxy requests."""
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 from urllib.parse import urlparse
@@ -24,7 +22,10 @@ def _resolve_browser(lease: ProxyLease | None) -> str:
 def _skip_proxy_ssl(proxy_url: str) -> bool:
     if not proxy_url:
         return False
-    return get_config().get_bool("proxy.skip_proxy_ssl_verify", False)
+    cfg = get_config()
+    # New key; fall back to old key for backward compatibility.
+    return cfg.get_bool("proxy.egress.skip_ssl_verify",
+                        cfg.get_bool("proxy.skip_proxy_ssl_verify", False))
 
 
 def normalize_proxy_url(url: str) -> str:

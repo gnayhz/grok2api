@@ -1,18 +1,21 @@
-"""Account repository factory — selects the backend from configuration."""
+"""Account repository factory — selects the backend from startup env."""
 
-from __future__ import annotations
-
+import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-from app.platform.config.snapshot import get_config
 from ..repository import AccountRepository
+
+_DEFAULT_LOCAL_PATH = "data/accounts.db"
+_DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+_SUPPORTED_BACKENDS = {"local", "redis", "mysql", "postgresql"}
 
 
 def create_repository() -> AccountRepository:
     """Instantiate the configured account storage backend.
 
-    Config key: ``account.storage``  (default: ``"local"``)
+    Startup env: ``ACCOUNT_STORAGE``  (default: ``"local"``)
 
     Supported values:
       ``local``      — SQLite (default, single-process)
@@ -20,40 +23,96 @@ def create_repository() -> AccountRepository:
       ``mysql``      — MySQL via asyncmy / SQLAlchemy
       ``postgresql`` — PostgreSQL via asyncpg / SQLAlchemy
     """
-    backend = get_config("account.storage", "local").strip().lower()
+    backend = get_repository_backend()
 
     if backend == "local":
         return _make_local()
     if backend == "redis":
         return _make_redis()
-    if backend in ("mysql", "mariadb"):
+    if backend == "mysql":
         return _make_sql("mysql")
-    if backend in ("postgresql", "postgres", "pgsql"):
+    if backend == "postgresql":
         return _make_sql("postgresql")
 
     raise ValueError(f"Unknown account storage backend: {backend!r}")
+
+
+def describe_repository_target() -> tuple[str, str]:
+    """Return current storage backend and a log-safe target description."""
+    backend = get_repository_backend()
+
+    if backend == "local":
+        return "local", str(_resolve_local_db_path())
+    if backend == "redis":
+        return "redis", _redact_url(_get_env("ACCOUNT_REDIS_URL", _DEFAULT_REDIS_URL))
+    if backend == "mysql":
+        return "mysql", _redact_url(_get_env("ACCOUNT_MYSQL_URL"))
+    if backend == "postgresql":
+        return "postgresql", _redact_url(_get_env("ACCOUNT_POSTGRESQL_URL"))
+    return backend, "<unknown>"
 
 
 # ---------------------------------------------------------------------------
 # Backend constructors
 # ---------------------------------------------------------------------------
 
+def get_repository_backend() -> str:
+    """Return the configured account storage backend from startup env."""
+    backend = _get_env("ACCOUNT_STORAGE", "local").lower()
+    if backend not in _SUPPORTED_BACKENDS:
+        raise ValueError(f"Unknown account storage backend: {backend!r}")
+    return backend
+
+
+def _get_env(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
+
+
+def _resolve_local_db_path() -> Path:
+    path_str = _get_env("ACCOUNT_LOCAL_PATH", _DEFAULT_LOCAL_PATH)
+    db_path = Path(path_str)
+    if not db_path.is_absolute():
+        db_path = Path(__file__).resolve().parents[4] / db_path
+    return db_path
+
+
+def _redact_url(url: Any) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return "<empty>"
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return raw
+    if not parts.scheme:
+        return raw
+    hostname = parts.hostname or ""
+    if parts.port:
+        hostname = f"{hostname}:{parts.port}"
+    if parts.username:
+        auth = f"{parts.username}:***@"
+    elif parts.password:
+        auth = "***@"
+    else:
+        auth = ""
+    return urlunsplit((parts.scheme, f"{auth}{hostname}", parts.path, parts.query, parts.fragment))
+
+
 def _make_local() -> AccountRepository:
     from .local import LocalAccountRepository
 
-    path_str = get_config("account.local.path", "data/accounts.db")
-    db_path  = Path(path_str)
-    if not db_path.is_absolute():
-        # Resolve relative to project root.
-        db_path = Path(__file__).resolve().parents[5] / db_path
-    return LocalAccountRepository(db_path)
+    return LocalAccountRepository(_resolve_local_db_path())
 
 
 def _make_redis() -> AccountRepository:
     from redis.asyncio import Redis
     from .redis import RedisAccountRepository
 
-    url = get_config("account.redis.url", "redis://localhost:6379/0")
+    url = _get_env("ACCOUNT_REDIS_URL", _DEFAULT_REDIS_URL)
     r   = Redis.from_url(url, decode_responses=False)
     return RedisAccountRepository(r)
 
@@ -62,12 +121,12 @@ def _make_sql(dialect: str) -> AccountRepository:
     from .sql import SqlAccountRepository, create_mysql_engine, create_pgsql_engine
 
     if dialect == "mysql":
-        url    = get_config("account.mysql.url", "")
+        url    = _get_env("ACCOUNT_MYSQL_URL")
         engine = create_mysql_engine(url)
     else:
-        url    = get_config("account.postgresql.url", "")
+        url    = _get_env("ACCOUNT_POSTGRESQL_URL")
         engine = create_pgsql_engine(url)
     return SqlAccountRepository(engine, dialect=dialect)
 
 
-__all__ = ["create_repository"]
+__all__ = ["create_repository", "describe_repository_target", "get_repository_backend"]

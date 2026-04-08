@@ -4,8 +4,6 @@ Wraps curl_cffi AsyncSession; handles proxy selection, header building,
 retry-on-reset, and timeout.
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any, AsyncGenerator
 
@@ -41,7 +39,8 @@ async def post_stream(
     )
     kwargs = build_session_kwargs(lease=lease)
 
-    async with ResettableSession(**kwargs) as session:
+    session = ResettableSession(**kwargs)
+    try:
         response = await session.post(
             url,
             headers = headers,
@@ -52,30 +51,37 @@ async def post_stream(
 
         if response.status_code != 200:
             try:
-                body = (await response.aread()).decode("utf-8", "replace")[:400]
+                body = (response.content).decode("utf-8", "replace")[:400]
             except Exception:
                 body = ""
             logger.error(
                 "HTTP POST failed: url={} status={} body={}",
                 url, response.status_code, body,
             )
+            await session.close()
             raise UpstreamError(
                 f"Upstream returned {response.status_code}",
                 status = response.status_code,
                 body   = body,
             )
+    except Exception:
+        try:
+            await session.close()
+        except Exception:
+            pass
+        raise
 
-        async def _lines() -> AsyncGenerator[str, None]:
+    async def _lines() -> AsyncGenerator[str, None]:
+        try:
+            async for line in response.aiter_lines():
+                yield line
+        finally:
             try:
-                async for line in response.aiter_lines():
-                    yield line
-            finally:
-                try:
-                    await session.close()
-                except Exception:
-                    pass
+                await session.close()
+            except Exception:
+                pass
 
-        return _lines()
+    return _lines()
 
 
 async def post_json(
@@ -83,47 +89,36 @@ async def post_json(
     token:   str,
     payload: bytes,
     *,
-    lease:        ProxyLease | None = None,
-    timeout_s:    float             = 30.0,
-    content_type: str               = "application/json",
-    origin:       str               = "https://grok.com",
-    referer:      str               = "https://grok.com/",
+    lease:        ProxyLease | None             = None,
+    timeout_s:    float                         = 30.0,
+    content_type: str                           = "application/json",
+    origin:       str                           = "https://grok.com",
+    referer:      str                           = "https://grok.com/",
+    session:      "ResettableSession | None"    = None,
 ) -> dict:
-    """POST *url* and return parsed JSON response body."""
-    headers = build_http_headers(
-        token,
-        content_type = content_type,
-        origin       = origin,
-        referer      = referer,
-        lease        = lease,
-    )
-    kwargs = build_session_kwargs(lease=lease)
+    """POST *url* and return parsed JSON response body.
 
-    async with ResettableSession(**kwargs) as session:
-        response = await session.post(
-            url,
-            headers = headers,
-            data    = payload,
-            timeout = timeout_s,
-        )
+    Pass *session* to reuse an existing connection (avoids a new TLS handshake).
+    When *session* is ``None`` a fresh session is created and closed automatically.
+    """
+    headers = build_http_headers(token, content_type=content_type, origin=origin, referer=referer, lease=lease)
 
-        body_bytes = await response.aread()
+    import orjson
+
+    async def _do(s: "ResettableSession") -> dict:
+        response = await s.post(url, headers=headers, data=payload, timeout=timeout_s)
+        body_bytes = response.content
         if response.status_code not in (200, 201, 204):
             body_text = body_bytes.decode("utf-8", "replace")[:400]
-            logger.error(
-                "HTTP POST JSON failed: url={} status={} body={}",
-                url, response.status_code, body_text,
-            )
-            raise UpstreamError(
-                f"Upstream returned {response.status_code}",
-                status = response.status_code,
-                body   = body_text,
-            )
+            logger.error("HTTP POST JSON failed: url={} status={} body={}", url, response.status_code, body_text)
+            raise UpstreamError(f"Upstream returned {response.status_code}", status=response.status_code, body=body_text)
+        return orjson.loads(body_bytes) if body_bytes.strip() else {}
 
-        if not body_bytes.strip():
-            return {}
-        import orjson
-        return orjson.loads(body_bytes)
+    if session is not None:
+        return await _do(session)
+
+    async with ResettableSession(**build_session_kwargs(lease=lease)) as s:
+        return await _do(s)
 
 
 async def get_json(
@@ -154,7 +149,7 @@ async def get_json(
             timeout = timeout_s,
         )
 
-        body_bytes = await response.aread()
+        body_bytes = response.content
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:400]
             logger.error(
@@ -197,7 +192,7 @@ async def delete_json(
             timeout = timeout_s,
         )
 
-        body_bytes = await response.aread()
+        body_bytes = response.content
         if response.status_code not in (200, 204):
             body_text = body_bytes.decode("utf-8", "replace")[:400]
             logger.error(
@@ -241,7 +236,8 @@ async def get_bytes_stream(
         headers.update(extra_headers)
     kwargs = build_session_kwargs(lease=lease)
 
-    async with ResettableSession(**kwargs) as session:
+    session = ResettableSession(**kwargs)
+    try:
         response = await session.get(
             url,
             headers         = headers,
@@ -252,31 +248,38 @@ async def get_bytes_stream(
 
         if response.status_code != 200:
             try:
-                body = (await response.aread()).decode("utf-8", "replace")[:400]
+                body = (response.content).decode("utf-8", "replace")[:400]
             except Exception:
                 body = ""
             logger.error(
                 "HTTP GET stream failed: url={} status={} body={}",
                 url, response.status_code, body,
             )
+            await session.close()
             raise UpstreamError(
                 f"Upstream returned {response.status_code}",
                 status = response.status_code,
                 body   = body,
             )
+    except Exception:
+        try:
+            await session.close()
+        except Exception:
+            pass
+        raise
 
-        async def _chunks() -> AsyncGenerator[bytes, None]:
+    async def _chunks() -> AsyncGenerator[bytes, None]:
+        try:
+            async for chunk in response.aiter_content():
+                if chunk:
+                    yield chunk
+        finally:
             try:
-                async for chunk in response.aiter_content():
-                    if chunk:
-                        yield chunk
-            finally:
-                try:
-                    await session.close()
-                except Exception:
-                    pass
+                await session.close()
+            except Exception:
+                pass
 
-        return _chunks()
+    return _chunks()
 
 
 __all__ = ["post_stream", "post_json", "get_json", "delete_json", "get_bytes_stream"]

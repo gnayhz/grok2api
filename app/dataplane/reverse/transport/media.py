@@ -3,10 +3,6 @@
 All three endpoints are simple JSON POST calls with proxy lifecycle.
 """
 
-from __future__ import annotations
-
-from typing import Any, Dict
-
 import orjson
 
 from app.platform.logging.logger import logger
@@ -85,6 +81,7 @@ async def create_media_post(
     media_type: str,
     media_url:  str = "",
     prompt:     str = "",
+    referer:    str = "https://grok.com/imagine",
 ) -> dict:
     """POST /rest/media/post/create — create a media post."""
     payload = build_media_post_payload(
@@ -95,6 +92,7 @@ async def create_media_post(
     return await _post_with_proxy(
         MEDIA_POST_URL, token, payload,
         label = "create_media_post",
+        referer = referer,
     )
 
 

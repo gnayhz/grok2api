@@ -1,7 +1,5 @@
 """Command / query objects for the account control plane."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -28,6 +26,7 @@ class AccountPatch(BaseModel):
     """
 
     token:            str
+    pool:             str | None             = None  # update pool type when inferred
     status:           AccountStatus | None   = None
     tags:             list[str] | None       = None
     add_tags:         list[str] | None       = None
@@ -36,6 +35,7 @@ class AccountPatch(BaseModel):
     quota_auto:       dict[str, Any] | None  = None
     quota_fast:       dict[str, Any] | None  = None
     quota_expert:     dict[str, Any] | None  = None
+    quota_heavy:      dict[str, Any] | None  = None
     # Usage counters — delta values (added to existing counts).
     usage_use_delta:  int | None             = None
     usage_fail_delta: int | None             = None

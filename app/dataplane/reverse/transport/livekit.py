@@ -5,8 +5,6 @@
 ``WebSocketConnection`` that the products layer can read/write.
 """
 
-from __future__ import annotations
-
 from typing import Any, Dict, Optional
 
 import orjson

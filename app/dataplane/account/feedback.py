@@ -4,9 +4,7 @@ The caller (AccountDirectory) is responsible for holding the state lock
 before calling these functions.
 """
 
-from __future__ import annotations
-
-from ..shared.enums import StatusId
+from ..shared.enums import ALL_MODE_IDS, StatusId
 from .table import AccountRuntimeTable
 
 # Health adjustment constants.
@@ -68,13 +66,13 @@ def apply_status_change(table: AccountRuntimeTable, idx: int, new_status_id: int
 
     if new_status_id != int(StatusId.ACTIVE):
         # Remove from all mode availability buckets.
-        for mode_id in (0, 1, 2):
+        for mode_id in ALL_MODE_IDS:
             bucket = table.mode_available.get((pool_id, mode_id))
             if bucket:
                 bucket.discard(idx)
     else:
         # Re-add to mode buckets where quota > 0.
-        for mode_id in (0, 1, 2):
+        for mode_id in ALL_MODE_IDS:
             if int(table._quota_col(mode_id)[idx]) > 0:
                 table.mode_available.setdefault((pool_id, mode_id), set()).add(idx)
 

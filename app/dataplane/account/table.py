@@ -8,8 +8,6 @@ All quota, status, health, and counter fields are stored as typed
 ``array.array`` columns indexed by a compact integer slot index.
 """
 
-from __future__ import annotations
-
 import array
 from dataclasses import dataclass, field
 from typing import Iterator
@@ -25,8 +23,8 @@ from ..shared.enums import ALL_MODE_IDS, POOL_STR_TO_ID, STATUS_STR_TO_ID, PoolI
 #   'L'  uint32  — epoch-second timestamps (valid until year 2106)
 # ---------------------------------------------------------------------------
 
-_QUOTA_COLS  = ("quota_auto", "quota_fast", "quota_expert")
-_RESET_COLS  = ("reset_auto", "reset_fast", "reset_expert")
+_QUOTA_COLS  = ("quota_auto", "quota_fast", "quota_expert", "quota_heavy")
+_RESET_COLS  = ("reset_auto", "reset_fast", "reset_expert", "reset_heavy")
 _INFLIGHT_CAP = 32_767   # avoid int16 overflow on quota
 
 # ---------------------------------------------------------------------------
@@ -55,11 +53,13 @@ class AccountRuntimeTable:
     quota_auto_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
     quota_fast_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
     quota_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("h"))
+    quota_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("h"))
 
     # --- Window reset timestamps (uint32 epoch-seconds; 0 = unknown) ---
     reset_auto_at_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
     reset_fast_at_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
     reset_expert_at_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    reset_heavy_at_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("L"))
 
     # --- Runtime counters (uint16) ---
     inflight_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("H"))
@@ -89,12 +89,14 @@ class AccountRuntimeTable:
     def _quota_col(self, mode_id: int) -> "array.array[int]":
         if mode_id == 0: return self.quota_auto_by_idx
         if mode_id == 1: return self.quota_fast_by_idx
-        return self.quota_expert_by_idx
+        if mode_id == 2: return self.quota_expert_by_idx
+        return self.quota_heavy_by_idx
 
     def _reset_col(self, mode_id: int) -> "array.array[int]":
         if mode_id == 0: return self.reset_auto_at_by_idx
         if mode_id == 1: return self.reset_fast_at_by_idx
-        return self.reset_expert_at_by_idx
+        if mode_id == 2: return self.reset_expert_at_by_idx
+        return self.reset_heavy_at_by_idx
 
     def _add_to_indexes(self, idx: int) -> None:
         pool_id   = int(self.pool_by_idx[idx])
@@ -128,20 +130,22 @@ class AccountRuntimeTable:
 
     def _append_slot(
         self,
-        token:       str,
-        pool_id:     int,
-        status_id:   int,
-        quota_auto:  int,
-        quota_fast:  int,
+        token:        str,
+        pool_id:      int,
+        status_id:    int,
+        quota_auto:   int,
+        quota_fast:   int,
         quota_expert: int,
-        reset_auto:  int,
-        reset_fast:  int,
+        quota_heavy:  int,
+        reset_auto:   int,
+        reset_fast:   int,
         reset_expert: int,
-        health:      float,
-        last_use_s:  int,
-        last_fail_s: int,
-        fail_count:  int,
-        tags:        list[str],
+        reset_heavy:  int,
+        health:       float,
+        last_use_s:   int,
+        last_fail_s:  int,
+        fail_count:   int,
+        tags:         list[str],
     ) -> int:
         idx = len(self.token_by_idx)
         self.token_by_idx.append(token)
@@ -151,9 +155,11 @@ class AccountRuntimeTable:
         self.quota_auto_by_idx.append(max(-1, min(quota_auto, 32767)))
         self.quota_fast_by_idx.append(max(-1, min(quota_fast, 32767)))
         self.quota_expert_by_idx.append(max(-1, min(quota_expert, 32767)))
+        self.quota_heavy_by_idx.append(max(-1, min(quota_heavy, 32767)))
         self.reset_auto_at_by_idx.append(reset_auto)
         self.reset_fast_at_by_idx.append(reset_fast)
         self.reset_expert_at_by_idx.append(reset_expert)
+        self.reset_heavy_at_by_idx.append(reset_heavy)
         self.inflight_by_idx.append(0)
         self.fail_count_by_idx.append(min(fail_count, 65535))
         self.health_by_idx.append(health)
@@ -170,36 +176,40 @@ class AccountRuntimeTable:
 
     def _update_slot(
         self,
-        idx:         int,
-        pool_id:     int,
-        status_id:   int,
-        quota_auto:  int,
-        quota_fast:  int,
+        idx:          int,
+        pool_id:      int,
+        status_id:    int,
+        quota_auto:   int,
+        quota_fast:   int,
         quota_expert: int,
-        reset_auto:  int,
-        reset_fast:  int,
+        quota_heavy:  int,
+        reset_auto:   int,
+        reset_fast:   int,
         reset_expert: int,
-        health:      float,
-        last_use_s:  int,
-        last_fail_s: int,
-        fail_count:  int,
-        old_tags:    list[str],
-        new_tags:    list[str],
+        reset_heavy:  int,
+        health:       float,
+        last_use_s:   int,
+        last_fail_s:  int,
+        fail_count:   int,
+        old_tags:     list[str],
+        new_tags:     list[str],
     ) -> None:
         self._remove_from_indexes(idx)
         self._remove_from_tag_idx(idx, old_tags)
 
-        self.pool_by_idx[idx]            = pool_id
-        self.status_by_idx[idx]          = status_id
-        self.quota_auto_by_idx[idx]      = max(-1, min(quota_auto, 32767))
-        self.quota_fast_by_idx[idx]      = max(-1, min(quota_fast, 32767))
-        self.quota_expert_by_idx[idx]    = max(-1, min(quota_expert, 32767))
-        self.reset_auto_at_by_idx[idx]   = reset_auto
-        self.reset_fast_at_by_idx[idx]   = reset_fast
-        self.reset_expert_at_by_idx[idx] = reset_expert
-        self.fail_count_by_idx[idx]      = min(fail_count, 65535)
-        self.last_use_at_by_idx[idx]     = last_use_s
-        self.last_fail_at_by_idx[idx]    = last_fail_s
+        self.pool_by_idx[idx]             = pool_id
+        self.status_by_idx[idx]           = status_id
+        self.quota_auto_by_idx[idx]       = max(-1, min(quota_auto, 32767))
+        self.quota_fast_by_idx[idx]       = max(-1, min(quota_fast, 32767))
+        self.quota_expert_by_idx[idx]     = max(-1, min(quota_expert, 32767))
+        self.quota_heavy_by_idx[idx]      = max(-1, min(quota_heavy, 32767))
+        self.reset_auto_at_by_idx[idx]    = reset_auto
+        self.reset_fast_at_by_idx[idx]    = reset_fast
+        self.reset_expert_at_by_idx[idx]  = reset_expert
+        self.reset_heavy_at_by_idx[idx]   = reset_heavy
+        self.fail_count_by_idx[idx]       = min(fail_count, 65535)
+        self.last_use_at_by_idx[idx]      = last_use_s
+        self.last_fail_at_by_idx[idx]     = last_fail_s
         # health is not reset on update
 
         self._add_to_indexes(idx)

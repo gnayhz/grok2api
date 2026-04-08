@@ -4,8 +4,6 @@ Periodically refreshes ClearanceBundles for managed (FlareSolverr) mode.
 Previously inline in ProxyDirectory; extracted for separation of concerns.
 """
 
-from __future__ import annotations
-
 import asyncio
 
 from app.platform.logging.logger import logger

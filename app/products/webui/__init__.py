@@ -1,1 +1,0 @@
-"""WebUI products package."""

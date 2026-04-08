@@ -1,7 +1,5 @@
 """Reverse pipeline data types — ReversePlan, ReverseLeaseSet, ReverseResult."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
 from typing import Any
@@ -43,15 +41,15 @@ class TransportKind(IntEnum):
 @dataclass(slots=True)
 class ReversePlan:
     """Describes how a single upstream call should be executed."""
-    endpoint:       str                  # full URL
-    transport_kind: TransportKind
-    pool_id:        int                  # 0=basic, 1=super
-    mode_id:        int                  # 0=auto, 1=fast, 2=expert
-    timeout_s:      float     = 120.0
-    content_type:   str       = "application/json"
-    origin:         str       = "https://grok.com"
-    referer:        str       = "https://grok.com/"
-    extra:          dict[str, Any] = field(default_factory=dict)
+    endpoint:        str                  # full URL
+    transport_kind:  TransportKind
+    pool_candidates: tuple[int, ...]      # ordered pool IDs to try (e.g. (0,1,2))
+    mode_id:         int                  # 0=auto, 1=fast, 2=expert, 3=heavy
+    timeout_s:       float    = 120.0
+    content_type:    str      = "application/json"
+    origin:          str      = "https://grok.com"
+    referer:         str      = "https://grok.com/"
+    extra:           dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

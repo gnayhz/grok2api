@@ -7,19 +7,19 @@ Performance notes:
   - Import refresh: reuses app.state.refresh_service singleton
 """
 
-from __future__ import annotations
-
 import asyncio
 import re
 from typing import TYPE_CHECKING
 
 import orjson
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 
+from app.platform.errors import AppError, ErrorKind, ValidationError
 from app.platform.logging.logger import logger
 from app.control.account.commands import (
+    AccountPatch,
     AccountUpsert,
     BulkReplacePoolCommand,
     ListAccountsQuery,
@@ -68,14 +68,35 @@ class ReplacePoolRequest(BaseModel):
     tags: list[str] = []
 
 
+class AddTokensRequest(BaseModel):
+    tokens: list[str]
+    pool: str = "basic"
+    tags: list[str] = []
+
+
+class EditTokenRequest(BaseModel):
+    old_token: str
+    token: str
+    pool: str = "basic"
+
+
+class TokenImportItem(BaseModel):
+    token: str
+    tags: list[str] = []
+
+
+class SaveTokensRequest(RootModel[dict[str, list[str | TokenImportItem]]]):
+    """Legacy bulk-save payload keyed by pool name."""
+
+
 # ---------------------------------------------------------------------------
 # Serialisation — zero-copy quota extraction
 # ---------------------------------------------------------------------------
 
 def _quota_brief(q: dict) -> dict:
-    """Extract {auto, fast, expert} with only remaining/total from stored quota dict."""
+    """Extract {auto, fast, expert, heavy} with only remaining/total from stored quota dict."""
     out = {}
-    for mode in ("auto", "fast", "expert"):
+    for mode in ("auto", "fast", "expert", "heavy"):
         v = q.get(mode)
         if isinstance(v, dict):
             out[mode] = {
@@ -85,22 +106,15 @@ def _quota_brief(q: dict) -> dict:
     return out
 
 
-def _serialize_record(r, pool: str) -> dict:
+def _serialize_record(r) -> dict:
     return {
-        "token":              r.token,
-        "status":             r.status,
-        "quota":              _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
-        "consumed":           0,
-        "created_at":         r.created_at,
-        "last_used_at":       r.last_use_at,
-        "use_count":          r.usage_use_count or 0,
-        "fail_count":         r.usage_fail_count or 0,
-        "last_fail_at":       r.last_fail_at,
-        "last_fail_reason":   r.last_fail_reason,
-        "last_sync_at":       r.last_sync_at,
-        "tags":               r.tags or [],
-        "note":               getattr(r, "note", "") or "",
-        "last_asset_clear_at": r.last_clear_at,
+        "token":       r.token,
+        "pool":        r.pool or "basic",
+        "status":      r.status,
+        "quota":       _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
+        "use_count":   r.usage_use_count or 0,
+        "last_used_at": r.last_use_at,
+        "tags":        r.tags or [],
     }
 
 
@@ -115,7 +129,7 @@ def _json(data) -> Response:
 
 @router.get("/tokens")
 async def list_tokens(repo: "AccountRepository" = Depends(get_repo)):
-    """Return all tokens grouped by pool."""
+    """Return flat token list."""
     all_items: list = []
     page_num = 1
     while True:
@@ -125,17 +139,12 @@ async def list_tokens(repo: "AccountRepository" = Depends(get_repo)):
             break
         page_num += 1
 
-    result: dict[str, list] = {}
-    for r in all_items:
-        pool = r.pool or "basic"
-        result.setdefault(pool, []).append(_serialize_record(r, pool))
-
-    return _json({"tokens": result, "consumed_mode_enabled": False})
+    return _json({"tokens": [_serialize_record(r) for r in all_items]})
 
 
 @router.post("/tokens")
 async def save_tokens(
-    data: dict,
+    req: SaveTokensRequest,
     repo: "AccountRepository" = Depends(get_repo),
     refresh_svc: "AccountRefreshService" = Depends(get_refresh_svc),
 ):
@@ -143,12 +152,10 @@ async def save_tokens(
     total_upserted = 0
     all_tokens: list[str] = []
 
-    for pool_name, items in data.items():
-        if not isinstance(items, list):
-            continue
+    for pool_name, items in req.root.items():
         upserts = []
         for item in items:
-            td = {"token": item} if isinstance(item, str) else dict(item or {})
+            td = {"token": item} if isinstance(item, str) else item.model_dump()
             token_val = _sanitize(td.get("token", ""))
             if not token_val:
                 continue
@@ -164,21 +171,138 @@ async def save_tokens(
     return _json({"status": "success", "count": total_upserted})
 
 
+@router.post("/tokens/add")
+async def add_tokens(
+    req: AddTokensRequest,
+    repo: "AccountRepository" = Depends(get_repo),
+    refresh_svc: "AccountRefreshService" = Depends(get_refresh_svc),
+):
+    requested_pool = (req.pool or "basic").strip().lower()
+    sync_auto_detect = requested_pool == "auto"
+
+    # Deduplicate and sanitize input
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for token in req.tokens:
+        tok = _sanitize(token)
+        if tok and tok not in seen:
+            seen.add(tok)
+            cleaned.append(tok)
+    if not cleaned:
+        raise ValidationError("No valid tokens provided", param="tokens")
+
+    # Only upsert tokens that are not already active — avoids overwriting quota/status.
+    # Soft-deleted tokens are treated as non-existing so they can be restored.
+    existing = {r.token for r in await repo.get_accounts(cleaned) if not r.is_deleted()}
+    new_tokens = [t for t in cleaned if t not in existing]
+
+    if not new_tokens:
+        return _json({"status": "success", "count": 0, "skipped": len(cleaned)})
+
+    upserts = [AccountUpsert(token=t, pool=requested_pool, tags=req.tags) for t in new_tokens]
+    result = await repo.upsert_accounts(upserts)
+    logger.info("Admin: added {} new tokens to pool={} (skipped {} existing)",
+                len(new_tokens), requested_pool, len(existing))
+
+    if sync_auto_detect:
+        try:
+            refresh_result = await refresh_svc.refresh_on_import(new_tokens)
+            logger.info(
+                "Admin: auto-detect sync completed for {} tokens (refreshed={} failed={})",
+                len(new_tokens), refresh_result.refreshed, refresh_result.failed,
+            )
+        except Exception as exc:
+            logger.warning("Admin: auto-detect sync failed for {} tokens: {}", len(new_tokens), exc)
+    else:
+        asyncio.create_task(_refresh_imported(refresh_svc, new_tokens))
+
+    return _json({
+        "status": "success",
+        "count": result.upserted or len(new_tokens),
+        "skipped": len(existing),
+        "synced": sync_auto_detect,
+    })
+
+
 @router.delete("/tokens")
 async def delete_tokens(
-    tokens: list[str],
+    tokens: list[str] = Body(...),
     repo: "AccountRepository" = Depends(get_repo),
 ):
     cleaned = [t for t in (_sanitize(t) for t in tokens) if t]
     if not cleaned:
-        return Response(
-            content=orjson.dumps({"error": "No valid tokens provided"}),
-            media_type="application/json",
-            status_code=400,
-        )
+        raise ValidationError("No valid tokens provided", param="tokens")
     await repo.delete_accounts(cleaned)
     logger.info("Admin: deleted {} tokens", len(cleaned))
     return _json({"deleted": len(cleaned)})
+
+
+@router.put("/tokens/edit")
+async def edit_token(
+    req: EditTokenRequest,
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    old_token = _sanitize(req.old_token)
+    new_token = _sanitize(req.token)
+    pool = (req.pool or "basic").strip().lower()
+
+    if not old_token or not new_token:
+        raise ValidationError("Token is required", param="token")
+
+    records = await repo.get_accounts([old_token])
+    if not records:
+        raise AppError(
+            "Account not found",
+            kind=ErrorKind.VALIDATION,
+            code="account_not_found",
+            status=404,
+        )
+    record = records[0]
+
+    if old_token != new_token:
+        existing = await repo.get_accounts([new_token])
+        if existing:
+            raise AppError(
+                "Target token already exists",
+                kind=ErrorKind.VALIDATION,
+                code="token_conflict",
+                status=409,
+            )
+
+    await repo.upsert_accounts([AccountUpsert(
+        token=new_token,
+        pool=pool,
+        tags=record.tags,
+        ext=record.ext,
+    )])
+
+    if old_token == new_token:
+        logger.info("Admin: updated token {} pool={}", _mask(new_token), pool)
+        return _json({"status": "success", "token": new_token, "pool": pool})
+
+    qs = record.quota_set()
+    await repo.patch_accounts([AccountPatch(
+        token=new_token,
+        status=record.status,
+        tags=record.tags,
+        quota_auto=qs.auto.to_dict(),
+        quota_fast=qs.fast.to_dict(),
+        quota_expert=qs.expert.to_dict(),
+        usage_use_delta=record.usage_use_count,
+        usage_fail_delta=record.usage_fail_count,
+        usage_sync_delta=record.usage_sync_count,
+        last_use_at=record.last_use_at,
+        last_fail_at=record.last_fail_at,
+        last_fail_reason=record.last_fail_reason,
+        last_sync_at=record.last_sync_at,
+        last_clear_at=record.last_clear_at,
+        state_reason=record.state_reason,
+        ext_merge=record.ext,
+    )])
+    await repo.delete_accounts([old_token])
+
+    logger.info("Admin: edited token {} -> {} pool={}", _mask(old_token), _mask(new_token), pool)
+    return _json({"status": "success", "token": new_token, "pool": pool})
 
 
 @router.put("/tokens/pool")

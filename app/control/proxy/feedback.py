@@ -1,7 +1,5 @@
 """Classify upstream HTTP responses into proxy feedback categories."""
 
-from __future__ import annotations
-
 from .models import ProxyFeedback, ProxyFeedbackKind
 
 

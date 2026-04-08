@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="webui.chatkit.pageTitle">Grok2API - ChatKit</title>
+  <link rel="icon" href="/favicon.ico">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
+  <link href="/static/css/app.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.11.4/dist/livekit-client.umd.min.js"></script>
+</head>
+<body class="webui-page">
+  <div id="webui-header" data-active="/webui/chatkit"></div>
+  <main class="webui-main webui-chatkit-main">
+    <button id="chatkitPanelToggle" class="btn webui-chatkit-mobile-toggle" type="button" aria-expanded="false" aria-label="设置" title="设置">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.75a1.5 1.5 0 0 1 1.47 1.2l.18.89a6.95 6.95 0 0 1 1.28.53l.78-.46a1.5 1.5 0 0 1 1.86.23l.3.3a1.5 1.5 0 0 1 .23 1.86l-.46.78c.22.4.4.83.53 1.28l.89.18a1.5 1.5 0 0 1 1.2 1.47v.42a1.5 1.5 0 0 1-1.2 1.47l-.89.18a6.95 6.95 0 0 1-.53 1.28l.46.78a1.5 1.5 0 0 1-.23 1.86l-.3.3a1.5 1.5 0 0 1-1.86.23l-.78-.46c-.4.22-.83.4-1.28.53l-.18.89a1.5 1.5 0 0 1-1.47 1.2h-.42a1.5 1.5 0 0 1-1.47-1.2l-.18-.89a6.95 6.95 0 0 1-1.28-.53l-.78.46a1.5 1.5 0 0 1-1.86-.23l-.3-.3a1.5 1.5 0 0 1-.23-1.86l.46-.78a6.95 6.95 0 0 1-.53-1.28l-.89-.18a1.5 1.5 0 0 1-1.2-1.47v-.42a1.5 1.5 0 0 1 1.2-1.47l.89-.18c.13-.45.31-.88.53-1.28l-.46-.78a1.5 1.5 0 0 1 .23-1.86l.3-.3a1.5 1.5 0 0 1 1.86-.23l.78.46c.4-.22.83-.4 1.28-.53l.18-.89a1.5 1.5 0 0 1 1.47-1.2h.42Z"/><path d="M12 9.25a2.75 2.75 0 1 1 0 5.5 2.75 2.75 0 0 1 0-5.5Z"/></svg>
+    </button>
+    <section class="webui-chatkit-shell">
+      <aside class="webui-chatkit-panel">
+        <header class="webui-chatkit-panel-head">
+          <h1 class="webui-chatkit-panel-title" data-i18n="webui.chatkit.title">ChatKit</h1>
+        </header>
+
+        <section class="webui-chatkit-settings">
+          <div class="webui-chatkit-settings-title" data-i18n="webui.chatkit.settings">连接设置</div>
+          <div class="webui-chatkit-settings-shell">
+            <label class="webui-chatkit-field">
+              <span data-i18n="webui.chatkit.voiceLabel">声音</span>
+              <select id="voiceSelect" class="input">
+                <option value="ara" selected>Ara</option>
+                <option value="eve">Eve</option>
+                <option value="leo">Leo</option>
+                <option value="rex">Rex</option>
+                <option value="sal">Sal</option>
+                <option value="gork">Gork</option>
+              </select>
+            </label>
+            <label class="webui-chatkit-field">
+              <span data-i18n="webui.chatkit.personalityLabel">个性</span>
+              <select id="personalitySelect" class="input">
+                <option value="assistant" selected>Assistant</option>
+                <option value="custom">Custom</option>
+                <option value="therapist">Therapist</option>
+                <option value="storyteller">Storyteller</option>
+                <option value="kids_story_time">Kids Story Time</option>
+                <option value="meditation">Meditation</option>
+                <option value="unhinged">Unhinged 18+</option>
+                <option value="sexy">Sexy 18+</option>
+              </select>
+            </label>
+            <label class="webui-chatkit-field">
+              <span data-i18n="webui.chatkit.speedLabel">语速</span>
+              <select id="speedSelect" class="input">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1.0" selected>1.0x</option>
+                <option value="1.1">1.1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.4">1.4x</option>
+                <option value="1.5">1.5x</option>
+                <option value="1.75">1.75x</option>
+                <option value="2.0">2.0x</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="webui-chatkit-settings webui-chatkit-log-card">
+          <div class="webui-chatkit-log-head">
+            <div class="webui-chatkit-settings-title" data-i18n="webui.chatkit.logTitle">会话日志</div>
+            <button id="clearVoiceLogBtn" class="btn webui-chatkit-icon-btn webui-chatkit-clear" type="button" aria-label="清空" title="清空">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
+            </button>
+          </div>
+          <div class="webui-chatkit-settings-shell webui-chatkit-log-shell">
+            <div id="voiceLog" class="webui-chatkit-log"></div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="webui-chatkit-stage">
+        <div class="webui-chatkit-stage-card">
+          <div class="webui-chatkit-orb-wrap">
+            <div id="voiceOrb" class="webui-chatkit-orb is-idle">
+              <div class="webui-chatkit-bubble webui-chatkit-bubble-a"></div>
+              <div class="webui-chatkit-bubble webui-chatkit-bubble-b"></div>
+              <div class="webui-chatkit-bubble webui-chatkit-bubble-c"></div>
+              <div class="webui-chatkit-bubble webui-chatkit-bubble-d"></div>
+            </div>
+            <div id="connectionBadge" class="webui-chatkit-badge" data-i18n="webui.chatkit.statusIdle">未连接</div>
+          </div>
+
+          <div class="webui-chatkit-stage-copy">
+            <div class="webui-chatkit-stage-title">Grok Voice</div>
+            <div id="connectionText" class="webui-chatkit-stage-text" data-i18n="webui.chatkit.idleText">准备好后点击开始，授权麦克风即可进入语音会话。</div>
+          </div>
+
+          <div class="webui-chatkit-controls">
+            <button id="startVoiceBtn" class="btn btn-primary webui-chatkit-icon-btn webui-chatkit-icon-btn-primary" type="button" aria-label="开始" title="开始">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6.5v11l8-5.5-8-5.5Z"/></svg>
+            </button>
+            <button id="muteVoiceBtn" class="btn webui-chatkit-icon-btn" type="button" disabled aria-label="静音" title="静音">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10h3l4-4v12l-4-4H5z"/><path d="M16 9a4.5 4.5 0 0 1 0 6"/><path d="M18.5 6.5a8 8 0 0 1 0 11"/></svg>
+            </button>
+            <button id="newSessionBtn" class="btn webui-chatkit-icon-btn" type="button" disabled aria-label="新会话" title="新会话">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div id="audioRoot" class="webui-chatkit-audio"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/js/i18n.js"></script>
+  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/toast.js"></script>
+  <script src="/static/js/webui-header.js"></script>
+  <script src="/static/js/webui/chatkit.js"></script>
+</body>
+</html>

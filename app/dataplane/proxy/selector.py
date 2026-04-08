@@ -3,8 +3,6 @@
 Extracted from ProxyDirectory.acquire() to formalize the dataplane separation.
 """
 
-from __future__ import annotations
-
 from app.control.proxy.models import (
     EgressMode, EgressNode, EgressNodeState,
     ProxyScope, RequestKind,

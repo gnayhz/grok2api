@@ -5,8 +5,6 @@ Sends a pre-framed gRPC-Web request to *url* and returns the parsed
 the caller controls acquisition and feedback.
 """
 
-from __future__ import annotations
-
 from typing import Dict, List, Tuple
 
 from app.platform.logging.logger import logger
@@ -33,12 +31,16 @@ async def post_grpc_web(
     token:     str,
     payload:   bytes,
     *,
-    lease:     ProxyLease | None = None,
-    timeout_s: float             = 30.0,
-    origin:    str               = "https://grok.com",
-    referer:   str               = "https://grok.com/",
+    lease:     ProxyLease | None      = None,
+    timeout_s: float                  = 30.0,
+    origin:    str                    = "https://grok.com",
+    referer:   str                    = "https://grok.com/",
+    session:   "ResettableSession | None" = None,
 ) -> Tuple[List[bytes], Dict[str, str]]:
     """POST a gRPC-Web frame to *url*.
+
+    Pass *session* to reuse an existing connection (avoids a new TLS handshake).
+    When *session* is ``None`` a fresh session is created and closed automatically.
 
     Returns:
         ``(messages, trailers)`` — raw protobuf message payloads and the
@@ -56,35 +58,20 @@ async def post_grpc_web(
     )
     headers.update(_GRPC_WEB_HEADERS)
 
-    kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
-        response = await session.post(
-            url,
-            headers = headers,
-            data    = payload,
-            timeout = timeout_s,
-        )
-
-        body_bytes = await response.aread()
+    async def _do(s: "ResettableSession") -> Tuple[List[bytes], Dict[str, str]]:
+        response = await s.post(url, headers=headers, data=payload, timeout=timeout_s)
+        body_bytes = response.content
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:300]
-            logger.error(
-                "gRPC-Web POST failed: url={} status={} body={}",
-                url, response.status_code, body_text,
-            )
-            raise UpstreamError(
-                f"Upstream returned {response.status_code}",
-                status = response.status_code,
-                body   = body_text,
-            )
+            logger.error("gRPC-Web POST failed: url={} status={} body={}", url, response.status_code, body_text)
+            raise UpstreamError(f"Upstream returned {response.status_code}", status=response.status_code, body=body_text)
+        return GrpcClient.parse_response(body_bytes, content_type=response.headers.get("content-type"), headers=response.headers)
 
-        content_type = response.headers.get("content-type")
-        return GrpcClient.parse_response(
-            body_bytes,
-            content_type = content_type,
-            headers      = response.headers,
-        )
+    if session is not None:
+        return await _do(session)
+
+    async with ResettableSession(**build_session_kwargs(lease=lease)) as s:
+        return await _do(s)
 
 
 __all__ = ["post_grpc_web"]

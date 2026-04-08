@@ -1,7 +1,5 @@
 """AccountLease — minimal hot-path rental object."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 from app.platform.runtime.ids import next_id

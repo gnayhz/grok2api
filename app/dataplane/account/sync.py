@@ -5,8 +5,6 @@ Two modes:
   incremental — revision-based change scan at runtime.
 """
 
-from __future__ import annotations
-
 import asyncio
 
 from app.platform.logging.logger import logger
@@ -30,15 +28,18 @@ def _record_to_slot_args(record: AccountRecord) -> dict:
             return 0
         return int(ms_to_s(window.reset_at))
 
+    heavy_w = qs.heavy
     return dict(
         pool_id      = pool_id,
         status_id    = status_id,
         quota_auto   = max(0, qs.auto.remaining),
         quota_fast   = max(0, qs.fast.remaining),
         quota_expert = max(0, qs.expert.remaining),
+        quota_heavy  = max(0, heavy_w.remaining) if heavy_w is not None else -1,
         reset_auto   = _reset_s(qs.auto),
         reset_fast   = _reset_s(qs.fast),
         reset_expert = _reset_s(qs.expert),
+        reset_heavy  = _reset_s(heavy_w) if heavy_w is not None else 0,
         health       = 1.0,
         last_use_s   = ms_to_s(record.last_use_at)  if record.last_use_at  else 0,
         last_fail_s  = ms_to_s(record.last_fail_at) if record.last_fail_at else 0,

@@ -1,7 +1,5 @@
 """Account repository protocol — the contract every backend must satisfy."""
 
-from __future__ import annotations
-
 from typing import Protocol, runtime_checkable
 
 from .commands import AccountPatch, AccountUpsert, BulkReplacePoolCommand, ListAccountsQuery

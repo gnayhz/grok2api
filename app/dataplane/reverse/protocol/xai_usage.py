@@ -1,7 +1,5 @@
 """XAI rate-limits API protocol — fetch live quota data per mode."""
 
-from __future__ import annotations
-
 import orjson
 
 from app.platform.logging.logger import logger
@@ -18,13 +16,15 @@ _MODE_NAMES: dict[int, str] = {
     0: "auto",
     1: "fast",
     2: "expert",
+    3: "heavy",
 }
 
 # Default window durations used as fallback when API call fails.
 _DEFAULT_WINDOW_SECS: dict[int, int] = {
-    0: 72_000,   # auto  — 20 h
-    1: 72_000,   # fast  — 20 h
-    2: 36_000,   # expert — 10 h
+    0: 72_000,   # auto   — 20 h (basic) / 2 h (super/heavy, real value overrides)
+    1: 72_000,   # fast   — 20 h (basic)
+    2: 36_000,   # expert — 10 h (basic)
+    3:  7_200,   # heavy  — 2 h  (heavy-pool only)
 }
 
 
@@ -141,16 +141,19 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
 # ---------------------------------------------------------------------------
 
 async def fetch_all_quotas(token: str) -> dict[int, object] | None:
-    """Fetch quota windows for all three modes (auto / fast / expert) concurrently.
+    """Fetch quota windows for all four modes (auto / fast / expert / heavy) concurrently.
 
-    Issues three requests in parallel.  Returns ``{mode_id: QuotaWindow}``
-    for every mode that responded successfully, or ``None`` if all failed.
+    Issues four requests in parallel.  Mode 3 (heavy) will silently return
+    ``None`` for basic and super accounts — this is expected and harmless.
+    Returns ``{mode_id: QuotaWindow}`` for every mode that responded
+    successfully, or ``None`` if all four failed.
     """
     import asyncio
     results = await asyncio.gather(
         _fetch_one(token, 0),
         _fetch_one(token, 1),
         _fetch_one(token, 2),
+        _fetch_one(token, 3),
         return_exceptions=False,
     )
     windows = {mode_id: win for mode_id, win in enumerate(results) if win is not None}

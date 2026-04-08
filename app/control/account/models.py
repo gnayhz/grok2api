@@ -1,7 +1,5 @@
 """Control-plane account models — persistent record shape."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,19 +67,25 @@ class QuotaWindow:
 
 @dataclass(slots=True)
 class AccountQuotaSet:
-    """Three-dimensional quota set — one window per mode."""
+    """Quota set — one window per mode (auto / fast / expert / heavy).
+
+    ``heavy`` is ``None`` for basic and super accounts.
+    """
 
     auto:   QuotaWindow
     fast:   QuotaWindow
     expert: QuotaWindow
+    heavy:  QuotaWindow | None = None  # heavy-pool accounts only
 
-    def get(self, mode_id: int) -> QuotaWindow:
-        """Return the quota window for *mode_id* (0=auto, 1=fast, 2=expert)."""
+    def get(self, mode_id: int) -> QuotaWindow | None:
+        """Return the quota window for *mode_id* (0=auto, 1=fast, 2=expert, 3=heavy)."""
         if mode_id == 0:
             return self.auto
         if mode_id == 1:
             return self.fast
-        return self.expert
+        if mode_id == 2:
+            return self.expert
+        return self.heavy  # mode_id == 3
 
     def set(self, mode_id: int, window: QuotaWindow) -> None:
         """Replace the quota window for *mode_id*."""
@@ -89,22 +93,29 @@ class AccountQuotaSet:
             self.auto = window
         elif mode_id == 1:
             self.fast = window
-        else:
+        elif mode_id == 2:
             self.expert = window
+        else:
+            self.heavy = window  # mode_id == 3
 
     def to_dict(self) -> dict[str, dict[str, Any]]:
-        return {
+        d: dict[str, dict[str, Any]] = {
             "auto":   self.auto.to_dict(),
             "fast":   self.fast.to_dict(),
             "expert": self.expert.to_dict(),
         }
+        if self.heavy is not None:
+            d["heavy"] = self.heavy.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "AccountQuotaSet":
+        heavy_d = d.get("heavy")
         return cls(
             auto   = QuotaWindow.from_dict(d.get("auto",   {})),
             fast   = QuotaWindow.from_dict(d.get("fast",   {})),
             expert = QuotaWindow.from_dict(d.get("expert", {})),
+            heavy  = QuotaWindow.from_dict(heavy_d) if heavy_d else None,
         )
 
 
@@ -143,7 +154,7 @@ class AccountUsageStats:
 class AccountRecord(BaseModel):
     """Persistent account record — single source of truth for all backends.
 
-    ``pool``  values: ``"basic"`` | ``"super"``
+    ``pool``  values: ``"basic"`` | ``"super"`` | ``"heavy"``
     All timestamps are milliseconds since epoch.
     ``ext`` carries non-core extension data only.
     """
@@ -180,6 +191,10 @@ class AccountRecord(BaseModel):
     @property
     def is_super(self) -> bool:
         return self.pool == "super"
+
+    @property
+    def is_heavy(self) -> bool:
+        return self.pool == "heavy"
 
     def is_deleted(self) -> bool:
         return self.deleted_at is not None
@@ -224,10 +239,13 @@ class AccountRecord(BaseModel):
     @classmethod
     def _normalize_pool(cls, v: Any) -> str:
         val = str(v or "").strip().lower()
-        # Accept legacy pool names.
-        if val in ("ssosuper", "super"):
+        if val in ("super"):
             return "super"
-        if val in ("ssobasic", "basic", ""):
+        if val in ("heavy",):
+            return "heavy"
+        if val in ("ssobasic", "basic", "", "auto"):
+            # "auto" is a UI alias meaning "let quota sync decide";
+            # save as basic for now — refresh will correct to the real type.
             return "basic"
         raise ValueError(f"Unknown pool: {v!r}")
 

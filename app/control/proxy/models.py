@@ -1,7 +1,5 @@
 """Control-plane proxy domain models."""
 
-from __future__ import annotations
-
 from enum import IntEnum, StrEnum
 from typing import Any
 

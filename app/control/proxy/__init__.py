@@ -5,8 +5,6 @@ Selection delegates to the dataplane ProxyTable; this module owns
 configuration loading and clearance refresh lifecycle.
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import Sequence
 
@@ -30,11 +28,12 @@ class ProxyDirectory:
     """
 
     def __init__(self) -> None:
-        self._nodes:    list[EgressNode]      = []
-        self._bundles:  dict[str, ClearanceBundle] = {}   # affinity_key → bundle
-        self._lock      = asyncio.Lock()
-        self._manual    = ManualClearanceProvider()
-        self._flare     = FlareSolverrClearanceProvider()
+        self._nodes:          list[EgressNode]          = []
+        self._resource_nodes: list[EgressNode]          = []  # for media downloads
+        self._bundles:        dict[str, ClearanceBundle] = {}
+        self._lock            = asyncio.Lock()
+        self._manual          = ManualClearanceProvider()
+        self._flare           = FlareSolverrClearanceProvider()
         self._egress_mode:    EgressMode    = EgressMode.DIRECT
         self._clearance_mode: ClearanceMode = ClearanceMode.NONE
 
@@ -48,20 +47,28 @@ class ProxyDirectory:
         self._egress_mode    = EgressMode(cfg.get_str("proxy.egress.mode", "direct"))
         self._clearance_mode = ClearanceMode(cfg.get_str("proxy.clearance.mode", "none"))
 
-        nodes: list[EgressNode] = []
+        nodes: list[EgressNode]          = []
+        resource_nodes: list[EgressNode] = []
 
         if self._egress_mode == EgressMode.SINGLE_PROXY:
-            url = cfg.get_str("proxy.egress.proxy_url", "")
-            if url:
-                nodes.append(EgressNode(node_id="single", proxy_url=url))
+            base_url = cfg.get_str("proxy.egress.proxy_url", "")
+            res_url  = cfg.get_str("proxy.egress.resource_proxy_url", "")
+            if base_url:
+                nodes.append(EgressNode(node_id="single", proxy_url=base_url))
+            if res_url:
+                resource_nodes.append(EgressNode(node_id="res-single", proxy_url=res_url))
 
         elif self._egress_mode == EgressMode.PROXY_POOL:
-            urls: list[str] = cfg.get_list("proxy.egress.proxy_pool", [])
-            for i, url in enumerate(urls):
+            base_pool: list[str] = cfg.get_list("proxy.egress.proxy_pool", [])
+            res_pool:  list[str] = cfg.get_list("proxy.egress.resource_proxy_pool", [])
+            for i, url in enumerate(base_pool):
                 nodes.append(EgressNode(node_id=f"pool-{i}", proxy_url=url))
+            for i, url in enumerate(res_pool):
+                resource_nodes.append(EgressNode(node_id=f"res-pool-{i}", proxy_url=url))
 
         async with self._lock:
-            self._nodes = nodes
+            self._nodes          = nodes
+            self._resource_nodes = resource_nodes
 
         logger.info(
             "ProxyDirectory loaded: egress={} clearance={} nodes={}",
@@ -75,14 +82,15 @@ class ProxyDirectory:
     async def acquire(
         self,
         *,
-        scope: ProxyScope = ProxyScope.APP,
-        kind:  RequestKind = RequestKind.HTTP,
+        scope:    ProxyScope  = ProxyScope.APP,
+        kind:     RequestKind = RequestKind.HTTP,
+        resource: bool        = False,
     ) -> ProxyLease:
         """Return a ProxyLease for the next request.
 
         For DIRECT mode, returns a lease with no proxy or clearance.
         """
-        proxy_url = await self._pick_proxy_url()
+        proxy_url = await self._pick_proxy_url(resource=resource)
         affinity  = proxy_url or "direct"
 
         bundle = await self._get_or_build_bundle(affinity_key=affinity, proxy_url=proxy_url or "")
@@ -117,20 +125,19 @@ class ProxyDirectory:
     # Internal
     # ------------------------------------------------------------------
 
-    async def _pick_proxy_url(self) -> str | None:
+    async def _pick_proxy_url(self, resource: bool = False) -> str | None:
         if self._egress_mode == EgressMode.DIRECT:
             return None
-        if self._egress_mode == EgressMode.SINGLE_PROXY:
-            async with self._lock:
-                if self._nodes:
-                    return self._nodes[0].proxy_url
-            return None
-        # PROXY_POOL: round-robin by inflight count (minimal implementation).
         async with self._lock:
-            if not self._nodes:
+            # Prefer resource-specific nodes when available; fall back to base nodes.
+            nodes = (self._resource_nodes if resource and self._resource_nodes
+                     else self._nodes)
+            if not nodes:
                 return None
-            node = min(self._nodes, key=lambda n: n.inflight)
-            return node.proxy_url
+            if self._egress_mode == EgressMode.SINGLE_PROXY:
+                return nodes[0].proxy_url
+            # PROXY_POOL: pick least-inflight node.
+            return min(nodes, key=lambda n: n.inflight).proxy_url
 
     async def _get_or_build_bundle(
         self,

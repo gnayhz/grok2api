@@ -1,7 +1,5 @@
 """Account refresh service — mode-aware usage synchronisation."""
 
-from __future__ import annotations
-
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -10,10 +8,10 @@ from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 from app.platform.runtime.batch import run_batch
-from app.control.model.enums import ALL_MODES, ModeId
+from app.control.model.enums import ALL_MODES_WITH_HEAVY, ModeId
 from .enums import AccountStatus, FeedbackKind, QuotaSource
 from .models import AccountRecord, QuotaWindow
-from .quota_defaults import default_quota_set
+from .quota_defaults import default_quota_set, infer_pool
 from .state_machine import AccountFeedback, apply_feedback
 
 if TYPE_CHECKING:
@@ -89,7 +87,11 @@ class AccountRefreshService:
             return RefreshResult(checked=len(records))
 
         concurrency = get_config("account.refresh.usage_concurrency", 10)
-        results = await run_batch(active, self._refresh_one, concurrency=concurrency)
+        results = await run_batch(
+            active,
+            lambda r: self._refresh_one(r, apply_fallback=True),
+            concurrency=concurrency,
+        )
         agg = RefreshResult(checked=len(records))
         for r in results:
             agg.merge(r)
@@ -101,17 +103,24 @@ class AccountRefreshService:
         if record is None or record.is_deleted():
             return
         window = await self._fetch_mode_quota(token, mode_id)
-        await self._apply_single_mode(record, mode_id, window)
+        await self._apply_single_mode(record, mode_id, window, is_use=True, use_at_ms=now_ms())
 
-    async def refresh_scheduled(self) -> RefreshResult:
-        """Periodic refresh — super: fetch API; basic: static reset check."""
+    async def refresh_scheduled(self, pool: str | None = None) -> RefreshResult:
+        """Periodic refresh — fetch real quotas for all (or one pool's) accounts.
+
+        Args:
+            pool: When set, only refreshes accounts belonging to that pool.
+                  When ``None``, refreshes all pools (legacy / manual trigger path).
+        """
         snapshot = await self._repo.runtime_snapshot()
         records  = snapshot.items
+        if pool is not None:
+            records = [r for r in records if r.pool == pool]
 
         concurrency = get_config("account.refresh.usage_concurrency", 10)
         results = await run_batch(
             records,
-            self._refresh_one,
+            lambda r: self._refresh_one(r, apply_fallback=True),
             concurrency=concurrency,
         )
         agg = RefreshResult()
@@ -150,61 +159,87 @@ class AccountRefreshService:
     # Per-account refresh
     # ------------------------------------------------------------------
 
-    async def _refresh_one(self, record: AccountRecord) -> RefreshResult:
-        """Fetch all 3 modes for any account type; apply real data or fall back gracefully."""
+    async def _refresh_one(
+        self,
+        record: AccountRecord,
+        *,
+        apply_fallback: bool = False,
+    ) -> RefreshResult:
+        """Fetch all 3 modes from the usage API and persist real quota data.
+
+        apply_fallback=True  — used by scheduled/import paths: when API fails,
+                               decrement REAL quotas or reset expired DEFAULT windows.
+        apply_fallback=False — used by manual/on-demand paths: if API fails, return
+                               failed=1 immediately without touching stored data.
+        """
         if record.is_deleted():
             return RefreshResult()
 
-        windows   = await self._fetch_all_quotas(record.token)
-        qs        = record.quota_set()
-        now       = now_ms()
-        patches:  dict[str, dict] = {}
+        windows = await self._fetch_all_quotas(record.token)
+
+        # API call completely failed — no real data available.
+        if windows is None:
+            if not apply_fallback:
+                return RefreshResult(checked=1, failed=1)
+            # Scheduled/import path: apply conservative fallback.
+            return await self._apply_fallback(record)
+
+        # We got at least a response — apply real data per mode.
+        qs       = record.quota_set()
+        now      = now_ms()
+        patches: dict[str, dict] = {}
         refreshed = False
 
-        _MODE_KEYS = {0: "quota_auto", 1: "quota_fast", 2: "quota_expert"}
+        _MODE_KEYS = {0: "quota_auto", 1: "quota_fast", 2: "quota_expert", 3: "quota_heavy"}
 
-        for mode in ALL_MODES:
+        for mode in ALL_MODES_WITH_HEAVY:
             mode_id = int(mode)
-
-            if windows and mode_id in windows:
-                # ✅ Got real data from API.
+            if mode_id in windows:
                 patches[_MODE_KEYS[mode_id]] = windows[mode_id].to_dict()
                 refreshed = True
-                continue
-
-            # ❌ API failed for this mode — apply fallback strategy.
-            existing = qs.get(mode_id)
-
-            if existing.source == QuotaSource.REAL:
-                # Had real data before: decrement by 1 (conservative estimate).
-                patches[_MODE_KEYS[mode_id]] = QuotaWindow(
-                    remaining      = max(0, existing.remaining - 1),
-                    total          = existing.total,
-                    window_seconds = existing.window_seconds,
-                    reset_at       = existing.reset_at,
-                    synced_at      = existing.synced_at,
-                    source         = QuotaSource.ESTIMATED,
-                ).to_dict()
-            elif existing.is_window_expired(now):
-                # Default/estimated data and window has expired: reset to defaults.
-                default = default_quota_set(record.pool).get(mode_id)
-                patches[_MODE_KEYS[mode_id]] = QuotaWindow(
-                    remaining      = default.total,
-                    total          = default.total,
-                    window_seconds = default.window_seconds,
-                    reset_at       = now + default.window_seconds * 1000,
-                    synced_at      = now,
-                    source         = QuotaSource.DEFAULT,
-                ).to_dict()
-            # else: window still valid, leave unchanged.
+            elif apply_fallback:
+                existing = qs.get(mode_id)
+                if existing is None:
+                    continue
+                if existing.source == QuotaSource.REAL:
+                    patches[_MODE_KEYS[mode_id]] = QuotaWindow(
+                        remaining      = max(0, existing.remaining - 1),
+                        total          = existing.total,
+                        window_seconds = existing.window_seconds,
+                        reset_at       = existing.reset_at,
+                        synced_at      = existing.synced_at,
+                        source         = QuotaSource.ESTIMATED,
+                    ).to_dict()
+                elif existing.is_window_expired(now):
+                    default = default_quota_set(record.pool).get(mode_id)
+                    if default is None:
+                        continue
+                    patches[_MODE_KEYS[mode_id]] = QuotaWindow(
+                        remaining      = default.total,
+                        total          = default.total,
+                        window_seconds = default.window_seconds,
+                        reset_at       = now + default.window_seconds * 1000,
+                        synced_at      = now,
+                        source         = QuotaSource.DEFAULT,
+                    ).to_dict()
 
         if not patches:
-            return RefreshResult(checked=1)
+            return RefreshResult(checked=1, failed=0 if refreshed else 1)
+
+        # Infer pool type from live quota data and patch if it changed.
+        inferred = infer_pool(windows)  # type: ignore[arg-type]
+        pool_patch = inferred if inferred != record.pool else None
+        if pool_patch:
+            logger.info(
+                "Pool auto-updated: token={}... {} → {}",
+                record.token[:10], record.pool, inferred,
+            )
 
         from .commands import AccountPatch
         await self._repo.patch_accounts([
             AccountPatch(
                 token            = record.token,
+                pool             = pool_patch,
                 last_sync_at     = now_ms() if refreshed else None,
                 usage_sync_delta = 1 if refreshed else None,
                 **patches,  # type: ignore[arg-type]
@@ -214,14 +249,73 @@ class AccountRefreshService:
         return RefreshResult(
             checked=1,
             refreshed=1 if refreshed else 0,
+            failed=0 if refreshed else 1,
             recovered=1 if (was_cooling and refreshed) else 0,
         )
+
+    async def _apply_fallback(self, record: AccountRecord) -> RefreshResult:
+        """Conservative fallback when API is unreachable (scheduled/import path only)."""
+        qs  = record.quota_set()
+        now = now_ms()
+        patches: dict[str, dict] = {}
+
+        _MODE_KEYS = {0: "quota_auto", 1: "quota_fast", 2: "quota_expert", 3: "quota_heavy"}
+
+        for mode in ALL_MODES_WITH_HEAVY:
+            mode_id  = int(mode)
+            existing = qs.get(mode_id)
+            if existing is None:
+                continue
+            if existing.source == QuotaSource.REAL:
+                patches[_MODE_KEYS[mode_id]] = QuotaWindow(
+                    remaining      = max(0, existing.remaining - 1),
+                    total          = existing.total,
+                    window_seconds = existing.window_seconds,
+                    reset_at       = existing.reset_at,
+                    synced_at      = existing.synced_at,
+                    source         = QuotaSource.ESTIMATED,
+                ).to_dict()
+            elif existing.is_window_expired(now):
+                default = default_quota_set(record.pool).get(mode_id)
+                if default is None:
+                    continue
+                patches[_MODE_KEYS[mode_id]] = QuotaWindow(
+                    remaining      = default.total,
+                    total          = default.total,
+                    window_seconds = default.window_seconds,
+                    reset_at       = now + default.window_seconds * 1000,
+                    synced_at      = now,
+                    source         = QuotaSource.DEFAULT,
+                ).to_dict()
+
+        if patches:
+            from .commands import AccountPatch
+            await self._repo.patch_accounts([AccountPatch(token=record.token, **patches)])  # type: ignore[arg-type]
+
+        return RefreshResult(checked=1, failed=1)
+
+    async def record_failure_async(self, token: str, mode_id: int) -> None:
+        """Fire-and-forget: persist failure counter and timestamp after a failed call."""
+        from .commands import AccountPatch
+        try:
+            await self._repo.patch_accounts([
+                AccountPatch(
+                    token            = token,
+                    usage_fail_delta = 1,
+                    last_fail_at     = now_ms(),
+                )
+            ])
+        except Exception as exc:
+            logger.debug("Failure record failed: token={}... error={}", token[:10], exc)
 
     async def _apply_single_mode(
         self,
         record: AccountRecord,
         mode_id: int,
         window: QuotaWindow | None,
+        *,
+        is_use: bool = False,
+        use_at_ms: int | None = None,
     ) -> None:
         qs = record.quota_set()
         if window is not None:
@@ -241,9 +335,11 @@ class AccountRefreshService:
         from .commands import AccountPatch
         await self._repo.patch_accounts([
             AccountPatch(
-                token        = record.token,
-                last_sync_at = now_ms() if window is not None else None,
+                token            = record.token,
+                last_sync_at     = now_ms() if window is not None else None,
                 usage_sync_delta = 1 if window is not None else None,
+                usage_use_delta  = 1 if is_use else None,
+                last_use_at      = use_at_ms if is_use else None,
                 **{mode_key: win.to_dict()},  # type: ignore[arg-type]
             )
         ])

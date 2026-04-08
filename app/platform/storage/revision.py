@@ -16,8 +16,6 @@ Backends that manage their own revision counter (e.g. SQLite, in-memory)
 can inherit from ``RevisionTracker`` to get a thread-safe bump + read helper.
 """
 
-from __future__ import annotations
-
 import threading
 
 

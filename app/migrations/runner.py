@@ -1,7 +1,5 @@
 """Migration runner — import legacy token storage into the new account domain."""
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import os

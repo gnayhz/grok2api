@@ -1,7 +1,5 @@
 """Bounded-concurrency batch processing utility."""
 
-from __future__ import annotations
-
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, TypeVar

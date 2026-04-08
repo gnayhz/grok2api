@@ -7,21 +7,19 @@ Performance notes:
   - Sync mode: concurrent execution, single JSON response
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 import orjson
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from app.platform.logging.logger import logger
+from app.platform.config.snapshot import get_config
+from app.platform.errors import AppError, ErrorKind, UpstreamError, ValidationError
 from app.platform.runtime.batch import run_batch
-from app.platform.runtime.task import AsyncTask, create_task, expire_task, get_task
-from app.platform.auth.middleware import get_admin_key
-from app.control.account.commands import ListAccountsQuery
+from app.platform.runtime.task import create_task, expire_task, get_task
+from app.control.account.commands import AccountPatch, ListAccountsQuery
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -34,6 +32,13 @@ router = APIRouter(prefix="/batch")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _concurrency(override: int | None, config_key: str, fallback: int = 50) -> int:
+    """Resolve effective concurrency: query-param → config → fallback."""
+    if override is not None:
+        return max(1, override)
+    v = get_config(config_key, fallback)
+    return max(1, int(v))
 
 
 def _mask(token: str) -> str:
@@ -127,15 +132,20 @@ async def _dispatch_async(
                 if task.cancelled:
                     return
                 async with sem:
+                    # Re-check after acquiring slot: cancel may have been set
+                    # while this coroutine was waiting for a semaphore slot.
+                    if task.cancelled:
+                        return
+                    masked = _mask(token)
                     try:
                         data = await handler(token)
                         ok_c += 1
-                        results[_mask(token)] = data
-                        task.record(True)
+                        results[masked] = data
+                        task.record(True, item=masked, detail=data)
                     except Exception as exc:
                         fail_c += 1
-                        results[_mask(token)] = {"error": str(exc)}
-                        task.record(False, error=str(exc))
+                        results[masked] = {"error": str(exc)}
+                        task.record(False, item=masked, error=str(exc))
 
             await asyncio.gather(*[_one(t) for t in tokens])
 
@@ -160,25 +170,30 @@ async def _dispatch_async(
 # Per-token handlers
 # ---------------------------------------------------------------------------
 
-async def _nsfw_one(token: str) -> dict:
-    from app.dataplane.reverse.protocol.xai_auth import accept_tos, set_birth_date, enable_nsfw
-    await accept_tos(token)
-    await set_birth_date(token)
-    await enable_nsfw(token)
-    return {"success": True}
+async def _nsfw_one(repo: "AccountRepository", token: str, enabled: bool) -> dict:
+    from app.dataplane.reverse.protocol.xai_auth import set_birth_date, set_nsfw
+    if enabled:
+        await set_birth_date(token)
+    await set_nsfw(token, enabled)
+    patch = AccountPatch(token=token, add_tags=["nsfw"]) if enabled else AccountPatch(token=token, remove_tags=["nsfw"])
+    await repo.patch_accounts([patch])
+    return {"success": True, "tagged": enabled}
 
 
 async def _cache_clear_one(token: str) -> dict:
     from app.dataplane.reverse.transport.assets import list_assets, delete_asset
-    resp = await list_assets(token)
+    resp  = await list_assets(token)
     items = resp.get("assets", resp.get("items", []))
-    deleted = 0
-    for item in items:
+
+    async def _del(item: dict) -> int:
         aid = item.get("id") or item.get("assetId")
-        if aid:
-            await delete_asset(token, aid)
-            deleted += 1
-    return {"deleted": deleted}
+        if not aid:
+            return 0
+        await delete_asset(token, aid)
+        return 1
+
+    results = await asyncio.gather(*[_del(i) for i in items], return_exceptions=True)
+    return {"deleted": sum(r for r in results if isinstance(r, int))}
 
 
 # ---------------------------------------------------------------------------
@@ -189,42 +204,58 @@ async def _cache_clear_one(token: str) -> dict:
 async def batch_nsfw(
     req: BatchRequest,
     async_mode: bool = Query(False, alias="async"),
+    concurrency: int | None = Query(None, ge=1),
+    enabled: bool = Query(True),
     repo: "AccountRepository" = Depends(get_repo),
 ):
     tokens = [t.strip() for t in req.tokens if t.strip()]
     if not tokens:
         tokens = await _list_all_tokens(repo)
     if not tokens:
-        raise HTTPException(400, "No tokens available")
-    return await _dispatch(tokens, _nsfw_one, use_async=async_mode)
+        raise ValidationError("No tokens available", param="tokens")
+
+    async def _nsfw_and_tag(token: str) -> dict:
+        return await _nsfw_one(repo, token, enabled)
+
+    c = _concurrency(concurrency, "batch.nsfw_concurrency")
+    return await _dispatch(tokens, _nsfw_and_tag, use_async=async_mode, concurrency=c)
 
 
 @router.post("/refresh")
 async def batch_refresh(
     req: BatchRequest,
     async_mode: bool = Query(False, alias="async"),
+    concurrency: int | None = Query(None, ge=1),
     refresh_svc: "AccountRefreshService" = Depends(get_refresh_svc),
 ):
     tokens = [t.strip() for t in req.tokens if t.strip()]
     if not tokens:
-        raise HTTPException(400, "No tokens provided")
+        raise ValidationError("No tokens provided", param="tokens")
 
     async def _refresh_one(token: str) -> dict:
         result = await refresh_svc.refresh_tokens([token])
-        return {"refreshed": result.refreshed, "failed": result.failed}
+        if not result.refreshed:
+            raise UpstreamError("未获取到真实配额数据")
+        return {"refreshed": result.refreshed}
 
-    return await _dispatch(tokens, _refresh_one, use_async=async_mode)
+    c = _concurrency(concurrency, "batch.refresh_concurrency")
+    return await _dispatch(tokens, _refresh_one, use_async=async_mode, concurrency=c)
 
 
 @router.post("/cache-clear")
 async def batch_cache_clear(
     req: BatchRequest,
     async_mode: bool = Query(False, alias="async"),
+    concurrency: int | None = Query(None, ge=1),
+    repo: "AccountRepository" = Depends(get_repo),
 ):
     tokens = [t.strip() for t in req.tokens if t.strip()]
     if not tokens:
-        raise HTTPException(400, "No tokens provided")
-    return await _dispatch(tokens, _cache_clear_one, use_async=async_mode)
+        tokens = await _list_all_tokens(repo)
+    if not tokens:
+        raise ValidationError("No tokens available", param="tokens")
+    c = _concurrency(concurrency, "batch.asset_delete_concurrency")
+    return await _dispatch(tokens, _cache_clear_one, use_async=async_mode, concurrency=c)
 
 
 # ---------------------------------------------------------------------------
@@ -233,16 +264,16 @@ async def batch_cache_clear(
 
 @router.get("/{task_id}/stream")
 async def batch_stream(task_id: str, request: Request):
-    # Auth via query param for EventSource (Bearer header unavailable).
-    app_key = get_admin_key()
-    if app_key:
-        key = request.query_params.get("app_key")
-        if key != app_key:
-            raise HTTPException(401, "Invalid authentication token")
-
+    # Auth is handled by the parent router's verify_admin_key dependency,
+    # which accepts both Bearer header and ?app_key= query param (for EventSource).
     task = get_task(task_id)
     if not task:
-        raise HTTPException(404, "Task not found")
+        raise AppError(
+            "Task not found",
+            kind=ErrorKind.VALIDATION,
+            code="task_not_found",
+            status=404,
+        )
 
     async def _stream():
         queue = task.attach()
@@ -278,6 +309,11 @@ async def batch_stream(task_id: str, request: Request):
 async def batch_cancel(task_id: str):
     task = get_task(task_id)
     if not task:
-        raise HTTPException(404, "Task not found")
+        raise AppError(
+            "Task not found",
+            kind=ErrorKind.VALIDATION,
+            code="task_not_found",
+            status=404,
+        )
     task.cancel()
     return {"status": "success"}

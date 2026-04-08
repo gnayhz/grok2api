@@ -4,8 +4,6 @@ Determines the endpoint URL, transport kind, pool/mode IDs, and timeout
 for a given operation.  Does NOT execute anything — pure data transform.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from app.control.model.spec import ModelSpec
@@ -41,12 +39,12 @@ def build_plan(spec: ModelSpec, request: dict[str, Any] | None = None) -> Revers
     defaults = _DEFAULTS.get(tkind, _DEFAULTS[TransportKind.HTTP_JSON])
 
     return ReversePlan(
-        endpoint       = endpoint,
-        transport_kind = tkind,
-        pool_id        = spec.pool_id(),
-        mode_id        = int(spec.mode_id),
-        timeout_s      = defaults["timeout_s"],
-        content_type   = defaults["content_type"],
+        endpoint        = endpoint,
+        transport_kind  = tkind,
+        pool_candidates = spec.pool_candidates(),
+        mode_id         = int(spec.mode_id),
+        timeout_s       = defaults["timeout_s"],
+        content_type    = defaults["content_type"],
     )
 
 

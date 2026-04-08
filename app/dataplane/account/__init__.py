@@ -5,8 +5,6 @@ Bootstrap loads a full snapshot; incremental sync applies revision-based
 changesets without holding the selection lock.
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import TYPE_CHECKING
 
@@ -80,7 +78,7 @@ class AccountDirectory:
 
     async def reserve(
         self,
-        pool_id: int,
+        pool_candidates: tuple[int, ...] | int,
         mode_id: int,
         *,
         exclude_tokens: list[str] | None = None,
@@ -89,12 +87,18 @@ class AccountDirectory:
     ) -> AccountLease | None:
         """Select and reserve the best available account slot.
 
+        ``pool_candidates`` is tried in order; the first pool with an available
+        account wins.  A plain ``int`` is accepted for backward compatibility.
+
         Returns an AccountLease, or None if no account is available.
         """
         table = self._table
         if table is None:
             return None
 
+        pools: tuple[int, ...] = (
+            (pool_candidates,) if isinstance(pool_candidates, int) else pool_candidates
+        )
         ts = now_s_override if now_s_override is not None else now_s()
 
         # Resolve exclude set (O(n) once, before lock).
@@ -112,25 +116,31 @@ class AccountDirectory:
                 prefer_tag_idxs = set().union(*sets)
 
         async with self._lock:
-            idx = select(
-                table,
-                pool_id,
-                mode_id,
-                exclude_idxs    = exclude_idxs,
-                prefer_tag_idxs = prefer_tag_idxs,
-                now_s           = ts,
-            )
+            idx: int | None = None
+            for pool_id in pools:
+                idx = select(
+                    table,
+                    pool_id,
+                    mode_id,
+                    exclude_idxs    = exclude_idxs,
+                    prefer_tag_idxs = prefer_tag_idxs,
+                    now_s           = ts,
+                )
+                if idx is not None:
+                    break
+
             if idx is None:
                 return None
 
             fb.increment_inflight(table, idx)
             fb.update_last_use(table, idx, ts)
-            token = table.get_token(idx)
+            token        = table.get_token(idx)
+            actual_pool  = table.get_pool_id(idx)
 
         return new_lease(
             idx         = idx,
             token       = token,
-            pool_id     = pool_id,
+            pool_id     = actual_pool,
             mode_id     = mode_id,
             selected_at = ts,
         )

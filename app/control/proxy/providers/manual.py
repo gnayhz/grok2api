@@ -1,7 +1,5 @@
 """Manual clearance provider — uses operator-supplied cookies directly."""
 
-from __future__ import annotations
-
 from app.platform.config.snapshot import get_config
 from ..models import ClearanceBundle, ClearanceMode
 

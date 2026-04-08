@@ -27,7 +27,7 @@
 
 ```text
 例如：
-- uv run main.py / uv run granian ... 启动正常
+- uv run granian ... app.main:app 启动正常
 - 调用 /v1/chat/completions 返回符合预期
 ```
 

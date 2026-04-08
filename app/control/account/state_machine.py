@@ -4,8 +4,6 @@ Applies feedback events to an AccountRecord, advancing its status
 and updating quota / usage fields accordingly.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any
 

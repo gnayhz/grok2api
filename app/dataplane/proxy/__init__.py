@@ -5,8 +5,6 @@ Kept as a thin shim so callers in the dataplane need not import control
 modules directly.
 """
 
-from __future__ import annotations
-
 from app.control.proxy import ProxyDirectory, get_proxy_directory
 from app.control.proxy.models import (
     ProxyLease, ProxyFeedback, ProxyScope, RequestKind,
@@ -22,10 +20,11 @@ class ProxyRuntime:
     async def acquire(
         self,
         *,
-        scope: ProxyScope = ProxyScope.APP,
-        kind:  RequestKind = RequestKind.HTTP,
+        scope:    ProxyScope  = ProxyScope.APP,
+        kind:     RequestKind = RequestKind.HTTP,
+        resource: bool        = False,
     ) -> ProxyLease:
-        return await self._dir.acquire(scope=scope, kind=kind)
+        return await self._dir.acquire(scope=scope, kind=kind, resource=resource)
 
     async def feedback(self, lease: ProxyLease, result: ProxyFeedback) -> None:
         await self._dir.feedback(lease, result)

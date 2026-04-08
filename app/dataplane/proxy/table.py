@@ -5,8 +5,6 @@ dataplane/control-plane boundary.  The control-plane ProxyDirectory owns
 mutation; this module provides a read-only snapshot for selector logic.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 
 from app.control.proxy.models import (

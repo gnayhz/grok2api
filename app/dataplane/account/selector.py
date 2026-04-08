@@ -5,9 +5,7 @@ overhead.  The caller provides the frozen set of excluded indices and
 pre-resolved tag index set.
 """
 
-from __future__ import annotations
-
-from ..shared.enums import StatusId
+from ..shared.enums import PoolId, StatusId
 from .table import AccountRuntimeTable
 
 # Scoring weights — tuned for throughput/fairness balance.
@@ -65,7 +63,14 @@ def _maybe_reset_windows(
     pool_id:   int,
     now_s:     int,
 ) -> None:
-    """Reset expired windows for basic-pool accounts (no API call required)."""
+    """Reset expired windows for basic-pool accounts (no API call required).
+
+    Only applies to the basic pool — super/heavy quotas are managed exclusively
+    by the periodic refresh service and must not be reset inline.
+    """
+    if pool_id != int(PoolId.BASIC):
+        return
+
     from app.control.account.quota_defaults import BASIC_QUOTA_DEFAULTS
 
     defaults = BASIC_QUOTA_DEFAULTS.get(mode_id)

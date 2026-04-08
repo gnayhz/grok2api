@@ -7,8 +7,6 @@ Layout:
   accounts:revision_log        — ZSET    token → revision (for scan_changes)
 """
 
-from __future__ import annotations
-
 import json
 from typing import Any
 
@@ -68,6 +66,7 @@ class RedisAccountRepository:
             "quota_auto":       json.dumps(qs.auto.to_dict()),
             "quota_fast":       json.dumps(qs.fast.to_dict()),
             "quota_expert":     json.dumps(qs.expert.to_dict()),
+            "quota_heavy":      json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
             "usage_use_count":  str(record.usage_use_count),
             "usage_fail_count": str(record.usage_fail_count),
             "usage_sync_count": str(record.usage_sync_count),
@@ -103,6 +102,9 @@ class RedisAccountRepository:
                 "auto":   json.loads(_s("quota_auto")   or "{}"),
                 "fast":   json.loads(_s("quota_fast")   or "{}"),
                 "expert": json.loads(_s("quota_expert") or "{}"),
+                **({
+                    "heavy": json.loads(_s("quota_heavy"))
+                } if _s("quota_heavy") and _s("quota_heavy") != "{}" else {}),
             },
             "usage_use_count":  int(_s("usage_use_count")  or 0),
             "usage_fail_count": int(_s("usage_fail_count") or 0),
@@ -205,7 +207,7 @@ class RedisAccountRepository:
                 token = AccountRecord.model_validate({"token": item.token, "pool": item.pool}).token
             except Exception:
                 continue
-            pool = item.pool if item.pool in ("basic", "super") else "basic"
+            pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
             qs   = default_quota_set(pool)
             ts   = now_ms()
             record = AccountRecord(
@@ -259,12 +261,16 @@ class RedisAccountRepository:
                 updates["last_sync_at"] = str(patch.last_sync_at)
             if patch.last_clear_at is not None:
                 updates["last_clear_at"] = str(patch.last_clear_at)
+            if patch.pool is not None:
+                updates["pool"] = patch.pool
             if patch.quota_auto is not None:
                 updates["quota_auto"] = json.dumps(patch.quota_auto)
             if patch.quota_fast is not None:
                 updates["quota_fast"] = json.dumps(patch.quota_fast)
             if patch.quota_expert is not None:
                 updates["quota_expert"] = json.dumps(patch.quota_expert)
+            if patch.quota_heavy is not None:
+                updates["quota_heavy"] = json.dumps(patch.quota_heavy)
 
             # Usage counters.
             if patch.usage_use_delta is not None:

@@ -64,7 +64,6 @@ COPY --from=builder /opt/venv /opt/venv
 COPY config.defaults.toml ./
 COPY app ./app
 COPY _public ./_public
-COPY main.py ./
 COPY scripts ./scripts
 
 RUN mkdir -p /app/data /app/logs \
@@ -74,4 +73,4 @@ EXPOSE 8000
 
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 
-CMD ["sh", "-c", "granian --interface asgi --host ${SERVER_HOST:-0.0.0.0} --port ${SERVER_PORT:-8000} --workers ${SERVER_WORKERS:-1} main:app"]
+CMD ["sh", "-c", "granian --interface asgi --host ${SERVER_HOST:-0.0.0.0} --port ${SERVER_PORT:-8000} --workers ${SERVER_WORKERS:-1} app.main:app"]

@@ -4,8 +4,6 @@ Encodes data frames for gRPC-Web requests and parses response frames,
 including trailer extraction and gRPC status code mapping.
 """
 
-from __future__ import annotations
-
 import base64
 import json
 import re

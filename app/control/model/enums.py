@@ -1,7 +1,5 @@
 """Control-plane model enumerations."""
 
-from __future__ import annotations
-
 from enum import IntEnum, IntFlag
 
 
@@ -14,6 +12,7 @@ class ModeId(IntEnum):
     AUTO   = 0  # modeId="auto"
     FAST   = 1  # modeId="fast"
     EXPERT = 2  # modeId="expert"
+    HEAVY  = 3  # modeId="heavy"  — only available on heavy-pool accounts
 
     def to_api_str(self) -> str:
         return self.name.lower()
@@ -24,6 +23,7 @@ class Tier(IntEnum):
 
     BASIC = 0  # pool="basic"
     SUPER = 1  # pool="super"
+    HEAVY = 2  # pool="heavy"
 
 
 class Capability(IntFlag):
@@ -42,8 +42,10 @@ MODE_STRINGS: dict[ModeId, str] = {
     ModeId.AUTO:   "auto",
     ModeId.FAST:   "fast",
     ModeId.EXPERT: "expert",
+    ModeId.HEAVY:  "heavy",
 }
 
-ALL_MODES: tuple[ModeId, ...] = (ModeId.AUTO, ModeId.FAST, ModeId.EXPERT)
+ALL_MODES:          tuple[ModeId, ...] = (ModeId.AUTO, ModeId.FAST, ModeId.EXPERT)
+ALL_MODES_WITH_HEAVY: tuple[ModeId, ...] = (ModeId.AUTO, ModeId.FAST, ModeId.EXPERT, ModeId.HEAVY)
 
-__all__ = ["ModeId", "Tier", "Capability", "MODE_STRINGS", "ALL_MODES"]
+__all__ = ["ModeId", "Tier", "Capability", "MODE_STRINGS", "ALL_MODES", "ALL_MODES_WITH_HEAVY"]

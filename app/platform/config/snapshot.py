@@ -1,7 +1,5 @@
 """Typed configuration snapshot — built once at startup, read-only at runtime."""
 
-from __future__ import annotations
-
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -9,6 +7,15 @@ from typing import Any
 from .loader import get_nested, load_config
 
 _BASE_DIR = Path(__file__).resolve().parents[3]  # project root
+_DATA_DIR = _BASE_DIR / "data"
+
+
+def _resolve_defaults_path() -> Path:
+    return _BASE_DIR / "config.defaults.toml"
+
+
+def _resolve_user_path() -> Path:
+    return _DATA_DIR / "config.toml"
 
 
 class ConfigSnapshot:
@@ -30,8 +37,10 @@ class ConfigSnapshot:
     ) -> None:
         """Load configuration files.  Idempotent — subsequent calls reload."""
         async with self._lock:
-            dp = defaults_path or (_BASE_DIR / "config.defaults.toml")
-            up = user_path or (_BASE_DIR / "config.toml")
+            dp = defaults_path or _resolve_defaults_path()
+            up = user_path or _resolve_user_path()
+            if not dp.exists():
+                raise RuntimeError(f"Missing required defaults config: {dp}")
             self._data = await asyncio.to_thread(load_config, dp, up)
             self._loaded = True
 
@@ -86,12 +95,13 @@ class ConfigSnapshot:
             from .loader import _deep_merge
             self._data = _deep_merge(self._data, patch)
             # Persist to user config file.
-            user_path = _BASE_DIR / "config.toml"
+            user_path = _resolve_user_path()
             await asyncio.to_thread(self._write_toml, user_path, self._data)
 
     @staticmethod
     def _write_toml(path: Path, data: dict[str, Any]) -> None:
         """Write config dict to TOML file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
             import tomli_w
             with open(path, "wb") as fh:

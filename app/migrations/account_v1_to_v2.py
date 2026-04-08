@@ -6,8 +6,6 @@ v1 schema (``data/account/v1/accounts.db``):
 v2 schema: current ``LocalAccountRepository`` (per-mode quota columns).
 """
 
-from __future__ import annotations
-
 import sqlite3
 from contextlib import closing
 from pathlib import Path

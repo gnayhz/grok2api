@@ -4,8 +4,6 @@ These mirror the control-plane enums but use IntEnum exclusively so they
 can be used directly as array indices with zero overhead.
 """
 
-from __future__ import annotations
-
 from enum import IntEnum
 
 
@@ -18,6 +16,7 @@ class ModeId(IntEnum):
 class PoolId(IntEnum):
     BASIC = 0
     SUPER = 1
+    HEAVY = 2
 
 
 class StatusId(IntEnum):
@@ -32,6 +31,7 @@ class StatusId(IntEnum):
 POOL_STR_TO_ID: dict[str, int] = {
     "basic": int(PoolId.BASIC),
     "super": int(PoolId.SUPER),
+    "heavy": int(PoolId.HEAVY),
 }
 
 STATUS_STR_TO_ID: dict[str, int] = {
@@ -41,7 +41,7 @@ STATUS_STR_TO_ID: dict[str, int] = {
     "disabled": int(StatusId.DISABLED),
 }
 
-ALL_MODE_IDS: tuple[int, ...] = (int(ModeId.AUTO), int(ModeId.FAST), int(ModeId.EXPERT))
+ALL_MODE_IDS: tuple[int, ...] = (int(ModeId.AUTO), int(ModeId.FAST), int(ModeId.EXPERT), 3)
 
 __all__ = [
     "ModeId", "PoolId", "StatusId",

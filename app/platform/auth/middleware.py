@@ -1,10 +1,8 @@
 """API-key authentication dependencies for FastAPI routes."""
 
-from __future__ import annotations
-
 import hmac
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.platform.config.snapshot import get_config
@@ -76,13 +74,18 @@ async def verify_api_key(
 
 async def verify_admin_key(
     authorization: str | None = Header(default=None),
+    app_key: str | None = Query(default=None),
 ) -> None:
-    """Validate Bearer token against ``app.app_key`` (admin access)."""
+    """Validate Bearer token against ``app.app_key`` (admin access).
+
+    Accepts either ``Authorization: Bearer <key>`` header or ``?app_key=<key>``
+    query parameter (the latter is needed for EventSource which cannot send headers).
+    """
     key = get_admin_key()
     if not key:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Admin key is not configured.")
 
-    token = _extract_bearer(authorization)
+    token = _extract_bearer(authorization) or app_key
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing authentication token.")
 

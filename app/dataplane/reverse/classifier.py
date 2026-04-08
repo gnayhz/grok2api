@@ -3,8 +3,6 @@
 Maps upstream HTTP status codes and response bodies to a ResultCategory.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from .types import ResultCategory

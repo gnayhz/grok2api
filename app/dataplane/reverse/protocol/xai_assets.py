@@ -8,9 +8,8 @@ URL reference (from production reverse analysis):
 The app-chat upload endpoint is handled separately in transport/asset_upload.py.
 """
 
-from __future__ import annotations
-
-from typing import Any, Dict, List, Optional
+import pathlib
+import urllib.parse
 from urllib.parse import urlparse
 
 ASSETS_LIST_URL      = "https://grok.com/rest/assets"
@@ -21,7 +20,7 @@ ASSETS_DOWNLOAD_BASE = "https://assets.grok.com"
 APP_CHAT_UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
 
 # MIME type mapping used for download content-type inference.
-_EXTENSION_MIME: Dict[str, str] = {
+_EXTENSION_MIME: dict[str, str] = {
     ".jpg":  "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png":  "image/png",
@@ -29,10 +28,6 @@ _EXTENSION_MIME: Dict[str, str] = {
     ".mp4":  "video/mp4",
     ".webm": "video/webm",
 }
-
-import pathlib
-import urllib.parse
-
 
 def asset_delete_url(asset_id: str) -> str:
     return f"{ASSETS_DELETE_URL}/{asset_id}"
@@ -57,14 +52,30 @@ def resolve_download_url(file_path: str) -> tuple[str, str, str]:
     return url, origin, f"{origin}/"
 
 
-def infer_content_type(url: str) -> Optional[str]:
+def infer_content_type(url: str) -> str | None:
     """Return a best-guess MIME type for *url* based on file extension."""
     path = pathlib.Path(urllib.parse.urlparse(url).path)
     return _EXTENSION_MIME.get(path.suffix.lower())
+
+
+def resolve_asset_reference(
+    file_id: str,
+    file_uri: str,
+    *,
+    user_id: str | None = None,
+) -> str | None:
+    """Return the absolute asset content URL used by image-edit requests."""
+    if file_uri:
+        url, _, _ = resolve_download_url(file_uri)
+        return url
+    if file_id and user_id:
+        return f"{ASSETS_DOWNLOAD_BASE}/users/{user_id}/{file_id}/content"
+    return None
 
 
 __all__ = [
     "ASSETS_LIST_URL", "ASSETS_DELETE_URL", "ASSETS_DOWNLOAD_BASE",
     "APP_CHAT_UPLOAD_URL",
     "asset_delete_url", "resolve_download_url", "infer_content_type",
+    "resolve_asset_reference",
 ]

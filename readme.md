@@ -46,11 +46,11 @@ docker compose up -d
 
 ### Vercel 部署
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,SERVER_STORAGE_TYPE,SERVER_STORAGE_URL&envDefaults=%7B%22DATA_DIR%22%3A%22/tmp/data%22%2C%22LOG_FILE_ENABLED%22%3A%22false%22%2C%22LOG_LEVEL%22%3A%22INFO%22%2C%22SERVER_STORAGE_TYPE%22%3A%22local%22%2C%22SERVER_STORAGE_URL%22%3A%22%22%7D)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,ACCOUNT_STORAGE,ACCOUNT_LOCAL_PATH,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL&envDefaults=%7B%22DATA_DIR%22%3A%22/tmp/data%22%2C%22LOG_FILE_ENABLED%22%3A%22false%22%2C%22LOG_LEVEL%22%3A%22INFO%22%2C%22ACCOUNT_STORAGE%22%3A%22local%22%2C%22ACCOUNT_LOCAL_PATH%22%3A%22/tmp/data/accounts.db%22%2C%22ACCOUNT_REDIS_URL%22%3A%22redis://localhost:6379/0%22%2C%22ACCOUNT_MYSQL_URL%22%3A%22%22%2C%22ACCOUNT_POSTGRESQL_URL%22%3A%22%22%7D)
 
 > 请务必设置 `DATA_DIR=/tmp/data` 并关闭文件日志 `LOG_FILE_ENABLED=false`。
 >
-> 持久化请使用 MySQL / Redis / PostgreSQL，并设置：`SERVER_STORAGE_TYPE` 与 `SERVER_STORAGE_URL`。
+> 持久化请使用 MySQL / Redis / PostgreSQL，并设置启动期环境变量：`ACCOUNT_STORAGE` 与对应的 `ACCOUNT_*_URL`。
 
 ### Render 部署
 
@@ -58,7 +58,7 @@ docker compose up -d
 
 > Render 免费实例 15 分钟无访问会休眠；重启/重新部署会丢失数据。
 >
-> 持久化请使用 MySQL / Redis / PostgreSQL，并设置：`SERVER_STORAGE_TYPE` 与 `SERVER_STORAGE_URL`。
+> 持久化请使用 MySQL / Redis / PostgreSQL，并设置启动期环境变量：`ACCOUNT_STORAGE` 与对应的 `ACCOUNT_*_URL`。
 
 <br>
 
@@ -91,9 +91,14 @@ docker compose up -d
 | `SERVER_PORT` | 服务端口 | `8000` | `8000` |
 | `HOST_PORT` | Docker Compose 宿主机映射端口 | `8000` | `9000` |
 | `SERVER_WORKERS` | 服务进程数量 | `1` | `2` |
-| `SERVER_STORAGE_TYPE` | 存储类型（`local`/`redis`/`mysql`/`pgsql`） | `local` | `pgsql` |
-| `SERVER_STORAGE_URL` | 存储连接串（local 时可为空） | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
+| `ACCOUNT_STORAGE` | 存储后端（`local`/`redis`/`mysql`/`postgresql`），启动后需重启生效 | `local` | `postgresql` |
+| `ACCOUNT_LOCAL_PATH` | SQLite 文件路径（`ACCOUNT_STORAGE=local` 时使用） | `data/accounts.db` | `/data/accounts.db` |
+| `ACCOUNT_REDIS_URL` | Redis 连接串（`ACCOUNT_STORAGE=redis` 时使用） | `redis://localhost:6379/0` | `redis://:password@host:6379/0` |
+| `ACCOUNT_MYSQL_URL` | MySQL 连接串（`ACCOUNT_STORAGE=mysql` 时使用） | `""` | `mysql+aiomysql://user:password@host:3306/db` |
+| `ACCOUNT_POSTGRESQL_URL` | PostgreSQL 连接串（`ACCOUNT_STORAGE=postgresql` 时使用） | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
 
+> 存储相关环境变量属于启动期配置，不在 Admin 配置页热更新。
+>
 > MySQL 示例：`mysql+aiomysql://user:password@host:3306/db`（若填 `mysql://` 会自动转为 `mysql+aiomysql://`）
 
 <br>
@@ -122,7 +127,7 @@ docker compose up -d
 | `grok-4.20-beta` | 1 | Basic/Super | 支持 | 支持 | - |
 | `grok-imagine-1.0` | - | Basic/Super | - | 支持 | - |
 | `grok-imagine-1.0-fast` | - | Basic/Super | - | 支持 | - |
-| `grok-imagine-1.0-edit` | - | Basic/Super | - | 支持 | - |
+| `grok-imagine-image-edit` | - | Basic/Super | - | 支持 | - |
 | `grok-imagine-1.0-video` | - | Basic/Super | - | - | 支持 |
 
 <br>
@@ -166,7 +171,7 @@ curl http://localhost:8000/v1/chat/completions \
 | └─`video_length` | integer | 视频时长 (秒) | `6` ~ `30` |
 | └─`resolution_name` | string | 分辨率 | `480p`, `720p` |
 | └─`preset` | string | 风格预设 | `fun`, `normal`, `spicy`, `custom` |
-| `image_config` | object | **图片模型专用配置对象** | 支持：`grok-imagine-1.0` / `grok-imagine-1.0-fast` / `grok-imagine-1.0-edit` |
+| `image_config` | object | **图片模型专用配置对象** | 支持：`grok-imagine-image` / `grok-imagine-image-lite` / `grok-imagine-image-edit` |
 | └─`n` | integer | 生成数量 | `1` ~ `10` |
 | └─`size` | string | 图片尺寸 | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
 | └─`response_format` | string | 响应格式 | `url`, `b64_json`, `base64` |
@@ -196,7 +201,7 @@ curl http://localhost:8000/v1/chat/completions \
 - `grok-imagine-1.0-fast` 在 `/v1/chat/completions` 的流式输出仅返回最终成图，不返回中间预览图。
 - `grok-imagine-1.0-fast` 流式 URL 出图会保持原始图片名（不追加 `-final` 后缀）。
 - 当图片疑似被审查拦截导致无最终图时，若开启 `image.blocked_parallel_enabled`，服务端会按 `image.blocked_parallel_attempts` 自动并行补偿生成，并优先使用不同 token；若仍无满足 `image.final_min_bytes` 的最终图则返回失败。
-- `grok-imagine-1.0-edit` 必须提供图片，多图默认取**最后 3 张**与最后一个文本。
+- `grok-imagine-image-edit` 必须提供图片，多图默认取**最后 3 张**与最后一个文本。
 - `grok-imagine-1.0-video` 支持文生视频与多图参考视频：可通过多个 `image_url` 传最多 `7` 张参考图，并在文本中使用 `@图1`、`@图2` 这类占位符；服务端会自动替换为对应 `assetId`。
 - `@图N` 与 `image_url` 的顺序一一对应；若引用了不存在的图片序号，会直接报错。
 - 除上述外的其他参数将自动丢弃并忽略。
@@ -301,9 +306,9 @@ curl http://localhost:8000/v1/images/generations \
 ```bash
 curl http://localhost:8000/v1/images/edits \
   -H "Authorization: Bearer $GROK2API_API_KEY" \
-  -F "model=grok-imagine-1.0-edit" \
+  -F "model=grok-imagine-image-edit" \
   -F "prompt=把图片变清晰" \
-  -F "image=@/path/to/image.png" \
+  -F "image[]=@/path/to/image.png" \
   -F "n=1"
 ```
 
@@ -314,18 +319,19 @@ curl http://localhost:8000/v1/images/edits \
 
 | 字段 | 类型 | 说明 | 可用参数 |
 | :-- | :-- | :-- | :-- |
-| `model` | string | 图像模型名 | `grok-imagine-1.0-edit` |
+| `model` | string | 图像模型名 | `grok-imagine-image-edit` |
 | `prompt` | string | 编辑描述 | - |
-| `image` | file | 待编辑图片 | `png`, `jpg`, `webp` |
-| `n` | integer | 生成数量 | `1` - `10` (流式模式仅限 `1` 或 `2`) |
-| `stream` | boolean | 是否开启流式输出 | `true`, `false` |
-| `size` | string | 图片尺寸 | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
+| `image[]` | file[] | 待编辑图片（可重复传） | `png`, `jpg`, `webp` |
+| `mask` | file | 遮罩图 | 暂不支持，传入会报错 |
+| `n` | integer | 生成数量 | `1` - `10` |
+| `size` | string | 图片尺寸 | 当前仅支持 `1024x1024` |
 | `quality` | string | 图片质量 | - (暂不支持) |
 | `response_format` | string | 响应格式 | `url`, `b64_json`, `base64` |
 | `style` | string | 风格 | - (暂不支持) |
 
 **注意事项**：
 
+- `mask` 参数为 OpenAI 兼容保留，当前版本尚未接入真实编辑链路。
 - `quality`、`style` 参数为 OpenAI 兼容保留，当前版本暂不支持自定义。
 
 <br>

@@ -1,7 +1,5 @@
 """Model registry — all supported model variants defined in one place."""
 
-from __future__ import annotations
-
 from .enums import Capability, ModeId, Tier
 from .spec import ModelSpec
 
@@ -11,21 +9,28 @@ from .spec import ModelSpec
 # ---------------------------------------------------------------------------
 
 MODELS: tuple[ModelSpec, ...] = (
-    # ── Basic · Chat ────────────────────────────────────────────────────────
-    ModelSpec("grok-3",             ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True,  "Grok 3"),
-    ModelSpec("grok-3-fast",        ModeId.FAST,   Tier.BASIC, Capability.CHAT,       True,  "Grok 3 Fast"),
-    ModelSpec("grok-3-expert",      ModeId.EXPERT, Tier.BASIC, Capability.CHAT,       True,  "Grok 3 Expert"),
-    ModelSpec("grok-4",             ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True,  "Grok 4"),
-    ModelSpec("grok-4-fast",        ModeId.FAST,   Tier.BASIC, Capability.CHAT,       True,  "Grok 4 Fast"),
-    ModelSpec("grok-4-expert",      ModeId.EXPERT, Tier.BASIC, Capability.CHAT,       True,  "Grok 4 Expert"),
-    # ── Super · Chat ────────────────────────────────────────────────────────
-    ModelSpec("grok-4-heavy",       ModeId.EXPERT, Tier.SUPER, Capability.CHAT,       True,  "Grok 4 Heavy"),
-    # ── Basic · Image ───────────────────────────────────────────────────────
-    ModelSpec("grok-image",         ModeId.FAST,   Tier.BASIC, Capability.IMAGE,      True,  "Grok Image"),
-    ModelSpec("grok-image-fast",    ModeId.FAST,   Tier.BASIC, Capability.IMAGE,      True,  "Grok Image Fast"),
-    ModelSpec("grok-image-edit",    ModeId.FAST,   Tier.BASIC, Capability.IMAGE_EDIT, True,  "Grok Image Edit"),
-    # ── Basic · Video ───────────────────────────────────────────────────────
-    ModelSpec("grok-video",         ModeId.FAST,   Tier.BASIC, Capability.VIDEO,      True,  "Grok Video"),
+    # === Chat ==============================================================
+    # Basic
+    ModelSpec("grok-4.20-0309",                  ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309"),
+    ModelSpec("grok-4.20-0309-non-reasoning",    ModeId.FAST,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309-non-reasoning"),
+    ModelSpec("grok-4.20-0309-reasoning",        ModeId.EXPERT, Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309-reasoning"),
+    # Heavy
+    ModelSpec("grok-4.20-multi-agent-0309",      ModeId.HEAVY,  Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20-multi-agent-0309"),
+    
+    # === Image ==============================================================
+    # Basic
+    ModelSpec("grok-imagine-image-lite",         ModeId.FAST,   Tier.BASIC, Capability.IMAGE,      True, "Grok Imagine Image Lite"),
+    # Super
+    ModelSpec("grok-imagine-image",              ModeId.AUTO,   Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image"),
+    ModelSpec("grok-imagine-image-pro",          ModeId.AUTO,   Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image Pro"),
+    
+    # === Image Edit =========================================================
+    # Super
+    ModelSpec("grok-imagine-image-edit",         ModeId.AUTO,   Tier.SUPER, Capability.IMAGE_EDIT, True, "Grok Imagine Image Edit"),
+    
+    # === Video ==============================================================
+    # Super
+    ModelSpec("grok-imagine-video",              ModeId.AUTO,   Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
 )
 
 # ---------------------------------------------------------------------------

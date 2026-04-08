@@ -1,7 +1,5 @@
 """TOML configuration loader with environment-variable override support."""
 
-from __future__ import annotations
-
 import os
 from pathlib import Path
 from typing import Any

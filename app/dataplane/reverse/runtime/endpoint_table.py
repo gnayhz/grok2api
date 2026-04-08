@@ -8,8 +8,6 @@ NOTE: gRPC-Web endpoints (accept_tos, nsfw_mgmt) live on different
 hosts (accounts.x.ai, grok.com with gRPC path), listed separately.
 """
 
-from __future__ import annotations
-
 BASE       = "https://grok.com"
 ASSETS_CDN = "https://assets.grok.com"
 

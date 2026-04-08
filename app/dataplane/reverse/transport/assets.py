@@ -4,12 +4,30 @@ All functions acquire a proxy lease internally, execute the upstream call,
 give feedback, and return results to the caller.
 """
 
-from __future__ import annotations
-
+import asyncio
 from typing import Any, AsyncGenerator, Dict, Optional
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
+
+# Global semaphores — limit concurrent transport calls across all callers.
+# Lazily initialised so the event loop is guaranteed to be running on first use.
+_list_sem:   asyncio.Semaphore | None = None
+_delete_sem: asyncio.Semaphore | None = None
+
+def _get_list_sem() -> asyncio.Semaphore:
+    global _list_sem
+    if _list_sem is None:
+        n = max(1, int(get_config("batch.asset_list_concurrency", 50)))
+        _list_sem = asyncio.Semaphore(n)
+    return _list_sem
+
+def _get_delete_sem() -> asyncio.Semaphore:
+    global _delete_sem
+    if _delete_sem is None:
+        n = max(1, int(get_config("batch.asset_delete_concurrency", 50)))
+        _delete_sem = asyncio.Semaphore(n)
+    return _delete_sem
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
 from app.dataplane.proxy import get_proxy_runtime
@@ -40,6 +58,14 @@ async def list_assets(
         token:  SSO session token.
         params: Optional query parameters (e.g. ``{"cursor": "...", "limit": 50}``).
     """
+    async with _get_list_sem():
+        return await _list_assets_inner(token, params)
+
+
+async def _list_assets_inner(
+    token:  str,
+    params: Optional[Dict[str, Any]] = None,
+) -> dict:
     cfg       = get_config()
     timeout_s = cfg.get_float("asset.list_timeout", 30.0)
 
@@ -86,6 +112,11 @@ async def list_assets(
 
 async def delete_asset(token: str, asset_id: str) -> dict:
     """DELETE /rest/assets-metadata/{asset_id} and return the JSON body (may be {})."""
+    async with _get_delete_sem():
+        return await _delete_asset_inner(token, asset_id)
+
+
+async def _delete_asset_inner(token: str, asset_id: str) -> dict:
     cfg       = get_config()
     timeout_s = cfg.get_float("asset.delete_timeout", 30.0)
 

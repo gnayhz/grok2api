@@ -3,8 +3,6 @@
 All values are sanitized to ASCII-safe Latin-1 before use.
 """
 
-from __future__ import annotations
-
 import base64
 import random
 import re
@@ -49,7 +47,7 @@ def _sanitize(value: Optional[str], *, field: str, strip_spaces: bool = False) -
 
 def _statsig_id() -> str:
     cfg = get_config()
-    if cfg.get_bool("app.dynamic_statsig", False):
+    if cfg.get_bool("features.dynamic_statsig", False):
         if random.choice((True, False)):
             rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
             msg  = f"e:TypeError: Cannot read properties of null (reading 'children['{rand}']')"

@@ -1,14 +1,20 @@
 """Imagine WebSocket reverse transport.
 
-Connects to wss://grok.com/ws/imagine/listen and streams image events.
-Handles blocked-state detection and parallel retry.
-"""
+Protocol (per round):
+  Client → reset message
+  Client → prompt message
+  Server → N × (start_stage json → image frames → completed json)
+  Server → [may close WS, or keep open for next round]
 
-from __future__ import annotations
+One WS connection is reused across rounds until the server closes it or n
+images have been collected. This avoids a TLS handshake per round when
+requesting more images than a single round produces (speed=6, quality=4).
+"""
 
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 
 import aiohttp
@@ -16,21 +22,257 @@ import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.control.proxy.models import ProxyLease, ProxyScope, RequestKind
+from app.control.proxy.models import ProxyScope, RequestKind
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_ws_headers
 from app.dataplane.reverse.protocol.xai_image import (
-    WS_IMAGINE_URL, build_request_message, classify_image,
+    WS_IMAGINE_URL,
+    build_reset_message,
+    build_request_message,
+    parse_image_url,
+    parse_json_frame,
 )
 from .websocket import WebSocketClient
 
-
-class _BlockedError(Exception):
-    """Upstream is reviewing/blocking the image — safe to retry."""
-
-
 _client = WebSocketClient()
+_INTER_ROUND_WAIT_S = 2.0
 
+
+# ---------------------------------------------------------------------------
+# Slot state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Slot:
+    """Tracks one in-flight image generation slot."""
+    image_id:  str
+    order:     int
+    width:     int
+    height:    int
+    last_blob: str  = field(default="", repr=False)
+    last_url:  str  = ""
+    done:      bool = False
+    progress:  int  = 0
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _final_event(slot: _Slot, r_rated: bool = False) -> dict[str, Any]:
+    return {
+        "type":      "image",
+        "image_id":  slot.image_id,
+        "order":     slot.order,
+        "stage":     "final",
+        "blob":      slot.last_blob,
+        "url":       slot.last_url,
+        "width":     slot.width,
+        "height":    slot.height,
+        "is_final":  True,
+        "moderated": False,
+        "r_rated":   r_rated,
+    }
+
+
+async def _probe_ws_closed(ws: aiohttp.ClientWebSocketResponse, wait_s: float) -> bool:
+    """Wait up to *wait_s* seconds for a CLOSE frame.
+
+    Returns True if the server closed the connection, False if the connection
+    appears to still be alive (timeout expired with no CLOSE received).
+    """
+    try:
+        msg = await asyncio.wait_for(ws.receive(), timeout=wait_s)
+        return msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR)
+    except asyncio.TimeoutError:
+        return False
+    except Exception:
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Single-round generator
+# ---------------------------------------------------------------------------
+
+async def _stream_round(
+    ws:                  aiohttp.ClientWebSocketResponse,
+    prompt:              str,
+    *,
+    aspect_ratio:        str,
+    enable_nsfw:         bool,
+    enable_pro:          bool,
+    needed:              int,
+    stream_timeout_s:    float,
+    round_timeout_s:     float,
+    inter_round_wait_s:  float,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Drive one round of image generation on an already-open WS.
+
+    Sends reset + prompt, then processes frames until all slots are completed
+    or the WS closes.  Always yields a ``{type: "_meta", ws_closed: bool}``
+    sentinel as the very last item so the caller knows whether to reconnect.
+    """
+    request_id = str(uuid.uuid4())
+    try:
+        await ws.send_json(build_reset_message())
+        await ws.send_json(build_request_message(
+            request_id, prompt, aspect_ratio, enable_nsfw, enable_pro,
+        ))
+    except Exception as exc:
+        yield {"type": "error", "error_code": "send_failed", "error": str(exc)}
+        yield {"type": "_meta", "ws_closed": True}
+        return
+
+    slots:           dict[str, _Slot] = {}
+    round_completed: int               = 0
+    round_start                        = time.monotonic()
+
+    while True:
+        elapsed = time.monotonic() - round_start
+        if elapsed >= round_timeout_s:
+            logger.warning("Imagine round timeout after {:.1f}s", elapsed)
+            for slot in slots.values():
+                if not slot.done:
+                    if slot.last_blob:
+                        yield _final_event(slot)
+                    else:
+                        yield {
+                            "type":       "error",
+                            "error_code": "slot_incomplete",
+                            "error":      f"slot {slot.image_id[:8]} timed out",
+                        }
+            yield {"type": "_meta", "ws_closed": False}
+            return
+
+        recv_timeout = min(stream_timeout_s, round_timeout_s - elapsed)
+        try:
+            ws_msg = await asyncio.wait_for(ws.receive(), timeout=recv_timeout)
+        except asyncio.TimeoutError:
+            # No frame arrived — check if all known slots are already done.
+            if slots and all(s.done for s in slots.values()):
+                ws_closed = await _probe_ws_closed(ws, inter_round_wait_s)
+                yield {"type": "_meta", "ws_closed": ws_closed}
+                return
+            continue
+
+        # ── TEXT frames ──────────────────────────────────────────────────────
+        if ws_msg.type == aiohttp.WSMsgType.TEXT:
+            try:
+                msg = orjson.loads(ws_msg.data)
+            except Exception:
+                continue
+
+            msg_type = msg.get("type")
+
+            # JSON control frames (start_stage / completed)
+            if msg_type == "json":
+                parsed = parse_json_frame(msg)
+                if parsed is None:
+                    continue
+
+                if parsed["status"] == "start_stage":
+                    iid = parsed["image_id"]
+                    slots[iid] = _Slot(
+                        image_id = iid,
+                        order    = parsed["order"],
+                        width    = parsed["width"],
+                        height   = parsed["height"],
+                    )
+                    logger.debug(
+                        "Imagine slot {} start order={} {}×{}",
+                        iid[:8], parsed["order"], parsed["width"], parsed["height"],
+                    )
+                    yield {
+                        "type": "progress",
+                        "image_id": iid,
+                        "order": parsed["order"],
+                        "progress": 10,
+                    }
+
+                elif parsed["status"] == "completed":
+                    iid  = parsed["image_id"]
+                    slot = slots.get(iid)
+                    if slot is None or slot.done:
+                        continue
+
+                    slot.done = True
+
+                    if parsed["moderated"]:
+                        logger.warning("Imagine slot {} moderated", iid[:8])
+                        yield {"type": "moderated", "image_id": iid, "order": slot.order}
+                    else:
+                        logger.debug("Imagine slot {} completed order={}", iid[:8], slot.order)
+                        yield _final_event(slot, r_rated=parsed["r_rated"])
+                        round_completed += 1
+
+                    all_done = slots and all(s.done for s in slots.values())
+                    if all_done:
+                        ws_closed = await _probe_ws_closed(ws, inter_round_wait_s)
+                        yield {"type": "_meta", "ws_closed": ws_closed}
+                        return
+
+                    if round_completed >= needed:
+                        # Have enough this round; leave remaining slots in flight.
+                        yield {"type": "_meta", "ws_closed": False}
+                        return
+
+            # Image blob frames (intermediate previews)
+            elif msg_type == "image":
+                url   = msg.get("url", "")
+                blob  = msg.get("blob", "")
+                iid, _ext = parse_image_url(url)
+                slot  = slots.get(iid)
+                if slot and not slot.done:
+                    slot.last_blob = blob
+                    slot.last_url  = url
+                    progress = msg.get("percentage_complete")
+                    try:
+                        parsed_progress = int(float(progress)) if progress is not None else 50
+                    except (TypeError, ValueError):
+                        parsed_progress = 50
+                    parsed_progress = max(10, min(99, parsed_progress))
+                    if parsed_progress > slot.progress:
+                        slot.progress = parsed_progress
+                        yield {
+                            "type": "progress",
+                            "image_id": iid,
+                            "order": slot.order,
+                            "progress": parsed_progress,
+                        }
+
+            # Server-side error
+            elif msg_type == "error":
+                err_code = msg.get("err_code") or "upstream_error"
+                err_msg  = msg.get("err_msg")  or str(msg)
+                logger.warning("Imagine WS server error: {} {}", err_code, err_msg)
+                yield {"type": "error", "error_code": err_code, "error": err_msg}
+                yield {"type": "_meta", "ws_closed": True}
+                return
+
+        # ── WS closed / error ────────────────────────────────────────────────
+        elif ws_msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+            # Yield best-effort finals for any slots that received a blob but
+            # never got a completed frame.
+            for slot in slots.values():
+                if not slot.done:
+                    if slot.last_blob:
+                        logger.debug(
+                            "Imagine WS closed: yielding best-effort final for slot {}",
+                            slot.image_id[:8],
+                        )
+                        yield _final_event(slot)
+                    else:
+                        logger.warning(
+                            "Imagine WS closed: slot {} had no blob, skipping",
+                            slot.image_id[:8],
+                        )
+            yield {"type": "_meta", "ws_closed": True}
+            return
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 async def stream_images(
     token:        str,
@@ -39,179 +281,91 @@ async def stream_images(
     aspect_ratio: str  = "2:3",
     n:            int  = 1,
     enable_nsfw:  bool = True,
+    enable_pro:   bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
-    """Stream image events from the Imagine WebSocket endpoint.
+    """Stream image events, collecting *n* final images.
 
-    Yields dicts with keys: type, image_id, ext, stage, blob, blob_size, url, is_final
-    (or type='error' on failure).
+    Reuses a single WS connection across multiple rounds when the server keeps
+    the connection open.  Reconnects transparently if the server closes it.
+
+    Yields:
+        ``{type: "image",      is_final: True,  ...}``  — final image per slot
+        ``{type: "moderated",  ...}``                   — censored slot
+        ``{type: "error",      ...}``                   — fatal error (stops iteration)
     """
-    cfg              = get_config()
-    timeout_s        = cfg.get_float("image.timeout", 120.0)
-    stream_timeout_s = cfg.get_float("image.stream_timeout", 10.0)
-    final_timeout_s  = cfg.get_float("image.final_timeout", 30.0)
-    blocked_grace_s  = min(max(cfg.get_float("image.blocked_grace_seconds", 10.0), 1.0), final_timeout_s)
-    final_min_bytes  = cfg.get_int("image.final_min_bytes", 50_000)
-    medium_min_bytes = cfg.get_int("image.medium_min_bytes", 5_000)
-    max_retries      = max(1, cfg.get_int("image.max_retries", 1))
-    parallel_ok      = cfg.get_bool("image.blocked_parallel_enabled", True)
+    cfg                = get_config()
+    timeout_s          = cfg.get_float("image.timeout",            120.0)
+    stream_timeout_s   = cfg.get_float("image.stream_timeout",      10.0)
+    inter_round_wait_s = _INTER_ROUND_WAIT_S
 
-    async def _once() -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        async for ev in _stream_once(
-            token, prompt,
-            aspect_ratio     = aspect_ratio,
-            n                = n,
-            enable_nsfw      = enable_nsfw,
-            timeout_s        = timeout_s,
-            stream_timeout_s = stream_timeout_s,
-            final_timeout_s  = final_timeout_s,
-            blocked_grace_s  = blocked_grace_s,
-            final_min_bytes  = final_min_bytes,
-            medium_min_bytes = medium_min_bytes,
-        ):
-            items.append(ev)
-        return items
+    collected = 0
 
-    for attempt in range(max_retries):
+    while collected < n:
+        needed = n - collected
+
+        # ── Establish connection ──────────────────────────────────────────────
+        proxy   = await get_proxy_runtime()
+        lease   = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.WEBSOCKET)
+        headers = build_ws_headers(token=token, lease=lease)
+
         try:
-            items = await _once()
-            for ev in items:
-                yield ev
-            return
-        except _BlockedError:
-            remaining = max_retries - attempt - 1
-            if remaining > 0 and parallel_ok:
-                logger.warning("Imagine blocked; launching {} parallel retries", remaining)
-                tasks = [asyncio.create_task(_once()) for _ in range(remaining)]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        continue
-                    if any(ev.get("is_final") for ev in result if isinstance(ev, dict)):
-                        for ev in result:
-                            yield ev
-                        return
-                yield {"type": "error", "error_code": "blocked", "error": "blocked_no_final_image"}
-                return
-            if attempt + 1 < max_retries:
-                logger.warning("Imagine blocked, retry {}/{}", attempt + 1, max_retries)
-                continue
-            yield {"type": "error", "error_code": "blocked", "error": "blocked_no_final_image"}
-            return
+            conn = await _client.connect(
+                WS_IMAGINE_URL,
+                headers   = headers,
+                timeout   = timeout_s,
+                ws_kwargs = {"heartbeat": 20, "receive_timeout": stream_timeout_s},
+                lease     = lease,
+            )
         except Exception as exc:
-            logger.error("Imagine stream error: {}", exc)
-            yield {"type": "error", "error_code": "stream_error", "error": str(exc)}
+            status = getattr(exc, "status", None)
+            logger.error("Imagine WS connect failed: {}", exc)
+            yield {
+                "type":       "error",
+                "error_code": "rate_limit_exceeded" if status == 429 else "connection_failed",
+                "error":      str(exc),
+            }
             return
 
+        # ── Run rounds on this connection ─────────────────────────────────────
+        try:
+            async with conn as ws:
+                while collected < n:
+                    needed = n - collected
+                    async for ev in _stream_round(
+                        ws, prompt,
+                        aspect_ratio       = aspect_ratio,
+                        enable_nsfw        = enable_nsfw,
+                        enable_pro         = enable_pro,
+                        needed             = needed,
+                        stream_timeout_s   = stream_timeout_s,
+                        round_timeout_s    = timeout_s,
+                        inter_round_wait_s = inter_round_wait_s,
+                    ):
+                        if ev["type"] == "_meta":
+                            ws_closed = ev["ws_closed"]
+                            break   # exit inner for-loop; handle ws_closed below
+                        if ev.get("is_final"):
+                            collected += 1
+                        yield ev
+                        if ev["type"] == "error":
+                            return
+                    else:
+                        # _stream_round exhausted without a _meta — shouldn't happen
+                        ws_closed = True
 
-async def _stream_once(
-    token:        str,
-    prompt:       str,
-    *,
-    aspect_ratio:     str,
-    n:                int,
-    enable_nsfw:      bool,
-    timeout_s:        float,
-    stream_timeout_s: float,
-    final_timeout_s:  float,
-    blocked_grace_s:  float,
-    final_min_bytes:  int,
-    medium_min_bytes: int,
-) -> AsyncGenerator[dict[str, Any], None]:
-    request_id = str(uuid.uuid4())
-    proxy      = await get_proxy_runtime()
-    lease      = await proxy.acquire(
-        scope = ProxyScope.APP,
-        kind  = RequestKind.WEBSOCKET,
-    )
-    headers = build_ws_headers(token=token, lease=lease)
+                    if ws_closed or collected >= n:
+                        break   # exit inner while; reconnect or finish
 
-    try:
-        conn = await _client.connect(
-            WS_IMAGINE_URL,
-            headers   = headers,
-            timeout   = timeout_s,
-            ws_kwargs = {"heartbeat": 20, "receive_timeout": stream_timeout_s},
-            lease     = lease,
-        )
-    except Exception as exc:
-        status = getattr(exc, "status", None)
-        logger.error("Imagine WebSocket connect failed: {}", exc)
-        yield {
-            "type":       "error",
-            "error_code": "rate_limit_exceeded" if status == 429 else "connection_failed",
-            "error":      str(exc),
-        }
-        return
+        except aiohttp.ClientError as exc:
+            logger.error("Imagine WS connection error: {}", exc)
+            yield {"type": "error", "error_code": "connection_failed", "error": str(exc)}
+            return
 
-    try:
-        async with conn as ws:
-            await ws.send_json(build_request_message(request_id, prompt, aspect_ratio, enable_nsfw))
-            logger.info("Imagine request sent: prompt={!r:.50} ratio={}", prompt, aspect_ratio)
+        if collected >= n:
+            return
 
-            final_ids:            set[str] = set()
-            completed:            int       = 0
-            start                           = time.monotonic()
-            last_activity                   = start
-            medium_received_at:   float | None = None
-
-            while time.monotonic() - start < timeout_s:
-                try:
-                    ws_msg = await asyncio.wait_for(ws.receive(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    now = time.monotonic()
-                    if medium_received_at and completed == 0 and now - medium_received_at > blocked_grace_s:
-                        logger.warning("Imagine blocked: medium received but no final in {:.1f}s", blocked_grace_s)
-                        raise _BlockedError()
-                    if completed > 0 and now - last_activity > 10.0:
-                        break
-                    continue
-
-                if ws_msg.type == aiohttp.WSMsgType.TEXT:
-                    last_activity = time.monotonic()
-                    try:
-                        msg = orjson.loads(ws_msg.data)
-                    except Exception:
-                        continue
-
-                    msg_type = msg.get("type")
-                    if msg_type == "image":
-                        info = classify_image(
-                            msg.get("url", ""), msg.get("blob", ""),
-                            final_min_bytes  = final_min_bytes,
-                            medium_min_bytes = medium_min_bytes,
-                        )
-                        if not info:
-                            continue
-                        if info["stage"] == "medium" and medium_received_at is None:
-                            medium_received_at = time.monotonic()
-                        if info["is_final"] and info["image_id"] not in final_ids:
-                            final_ids.add(info["image_id"])
-                            completed += 1
-                        yield info
-
-                    elif msg_type == "error":
-                        logger.warning("Imagine WS error: {} {}", msg.get("err_code"), msg.get("err_msg"))
-                        yield {
-                            "type":       "error",
-                            "error_code": msg.get("err_code", ""),
-                            "error":      msg.get("err_msg", ""),
-                        }
-                        return
-
-                    if completed >= n:
-                        break
-
-                    if medium_received_at and completed == 0 and time.monotonic() - medium_received_at > final_timeout_s:
-                        logger.warning("Imagine final-timeout: no final image in {:.1f}s", final_timeout_s)
-                        raise _BlockedError()
-
-                elif ws_msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    yield {"type": "error", "error_code": "ws_closed", "error": str(ws_msg.type)}
-                    return
-
-    except aiohttp.ClientError as exc:
-        yield {"type": "error", "error_code": "connection_failed", "error": str(exc)}
+        # Server closed the connection but we still need more images → reconnect.
+        logger.info("Imagine reconnecting for {}/{} remaining images", n - collected, n)
 
 
 __all__ = ["stream_images"]

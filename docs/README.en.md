@@ -1,6 +1,6 @@
 # Grok2API
 
-[中文](../readme.md) | **English** | [Docs](https://blog.cheny.me/blog/posts/grok2api)
+[中文](../README.md) | **English** | [Docs](https://blog.cheny.me/blog/posts/grok2api)
 
 > [!NOTE]
 > This project is for learning and research only. You must comply with Grok **Terms of Use** and **local laws and regulations**. Do not use for illegal purposes.
@@ -22,7 +22,7 @@ Grok2API rebuilt with **FastAPI**, fully aligned with the latest web call format
 ```bash
 uv sync
 
-uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 main:app
+uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 app.main:app
 ```
 
 ### Docker Compose
@@ -46,11 +46,11 @@ docker compose up -d
 
 ### Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,SERVER_STORAGE_TYPE,SERVER_STORAGE_URL&envDefaults=%7B%22DATA_DIR%22%3A%22/tmp/data%22%2C%22LOG_FILE_ENABLED%22%3A%22false%22%2C%22LOG_LEVEL%22%3A%22INFO%22%2C%22SERVER_STORAGE_TYPE%22%3A%22local%22%2C%22SERVER_STORAGE_URL%22%3A%22%22%7D)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,ACCOUNT_STORAGE,ACCOUNT_LOCAL_PATH,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL&envDefaults=%7B%22DATA_DIR%22%3A%22/tmp/data%22%2C%22LOG_FILE_ENABLED%22%3A%22false%22%2C%22LOG_LEVEL%22%3A%22INFO%22%2C%22ACCOUNT_STORAGE%22%3A%22local%22%2C%22ACCOUNT_LOCAL_PATH%22%3A%22/tmp/data/accounts.db%22%2C%22ACCOUNT_REDIS_URL%22%3A%22redis://localhost:6379/0%22%2C%22ACCOUNT_MYSQL_URL%22%3A%22%22%2C%22ACCOUNT_POSTGRESQL_URL%22%3A%22%22%7D)
 
 > Set `DATA_DIR=/tmp/data` and disable file logs with `LOG_FILE_ENABLED=false`.
 >
-> For persistence, use MySQL / Redis / PostgreSQL and set `SERVER_STORAGE_TYPE` and `SERVER_STORAGE_URL`.
+> For persistence, use MySQL / Redis / PostgreSQL and set startup env `ACCOUNT_STORAGE` plus the matching `ACCOUNT_*_URL`.
 
 ### Render
 
@@ -58,7 +58,7 @@ docker compose up -d
 
 > Render free instances sleep after 15 minutes of inactivity; redeploy/restart will lose data.
 >
-> For persistence, use MySQL / Redis / PostgreSQL and set `SERVER_STORAGE_TYPE` and `SERVER_STORAGE_URL`.
+> For persistence, use MySQL / Redis / PostgreSQL and set startup env `ACCOUNT_STORAGE` plus the matching `ACCOUNT_*_URL`.
 
 <br>
 
@@ -91,9 +91,14 @@ docker compose up -d
 | `SERVER_PORT` | Server port | `8000` | `8000` |
 | `HOST_PORT` | Host published port for Docker Compose | `8000` | `9000` |
 | `SERVER_WORKERS` | Server worker count | `1` | `2` |
-| `SERVER_STORAGE_TYPE` | Storage type (`local`/`redis`/`mysql`/`pgsql`) | `local` | `pgsql` |
-| `SERVER_STORAGE_URL` | Storage DSN (optional for local) | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
+| `ACCOUNT_STORAGE` | Storage backend (`local`/`redis`/`mysql`/`postgresql`), restart required after changes | `local` | `postgresql` |
+| `ACCOUNT_LOCAL_PATH` | SQLite file path when `ACCOUNT_STORAGE=local` | `data/accounts.db` | `/data/accounts.db` |
+| `ACCOUNT_REDIS_URL` | Redis DSN when `ACCOUNT_STORAGE=redis` | `redis://localhost:6379/0` | `redis://:password@host:6379/0` |
+| `ACCOUNT_MYSQL_URL` | MySQL DSN when `ACCOUNT_STORAGE=mysql` | `""` | `mysql+aiomysql://user:password@host:3306/db` |
+| `ACCOUNT_POSTGRESQL_URL` | PostgreSQL DSN when `ACCOUNT_STORAGE=postgresql` | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
 
+> Storage env vars are startup-only and are not editable from the Admin config page.
+>
 > MySQL example: `mysql+aiomysql://user:password@host:3306/db` (if you provide `mysql://`, it will be converted to `mysql+aiomysql://`).
 
 <br>
@@ -122,7 +127,7 @@ docker compose up -d
 | `grok-4.20-beta` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-imagine-1.0` | - | Basic/Super | - | Yes | - |
 | `grok-imagine-1.0-fast` | - | Basic/Super | - | Yes | - |
-| `grok-imagine-1.0-edit` | - | Basic/Super | - | Yes | - |
+| `grok-imagine-image-edit` | - | Basic/Super | - | Yes | - |
 | `grok-imagine-1.0-video` | - | Basic/Super | - | - | Yes |
 
 <br>
@@ -161,12 +166,12 @@ curl http://localhost:8000/v1/chat/completions \
 | `tools` | array | Tool definitions | OpenAI function tools |
 | `tool_choice` | string/object | Tool choice | `auto`, `required`, `none`, or a specific tool |
 | `parallel_tool_calls` | boolean | Allow parallel tool calls | `true`, `false` |
-| `video_config` | object | **Video model only** | Supported: `grok-imagine-1.0-video` |
-| └─ `aspect_ratio` | string | Video aspect ratio | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`, `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
-| └─ `video_length` | integer | Video length (seconds) | `6` ~ `30` |
-| └─ `resolution_name` | string | Resolution | `480p`, `720p` |
-| └─ `preset` | string | Style preset | `fun`, `normal`, `spicy`, `custom` |
-| `image_config` | object | **Image models only** | Supported: `grok-imagine-1.0` / `grok-imagine-1.0-fast` / `grok-imagine-1.0-edit` |
+| `video_config` | object | **Video model only** | Supported: `grok-video` |
+| └─ `seconds` | integer | Video length (seconds) | `6`, `10`, `12`, `16`, `20` |
+| └─ `size` | string | Frame size | `1280x720`, `720x1280`, `1024x1024`, `1792x1024`, `1024x1792` |
+| └─ `resolution_name` | string | Output resolution override | `480p`, `720p` |
+| └─ `preset` | string | Upstream video style preset | `fun`, `normal`, `spicy`, `custom` |
+| `image_config` | object | **Image models only** | Supported: `grok-imagine-image` / `grok-imagine-image-lite` / `grok-imagine-image-edit` |
 | └─ `n` | integer | Number of images | `1` ~ `10` |
 | └─ `size` | string | Image size | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
 | └─ `response_format` | string | Response format | `url`, `b64_json`, `base64` |
@@ -195,7 +200,7 @@ curl http://localhost:8000/v1/chat/completions \
 - `grok-imagine-1.0-fast` works similarly to the imagine waterfall stream, and can be called directly via `/v1/chat/completions`. Its `n/size/response_format` are globally controlled by the server's `[imagine_fast]` config.
 - `grok-imagine-1.0-fast` streaming output in `/chat/completions` only returns the final image, hiding intermediate preview images.
 - `grok-imagine-1.0-fast` streaming URL output will retain the original image filename (without appending `-final`).
-- `grok-imagine-1.0-edit` requires an image; if multiple are provided, the **last 3** images and last text are used.
+- `grok-imagine-image-edit` requires an image; if multiple are provided, the **last 3** images and last text are used.
 - `grok-imagine-1.0-video` supports text-to-video and multi-image reference video: pass up to `7` `image_url` blocks and use placeholders like `@图1`, `@图2` in the prompt; the server will replace them with the corresponding `assetId` values.
 - `@图N` placeholders map to `image_url` order; referencing a missing image index returns an error.
 - Any other parameters will be discarded and ignored.
@@ -300,9 +305,9 @@ curl http://localhost:8000/v1/images/generations \
 ```bash
 curl http://localhost:8000/v1/images/edits \
   -H "Authorization: Bearer $GROK2API_API_KEY" \
-  -F "model=grok-imagine-1.0-edit" \
+  -F "model=grok-imagine-image-edit" \
   -F "prompt=Make the image clearer" \
-  -F "image=@/path/to/image.png" \
+  -F "image[]=@/path/to/image.png" \
   -F "n=1"
 ```
 
@@ -313,18 +318,19 @@ curl http://localhost:8000/v1/images/edits \
 
 | Field | Type | Description | Allowed values |
 | :-- | :-- | :-- | :-- |
-| `model` | string | Image model ID | `grok-imagine-1.0-edit` |
+| `model` | string | Image model ID | `grok-imagine-image-edit` |
 | `prompt` | string | Edit prompt | - |
-| `image` | file | Source image | `png`, `jpg`, `webp` |
-| `n` | integer | Number of images | `1` - `10` (streaming: `1` or `2` only) |
-| `stream` | boolean | Enable streaming | `true`, `false` |
-| `size` | string | Image size | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
+| `image[]` | file[] | Source image(s), repeatable. | `png`, `jpg`, `webp` |
+| `mask` | file | Mask image | Not supported yet; requests will be rejected |
+| `n` | integer | Number of images | `1` - `10` |
+| `size` | string | Image size | Currently only `1024x1024` |
 | `quality` | string | Image quality | - (not supported) |
 | `response_format` | string | Response format | `url`, `b64_json`, `base64` |
 | `style` | string | Style | - (not supported) |
 
 **Notes**:
 
+- `mask` is reserved for OpenAI compatibility and is not wired into the upstream edit flow yet.
 - `quality` and `style` are OpenAI compatibility placeholders and are not customizable yet.
 
 <br>
@@ -336,18 +342,25 @@ curl http://localhost:8000/v1/images/edits \
 ### `POST /v1/videos`
 
 > Video generation endpoint (OpenAI videos.create compatible)
+> Official-style `multipart/form-data`
 
 ```bash
 curl http://localhost:8000/v1/videos \
-  -H "Content-Type: application/json" \
   -H "Authorization: Bearer $GROK2API_API_KEY" \
-  -d '{
-    "model": "grok-imagine-1.0-video",
-    "prompt": "Neon rainy street at night, cinematic slow tracking shot",
-    "size": "1792x1024",
-    "seconds": 18,
-    "quality": "standard"
-  }'
+  -F "model=grok-video" \
+  -F "prompt=Neon rainy street at night, cinematic slow tracking shot" \
+  -F "size=1792x1024" \
+  -F "seconds=10"
+```
+
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -F "model=grok-video" \
+  -F "prompt=The bread catches fire, dramatic handheld motion" \
+  -F "size=720x1280" \
+  -F "seconds=6" \
+  -F "input_reference=@/path/to/reference.jpg"
 ```
 
 <details>
@@ -357,20 +370,19 @@ curl http://localhost:8000/v1/videos \
 
 | Field | Type | Description | Allowed values |
 | :-- | :-- | :-- | :-- |
-| `model` | string | Video model | `grok-imagine-1.0-video` |
+| `model` | string | Video model | `grok-video` |
 | `prompt` | string | Video prompt | - |
-| `size` | string | Frame size (mapped to aspect_ratio) | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
-| `seconds` | integer | Target duration (seconds) | `6` ~ `30` |
-| `quality` | string | Video quality (mapped to resolution) | `standard`, `high` |
-| `image_reference` | array | Reference image (optional) | OpenAI-compatible content block array (`[{"type":"image_url"...}]`) or an array of URL strings; single-image requests should use a one-item array |
-| `input_reference` | file | multipart reference image (optional) | `png`, `jpg`, `webp` |
+| `size` | string | Frame size (mapped to aspect_ratio) | `1280x720`, `720x1280`, `1024x1024`, `1792x1024`, `1024x1792` |
+| `seconds` | integer | Target duration (seconds) | `6`, `10`, `12`, `16`, `20` |
+| `resolution_name` | string | Output resolution override | `480p`, `720p` |
+| `preset` | string | Upstream video style preset | `fun`, `normal`, `spicy`, `custom` |
+| `input_reference` | file | Optional reference image for image-to-video | `png`, `jpg`, `webp` |
 
 **Notes**:
 
-- Server-side chain extension now supports 6~30 seconds automatically, so **`/v1/video/extend` is not required**.
-- `quality=standard` maps to `480p`; `quality=high` maps to `720p`.
-- For basic-pool requests at `720p`, generation falls back to `480p` first, then upscales according to `video.upscale_timing`.
-- `image_reference` now uses array format only and supports up to 7 images; single-image requests should also use a one-item array. If both `image_reference` and `input_reference` are provided, references are processed and merged in order; you can use placeholders like `@图1`, `@图2` in prompts.
+- `12`, `16`, and `20` seconds are produced through the upstream video extension flow, not by pretending the provider supports arbitrary durations directly.
+- If `input_reference` is provided, the server first uploads the image, then creates an upstream image post, and finally starts video generation from that post.
+- `/v1/videos` follows the official multipart form surface and does not accept a JSON request body.
 
 <br>
 
