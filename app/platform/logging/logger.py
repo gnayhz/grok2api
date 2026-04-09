@@ -30,17 +30,19 @@ def setup_logging(
     fmt_text = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{line}</cyan> - "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
         "<level>{message}</level>"
     )
-    fmt_json = "{time} | {level} | {name}:{line} | {message}"
+    fmt_json = "{time} | {level} | {name}:{function}:{line} | {message}"
 
     logger.add(
         sys.stdout,
         level=level.upper(),
         format=fmt_json if json_console else fmt_text,
         colorize=not json_console,
-        enqueue=True,
+        enqueue=False,
+        backtrace=False,
+        diagnose=False,
     )
 
     if file_logging:
@@ -56,6 +58,8 @@ def setup_logging(
             retention=retention,
             enqueue=True,
             encoding="utf-8",
+            backtrace=False,
+            diagnose=False,
         )
 
     _configured = True

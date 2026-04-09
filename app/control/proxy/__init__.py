@@ -71,8 +71,11 @@ class ProxyDirectory:
             self._resource_nodes = resource_nodes
 
         logger.info(
-            "ProxyDirectory loaded: egress={} clearance={} nodes={}",
-            self._egress_mode, self._clearance_mode, len(nodes),
+            "proxy directory loaded: egress_mode={} clearance_mode={} node_count={} resource_node_count={}",
+            self._egress_mode,
+            self._clearance_mode,
+            len(nodes),
+            len(resource_nodes),
         )
 
     # ------------------------------------------------------------------

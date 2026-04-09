@@ -29,13 +29,13 @@ def get_admin_key() -> str:
 
 
 def get_webui_key() -> str:
-    """Return configured ``app.function_key`` (webui access key)."""
-    return str(get_config("app.function_key", "") or "")
+    """Return configured ``app.webui_key`` (webui access key)."""
+    return str(get_config("app.webui_key", "") or "")
 
 
 def is_webui_enabled() -> bool:
     """Whether the webui entry is enabled."""
-    val = get_config("app.function_enabled", False)
+    val = get_config("app.webui_enabled", False)
     if isinstance(val, bool):
         return val
     if isinstance(val, str):

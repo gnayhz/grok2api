@@ -28,6 +28,26 @@
       color:#222;
       letter-spacing:.01em;
     }
+    .section-title-row {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+    }
+    .section-count-badge {
+      min-width:20px;
+      height:20px;
+      padding:0 7px;
+      border-radius:999px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      background:#f1ece2;
+      color:#6a6459;
+      font-size:11px;
+      font-weight:600;
+      font-variant-numeric:tabular-nums;
+      line-height:1;
+    }
     .page-action-btn {
       height:32px;
       padding:0 14px;
@@ -59,7 +79,7 @@
     /* Stats */
     .stat-grid {
       display:grid;
-      grid-template-columns:repeat(4, minmax(0, 1fr));
+      grid-template-columns:repeat(5, minmax(0, 1fr));
       gap:12px;
       margin-bottom:20px;
     }
@@ -85,8 +105,8 @@
       white-space:nowrap;
     }
     .stat-icon {
-      width:22px;
-      height:22px;
+      width:24px;
+      height:24px;
       display:inline-flex;
       align-items:center;
       justify-content:center;
@@ -94,8 +114,8 @@
       flex:0 0 auto;
     }
     .stat-icon svg {
-      width:14px;
-      height:14px;
+      width:15px;
+      height:15px;
       stroke:currentColor;
     }
     .stat-num  {
@@ -178,7 +198,17 @@
     .filter-chip-count.is-purple { color:inherit }
 
     /* Toolbar row above table */
-    .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap }
+    .table-toolbar {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:8px;
+      flex-wrap:wrap;
+      color:#8f8f8f;
+      font-size:12px;
+      font-weight:500;
+      font-family:inherit;
+    }
     .table-toolbar-left { flex:1 }
     .table-toolbar-actions {
       display:flex;
@@ -186,34 +216,117 @@
       gap:8px;
       flex-wrap:wrap;
     }
-    .toolbar-action {
+    .toolbar-icon-btn {
+      width:28px;
       height:28px;
-      padding:0 12px;
-      border-radius:999px;
-      background:#fafafa;
-      font-size:12px;
-      font-weight:500;
-      color:#5f5f5f;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      color:inherit;
+      flex:0 0 auto;
+      font:inherit;
     }
-    .toolbar-action:hover {
+    .toolbar-icon-btn:hover {
+      color:#555;
+    }
+    .toolbar-icon-btn svg {
+      width:14px;
+      height:14px;
+      stroke:currentColor;
+      stroke-linecap:round;
+      stroke-linejoin:round;
+      fill:none;
+    }
+    .toolbar-icon-btn-danger { color:inherit; }
+    .toolbar-icon-btn-danger:hover { color:#555; }
+    .toolbar-icon-btn.is-active {
+      color:#111;
       background:#f3f3f3;
-    }
-    .toolbar-action-danger {
-      color:#b42318;
-      background:#fff5f4;
-      border-color:#f3d2cf;
-    }
-    .toolbar-action-danger:hover {
-      background:#feeceb;
-      border-color:#eab8b3;
+      border-radius:999px;
     }
     .toolbar-page-size {
       width:94px !important;
       height:28px;
       border-radius:999px;
-      font-size:12px;
+      font:inherit;
+      color:inherit;
       background:#fafafa;
       border-color:transparent;
+    }
+    .toolbar-dropdown {
+      position:relative;
+      display:inline-flex;
+      align-items:center;
+    }
+    .toolbar-dropdown-panel {
+      position:absolute;
+      top:calc(100% + 10px);
+      right:0;
+      width:min(416px, calc(100vw - 24px));
+      padding:12px;
+      border-radius:16px;
+      background:#FAF9F5;
+      border:1px solid #ece3d6;
+      box-shadow:0 12px 28px rgba(22,20,18,.07);
+      display:none;
+      z-index:30;
+    }
+    .toolbar-dropdown.open .toolbar-dropdown-panel {
+      display:block;
+    }
+    .toolbar-dropdown-panel .filter-bar {
+      gap:10px;
+      margin-bottom:0;
+    }
+    .toolbar-dropdown-panel .filter-group {
+      align-items:flex-start;
+      gap:8px;
+      width:100%;
+      flex-wrap:nowrap;
+    }
+    .filter-chip-list {
+      display:flex;
+      align-items:center;
+      gap:6px;
+      flex-wrap:nowrap;
+      min-width:0;
+      flex:1 1 auto;
+      overflow-x:auto;
+      overflow-y:hidden;
+      scrollbar-width:none;
+      -ms-overflow-style:none;
+    }
+    .filter-chip-list::-webkit-scrollbar {
+      display:none;
+    }
+    .toolbar-dropdown-panel .filter-label {
+      width:34px;
+      flex:0 0 34px;
+      padding-top:6px;
+      text-align:left;
+    }
+    .toolbar-dropdown-panel .filter-chip {
+      height:26px;
+      min-width:66px;
+      padding:0 10px;
+      font-size:11px;
+      gap:5px;
+    }
+    .toolbar-dropdown-panel .filter-chip-count {
+      min-width:16px;
+      height:16px;
+      padding:0 4px;
+      font-size:10px;
+    }
+    @media (max-width: 720px) {
+      .toolbar-dropdown-panel {
+        right:-8px;
+        width:min(320px, calc(100vw - 20px));
+      }
+      .toolbar-dropdown-panel .filter-label {
+        width:32px;
+        flex:0 0 32px;
+      }
     }
 
     /* Table */
@@ -286,6 +399,10 @@
       color:#b66a63;
       background:#fbf3f2;
     }
+    .table-card .badge-disabled {
+      color:#6f675d;
+      background:#f1ece4;
+    }
     .table-center { text-align:center }
     .table-center .badge { margin:0 auto }
     .token-stack {
@@ -316,6 +433,10 @@
       stroke-linecap:round;
       stroke-linejoin:round;
       fill:none;
+    }
+    .row-icon-btn.row-icon-btn-state svg {
+      width:14.5px;
+      height:14.5px;
     }
     .row-icon-btn:hover { color:#555 }
     .row-icon-btn.is-loading {
@@ -431,23 +552,36 @@
 
     /* Pagination */
     .pagi { display:flex; align-items:center; gap:6px; padding:12px 16px; border-top:none }
-    .pagi-meta { display:flex; align-items:center; gap:8px }
+    .pagi-meta {
+      display:flex;
+      align-items:center;
+      gap:0;
+      color:inherit;
+      font:inherit;
+      margin:0 -2px;
+    }
     .pagi-page {
-      min-width:54px;
+      min-width:0;
       height:28px;
-      padding:0 10px;
-      border-radius:999px;
-      background:#f5f5f5;
-      font-size:12px;
-      font-weight:600;
-      color:#222;
+      padding:0 4px;
+      font:inherit;
+      color:inherit;
       display:inline-flex;
       align-items:center;
       justify-content:center;
       font-variant-numeric:tabular-nums;
     }
-    .pagi-info { font-size:12px; color:var(--fg-muted) }
-    .pagi-btn  { width:28px; height:28px; border-radius:6px; font-size:13px; display:inline-flex; align-items:center; justify-content:center; color:var(--fg-muted); transition:background .1s }
+    .pagi-btn  {
+      width:28px;
+      height:28px;
+      border-radius:6px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      color:inherit;
+      transition:background .1s, color .1s;
+      font:inherit;
+    }
     .pagi-btn:hover  { background:var(--border) }
     .pagi-btn.on     { background:var(--fg); color:#fff }
     .pagi-btn:disabled { opacity:.35; pointer-events:none }
@@ -465,18 +599,17 @@
       margin-bottom:12px;
     }
     #modal-export .dialog-body { gap:10px }
-    #modal-export .dialog-actions { margin-top:12px }
     .export-option-btn {
       width:100%;
-      min-height:44px;
+      min-height:34px;
       height:auto;
-      padding:10px 14px;
+      padding:6px 12px;
       display:flex;
       align-items:center;
       justify-content:center;
       text-align:center;
       white-space:normal;
-      line-height:1.4;
+      line-height:1.35;
     }
     .modal { box-shadow:none }
     .dialog-body { display:grid; gap:12px }
@@ -579,11 +712,11 @@
     <div class="page-actions">
       <button onclick="openImport()" class="page-action-btn">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span data-i18n="account.actionImport">导入</span>
+        <span data-i18n="account.actionImportShort">导入</span>
       </button>
       <button onclick="openAdd()" class="page-action-btn page-action-btn-primary">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span data-i18n="account.actionAdd">添加</span>
+        <span data-i18n="account.actionAddShort">新增</span>
       </button>
     </div>
   </div>
@@ -592,7 +725,7 @@
     <div class="section-title" data-i18n="account.sectionOverview">账户概览</div>
   </div>
 
-  <!-- Stats 2×4 -->
+  <!-- Stats 2×5 -->
   <div class="stat-grid">
     <div class="stat-cell">
       <div class="stat-top">
@@ -605,16 +738,16 @@
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statActive">账户正常</div>
+        <div class="stat-label" data-i18n="account.statActive">正常账户</div>
         <span class="stat-icon" style="color:#16a34a">
-          <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="m5 12 4.2 4.2L19 6.5"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.4 2.4 4.8-4.8"/></svg>
         </span>
       </div>
       <div class="stat-num" id="s-active" style="color:#16a34a">0</div>
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statCooling">账户限流</div>
+        <div class="stat-label" data-i18n="account.statCooling">限流账户</div>
         <span class="stat-icon" style="color:#ea580c">
           <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="8"/></svg>
         </span>
@@ -623,7 +756,7 @@
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statInvalid">账户失效</div>
+        <div class="stat-label" data-i18n="account.statInvalid">异常账户</div>
         <span class="stat-icon" style="color:#dc2626">
           <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="m15 9-6 6m0-6 6 6"/><circle cx="12" cy="12" r="8"/></svg>
         </span>
@@ -632,36 +765,54 @@
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statAuto">Auto 剩余</div>
+        <div class="stat-label" data-i18n="account.statDisabled">禁用账户</div>
+        <span class="stat-icon" style="color:#6f675d">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M8.5 8.5 15.5 15.5"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-disabled" style="color:#6f675d">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="account.statCalls">调用总数</div>
+        <span class="stat-icon" style="color:#111">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M5 19h14"/><path d="M8 16V10"/><path d="M12 16V6"/><path d="M16 16v-3"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-calls" style="color:#111">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="account.statAuto">Auto 余额</div>
         <span class="stat-icon" style="color:#2563eb">
-          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 12h16M12 4v16"/><circle cx="12" cy="12" r="8"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M6 19h12"/><path d="M12 16V9"/></svg>
         </span>
       </div>
       <div class="stat-num" id="s-qa" style="color:#2563eb">0</div>
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statFast">Fast 剩余</div>
+        <div class="stat-label" data-i18n="account.statFast">Fast 余额</div>
         <span class="stat-icon" style="color:#16a34a">
-          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M13 4 6 14h5l-1 6 8-12h-5z"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M6 19h12"/><path d="M10 16v-4"/><path d="M14 16V8"/></svg>
         </span>
       </div>
       <div class="stat-num" id="s-qf" style="color:#16a34a">0</div>
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statExpert">Expert 剩余</div>
+        <div class="stat-label" data-i18n="account.statExpert">Expert 余额</div>
         <span class="stat-icon" style="color:#7c3aed">
-          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.8 1-6.1-4.4-4.3 6.1-.9z"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M6 19h12"/><path d="M8 16v-2"/><path d="M12 16v-6"/><path d="M16 16V6"/></svg>
         </span>
       </div>
       <div class="stat-num" id="s-qe" style="color:#7c3aed">0</div>
     </div>
     <div class="stat-cell">
       <div class="stat-top">
-        <div class="stat-label" data-i18n="account.statHeavy">Heavy 剩余</div>
+        <div class="stat-label" data-i18n="account.statHeavy">Heavy 余额</div>
         <span class="stat-icon" style="color:#b0632a">
-          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.8 1-6.1-4.4-4.3 6.1-.9z"/><circle cx="12" cy="12" r="10"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M5 19h14"/><path d="M7 16v-1"/><path d="M10 16v-4"/><path d="M14 16V8"/><path d="M17 16V5"/></svg>
         </span>
       </div>
       <div class="stat-num" id="s-qh" style="color:#b0632a">0</div>
@@ -669,48 +820,9 @@
   </div>
 
   <div class="section-head" style="margin-top:40px">
-    <div class="section-title" data-i18n="account.sectionTable">账户明细</div>
-  </div>
-
-  <!-- Filters -->
-  <div class="filter-bar">
-    <div class="filter-group">
-      <span class="filter-label" data-i18n="account.filterStatusLabel">状态</span>
-      <button type="button" class="filter-chip active" data-status="all" onclick="switchStatus('all')">
-        <span data-i18n="account.filterStatusAll">全部</span>
-        <span class="filter-chip-count" id="fc-status-all">0</span>
-      </button>
-      <button type="button" class="filter-chip" data-status="active" onclick="switchStatus('active')">
-        <span data-i18n="account.filterStatusActive">正常</span>
-        <span class="filter-chip-count is-green" id="fc-status-active">0</span>
-      </button>
-      <button type="button" class="filter-chip" data-status="cooling" onclick="switchStatus('cooling')">
-        <span data-i18n="account.filterStatusCooling">限流</span>
-        <span class="filter-chip-count is-orange" id="fc-status-cooling">0</span>
-      </button>
-      <button type="button" class="filter-chip" data-status="invalid" onclick="switchStatus('invalid')">
-        <span data-i18n="account.filterStatusInvalid">异常</span>
-        <span class="filter-chip-count is-red" id="fc-status-invalid">0</span>
-      </button>
-    </div>
-    <div class="filter-group" id="pool-filter-group">
-      <span class="filter-label" data-i18n="account.filterTypeLabel">类型</span>
-      <div class="filter-group" id="pool-filter-chips"></div>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label" data-i18n="account.filterNsfwLabel">NSFW</span>
-      <button type="button" class="filter-chip active" data-nsfw="all" onclick="switchNsfw('all')">
-        <span data-i18n="account.filterNsfwAll">全部</span>
-        <span class="filter-chip-count" id="fc-nsfw-all">0</span>
-      </button>
-      <button type="button" class="filter-chip" data-nsfw="enabled" onclick="switchNsfw('enabled')">
-        <span data-i18n="account.filterNsfwEnabled">开启</span>
-        <span class="filter-chip-count is-purple" id="fc-nsfw-enabled">0</span>
-      </button>
-      <button type="button" class="filter-chip" data-nsfw="disabled" onclick="switchNsfw('disabled')">
-        <span data-i18n="account.filterNsfwDisabled">关闭</span>
-        <span class="filter-chip-count" id="fc-nsfw-disabled">0</span>
-      </button>
+    <div class="section-title-row">
+      <div class="section-title" data-i18n="account.sectionTable">账户明细</div>
+      <span class="section-count-badge" id="section-table-count">0</span>
     </div>
   </div>
 
@@ -722,18 +834,85 @@
       </button>
       <div class="pagi-meta">
         <span class="pagi-page" id="pagi-page">0 / 0</span>
-        <span class="pagi-info" id="pagi-info">共 0 条</span>
       </div>
       <button onclick="nextPage()" class="pagi-btn" id="btn-next">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
       </button>
     </div>
     <div class="table-toolbar-actions">
-      <button onclick="doExport()" class="toolbar-action" data-i18n="account.export">导出</button>
-<button onclick="batchNSFW()" id="btn-nsfw" class="toolbar-action" style="display:none" data-i18n="account.batchNsfw">开启 NSFW</button>
-      <button onclick="batchRefreshSel()" id="btn-refresh" class="toolbar-action" style="display:none" data-i18n="account.batchRefresh">刷新选中</button>
-      <button onclick="batchDeleteSel()" id="btn-delete" class="toolbar-action toolbar-action-danger" style="display:none" data-i18n="account.batchDelete">删除选中</button>
-      <button onclick="cancelBatch()" id="btn-batch-cancel" class="toolbar-action toolbar-action-danger" style="display:none">取消</button>
+      <div class="toolbar-dropdown" id="filter-menu">
+        <button type="button" id="btn-filter" class="toolbar-icon-btn" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M4 6h16"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+        </button>
+        <div class="toolbar-dropdown-panel" id="filter-panel" role="menu" aria-labelledby="btn-filter">
+          <div class="filter-bar">
+            <div class="filter-group">
+              <span class="filter-label" data-i18n="account.filterStatusLabel">状态</span>
+              <div class="filter-chip-list">
+                <button type="button" class="filter-chip active" data-status="all" onclick="switchStatus('all')">
+                  <span data-i18n="account.filterStatusAll">全部</span>
+                  <span class="filter-chip-count" id="fc-status-all">0</span>
+                </button>
+                <button type="button" class="filter-chip" data-status="active" onclick="switchStatus('active')">
+                  <span data-i18n="account.filterStatusActive">正常</span>
+                  <span class="filter-chip-count is-green" id="fc-status-active">0</span>
+                </button>
+                <button type="button" class="filter-chip" data-status="cooling" onclick="switchStatus('cooling')">
+                  <span data-i18n="account.filterStatusCooling">限流</span>
+                  <span class="filter-chip-count is-orange" id="fc-status-cooling">0</span>
+                </button>
+                <button type="button" class="filter-chip" data-status="invalid" onclick="switchStatus('invalid')">
+                  <span data-i18n="account.filterStatusInvalid">异常</span>
+                  <span class="filter-chip-count is-red" id="fc-status-invalid">0</span>
+                </button>
+                <button type="button" class="filter-chip" data-status="disabled" onclick="switchStatus('disabled')">
+                  <span data-i18n="account.filterStatusDisabled">禁用</span>
+                  <span class="filter-chip-count" id="fc-status-disabled">0</span>
+                </button>
+              </div>
+            </div>
+            <div class="filter-group" id="pool-filter-group">
+              <span class="filter-label" data-i18n="account.filterTypeLabel">类型</span>
+              <div class="filter-chip-list" id="pool-filter-chips"></div>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label" data-i18n="account.filterNsfwLabel">NSFW</span>
+              <div class="filter-chip-list">
+                <button type="button" class="filter-chip active" data-nsfw="all" onclick="switchNsfw('all')">
+                  <span data-i18n="account.filterNsfwAll">全部</span>
+                  <span class="filter-chip-count" id="fc-nsfw-all">0</span>
+                </button>
+                <button type="button" class="filter-chip" data-nsfw="enabled" onclick="switchNsfw('enabled')">
+                  <span data-i18n="account.filterNsfwEnabled">开启</span>
+                  <span class="filter-chip-count is-purple" id="fc-nsfw-enabled">0</span>
+                </button>
+                <button type="button" class="filter-chip" data-nsfw="disabled" onclick="switchNsfw('disabled')">
+                  <span data-i18n="account.filterNsfwDisabled">关闭</span>
+                  <span class="filter-chip-count" id="fc-nsfw-disabled">0</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <button type="button" onclick="doExport()" id="btn-export" class="toolbar-icon-btn">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      </button>
+      <button type="button" onclick="batchNSFW()" id="btn-nsfw" class="row-nsfw-btn" style="display:none">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="7.25"/>
+          <text x="10" y="10.4">18</text>
+        </svg>
+      </button>
+      <button type="button" onclick="batchRefreshSel()" id="btn-refresh" class="toolbar-icon-btn" style="display:none">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
+      </button>
+      <button type="button" onclick="batchDeleteSel()" id="btn-delete" class="toolbar-icon-btn toolbar-icon-btn-danger" style="display:none">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
+      </button>
+      <button type="button" onclick="cancelBatch()" id="btn-batch-cancel" class="toolbar-icon-btn toolbar-icon-btn-danger" style="display:none">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M6 6 18 18"/><path d="M18 6 6 18"/></svg>
+      </button>
       <select class="input toolbar-page-size" id="page-size-sel" onchange="changePageSize(this.value)">
         <option value="50">50 / 页</option>
         <option value="100">100 / 页</option>
@@ -849,11 +1028,8 @@
     <div class="modal-title" data-i18n="account.exportTitle">导出格式</div>
     <div class="dialog-help"><span data-i18n="account.exportCountPrefix">共 </span><b id="exp-count">0</b><span data-i18n="account.exportCountSuffix"> 个 Token</span></div>
     <div class="dialog-body" style="gap:8px">
-      <button id="exp-json-btn" class="dialog-btn dialog-btn-primary export-option-btn" data-i18n="account.exportJson">JSON格式(全面，但不同版本可能不兼容)</button>
-      <button id="exp-txt-btn"  class="dialog-btn export-option-btn" data-i18n="account.exportTxt">TXT格式(Token导出，所有版本通用)</button>
-    </div>
-    <div class="dialog-actions" style="margin-top:4px">
-      <button onclick="closeModal('modal-export')" class="dialog-btn" data-i18n="account.cancel">取消</button>
+      <button id="exp-json-btn" class="dialog-btn dialog-btn-primary export-option-btn" data-i18n="account.exportJson">JSON格式（完整导出）</button>
+      <button id="exp-txt-btn"  class="dialog-btn export-option-btn" data-i18n="account.exportTxt">TXT格式（仅导出 Token）</button>
     </div>
   </div>
 </div>
@@ -884,6 +1060,7 @@ const sel = new Set();
 const refreshingTokens = new Set();
 let _cb = null;
 let _editingToken = '';
+let _filterMenuBound = false;
 
 function tr(key, params, fallback) {
   const value = t(key, params);
@@ -894,6 +1071,22 @@ function applyAccountI18n() {
   document.title = tr('account.pageTitle', null, 'Grok2API - 账户管理');
   document.querySelectorAll('#page-size-sel option').forEach(opt => {
     opt.textContent = tr('account.pageSizeOption', { n: opt.value }, `${opt.value} / 页`);
+  });
+  const toolbarTips = [
+    ['btn-filter', 'account.filter', '筛选'],
+    ['btn-export', 'account.export', '导出数据'],
+    ['btn-nsfw', 'account.batchNsfw', '开启 NSFW'],
+    ['btn-refresh', 'account.batchRefresh', '刷新选中'],
+    ['btn-delete', 'account.batchDelete', '删除选中'],
+    ['btn-batch-cancel', 'account.cancel', '取消'],
+  ];
+  toolbarTips.forEach(([id, key, fallback]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const label = tr(key, null, fallback);
+    el.setAttribute('data-tip', label);
+    el.setAttribute('aria-label', label);
+    el.setAttribute('title', label);
   });
   const pageSizeSel = document.getElementById('page-size-sel');
   if (pageSizeSel) pageSizeSel.value = String(pageSize);
@@ -910,6 +1103,7 @@ function waitI18n() {
   await waitI18n();
   applyAccountI18n();
   await renderAdminHeader?.();
+  initFilterMenu();
   const key = await adminKey.get();
   if (!key || !await verifyKey(ADMIN_API + '/verify', key).catch(() => false))
     return location.href = '/admin/login';
@@ -947,13 +1141,23 @@ function poolLabel(pool) {
   return tr(`account.pool.${pool}`, null, pool);
 }
 
+function isDisabledStatus(status) {
+  return status === 'disabled';
+}
+
+function isInvalidStatus(status) {
+  return !['active', 'cooling', 'disabled'].includes(status);
+}
+
 function renderStats() {
   const active  = allTokens.filter(t => t.status === 'active').length;
   const cooling = allTokens.filter(t => t.status === 'cooling').length;
-  const invalid = allTokens.filter(t => !['active','cooling'].includes(t.status)).length;
-  let qa = 0, qf = 0, qe = 0, qh = 0;
+  const invalid = allTokens.filter(t => isInvalidStatus(t.status)).length;
+  const disabled = allTokens.filter(t => isDisabledStatus(t.status)).length;
+  let calls = 0, qa = 0, qf = 0, qe = 0, qh = 0;
   for (const t of allTokens) {
     const q = t.quota || {};
+    calls += (t.use_count || 0) + (t.fail_count || 0);
     qa += q.auto?.remaining   || 0;
     qf += q.fast?.remaining   || 0;
     qe += q.expert?.remaining || 0;
@@ -963,6 +1167,8 @@ function renderStats() {
   $('s-active',  active);
   $('s-cooling', cooling);
   $('s-invalid', invalid);
+  $('s-disabled', disabled);
+  $('s-calls', fmt(calls));
   $('s-qa', fmt(qa)); $('s-qf', fmt(qf)); $('s-qe', fmt(qe)); $('s-qh', fmt(qh));
 }
 
@@ -970,6 +1176,47 @@ function renderFilters() {
   renderStatusFilters();
   renderNsfwFilters();
   renderPoolFilters();
+  syncFilterTrigger();
+}
+
+function initFilterMenu() {
+  if (_filterMenuBound) return;
+  const menu = document.getElementById('filter-menu');
+  const trigger = document.getElementById('btn-filter');
+  const panel = document.getElementById('filter-panel');
+  if (!menu || !trigger || !panel) return;
+  _filterMenuBound = true;
+
+  const close = () => {
+    menu.classList.remove('open');
+    trigger.setAttribute('aria-expanded', 'false');
+    syncFilterTrigger();
+  };
+
+  trigger.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const open = !menu.classList.contains('open');
+    menu.classList.toggle('open', open);
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    syncFilterTrigger();
+  });
+
+  panel.addEventListener('click', (event) => event.stopPropagation());
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Node) || !menu.contains(target)) close();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') close();
+  });
+}
+
+function syncFilterTrigger() {
+  const menu = document.getElementById('filter-menu');
+  const trigger = document.getElementById('btn-filter');
+  if (!menu || !trigger) return;
+  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || menu.classList.contains('open');
+  trigger.classList.toggle('is-active', active);
 }
 
 function renderStatusFilters() {
@@ -977,7 +1224,8 @@ function renderStatusFilters() {
   setFilterCount('fc-status-all', scope.length);
   setFilterCount('fc-status-active', scope.filter(t => t.status === 'active').length);
   setFilterCount('fc-status-cooling', scope.filter(t => t.status === 'cooling').length);
-  setFilterCount('fc-status-invalid', scope.filter(t => !['active','cooling'].includes(t.status)).length);
+  setFilterCount('fc-status-invalid', scope.filter(t => isInvalidStatus(t.status)).length);
+  setFilterCount('fc-status-disabled', scope.filter(t => isDisabledStatus(t.status)).length);
   document.querySelectorAll('[data-status]').forEach(el => el.classList.toggle('active', el.dataset.status === curStatus));
 }
 
@@ -1017,7 +1265,8 @@ function applyPoolFilter(items, pool = curPool) {
 
 function applyStatusFilter(items, status = curStatus) {
   if (status === 'all') return items;
-  if (status === 'invalid') return items.filter(t => !['active', 'cooling'].includes(t.status));
+  if (status === 'invalid') return items.filter(t => isInvalidStatus(t.status));
+  if (status === 'disabled') return items.filter(t => isDisabledStatus(t.status));
   return items.filter(t => t.status === status);
 }
 
@@ -1047,8 +1296,8 @@ function renderTable() {
     ? slice.map(rowHtml).join('')
     : `<tr><td colspan="10" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
-  $('pagi-page', `${total ? curPage : 0} / ${pages}`);
-  $('pagi-info', tr('account.pageInfo', { n: total }, `共 ${total} 条`));
+  $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
+  $('section-table-count', total);
   const prev = document.getElementById('btn-prev'), next = document.getElementById('btn-next');
   prev.disabled = curPage <= 1; next.disabled = curPage >= pages;
   updateBatchBtns();
@@ -1057,6 +1306,7 @@ function renderTable() {
 function rowHtml(t) {
   const q      = t.quota || {};
   const isNsfw = (t.tags || []).includes('nsfw');
+  const isDisabled = t.status === 'disabled';
   const isRefreshing = refreshingTokens.has(t.token);
   const success = t.use_count || 0;
   const fail = t.fail_count || 0;
@@ -1091,6 +1341,11 @@ function rowHtml(t) {
     <td style="font-size:12px;color:#9a9a9a">${fmtDate(t.last_used_at)}</td>
     <td><div class="row-actions">
       ${nsfwBtn}
+      <button onclick="${isDisabled ? `restoreOne('${xe(t.token)}')` : `disableOne('${xe(t.token)}')`}" class="row-icon-btn row-icon-btn-state" data-tip="${xe(isDisabled ? tr('account.actionRestore', null, '恢复账号') : tr('account.actionDisable', null, '禁用账号'))}" aria-label="${xe(isDisabled ? tr('account.actionRestore', null, '恢复账号') : tr('account.actionDisable', null, '禁用账号'))}">
+        ${isDisabled
+          ? '<svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.708"/><path d="M3 4v5h5"/></svg>'
+          : '<svg viewBox="0 0 24 24" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M8.5 8.5 15.5 15.5"/></svg>'}
+      </button>
       <button onclick="refreshOne('${xe(t.token)}')" class="row-icon-btn${isRefreshing ? ' is-loading' : ''}" data-tip="${xe(isRefreshing ? tr('account.refreshing', { n: 1 }, '正在刷新 1 个账户…') : tr('account.actionRefresh', null, '刷新 Usage'))}" aria-label="${xe(tr('account.actionRefresh', null, '刷新 Usage'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
       </button>
@@ -1197,7 +1452,8 @@ function statusBadge(s) {
     active:['badge-active', tr('account.status.active', null, '正常')],
     cooling:['badge-cooling', tr('account.status.cooling', null, '限流')],
     expired:['badge-expired', tr('account.status.expired', null, '过期')],
-    invalid:['badge-invalid', tr('account.status.invalid', null, '失效')],
+    disabled:['badge-disabled', tr('account.status.disabled', null, '禁用')],
+    invalid:['badge-invalid', tr('account.status.invalid', null, '异常')],
   };
   const [cls, label] = m[s] || ['badge-invalid', s || tr('account.unknown', null, '未知')];
   return `<span class="badge ${cls}">${label}</span>`;
@@ -1481,6 +1737,40 @@ async function refreshOne(token) {
     renderTable();
   }
 }
+
+async function setDisabled(token, disabled) {
+  const masked = mask(token);
+  const title = disabled
+    ? tr('account.disableConfirmTitle', null, '禁用账号')
+    : tr('account.restoreConfirmTitle', null, '恢复账号');
+  const body = disabled
+    ? tr('account.disableConfirmBody', { token: `<code>${masked}</code>` }, `确认禁用 <code>${masked}</code>？<br><small style="color:var(--fg-muted)">禁用后该账号不会参与请求分配。</small>`)
+    : tr('account.restoreConfirmBody', { token: `<code>${masked}</code>` }, `确认恢复 <code>${masked}</code>？<br><small style="color:var(--fg-muted)">恢复后该账号将重新参与请求分配。</small>`);
+
+  openConfirm(title, body, async () => {
+    try {
+      showToast(
+        disabled
+          ? tr('account.disablingOne', null, '正在禁用账号…')
+          : tr('account.restoringOne', null, '正在恢复账号…'),
+        'info',
+      );
+      await _api('POST', '/tokens/disabled', { token, disabled });
+      showToast(
+        disabled
+          ? tr('account.disableDone', null, '账号已禁用')
+          : tr('account.restoreDone', null, '账号已恢复'),
+        'success',
+      );
+      await load();
+    } catch (e) {
+      showToast(`${tr('account.operationFailed', null, '操作失败')}: ${e.message}`, 'error');
+    }
+  });
+}
+
+function disableOne(token) { setDisabled(token, true); }
+function restoreOne(token) { setDisabled(token, false); }
 
 async function batchRefreshSel() {
   if (!sel.size) return;

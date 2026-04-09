@@ -2,6 +2,7 @@
 
 import orjson
 
+from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 
@@ -125,12 +126,14 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
     try:
         body = await _do_fetch(token, mode_name)
     except Exception as exc:
-        logger.debug("rate-limits fetch failed: token={}... mode={} err={}", token[:10], mode_name, exc)
+        if is_invalid_credentials_error(exc):
+            raise
+        logger.debug("rate-limits fetch failed: token={}... mode={} error={}", token[:10], mode_name, exc)
         return None
 
     data = parse_rate_limits(body)
     if data is None:
-        logger.debug("rate-limits empty response: token={}... mode={} body={}", token[:10], mode_name, body)
+        logger.debug("rate-limits response missing quota fields: token={}... mode={} body={}", token[:10], mode_name, body)
         return None
 
     return _to_quota_window(data, now_ms())
@@ -140,23 +143,24 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def fetch_all_quotas(token: str) -> dict[int, object] | None:
-    """Fetch quota windows for all four modes (auto / fast / expert / heavy) concurrently.
+async def fetch_all_quotas(token: str, mode_ids: tuple[int, ...] | None = None) -> dict[int, object] | None:
+    """Fetch quota windows for the requested modes concurrently.
 
-    Issues four requests in parallel.  Mode 3 (heavy) will silently return
-    ``None`` for basic and super accounts — this is expected and harmless.
-    Returns ``{mode_id: QuotaWindow}`` for every mode that responded
-    successfully, or ``None`` if all four failed.
+    ``mode_ids`` defaults to ``(0, 1, 2, 3)``. Returns ``{mode_id: QuotaWindow}``
+    for every mode that responded successfully, or ``None`` if every requested
+    mode failed.
     """
     import asyncio
-    results = await asyncio.gather(
-        _fetch_one(token, 0),
-        _fetch_one(token, 1),
-        _fetch_one(token, 2),
-        _fetch_one(token, 3),
-        return_exceptions=False,
-    )
-    windows = {mode_id: win for mode_id, win in enumerate(results) if win is not None}
+    requested = mode_ids or (0, 1, 2, 3)
+    results = await asyncio.gather(*(_fetch_one(token, mode_id) for mode_id in requested), return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception) and is_invalid_credentials_error(result):
+            raise result
+    windows = {
+        mode_id: win
+        for mode_id, win in zip(requested, results, strict=False)
+        if win is not None and not isinstance(win, Exception)
+    }
     return windows if windows else None
 
 
@@ -165,4 +169,25 @@ async def fetch_mode_quota(token: str, mode_id: int) -> object | None:
     return await _fetch_one(token, mode_id)
 
 
-__all__ = ["parse_rate_limits", "fetch_all_quotas", "fetch_mode_quota"]
+def is_invalid_credentials_body(body: str) -> bool:
+    """Return whether *body* contains the Grok invalid-session marker."""
+    text = str(body or "").lower()
+    return "invalid-credentials" in text or "failed to look up session id" in text
+
+
+def is_invalid_credentials_error(exc: BaseException) -> bool:
+    """Return whether *exc* is the Grok invalid-session credential failure."""
+    if not isinstance(exc, UpstreamError):
+        return False
+    if exc.status != 400:
+        return False
+    return is_invalid_credentials_body(str(exc.details.get("body", "") or ""))
+
+
+__all__ = [
+    "parse_rate_limits",
+    "fetch_all_quotas",
+    "fetch_mode_quota",
+    "is_invalid_credentials_body",
+    "is_invalid_credentials_error",
+]

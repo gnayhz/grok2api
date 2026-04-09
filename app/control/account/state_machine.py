@@ -118,7 +118,16 @@ def is_selectable(record: AccountRecord, mode_id: int, *, now: int | None = None
     if status != AccountStatus.ACTIVE:
         return False
     qs = record.quota_set()
-    return not qs.get(mode_id).is_exhausted()
+    win = qs.get(mode_id)
+    return win is not None and not win.is_exhausted()
+
+
+def is_manageable(record: AccountRecord, *, now: int | None = None) -> bool:
+    """Return True if the account should participate in maintenance flows."""
+    if record.is_deleted():
+        return False
+    status = derive_status(record, now=now)
+    return status in (AccountStatus.ACTIVE, AccountStatus.COOLING)
 
 
 # ---------------------------------------------------------------------------
@@ -157,31 +166,33 @@ def apply_feedback(
     elif feedback.kind == FeedbackKind.SUCCESS:
         # Decrement locally when no real data is available.
         win = qs.get(feedback.mode_id)
-        updated_win = QuotaWindow(
-            remaining      = max(0, win.remaining - 1),
-            total          = win.total,
-            window_seconds = win.window_seconds,
-            reset_at       = win.reset_at,
-            synced_at      = win.synced_at,
-            source         = win.source,
-        )
-        qs.set(feedback.mode_id, updated_win)
+        if win is not None:
+            updated_win = QuotaWindow(
+                remaining      = max(0, win.remaining - 1),
+                total          = win.total,
+                window_seconds = win.window_seconds,
+                reset_at       = win.reset_at,
+                synced_at      = win.synced_at,
+                source         = win.source,
+            )
+            qs.set(feedback.mode_id, updated_win)
     elif feedback.kind == FeedbackKind.RATE_LIMITED:
         # Mark quota as zero; set reset_at from retry_after if available.
         win = qs.get(feedback.mode_id)
-        reset_at = (
-            ts + feedback.retry_after_ms
-            if feedback.retry_after_ms
-            else (ts + win.window_seconds * 1000)
-        )
-        qs.set(feedback.mode_id, QuotaWindow(
-            remaining      = 0,
-            total          = win.total,
-            window_seconds = win.window_seconds,
-            reset_at       = reset_at,
-            synced_at      = win.synced_at,
-            source         = win.source,
-        ))
+        if win is not None:
+            reset_at = (
+                ts + feedback.retry_after_ms
+                if feedback.retry_after_ms
+                else (ts + win.window_seconds * 1000)
+            )
+            qs.set(feedback.mode_id, QuotaWindow(
+                remaining      = 0,
+                total          = win.total,
+                window_seconds = win.window_seconds,
+                reset_at       = reset_at,
+                synced_at      = win.synced_at,
+                source         = win.source,
+            ))
 
     # Update usage counters.
     if feedback.kind == FeedbackKind.SUCCESS and feedback.apply_usage:
@@ -301,6 +312,7 @@ __all__ = [
     "AccountFeedback",
     "derive_status",
     "is_selectable",
+    "is_manageable",
     "apply_feedback",
     "clear_failures",
 ]

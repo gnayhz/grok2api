@@ -83,7 +83,7 @@ async def fetch_livekit_token(
         lease,
         ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
     )
-    logger.debug("fetch_livekit_token: ok")
+    logger.debug("livekit session token fetched")
     return result
 
 
@@ -142,10 +142,10 @@ async def connect_livekit_ws(
             lease,
             ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR),
         )
-        logger.error("connect_livekit_ws: failed: {}", exc)
+        logger.error("livekit websocket connect failed: error={}", exc)
         raise UpstreamError(f"connect_livekit_ws: {exc}") from exc
 
-    logger.debug("connect_livekit_ws: connected to {}", url)
+    logger.debug("livekit websocket connected: url={}", url)
     return connection
 
 

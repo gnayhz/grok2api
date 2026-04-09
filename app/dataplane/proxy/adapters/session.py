@@ -23,9 +23,7 @@ def _skip_proxy_ssl(proxy_url: str) -> bool:
     if not proxy_url:
         return False
     cfg = get_config()
-    # New key; fall back to old key for backward compatibility.
-    return cfg.get_bool("proxy.egress.skip_ssl_verify",
-                        cfg.get_bool("proxy.skip_proxy_ssl_verify", False))
+    return cfg.get_bool("proxy.egress.skip_ssl_verify", False)
 
 
 def normalize_proxy_url(url: str) -> str:

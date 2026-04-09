@@ -20,6 +20,7 @@ from app.platform.errors import AppError, ErrorKind, UpstreamError, ValidationEr
 from app.platform.runtime.batch import run_batch
 from app.platform.runtime.task import create_task, expire_task, get_task
 from app.control.account.commands import AccountPatch, ListAccountsQuery
+from app.control.account.state_machine import is_manageable
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
 from . import get_refresh_svc, get_repo
 
-router = APIRouter(prefix="/batch")
+router = APIRouter(prefix="/batch", tags=["Admin - Batch"])
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,7 +50,7 @@ async def _list_all_tokens(repo: "AccountRepository") -> list[str]:
     page_num, tokens = 1, []
     while True:
         page = await repo.list_accounts(ListAccountsQuery(page=page_num, page_size=2000))
-        tokens.extend(r.token for r in page.items)
+        tokens.extend(r.token for r in page.items if is_manageable(r))
         if page_num * 2000 >= page.total:
             break
         page_num += 1
@@ -180,20 +181,30 @@ async def _nsfw_one(repo: "AccountRepository", token: str, enabled: bool) -> dic
     return {"success": True, "tagged": enabled}
 
 
-async def _cache_clear_one(token: str) -> dict:
+async def _cache_clear_one(repo: "AccountRepository", token: str) -> dict:
+    from app.control.account.invalid_credentials import mark_account_invalid_credentials
     from app.dataplane.reverse.transport.assets import list_assets, delete_asset
-    resp  = await list_assets(token)
-    items = resp.get("assets", resp.get("items", []))
+    try:
+        resp = await list_assets(token)
+        items = resp.get("assets", resp.get("items", []))
 
-    async def _del(item: dict) -> int:
-        aid = item.get("id") or item.get("assetId")
-        if not aid:
-            return 0
-        await delete_asset(token, aid)
-        return 1
+        async def _delete_one(item: dict) -> int:
+            asset_id = item.get("id") or item.get("assetId")
+            if not asset_id:
+                return 0
+            await delete_asset(token, asset_id)
+            return 1
 
-    results = await asyncio.gather(*[_del(i) for i in items], return_exceptions=True)
-    return {"deleted": sum(r for r in results if isinstance(r, int))}
+        results = await asyncio.gather(*[_delete_one(item) for item in items], return_exceptions=True)
+        for result in results:
+            if not isinstance(result, Exception):
+                continue
+            if await mark_account_invalid_credentials(repo, token, result, source="asset batch clear"):
+                raise result
+        return {"deleted": sum(r for r in results if isinstance(r, int))}
+    except Exception as exc:
+        await mark_account_invalid_credentials(repo, token, exc, source="asset batch clear")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +265,12 @@ async def batch_cache_clear(
         tokens = await _list_all_tokens(repo)
     if not tokens:
         raise ValidationError("No tokens available", param="tokens")
+
+    async def _clear_one(token: str) -> dict:
+        return await _cache_clear_one(repo, token)
+
     c = _concurrency(concurrency, "batch.asset_delete_concurrency")
-    return await _dispatch(tokens, _cache_clear_one, use_async=async_mode, concurrency=c)
+    return await _dispatch(tokens, _clear_one, use_async=async_mode, concurrency=c)
 
 
 # ---------------------------------------------------------------------------

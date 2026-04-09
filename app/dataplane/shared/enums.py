@@ -11,6 +11,7 @@ class ModeId(IntEnum):
     AUTO   = 0
     FAST   = 1
     EXPERT = 2
+    HEAVY  = 3
 
 
 class PoolId(IntEnum):
@@ -41,7 +42,12 @@ STATUS_STR_TO_ID: dict[str, int] = {
     "disabled": int(StatusId.DISABLED),
 }
 
-ALL_MODE_IDS: tuple[int, ...] = (int(ModeId.AUTO), int(ModeId.FAST), int(ModeId.EXPERT), 3)
+ALL_MODE_IDS: tuple[int, ...] = (
+    int(ModeId.AUTO),
+    int(ModeId.FAST),
+    int(ModeId.EXPERT),
+    int(ModeId.HEAVY),
+)
 
 __all__ = [
     "ModeId", "PoolId", "StatusId",

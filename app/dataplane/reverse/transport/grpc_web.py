@@ -63,7 +63,7 @@ async def post_grpc_web(
         body_bytes = response.content
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:300]
-            logger.error("gRPC-Web POST failed: url={} status={} body={}", url, response.status_code, body_text)
+            logger.error("grpc-web post failed: url={} status={} body={}", url, response.status_code, body_text)
             raise UpstreamError(f"Upstream returned {response.status_code}", status=response.status_code, body=body_text)
         return GrpcClient.parse_response(body_bytes, content_type=response.headers.get("content-type"), headers=response.headers)
 

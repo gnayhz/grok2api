@@ -5,6 +5,8 @@ Maps upstream HTTP status codes and response bodies to a ResultCategory.
 
 from typing import Any
 
+from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_body
+
 from .types import ResultCategory
 
 
@@ -26,6 +28,9 @@ def classify_result(
         return ResultCategory.RATE_LIMITED
 
     if status_code == 401:
+        return ResultCategory.AUTH_FAILURE
+
+    if status_code == 400 and is_invalid_credentials_body(body):
         return ResultCategory.AUTH_FAILURE
 
     if status_code == 403:

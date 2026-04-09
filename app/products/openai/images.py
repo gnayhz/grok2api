@@ -51,7 +51,7 @@ from ._format import (
     make_stream_chunk,
     make_thinking_chunk,
 )
-from .chat import _quota_sync, _fail_sync
+from .chat import _quota_sync, _fail_sync, _feedback_kind
 
 _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
 
@@ -138,11 +138,9 @@ async def _lite_progress_updates(
 
 def _normalize_response_format(response_format: str) -> str:
     fmt = (response_format or "url").strip().lower()
-    if fmt == "base64":
-        return "b64_json"
     if fmt not in {"url", "b64_json"}:
         raise ValidationError(
-            "response_format must be one of ['url', 'b64_json', 'base64']",
+            "response_format must be one of ['url', 'b64_json']",
             param="response_format",
         )
     return fmt
@@ -288,6 +286,7 @@ async def generate(
     if stream:
         async def _sse_stream() -> AsyncGenerator[str, None]:
             success = False
+            fail_exc: BaseException | None = None
             progress_map: dict[object, int] = {}
             completed_ids: set[object] = set()
             last_progress = -1
@@ -303,7 +302,7 @@ async def generate(
                     if ev_type == "error":
                         raise UpstreamError(f"Image error: {ev.get('error', '')}")
                     if ev_type == "moderated":
-                        logger.warning("Image slot {} moderated (skipped)", ev.get("image_id", "")[:8])
+                        logger.warning("image generation slot moderated: image_id={}", ev.get("image_id", "")[:8])
                         continue
                     if ev_type == "progress":
                         key = ev.get("image_id") or f"progress-{len(progress_map)}"
@@ -345,14 +344,17 @@ async def generate(
                 yield f"data: {orjson.dumps(final).decode()}\n\n"
                 yield "data: [DONE]\n\n"
                 success = True
+            except BaseException as exc:
+                fail_exc = exc
+                raise
             finally:
                 await _acct_dir.release(acct)
-                kind = FeedbackKind.SUCCESS if success else FeedbackKind.SERVER_ERROR
+                kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
                 await _acct_dir.feedback(token, kind, int(spec.mode_id))
                 if success:
                     asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
                 else:
-                    asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                    asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
         return _sse_stream()
 
@@ -362,6 +364,7 @@ async def generate(
     progress_map: dict[object, int] = {}
     completed_ids: set[object] = set()
     success = False
+    fail_exc: BaseException | None = None
     try:
         async for ev in stream_images(
             token, prompt,
@@ -374,7 +377,7 @@ async def generate(
             if ev_type == "error":
                 raise UpstreamError(f"Image generation failed: {ev.get('error', 'unknown')}")
             if ev_type == "moderated":
-                logger.warning("Image slot {} moderated (skipped)", ev.get("image_id", "")[:8])
+                logger.warning("image generation slot moderated: image_id={}", ev.get("image_id", "")[:8])
                 continue
             if ev_type == "progress":
                 key = ev.get("image_id") or f"progress-{len(progress_map)}"
@@ -408,14 +411,17 @@ async def generate(
                 )
                 finals.append(image)
         success = True
+    except BaseException as exc:
+        fail_exc = exc
+        raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else FeedbackKind.SERVER_ERROR
+        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
         await _acct_dir.feedback(token, kind, int(spec.mode_id))
         if success:
             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
         else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
     if chat_format:
         content = "\n\n".join(image.markdown_value for image in finals)
@@ -457,7 +463,7 @@ async def _generate_lite(
     response_id = make_response_id()
     cfg         = get_config()
     timeout_s   = cfg.get_float("chat.timeout", 120.0)
-    logger.debug("Lite image fan-out: requests={} mode={}", n, spec.mode_id.name.lower())
+    logger.debug("lite image fan-out started: request_count={} mode={}", n, spec.mode_id.name.lower())
 
     if stream:
         async def _sse_stream() -> AsyncGenerator[str, None]:
@@ -565,12 +571,7 @@ def _normalize_edit_inputs(image_inputs: list[str]) -> list[str]:
     cleaned = [item.strip() for item in image_inputs if isinstance(item, str) and item.strip()]
     if not cleaned:
         raise ValidationError("Image edit requires at least one image_url content block", param="messages")
-    if len(cleaned) > _EDIT_MAX_REFERENCES:
-        raise ValidationError(
-            f"image edit supports at most {_EDIT_MAX_REFERENCES} reference images",
-            param="image",
-        )
-    return cleaned
+    return cleaned[-_EDIT_MAX_REFERENCES:]
 
 
 def _normalize_edit_size(size: str) -> str:
@@ -811,7 +812,7 @@ async def _collect_edit_images(
 
     if len(images) < requested_n:
         logger.warning(
-            "Image edit returned fewer images than requested: requested={} got={}",
+            "image edit returned fewer images than requested: requested={} received={}",
             requested_n, len(images),
         )
     return images[:requested_n]
@@ -920,6 +921,7 @@ async def _run_lite_request(
     token   = acct.token
     adapter = StreamAdapter()
     success = False
+    fail_exc: BaseException | None = None
     try:
         async for line in _stream_lite_generate(
             token,
@@ -950,14 +952,17 @@ async def _run_lite_request(
                     success = True
                     return image
         raise UpstreamError("Image generation returned no images")
+    except BaseException as exc:
+        fail_exc = exc
+        raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else FeedbackKind.SERVER_ERROR
+        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
         await _acct_dir.feedback(token, kind, int(spec.mode_id))
         if success:
             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
         else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
 
 async def _run_lite_batch(
@@ -1045,6 +1050,7 @@ async def edit(
     if stream:
         async def _sse_stream() -> AsyncGenerator[str, None]:
             success = False
+            fail_exc: BaseException | None = None
             progress_map: dict[int, int] = {}
             last_progress = -1
             queue: asyncio.Queue[tuple[int, int]] = asyncio.Queue()
@@ -1091,18 +1097,22 @@ async def edit(
                 yield f"data: {orjson.dumps(final).decode()}\n\n"
                 yield "data: [DONE]\n\n"
                 success = True
+            except BaseException as exc:
+                fail_exc = exc
+                raise
             finally:
                 await _acct_dir.release(acct)
-                kind = FeedbackKind.SUCCESS if success else FeedbackKind.SERVER_ERROR
+                kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
                 await _acct_dir.feedback(token, kind, int(spec.mode_id))
                 if success:
                     asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
                 else:
-                    asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                    asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
         return _sse_stream()
 
     success = False
+    fail_exc: BaseException | None = None
     reasoning_updates: list[str] = []
     progress_map: dict[int, int] = {}
     try:
@@ -1128,14 +1138,17 @@ async def edit(
             progress_cb=_progress,
         )
         success = True
+    except BaseException as exc:
+        fail_exc = exc
+        raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else FeedbackKind.SERVER_ERROR
+        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
         await _acct_dir.feedback(token, kind, int(spec.mode_id))
         if success:
             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
         else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
     if chat_format:
         content = "\n\n".join(image.markdown_value for image in images)

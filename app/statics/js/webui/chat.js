@@ -51,6 +51,17 @@
     if (typeof showToast === 'function') showToast(message, type);
   }
 
+  function formatModelOptionLabel(modelId, fallbackName) {
+    const normalized = String(modelId || '').trim().toLowerCase();
+    if (!normalized) return fallbackName || '';
+
+    return normalized
+      .split('-')
+      .filter(Boolean)
+      .map((part) => part ? part.charAt(0).toUpperCase() + part.slice(1) : part)
+      .join(' ');
+  }
+
   function currentSystemPrompt() {
     return systemInput ? (systemInput.value || '').trim() : '';
   }
@@ -450,6 +461,10 @@
     card.textContent = content;
   }
 
+  function renderAssistantWaiting(card) {
+    card.innerHTML = '<div class="msg-loading" aria-hidden="true"><span class="msg-loading-spinner"></span></div>';
+  }
+
   function parseSseEvent(chunk) {
     let event = 'message';
     const dataLines = [];
@@ -551,6 +566,7 @@
         ? item.messages
           .filter((entry) => {
             if (!entry || typeof entry.role !== 'string') return false;
+            if (!['user', 'assistant', 'error'].includes(entry.role)) return false;
             return typeof entry.content === 'string' || Array.isArray(entry.content);
           })
           .map((entry) => ({
@@ -862,15 +878,10 @@
   function createMessage(role, initialText = '', initialReasoning = '', messageIndex = -1) {
     hideEmpty();
     const hasReasoning = role === 'assistant' && hasVisibleReasoning(initialReasoning);
+    const isAssistantWaiting = role === 'assistant' && messageIndex < 0 && !hasReasoning && typeof initialText === 'string' && !initialText.trim();
 
     const wrap = document.createElement('div');
     wrap.className = `msg ${role}`;
-
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = role === 'user'
-      ? text('webui.chat.userLabel', 'You')
-      : text('webui.chat.assistantLabel', 'Grok');
 
     const reasoning = document.createElement('div');
     reasoning.className = 'msg-reasoning';
@@ -942,11 +953,12 @@
         editor.focus();
         editor.setSelectionRange(editor.value.length, editor.value.length);
       }, 0);
+    } else if (isAssistantWaiting) {
+      renderAssistantWaiting(card);
     } else {
       renderMessageContent(card, role, initialText);
     }
 
-    wrap.appendChild(meta);
     if (role === 'assistant') {
       wrap.appendChild(reasoning);
     }
@@ -1052,16 +1064,28 @@
 
     thread.appendChild(wrap);
 
-    return { reasoning, reasoningBody, card, text: initialText, reasoningText: initialReasoning };
+    return {
+      reasoning,
+      reasoningBody,
+      card,
+      text: initialText,
+      reasoningText: initialReasoning,
+      waiting: isAssistantWaiting,
+    };
   }
 
   function updateAssistant(entry, delta) {
+    if (entry.waiting) entry.waiting = false;
     entry.text += delta;
     renderMessageContent(entry.card, 'assistant', entry.text);
     scrollThread();
   }
 
   function updateReasoning(entry, delta) {
+    if (entry.waiting) {
+      entry.waiting = false;
+      entry.card.innerHTML = '';
+    }
     entry.reasoningText += delta;
     const hasReasoning = hasVisibleReasoning(entry.reasoningText);
     entry.reasoning.hidden = !hasReasoning;
@@ -1232,7 +1256,9 @@
     const outgoing = [];
     const system = currentSystemPrompt();
     if (system) outgoing.push({ role: 'system', content: system });
-    messages.forEach((message) => outgoing.push(message));
+    messages
+      .filter((message) => message && (message.role === 'user' || message.role === 'assistant'))
+      .forEach((message) => outgoing.push(message));
     return {
       model: modelSelect.value || PREFERRED_MODEL,
       messages: outgoing,
@@ -1256,7 +1282,7 @@
     availableModels.forEach((item) => {
       const opt = document.createElement('option');
       opt.value = item.id;
-      opt.textContent = item.name || item.id;
+      opt.textContent = formatModelOptionLabel(item.id, item.name || item.id);
       modelSelect.appendChild(opt);
     });
     modelSelect.value = ids.includes(PREFERRED_MODEL) ? PREFERRED_MODEL : (ids[0] || PREFERRED_MODEL);
@@ -1407,11 +1433,14 @@
       if (error && error.name === 'AbortError') {
         setStatus(text('webui.chat.statusStopped', 'Stopped'));
       } else {
-        renderMessageContent(
-          assistantEntry.card,
-          'assistant',
-          `${text('webui.chat.errors.requestFailed', 'Request failed')}: ${error.message || error}`,
-        );
+        messages.push({
+          role: 'error',
+          content: `${text('webui.chat.errors.requestFailed', 'Request failed')}: ${error.message || error}`,
+          createdAt: Date.now(),
+          feedback: '',
+        });
+        syncCurrentSession();
+        renderThread();
         toast(text('webui.chat.errors.requestFailed', 'Request failed'), 'error');
         setStatus(text('webui.chat.statusFailed', 'Failed'));
       }

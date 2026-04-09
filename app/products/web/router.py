@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 
 from app.platform.auth.middleware import is_webui_enabled, verify_webui_key
@@ -60,7 +60,7 @@ async def webui_login():
         raise HTTPException(404, "Not Found")
     return _serve("webui/login.html")
 
-@router.get("/webui/api/verify", dependencies=[Depends(verify_webui_key)])
+@router.get("/webui/api/verify", dependencies=[Depends(verify_webui_key)], tags=["WebUI - System"])
 async def webui_verify():
     return {"status": "ok"}
 
@@ -71,5 +71,5 @@ async def app_meta():
 
 
 @router.get("/meta/update", include_in_schema=False)
-async def app_update_meta():
-    return await get_latest_release_info()
+async def app_update_meta(force: bool = Query(False)):
+    return await get_latest_release_info(force=force)

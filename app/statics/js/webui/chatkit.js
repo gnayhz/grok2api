@@ -1,38 +1,25 @@
 (() => {
   const VOICE_ENDPOINT = '/webui/api/voice/token';
-  const MOBILE_BREAKPOINT = 960;
   const voiceSelect = document.getElementById('voiceSelect');
   const personalitySelect = document.getElementById('personalitySelect');
   const speedSelect = document.getElementById('speedSelect');
   const startVoiceBtn = document.getElementById('startVoiceBtn');
   const muteVoiceBtn = document.getElementById('muteVoiceBtn');
   const newSessionBtn = document.getElementById('newSessionBtn');
-  const chatkitPanelToggle = document.getElementById('chatkitPanelToggle');
-  const chatkitShell = document.querySelector('.webui-chatkit-shell');
-  const chatkitPanel = document.querySelector('.webui-chatkit-panel');
-  const voiceLog = document.getElementById('voiceLog');
-  const clearVoiceLogBtn = document.getElementById('clearVoiceLogBtn');
   const connectionBadge = document.getElementById('connectionBadge');
   const connectionText = document.getElementById('connectionText');
   const voiceOrb = document.getElementById('voiceOrb');
-  const roomName = document.getElementById('roomName');
-  const participantName = document.getElementById('participantName');
-  const remoteCount = document.getElementById('remoteCount');
-  const voiceEndpoint = document.getElementById('voiceEndpoint');
   const audioRoot = document.getElementById('audioRoot');
 
   let room = null;
-  let remoteParticipants = 0;
   let micEnabled = true;
   let outputMuted = false;
-  let mobilePanelOpen = false;
   let orbAudioContext = null;
-  let orbAnalyser = null;
-  let orbSource = null;
-  let orbData = null;
+  const orbInputs = new Map();
   let orbFrame = 0;
   let orbLevel = 0;
-  let orbStreamId = '';
+  let orbBeat = 0;
+  let orbMotionPhase = 0;
 
   const controlIcon = {
     start: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7.25 17 12l-8 4.75V7.25Z" fill="currentColor" stroke="none"/></svg>',
@@ -42,67 +29,52 @@
     newSession: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
   };
 
-  const text = (key, fallback, params) => {
+  const text = (key, fallback) => {
     if (typeof window.t !== 'function') return fallback;
-    const value = t(key, params);
+    const value = t(key);
     return value === key ? fallback : value;
-  };
-
-  const isMobileLayout = () => window.innerWidth <= MOBILE_BREAKPOINT;
-
-  const syncMobilePanel = () => {
-    if (!chatkitShell || !chatkitPanelToggle) return;
-    const mobile = isMobileLayout();
-    chatkitShell.classList.toggle('is-mobile-panel-open', mobile && mobilePanelOpen);
-    chatkitPanelToggle.classList.toggle('is-open', mobile && mobilePanelOpen);
-    chatkitPanelToggle.hidden = !mobile;
-    chatkitPanelToggle.setAttribute('aria-expanded', mobile && mobilePanelOpen ? 'true' : 'false');
-    const label = mobile && mobilePanelOpen
-      ? text('webui.chatkit.panelHide', '收起设置')
-      : text('webui.chatkit.panelShow', '设置');
-    chatkitPanelToggle.setAttribute('aria-label', label);
-    chatkitPanelToggle.setAttribute('title', label);
-  };
-
-  const syncVoiceLogEmptyState = () => {
-    if (!voiceLog) return;
-    voiceLog.dataset.empty = text(
-      'webui.chatkit.logEmpty',
-      '待机中，连接后这里会显示会话事件。',
-    );
-  };
-
-  const logLine = (message, level = 'info') => {
-    if (!voiceLog) return;
-    const item = document.createElement('div');
-    item.className = `webui-chatkit-log-item${level !== 'info' ? ` is-${level}` : ''}`;
-    item.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-    voiceLog.prepend(item);
-    syncVoiceLogEmptyState();
   };
 
   const setOrbLevel = (level) => {
     orbLevel = Math.max(0, Math.min(1, level || 0));
     if (!voiceOrb) return;
     voiceOrb.style.setProperty('--chatkit-level', orbLevel.toFixed(3));
-    voiceOrb.classList.toggle('is-speaking', voiceOrb.classList.contains('is-live') && orbLevel > 0.08);
+    voiceOrb.classList.toggle('is-speaking', voiceOrb.classList.contains('is-live') && orbLevel > 0.045);
   };
 
-  const stopOrbAnalysis = () => {
-    if (orbFrame) {
-      cancelAnimationFrame(orbFrame);
-      orbFrame = 0;
-    }
-    if (orbSource) {
+  const setOrbBeat = (value) => {
+    orbBeat = Math.max(0, Math.min(1, value || 0));
+    if (!voiceOrb) return;
+    voiceOrb.style.setProperty('--chatkit-beat', orbBeat.toFixed(3));
+  };
+
+  const setOrbMotion = (level) => {
+    if (!voiceOrb) return;
+    const intensity = Math.max(0, Math.min(1, level || 0));
+    const activeIntensity = intensity > 0.03 ? Math.max(intensity, 0.18) : 0;
+    const distance = activeIntensity * 11;
+    orbMotionPhase += 0.14 + activeIntensity * 0.18;
+    const drift = (speed, amplitude, offset = 0) => Math.sin(orbMotionPhase * speed + offset) * amplitude * distance;
+
+    voiceOrb.style.setProperty('--chatkit-drift-a-x', `${drift(0.92, 0.95, 0.2).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-a-y', `${drift(1.08, 0.9, 1.1).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-b-x', `${drift(1.16, 0.82, 2.4).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-b-y', `${drift(0.98, 0.76, 0.7).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-c-x', `${drift(1.04, 1.02, 3.1).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-c-y', `${drift(1.22, 0.84, 1.8).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-d-x', `${drift(0.88, 0.78, 4.2).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-d-y', `${drift(1.14, 0.74, 2.7).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-e-x', `${drift(1.28, 0.62, 5.1).toFixed(2)}px`);
+    voiceOrb.style.setProperty('--chatkit-drift-e-y', `${drift(0.94, 0.58, 3.5).toFixed(2)}px`);
+  };
+
+  const disconnectOrbInput = (entry) => {
+    if (!entry) return;
+    if (entry.source) {
       try {
-        orbSource.disconnect();
+        entry.source.disconnect();
       } catch {}
     }
-    orbAnalyser = null;
-    orbSource = null;
-    orbData = null;
-    orbStreamId = '';
-    setOrbLevel(0);
   };
 
   const ensureOrbAudioContext = async () => {
@@ -117,52 +89,125 @@
     return orbAudioContext;
   };
 
-  const startOrbAnalysis = async (element) => {
-    if (!element || !(element.srcObject instanceof MediaStream)) {
-      stopOrbAnalysis();
-      return;
+  const measureOrbInput = (analyser, data) => {
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let index = 0; index < data.length; index += 1) {
+      const normalized = (data[index] - 128) / 128;
+      sum += normalized * normalized;
     }
+    const rms = Math.sqrt(sum / data.length);
+    return Math.max(0, Math.min(1, (rms - 0.01) * 14));
+  };
 
-    const stream = element.srcObject;
-    const streamId = stream.id || stream.getAudioTracks?.()[0]?.id || '';
-    if (streamId && streamId === orbStreamId && orbAnalyser) return;
+  const stopOrbLoop = () => {
+    if (!orbFrame) return;
+    cancelAnimationFrame(orbFrame);
+    orbFrame = 0;
+  };
 
-    stopOrbAnalysis();
+  const stopOrbAnalysis = () => {
+    stopOrbLoop();
+    orbInputs.forEach(disconnectOrbInput);
+    orbInputs.clear();
+    setOrbLevel(0);
+    setOrbBeat(0);
+  };
+
+  const startOrbLoop = () => {
+    if (orbFrame) return;
+    const render = () => {
+      let strongest = 0;
+      let total = 0;
+      orbInputs.forEach((entry) => {
+        const level = measureOrbInput(entry.analyser, entry.data);
+        strongest = Math.max(strongest, level);
+        total += level;
+      });
+
+      const targetLevel = orbInputs.size
+        ? Math.max(strongest, Math.min(1, strongest * 0.86 + total * 0.12))
+        : 0;
+      const smoothing = targetLevel > orbLevel ? 0.38 : 0.18;
+      const nextLevel = orbLevel + (targetLevel - orbLevel) * smoothing;
+      const normalizedLevel = nextLevel < 0.006 ? 0 : nextLevel;
+      const beatTarget = orbInputs.size ? Math.min(1, strongest * 1.35) : 0;
+      const beatSmoothing = beatTarget > orbBeat ? 0.58 : 0.14;
+      const nextBeat = orbBeat + (beatTarget - orbBeat) * beatSmoothing;
+      setOrbLevel(normalizedLevel);
+      setOrbBeat(nextBeat < 0.01 ? 0 : nextBeat);
+      setOrbMotion(normalizedLevel);
+
+      if (!orbInputs.size && normalizedLevel < 0.006) {
+        orbFrame = 0;
+        return;
+      }
+      orbFrame = requestAnimationFrame(render);
+    };
+    orbFrame = requestAnimationFrame(render);
+  };
+
+  const removeOrbInput = (key) => {
+    const entry = orbInputs.get(key);
+    if (!entry) return;
+    disconnectOrbInput(entry);
+    orbInputs.delete(key);
+    if (!orbInputs.size) stopOrbLoop();
+  };
+
+  const removeOrbInputsByPrefix = (prefix) => {
+    Array.from(orbInputs.keys()).forEach((key) => {
+      if (key.startsWith(prefix)) removeOrbInput(key);
+    });
+  };
+
+  const attachOrbStream = async (stream, key) => {
+    if (!(stream instanceof MediaStream) || !key || orbInputs.has(key)) return;
+
     const context = await ensureOrbAudioContext();
     if (!context) return;
 
     try {
-      orbAnalyser = context.createAnalyser();
-      orbAnalyser.fftSize = 256;
-      orbAnalyser.smoothingTimeConstant = 0.82;
-      orbData = new Uint8Array(orbAnalyser.fftSize);
-      orbSource = context.createMediaStreamSource(stream);
-      orbSource.connect(orbAnalyser);
-      orbStreamId = streamId;
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      const data = new Uint8Array(analyser.fftSize);
+      const source = context.createMediaStreamSource(stream);
+      source.connect(analyser);
+      orbInputs.set(key, { analyser, data, source });
+      startOrbLoop();
+    } catch {}
+  };
 
-      const render = () => {
-        if (!orbAnalyser || !orbData) return;
-        orbAnalyser.getByteTimeDomainData(orbData);
-        let sum = 0;
-        for (let index = 0; index < orbData.length; index += 1) {
-          const normalized = (orbData[index] - 128) / 128;
-          sum += normalized * normalized;
-        }
-        const rms = Math.sqrt(sum / orbData.length);
-        const targetLevel = Math.max(0, Math.min(1, (rms - 0.015) * 8.2));
-        const nextLevel = orbLevel + (targetLevel - orbLevel) * 0.22;
-        setOrbLevel(nextLevel < 0.012 ? 0 : nextLevel);
-        orbFrame = requestAnimationFrame(render);
-      };
+  const getMediaStreamTrack = (trackOrPublication) => {
+    const candidate = trackOrPublication?.track || trackOrPublication;
+    const mediaTrack = candidate?.mediaStreamTrack
+      || candidate?.track?.mediaStreamTrack
+      || candidate?._mediaStreamTrack
+      || null;
+    if (!mediaTrack || mediaTrack.kind !== 'audio' || mediaTrack.readyState !== 'live') return null;
+    return mediaTrack;
+  };
 
-      render();
-    } catch {
-      stopOrbAnalysis();
+  const syncLocalMicAnalysis = async (currentRoom) => {
+    removeOrbInputsByPrefix('local:');
+    if (!currentRoom || !micEnabled) return;
+
+    const publications = currentRoom.localParticipant?.trackPublications;
+    if (!publications || typeof publications.values !== 'function') return;
+
+    for (const publication of publications.values()) {
+      const mediaTrack = getMediaStreamTrack(publication);
+      if (!mediaTrack || mediaTrack.enabled === false) continue;
+      const stream = new MediaStream([mediaTrack]);
+      await attachOrbStream(stream, `local:${mediaTrack.id || 'mic'}`);
+      break;
     }
   };
 
   const setStatus = (state, label, description) => {
     if (connectionBadge) connectionBadge.textContent = label;
+    if (connectionBadge) connectionBadge.dataset.state = state;
     if (connectionText) connectionText.textContent = description;
     if (voiceOrb) {
       voiceOrb.classList.remove('is-idle', 'is-connecting', 'is-live', 'is-paused', 'is-output-muted', 'is-error');
@@ -170,6 +215,7 @@
       if (state !== 'is-live') {
         voiceOrb.classList.remove('is-speaking');
         setOrbLevel(0);
+        setOrbBeat(0);
       }
     }
   };
@@ -179,7 +225,7 @@
       setStatus(
         'is-idle',
         text('webui.chatkit.statusIdle', '未连接'),
-        text('webui.chatkit.idleText', '准备好后点击开始，授权麦克风即可进入语音会话。'),
+        text('webui.chatkit.idleText', '点击并授权，通过 ChatKit 语音会话连接 Grok Voice。'),
       );
       return;
     }
@@ -237,10 +283,6 @@
     }
   };
 
-  const updateRemoteCount = () => {
-    if (remoteCount) remoteCount.textContent = String(Math.max(0, remoteParticipants));
-  };
-
   const detachAudio = () => {
     stopOrbAnalysis();
     if (!audioRoot) return;
@@ -251,14 +293,6 @@
       } catch {}
       node.remove();
     });
-  };
-
-  const resetSessionMeta = () => {
-    if (roomName) roomName.textContent = '-';
-    if (participantName) participantName.textContent = '-';
-    if (voiceEndpoint) voiceEndpoint.textContent = 'wss://livekit.grok.com';
-    remoteParticipants = 0;
-    updateRemoteCount();
   };
 
   const getLiveKit = () => window.LiveKitClient || window.LivekitClient || null;
@@ -275,55 +309,33 @@
     element.playsInline = true;
     element.muted = outputMuted;
     audioRoot.appendChild(element);
-    void startOrbAnalysis(element);
+    const stream = element.srcObject instanceof MediaStream ? element.srcObject : null;
+    const streamId = stream?.id || stream?.getAudioTracks?.()[0]?.id || '';
+    if (stream && streamId) {
+      void attachOrbStream(stream, `remote:${streamId}`);
+    }
   };
 
   const bindRoomEvents = (lk, currentRoom) => {
-    currentRoom.on(lk.RoomEvent.ParticipantConnected, (participant) => {
-      remoteParticipants += 1;
-      updateRemoteCount();
-      logLine(text('webui.chatkit.participantJoined', 'Remote participant joined: {identity}', {
-        identity: participant.identity || 'remote',
-      }));
-    });
-
-    currentRoom.on(lk.RoomEvent.ParticipantDisconnected, (participant) => {
-      remoteParticipants = Math.max(0, remoteParticipants - 1);
-      updateRemoteCount();
-      logLine(text('webui.chatkit.participantLeft', 'Remote participant left: {identity}', {
-        identity: participant.identity || 'remote',
-      }));
-    });
-
     currentRoom.on(lk.RoomEvent.TrackSubscribed, (track) => {
       addRemoteAudioTrack(track);
-      logLine(text('webui.chatkit.trackSubscribed', 'Remote audio subscribed'));
     });
 
     currentRoom.on(lk.RoomEvent.TrackUnsubscribed, (track) => {
       try {
         const elements = track.detach();
-        let activeRemoved = false;
         elements.forEach((el) => {
+          let streamId = '';
           if (el instanceof HTMLMediaElement && el.srcObject instanceof MediaStream) {
-            const streamId = el.srcObject.id || el.srcObject.getAudioTracks?.()[0]?.id || '';
-            if (streamId && streamId === orbStreamId) activeRemoved = true;
+            streamId = el.srcObject.id || el.srcObject.getAudioTracks?.()[0]?.id || '';
           }
+          if (streamId) removeOrbInput(`remote:${streamId}`);
           el.remove();
         });
-        if (activeRemoved) {
-          const nextAudio = audioRoot?.querySelector('audio');
-          if (nextAudio instanceof HTMLAudioElement) {
-            void startOrbAnalysis(nextAudio);
-          } else {
-            stopOrbAnalysis();
-          }
-        }
       } catch {}
     });
 
     currentRoom.on(lk.RoomEvent.Disconnected, () => {
-      logLine(text('webui.chatkit.disconnected', 'Voice session disconnected'), 'warn');
       teardownSession(false);
     });
   };
@@ -335,7 +347,6 @@
       if (currentRoom) await currentRoom.disconnect();
     } catch {}
     detachAudio();
-    resetSessionMeta();
     micEnabled = true;
     outputMuted = false;
     setButtons(false);
@@ -359,7 +370,6 @@
       text('webui.chatkit.statusConnecting', '正在连接'),
       text('webui.chatkit.connectingText', '正在向 Grok Voice 申请会话并连接 LiveKit…'),
     );
-    logLine(text('webui.chatkit.fetchingToken', 'Requesting voice token...'));
 
     try {
       const params = new URLSearchParams({
@@ -381,10 +391,6 @@
         throw new Error(text('webui.chatkit.invalidToken', 'Voice token response invalid'));
       }
 
-      if (roomName) roomName.textContent = payload.room_name || '-';
-      if (participantName) participantName.textContent = payload.participant_name || '-';
-      if (voiceEndpoint) voiceEndpoint.textContent = payload.url || 'wss://livekit.grok.com';
-
       const currentRoom = new lk.Room({
         adaptiveStream: true,
         dynacast: true,
@@ -404,10 +410,9 @@
       outputMuted = false;
       setButtons(true);
       renderConnectedStatus();
-      logLine(text('webui.chatkit.connected', 'Voice session connected'));
+      void syncLocalMicAnalysis(currentRoom);
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
-      logLine(message, 'error');
       showToast?.(message, 'error');
       setStatus(
         'is-error',
@@ -426,12 +431,7 @@
     await room.localParticipant.setMicrophoneEnabled(micEnabled);
     setButtons(true);
     renderConnectedStatus();
-    logLine(
-      micEnabled
-        ? text('webui.chatkit.sessionResumed', 'Voice session resumed')
-        : text('webui.chatkit.sessionPaused', 'Voice session paused'),
-      'warn',
-    );
+    void syncLocalMicAnalysis(room);
   };
 
   const toggleOutputMute = () => {
@@ -444,12 +444,6 @@
     }
     setButtons(true);
     renderConnectedStatus();
-    logLine(
-      outputMuted
-        ? text('webui.chatkit.outputMuted', 'Speaker muted')
-        : text('webui.chatkit.outputUnmuted', 'Speaker unmuted'),
-      'warn',
-    );
   };
 
   const handlePrimaryAction = async () => {
@@ -462,7 +456,6 @@
 
   const startFreshSession = async () => {
     if (!room) return;
-    logLine(text('webui.chatkit.startingNewSession', 'Starting a new voice session...'));
     await teardownSession(true);
     await startSession();
   };
@@ -474,40 +467,17 @@
   newSessionBtn?.addEventListener('click', () => {
     void startFreshSession();
   });
-  clearVoiceLogBtn?.addEventListener('click', () => {
-    if (voiceLog) voiceLog.innerHTML = '';
-    syncVoiceLogEmptyState();
-  });
-  chatkitPanelToggle?.addEventListener('click', () => {
-    mobilePanelOpen = !mobilePanelOpen;
-    syncMobilePanel();
-  });
-  document.addEventListener('click', (event) => {
-    if (!isMobileLayout() || !mobilePanelOpen) return;
-    const target = event.target;
-    if (!(target instanceof Node)) return;
-    if (chatkitPanelToggle?.contains(target) || chatkitPanel?.contains(target)) return;
-    mobilePanelOpen = false;
-    syncMobilePanel();
-  });
 
   window.addEventListener('beforeunload', () => {
     if (room) void room.disconnect();
   });
-  window.addEventListener('resize', () => {
-    if (!isMobileLayout()) mobilePanelOpen = false;
-    syncMobilePanel();
-  });
 
-  resetSessionMeta();
   setButtons(false);
   setStatus(
     'is-idle',
     text('webui.chatkit.statusIdle', '未连接'),
-    text('webui.chatkit.idleText', '准备好后点击开始，授权麦克风即可进入语音会话。'),
+    text('webui.chatkit.idleText', '点击并授权，通过 ChatKit 语音会话连接 Grok Voice。'),
   );
-  syncVoiceLogEmptyState();
-  syncMobilePanel();
   if (typeof renderWebuiHeader === 'function') {
     void renderWebuiHeader();
   }

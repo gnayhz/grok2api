@@ -153,7 +153,7 @@ async def _delete_asset_inner(token: str, asset_id: str) -> dict:
         lease,
         ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
     )
-    logger.debug("delete_asset: asset_id={} ok", asset_id)
+    logger.debug("asset deletion completed: asset_id={}", asset_id)
     return result
 
 

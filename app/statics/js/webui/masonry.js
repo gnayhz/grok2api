@@ -154,12 +154,6 @@
 
     const body = document.createElement('div');
     body.className = 'webui-masonry-tile-body';
-
-    const label = document.createElement('div');
-    label.className = 'webui-masonry-tile-label';
-    label.textContent = '0%';
-
-    body.appendChild(label);
     tile.appendChild(badge);
     tile.appendChild(body);
 
@@ -171,7 +165,6 @@
       moderated: false,
       tile,
       body,
-      label,
     };
   }
 
@@ -190,24 +183,25 @@
     meta.className = 'webui-masonry-batch-meta';
 
     const ratio = document.createElement('span');
-    ratio.className = 'webui-masonry-batch-chip';
+    ratio.className = 'webui-masonry-batch-chip is-param';
     ratio.textContent = aspectRatio;
 
     const qualityChip = document.createElement('span');
-    qualityChip.className = 'webui-masonry-batch-chip';
+    qualityChip.className = 'webui-masonry-batch-chip is-param';
     qualityChip.textContent = formatQualityLabel(quality);
 
     const roundLabel = document.createElement('span');
-    roundLabel.className = 'webui-masonry-batch-chip';
+    roundLabel.className = 'webui-masonry-batch-chip is-round';
     roundLabel.textContent = formatRoundLabel(round);
 
     const count = document.createElement('span');
-    count.className = 'webui-masonry-batch-chip';
+    count.className = 'webui-masonry-batch-chip is-count';
     count.textContent = `0/${IMAGE_COUNT}`;
 
     const state = document.createElement('span');
-    state.className = 'webui-masonry-batch-chip';
-    state.textContent = text('webui.masonry.statusGenerating', '生成中…');
+    state.className = 'webui-masonry-batch-chip is-state';
+    state.dataset.state = 'generating';
+    state.textContent = text('webui.masonry.statusGenerating', '正在生成');
 
     meta.appendChild(roundLabel);
     meta.appendChild(ratio);
@@ -223,7 +217,10 @@
     grid.style.setProperty('--tile-aspect', aspectRatioCss(aspectRatio));
 
     const slots = Array.from({ length: IMAGE_COUNT }, (_, index) => createSlot(index + 1));
-    slots.forEach((slot) => grid.appendChild(slot.tile));
+    slots.forEach((slot) => {
+      renderSlot(slot);
+      grid.appendChild(slot.tile);
+    });
 
     wrap.appendChild(head);
     wrap.appendChild(grid);
@@ -242,38 +239,48 @@
       quality,
       completed: false,
       failed: false,
+      finalized: false,
     };
   }
 
   function updateBatchMeta(batch) {
-    if (batch.failed) {
-      batch.state.textContent = text('webui.masonry.batchError', '生成失败');
-      return;
-    }
     const completed = batch.slots.filter((slot) => slot.url && !slot.moderated).length;
     const filtered = batch.slots.filter((slot) => slot.moderated).length;
     batch.count.textContent = `${completed}/${IMAGE_COUNT}`;
 
+    if (!batch.finalized) {
+      batch.state.dataset.state = 'generating';
+      batch.state.textContent = text('webui.masonry.statusGenerating', '正在生成');
+      return;
+    }
+
     if (completed >= IMAGE_COUNT) {
-      batch.state.textContent = text('webui.masonry.statusCompleted', '完成');
+      batch.state.dataset.state = 'success';
+      batch.state.textContent = text('webui.masonry.statusSuccess', '生成成功');
       return;
     }
-    if (filtered >= IMAGE_COUNT) {
-      batch.state.textContent = text('webui.masonry.batchFiltered', '已过滤');
+
+    if (completed > 0 || (completed === 0 && filtered > 0 && filtered < IMAGE_COUNT)) {
+      batch.state.dataset.state = 'partial';
+      batch.state.textContent = text('webui.masonry.statusPartialFailure', '部分失败');
       return;
     }
-    batch.state.textContent = text('webui.masonry.statusGenerating', '生成中…');
+
+    batch.state.dataset.state = 'failed';
+    batch.state.textContent = text('webui.masonry.statusBatchFailed', '生成失败');
   }
 
   function markBatchFailed(batch) {
-    if (!batch || batch.completed || batch.failed) return;
+    if (!batch || batch.finalized) return;
     batch.failed = true;
-    batch.state.textContent = text('webui.masonry.batchError', '生成失败');
+    batch.finalized = true;
+    updateBatchMeta(batch);
   }
 
   function markBatchStopped(batch) {
-    if (!batch || batch.completed || batch.failed) return;
-    batch.state.textContent = text('webui.masonry.statusStopped', '已停止');
+    if (!batch || batch.finalized) return;
+    batch.finalized = true;
+    updateBatchMeta(batch);
   }
 
   function renderSlot(slot) {
@@ -437,7 +444,7 @@
         } else if (payload.status === 'completed') {
           if (batch) {
             batch.completed = true;
-            batch.state.textContent = text('webui.masonry.statusCompleted', '完成');
+            batch.finalized = true;
             updateBatchMeta(batch);
           }
           state.currentRunId = '';

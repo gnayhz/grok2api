@@ -52,7 +52,7 @@ class FlareSolverrClearanceProvider:
         )
         if not result:
             logger.warning(
-                "FlareSolverr clearance refresh failed: affinity={} proxy={}",
+                "flaresolverr clearance refresh failed: affinity={} proxy={}",
                 affinity_key, proxy_url or "<direct>",
             )
             return None
@@ -95,7 +95,7 @@ class FlareSolverrClearanceProvider:
             result = await asyncio.to_thread(_post)
             if result.get("status") != "ok":
                 logger.warning(
-                    "FlareSolverr non-ok: status={} msg={}",
+                    "flaresolverr returned non-ok status: status={} message={}",
                     result.get("status"), result.get("message", ""),
                 )
                 return None
@@ -103,7 +103,7 @@ class FlareSolverrClearanceProvider:
             solution = result.get("solution", {})
             cookies  = solution.get("cookies", [])
             if not cookies:
-                logger.warning("FlareSolverr returned no cookies")
+                logger.warning("flaresolverr returned no cookies")
                 return None
 
             ua = solution.get("userAgent", "") or ""
@@ -115,11 +115,11 @@ class FlareSolverrClearanceProvider:
 
         except HTTPError as exc:
             body_text = exc.read().decode("utf-8", "replace")[:300]
-            logger.warning("FlareSolverr HTTP error: code={} body={}", exc.code, body_text)
+            logger.warning("flaresolverr http request failed: status={} body={}", exc.code, body_text)
         except URLError as exc:
-            logger.warning("FlareSolverr connect error: {}", exc.reason)
+            logger.warning("flaresolverr connection failed: reason={}", exc.reason)
         except Exception as exc:
-            logger.warning("FlareSolverr request failed: {}", exc)
+            logger.warning("flaresolverr request failed: error={}", exc)
 
         return None
 

@@ -71,9 +71,11 @@ def _maybe_reset_windows(
     if pool_id != int(PoolId.BASIC):
         return
 
-    from app.control.account.quota_defaults import BASIC_QUOTA_DEFAULTS
+    from app.control.account.quota_defaults import default_quota_window
 
-    defaults = BASIC_QUOTA_DEFAULTS.get(mode_id)
+    defaults = default_quota_window("basic", mode_id)
+    if defaults is None:
+        return
     add_back: list[int] = []
 
     for idx in list(candidates):

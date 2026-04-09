@@ -19,7 +19,6 @@ from ..models import (
 )
 from ..quota_defaults import default_quota_set
 
-_SCHEMA_VERSION = 3
 _TBL = "accounts"
 _META = "account_meta"
 
@@ -53,7 +52,6 @@ class LocalAccountRepository:
                     value TEXT NOT NULL
                 );
                 INSERT OR IGNORE INTO {_META} VALUES ('revision', '0');
-                INSERT OR IGNORE INTO {_META} VALUES ('schema_version', '{_SCHEMA_VERSION}');
 
                 CREATE TABLE IF NOT EXISTS {_TBL} (
                     token              TEXT    NOT NULL PRIMARY KEY,
@@ -86,21 +84,6 @@ class LocalAccountRepository:
                 CREATE INDEX IF NOT EXISTS idx_acc_deleted
                     ON {_TBL} (deleted_at) WHERE deleted_at IS NOT NULL;
             """)
-            # Incremental schema migrations.
-            ver_row = conn.execute(
-                f"SELECT CAST(value AS INTEGER) FROM {_META} WHERE key = 'schema_version'"
-            ).fetchone()
-            ver = int(ver_row[0]) if ver_row else 1
-            if ver < 3:
-                try:
-                    conn.execute(
-                        f"ALTER TABLE {_TBL} ADD COLUMN quota_heavy TEXT NOT NULL DEFAULT '{{}}'"
-                    )
-                except Exception:
-                    pass  # Column already exists in partial migrations.
-                conn.execute(
-                    f"UPDATE {_META} SET value = '3' WHERE key = 'schema_version'"
-                )
             conn.commit()
 
     def _bump_revision(self, conn: sqlite3.Connection) -> int:
@@ -172,7 +155,7 @@ class LocalAccountRepository:
         for item in items:
             try:
                 token = AccountRecord.model_validate({"token": item.token, "pool": item.pool}).token
-            except Exception:
+            except ValueError:
                 continue
             pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
             qs   = default_quota_set(pool)
@@ -268,17 +251,15 @@ class LocalAccountRepository:
             if patch.quota_heavy is not None:
                 sets["quota_heavy"] = json.dumps(patch.quota_heavy)
 
-            # Tags.
-            tags = list(record.tags)
+            # Tags — use set arithmetic to avoid O(n×m) membership tests.
+            tag_set: set[str] = set(record.tags)
             if patch.tags is not None:
-                tags = patch.tags
+                tag_set = set(patch.tags)
             if patch.add_tags:
-                for t in patch.add_tags:
-                    if t not in tags:
-                        tags.append(t)
+                tag_set.update(patch.add_tags)
             if patch.remove_tags:
-                tags = [t for t in tags if t not in patch.remove_tags]
-            sets["tags"] = json.dumps(tags)
+                tag_set.difference_update(patch.remove_tags)
+            sets["tags"] = json.dumps(sorted(tag_set))
 
             # ext merge.
             ext = dict(record.ext)

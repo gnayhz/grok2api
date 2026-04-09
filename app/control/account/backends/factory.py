@@ -8,7 +8,6 @@ from urllib.parse import urlsplit, urlunsplit
 from ..repository import AccountRepository
 
 _DEFAULT_LOCAL_PATH = "data/accounts.db"
-_DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 _SUPPORTED_BACKENDS = {"local", "redis", "mysql", "postgresql"}
 
 
@@ -44,7 +43,7 @@ def describe_repository_target() -> tuple[str, str]:
     if backend == "local":
         return "local", str(_resolve_local_db_path())
     if backend == "redis":
-        return "redis", _redact_url(_get_env("ACCOUNT_REDIS_URL", _DEFAULT_REDIS_URL))
+        return "redis", _redact_url(_get_required_env("ACCOUNT_REDIS_URL"))
     if backend == "mysql":
         return "mysql", _redact_url(_get_env("ACCOUNT_MYSQL_URL"))
     if backend == "postgresql":
@@ -70,6 +69,13 @@ def _get_env(name: str, default: str = "") -> str:
         return default
     value = value.strip()
     return value or default
+
+
+def _get_required_env(name: str) -> str:
+    value = _get_env(name)
+    if not value:
+        raise ValueError(f"Missing required env: {name}")
+    return value
 
 
 def _resolve_local_db_path() -> Path:
@@ -112,7 +118,7 @@ def _make_redis() -> AccountRepository:
     from redis.asyncio import Redis
     from .redis import RedisAccountRepository
 
-    url = _get_env("ACCOUNT_REDIS_URL", _DEFAULT_REDIS_URL)
+    url = _get_required_env("ACCOUNT_REDIS_URL")
     r   = Redis.from_url(url, decode_responses=False)
     return RedisAccountRepository(r)
 

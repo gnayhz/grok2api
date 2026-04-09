@@ -10,7 +10,7 @@ from app.platform.auth.middleware import verify_webui_key
 from app.products.openai.router import chat_completions_endpoint
 from app.products.openai.schemas import ChatCompletionRequest
 
-router = APIRouter(prefix="/webui/api", dependencies=[Depends(verify_webui_key)])
+router = APIRouter(prefix="/webui/api", dependencies=[Depends(verify_webui_key)], tags=["WebUI - Chat"])
 
 
 def _capability_name(spec) -> str:

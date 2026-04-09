@@ -43,7 +43,7 @@ from ._format import (
     make_stream_chunk,
     make_thinking_chunk,
 )
-from .chat import _fail_sync, _quota_sync
+from .chat import _fail_sync, _quota_sync, _feedback_kind
 
 _IMAGE_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
 _VIDEO_MEDIA_TYPE = "MEDIA_POST_TYPE_VIDEO"
@@ -528,7 +528,7 @@ async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
         raw, _mime = await _download_video_bytes(token, url)
         _save_video_bytes(raw, file_id)
     except Exception as exc:
-        logger.warning("Video download failed, falling back to upstream URL: {}", exc)
+        logger.warning("video download failed: fallback_to=upstream_url error={}", exc)
         return url if fmt == "local_url" else _render_video_html(url)
 
     local_url = _local_video_url(file_id)
@@ -672,18 +672,22 @@ async def _run_video_with_account(
 
     token = acct.token
     success = False
+    fail_exc: BaseException | None = None
     try:
         artifact = await runner(token, timeout_s)
         success = True
         return artifact
+    except BaseException as exc:
+        fail_exc = exc
+        raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else FeedbackKind.SERVER_ERROR
+        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
         await _acct_dir.feedback(token, kind, int(spec.mode_id))
         if success:
             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
         else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
 
 async def _put_video_job(job: _VideoJob) -> None:
@@ -746,6 +750,8 @@ async def _run_video_job(
             raise RateLimitError("No available accounts for video generation")
 
         token = acct.token
+        success = False
+        fail_exc: BaseException | None = None
         try:
             cfg = get_config()
             timeout_s = cfg.get_float("video.timeout", 180.0)
@@ -765,14 +771,18 @@ async def _run_video_job(
                 progress_cb=_progress,
             )
             raw, _mime = await _download_video_bytes(token, artifact.video_url)
-            kind = FeedbackKind.SUCCESS
+            success = True
+        except BaseException as exc:
+            fail_exc = exc
+            raise
         finally:
             await _acct_dir.release(acct)
-            await _acct_dir.feedback(token, kind if "kind" in locals() else FeedbackKind.SERVER_ERROR, int(spec.mode_id))
-            if "kind" in locals() and kind == FeedbackKind.SUCCESS:
+            kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
+            await _acct_dir.feedback(token, kind, int(spec.mode_id))
+            if success:
                 asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
             else:
-                asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
 
         path = _save_video_bytes(raw, job.id)
         async with _VIDEO_JOBS_LOCK:
@@ -783,7 +793,7 @@ async def _run_video_job(
             job.content_path = str(path)
             job.remixed_from_video_id = artifact.remixed_from_video_id
     except Exception as exc:
-        logger.exception("Video job {} failed: {}", job.id, exc)
+        logger.exception("video job failed: job_id={} error={}", job.id, exc)
         async with _VIDEO_JOBS_LOCK:
             job.status = "failed"
             job.error = _job_error_payload(str(exc))

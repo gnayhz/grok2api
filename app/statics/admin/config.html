@@ -259,8 +259,14 @@
       <div class="page-sub" data-i18n="config.pageSubtitle">统一管理运行时参数与服务行为。保存后即时生效，部分配置需重启服务。</div>
     </div>
     <div class="page-actions">
-      <button id="btn-reset" onclick="doReset()" class="page-action-btn" data-i18n="config.resetChanges">重置更改</button>
-      <button id="btn-save"  onclick="doSave()"  class="page-action-btn page-action-btn-primary" disabled data-i18n="config.saveChanges">保存更改</button>
+      <button id="btn-reset" onclick="doReset()" class="page-action-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.708"/><path d="M3 4v5h5"/></svg>
+        <span data-i18n="config.resetShort">重置</span>
+      </button>
+      <button id="btn-save" onclick="doSave()" class="page-action-btn page-action-btn-primary" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4.2 4.2L19 6.5"/></svg>
+        <span data-i18n="config.saveShort">保存</span>
+      </button>
     </div>
   </div>
 
@@ -276,8 +282,8 @@
 <div class="save-bar" id="save-bar">
   <div class="save-bar-msg" id="save-bar-msg" data-i18n="config.unsavedDefault">存在未保存的更改</div>
   <div class="save-bar-actions">
-    <button class="save-bar-btn save-bar-btn-cancel" onclick="doReset()" data-i18n="config.discardChanges">放弃更改</button>
-    <button class="save-bar-btn save-bar-btn-save"   onclick="doSave()" data-i18n="config.saveChanges">保存更改</button>
+    <button class="save-bar-btn save-bar-btn-cancel" onclick="doReset()" data-i18n="config.discardShort">撤销</button>
+    <button class="save-bar-btn save-bar-btn-save"   onclick="doSave()" data-i18n="config.saveBarShort">保存</button>
   </div>
 </div>
 
@@ -301,8 +307,8 @@ const SCHEMA_DEF = [
           { key: 'app_url', label: 'APP 访问地址', labelKey: 'config.schema.fields.appUrl.label', type: 'text', desc: '应用对外提供服务的根 URL，格式如 https://your-domain.com。本地代理模式必须配置。', descKey: 'config.schema.fields.appUrl.desc', wide: true },
           { key: 'app_key', label: 'APP 访问密码', labelKey: 'config.schema.fields.appKey.label', type: 'password', desc: '管理后台鉴权密码。修改后已有 Session 将立即失效，需重新登录。', descKey: 'config.schema.fields.appKey.desc', rand: true },
           { key: 'api_key', label: 'API 调用密钥', labelKey: 'config.schema.fields.apiKey.label', type: 'text', desc: 'OpenAI 兼容 API 的鉴权密钥。多个值请使用英文逗号分隔；留空则禁用鉴权。', descKey: 'config.schema.fields.apiKey.desc', rand: true },
-          { key: 'function_enabled', label: '启用 WebUI', labelKey: 'config.schema.fields.webuiEnabled.label', type: 'bool', desc: '开放 WebUI 功能入口。关闭后相关路由将返回 404。', descKey: 'config.schema.fields.webuiEnabled.desc' },
-          { key: 'function_key', label: 'WebUI 访问密码', labelKey: 'config.schema.fields.webuiKey.label', type: 'password', desc: 'WebUI 的访问鉴权密码。配置后访问时必须提供。', descKey: 'config.schema.fields.webuiKey.desc', rand: true, showIf: 'app.function_enabled' },
+          { key: 'webui_enabled', label: '启用 WebUI', labelKey: 'config.schema.fields.webuiEnabled.label', type: 'bool', desc: '开放 WebUI 功能入口。关闭后相关路由将返回 404。', descKey: 'config.schema.fields.webuiEnabled.desc' },
+          { key: 'webui_key', label: 'WebUI 访问密码', labelKey: 'config.schema.fields.webuiKey.label', type: 'password', desc: 'WebUI 的访问鉴权密码。配置后访问时必须提供。', descKey: 'config.schema.fields.webuiKey.desc', rand: true, showIf: 'app.webui_enabled' },
         ]
       },
     ]
@@ -370,8 +376,8 @@ const SCHEMA_DEF = [
           { key: 'basic_interval_sec', label: 'Basic 刷新周期（秒）', labelKey: 'config.schema.fields.basicInterval.label', type: 'number', desc: 'basic 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 36000 s / 10 h）。', descKey: 'config.schema.fields.basicInterval.desc' },
           { key: 'super_interval_sec', label: 'Super 刷新周期（秒）', labelKey: 'config.schema.fields.superInterval.label', type: 'number', desc: 'super 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 7200 s / 2 h）。', descKey: 'config.schema.fields.superInterval.desc' },
           { key: 'heavy_interval_sec', label: 'Heavy 刷新周期（秒）', labelKey: 'config.schema.fields.heavyInterval.label', type: 'number', desc: 'heavy 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 7200 s / 2 h）。', descKey: 'config.schema.fields.heavyInterval.desc' },
-          { key: 'usage_concurrency', label: '刷新并发数', labelKey: 'config.schema.fields.usageConcurrency.label', type: 'number', desc: '并发调用 usage 接口刷新额度时允许的最大并行数。', descKey: 'config.schema.fields.usageConcurrency.desc' },
           { key: 'on_demand_min_interval_sec', label: '按需刷新最小间隔（秒）', labelKey: 'config.schema.fields.onDemandMinInterval.label', type: 'number', desc: '请求链路触发刷新（例如收到 429）时的节流间隔。N 秒内重复触发只执行一次，避免批量打爆配额接口。', descKey: 'config.schema.fields.onDemandMinInterval.desc' },
+          { key: 'usage_concurrency', label: '刷新并发数', labelKey: 'config.schema.fields.usageConcurrency.label', type: 'number', desc: '并发调用 usage 接口刷新额度时允许的最大并行数。', descKey: 'config.schema.fields.usageConcurrency.desc' },
         ]
       },
       {
@@ -655,7 +661,7 @@ function _evalDisabledWhen(condition) {
 }
 
 // Evaluate a showIf condition.
-// String form: truthy check on config path.  "app.function_enabled"
+// String form: truthy check on config path.  "app.webui_enabled"
 // Object form: value-in-list check.          { path: "proxy.egress.mode", values: ["single_proxy"] }
 function _evalShowIf(showIf) {
   if (!showIf) return true;

@@ -65,7 +65,7 @@ async def bootstrap(repository: AccountRepository) -> AccountRuntimeTable:
 
     table.revision = snapshot.revision
     logger.info(
-        "AccountRuntimeTable bootstrapped: revision={} accounts={} pools={}",
+        "account runtime table bootstrapped: revision={} account_count={} pool_count={}",
         table.revision,
         table.size,
         len({k[0] for k in table.mode_available}),

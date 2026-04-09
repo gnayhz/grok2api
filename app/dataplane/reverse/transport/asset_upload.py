@@ -140,7 +140,7 @@ async def _upload_file_inner(
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:300]
             logger.error(
-                "Asset upload failed: status={} body={}",
+                "asset upload request failed: status={} body={}",
                 response.status_code, body_text,
             )
             await proxy.feedback(
@@ -165,7 +165,7 @@ async def _upload_file_inner(
         result   = orjson.loads(body_bytes)
         file_id  = result.get("fileMetadataId") or result.get("fileId", "")
         file_uri = result.get("fileUri", "")
-        logger.info("Asset upload success: filename={!r} file_id={}", filename, file_id)
+        logger.info("asset upload completed: filename={!r} file_id={}", filename, file_id)
         return file_id, file_uri
 
     except UpstreamError:

@@ -130,7 +130,7 @@ async def _stream_round(
     while True:
         elapsed = time.monotonic() - round_start
         if elapsed >= round_timeout_s:
-            logger.warning("Imagine round timeout after {:.1f}s", elapsed)
+            logger.warning("imagine round timed out: elapsed_s={:.1f}", elapsed)
             for slot in slots.values():
                 if not slot.done:
                     if slot.last_blob:
@@ -179,7 +179,7 @@ async def _stream_round(
                         height   = parsed["height"],
                     )
                     logger.debug(
-                        "Imagine slot {} start order={} {}×{}",
+                        "imagine slot started: image_id={} order={} width={} height={}",
                         iid[:8], parsed["order"], parsed["width"], parsed["height"],
                     )
                     yield {
@@ -198,10 +198,10 @@ async def _stream_round(
                     slot.done = True
 
                     if parsed["moderated"]:
-                        logger.warning("Imagine slot {} moderated", iid[:8])
+                        logger.warning("imagine slot moderated: image_id={}", iid[:8])
                         yield {"type": "moderated", "image_id": iid, "order": slot.order}
                     else:
-                        logger.debug("Imagine slot {} completed order={}", iid[:8], slot.order)
+                        logger.debug("imagine slot completed: image_id={} order={}", iid[:8], slot.order)
                         yield _final_event(slot, r_rated=parsed["r_rated"])
                         round_completed += 1
 
@@ -244,7 +244,7 @@ async def _stream_round(
             elif msg_type == "error":
                 err_code = msg.get("err_code") or "upstream_error"
                 err_msg  = msg.get("err_msg")  or str(msg)
-                logger.warning("Imagine WS server error: {} {}", err_code, err_msg)
+                logger.warning("imagine websocket server error: code={} message={}", err_code, err_msg)
                 yield {"type": "error", "error_code": err_code, "error": err_msg}
                 yield {"type": "_meta", "ws_closed": True}
                 return
@@ -257,13 +257,13 @@ async def _stream_round(
                 if not slot.done:
                     if slot.last_blob:
                         logger.debug(
-                            "Imagine WS closed: yielding best-effort final for slot {}",
+                            "imagine websocket closed with best-effort final: image_id={}",
                             slot.image_id[:8],
                         )
                         yield _final_event(slot)
                     else:
                         logger.warning(
-                            "Imagine WS closed: slot {} had no blob, skipping",
+                            "imagine websocket closed before image data arrived: image_id={}",
                             slot.image_id[:8],
                         )
             yield {"type": "_meta", "ws_closed": True}
@@ -318,7 +318,7 @@ async def stream_images(
             )
         except Exception as exc:
             status = getattr(exc, "status", None)
-            logger.error("Imagine WS connect failed: {}", exc)
+            logger.error("imagine websocket connect failed: error={}", exc)
             yield {
                 "type":       "error",
                 "error_code": "rate_limit_exceeded" if status == 429 else "connection_failed",
@@ -357,7 +357,7 @@ async def stream_images(
                         break   # exit inner while; reconnect or finish
 
         except aiohttp.ClientError as exc:
-            logger.error("Imagine WS connection error: {}", exc)
+            logger.error("imagine websocket connection failed: error={}", exc)
             yield {"type": "error", "error_code": "connection_failed", "error": str(exc)}
             return
 
@@ -365,7 +365,7 @@ async def stream_images(
             return
 
         # Server closed the connection but we still need more images → reconnect.
-        logger.info("Imagine reconnecting for {}/{} remaining images", n - collected, n)
+        logger.info("imagine websocket reconnecting: remaining_images={} requested_images={}", n - collected, n)
 
 
 __all__ = ["stream_images"]

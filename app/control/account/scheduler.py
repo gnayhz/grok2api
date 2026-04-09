@@ -6,9 +6,6 @@ its own configurable interval read from:
     account.refresh.basic_interval_sec  (default 36000 — 10 h)
     account.refresh.super_interval_sec  (default  7200 —  2 h)
     account.refresh.heavy_interval_sec  (default  7200 —  2 h)
-
-Falls back to the legacy ``account.refresh.interval_sec`` key if the
-pool-specific key is absent (backward compatibility with existing configs).
 """
 
 import asyncio
@@ -27,10 +24,7 @@ _POOL_CONFIG: dict[str, tuple[str, int]] = {
 
 def _interval(pool: str) -> int:
     key, default = _POOL_CONFIG[pool]
-    # Pool-specific key takes precedence; legacy key as second fallback.
     v = get_config(key, None)
-    if v is None:
-        v = get_config("account.refresh.interval_sec", None)
     return int(v) if v is not None else default
 
 
@@ -53,9 +47,10 @@ class AccountRefreshScheduler:
             asyncio.create_task(self._loop(pool), name=f"account-refresh-{pool}")
             for pool in _POOL_CONFIG
         ]
+        intervals = {p: _interval(p) for p in _POOL_CONFIG}
         logger.info(
-            "AccountRefreshScheduler started — basic={}s super={}s heavy={}s",
-            _interval("basic"), _interval("super"), _interval("heavy"),
+            "account refresh scheduler started: basic_interval_s={} super_interval_s={} heavy_interval_s={}",
+            intervals["basic"], intervals["super"], intervals["heavy"],
         )
 
     def stop(self) -> None:
@@ -63,7 +58,7 @@ class AccountRefreshScheduler:
         for t in self._tasks:
             if not t.done():
                 t.cancel()
-        logger.info("AccountRefreshScheduler stopped.")
+        logger.info("account refresh scheduler stopped")
 
     async def _loop(self, pool: str) -> None:
         while not self._stop.is_set():
@@ -80,13 +75,18 @@ class AccountRefreshScheduler:
             try:
                 result = await self._service.refresh_scheduled(pool=pool)
                 logger.info(
-                    "Account refresh [{}]: checked={} refreshed={} recovered={} failed={}",
+                    "account refresh cycle completed: pool={} checked={} refreshed={} recovered={} failed={}",
                     pool, result.checked, result.refreshed, result.recovered, result.failed,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error("Account refresh [{}] error: {}", pool, exc)
+                logger.error(
+                    "account refresh cycle failed: pool={} error_type={} error={}",
+                    pool,
+                    type(exc).__name__,
+                    exc,
+                )
 
 
 # ---------------------------------------------------------------------------

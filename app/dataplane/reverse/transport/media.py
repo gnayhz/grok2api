@@ -68,7 +68,7 @@ async def _post_with_proxy(
         lease,
         ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
     )
-    logger.debug("{}: ok", label)
+    logger.debug("media request completed: operation={}", label)
     return result
 
 

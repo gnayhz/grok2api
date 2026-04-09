@@ -31,13 +31,14 @@ class AppError(Exception):
         self.details = details or {}
 
     def to_dict(self) -> dict:
-        return {
-            "error": {
-                "message": self.message,
-                "type":    self.kind,
-                "code":    self.code,
-            }
+        err = {
+            "message": self.message,
+            "type":    self.kind,
+            "code":    self.code,
         }
+        if "param" in self.details:
+            err["param"] = self.details["param"]
+        return {"error": err}
 
 
 class ValidationError(AppError):

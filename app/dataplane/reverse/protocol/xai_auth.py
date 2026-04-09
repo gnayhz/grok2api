@@ -119,7 +119,7 @@ async def _grpc_call(
     if status.ok or status.code == -1:
         if not shared:
             await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
-        logger.debug("{}: gRPC ok (code={})", label, status.code)
+        logger.debug("auth grpc call completed: label={} grpc_code={}", label, status.code)
     else:
         if not shared:
             await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.UPSTREAM_5XX, status_code=status.http_equiv))
@@ -211,7 +211,7 @@ async def set_birth_date(
 
     if not shared:
         await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
-    logger.debug("set_birth_date: ok")
+    logger.debug("auth birth date update completed")
     return result
 
 
@@ -237,7 +237,7 @@ async def nsfw_sequence(token: str) -> None:
                 session=session, lease=lease,
             )
         await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
-        logger.debug("nsfw_sequence: completed for token={}", token[:8])
+        logger.debug("auth nsfw sequence completed: token={}...", token[:8])
     except UpstreamError as exc:
         await proxy.feedback(lease, ProxyFeedback(
             kind=ProxyFeedbackKind.UPSTREAM_5XX if (exc.status or 0) >= 500

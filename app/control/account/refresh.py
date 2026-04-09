@@ -4,15 +4,16 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from app.platform.errors import UpstreamError
 from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 from app.platform.runtime.batch import run_batch
-from app.control.model.enums import ALL_MODES_WITH_HEAVY, ModeId
-from .enums import AccountStatus, FeedbackKind, QuotaSource
+from app.control.model.enums import ALL_MODES_WITH_HEAVY
+from .enums import AccountStatus, QuotaSource
 from .models import AccountRecord, QuotaWindow
-from .quota_defaults import default_quota_set, infer_pool
-from .state_machine import AccountFeedback, apply_feedback
+from .quota_defaults import default_quota_window, infer_pool, supported_mode_ids, supports_mode
+from .state_machine import is_manageable
 
 if TYPE_CHECKING:
     from .repository import AccountRepository
@@ -38,6 +39,14 @@ class RefreshResult:
         self.failed       += other.failed
 
 
+_MODE_KEYS = {
+    0: "quota_auto",
+    1: "quota_fast",
+    2: "quota_expert",
+    3: "quota_heavy",
+}
+
+
 class AccountRefreshService:
     """Fetches real quota data from the upstream usage API and persists it.
 
@@ -57,22 +66,32 @@ class AccountRefreshService:
     # Usage API fetch (delegates to dataplane reverse protocol)
     # ------------------------------------------------------------------
 
-    async def _fetch_all_quotas(self, token: str) -> dict[int, QuotaWindow] | None:
-        """Fetch quota windows for all three modes.  Returns {mode_id: window}."""
+    async def _fetch_all_quotas(self, token: str, pool: str) -> dict[int, QuotaWindow] | None:
+        """Fetch quota windows for modes supported by *pool*. Returns {mode_id: window}."""
         try:
             from app.dataplane.reverse.protocol.xai_usage import fetch_all_quotas
-            return await fetch_all_quotas(token)
+            return await fetch_all_quotas(token, supported_mode_ids(pool))
+        except UpstreamError:
+            raise
         except Exception as exc:
-            logger.debug("Usage fetch failed: token={}... error={}", token[:10], exc)
+            logger.debug("account quota fetch failed: token={}... pool={} error={}", token[:10], pool, exc)
             return None
 
-    async def _fetch_mode_quota(self, token: str, mode_id: int) -> QuotaWindow | None:
+    async def _fetch_mode_quota(self, token: str, pool: str, mode_id: int) -> QuotaWindow | None:
         """Fetch a single mode quota window."""
+        if not supports_mode(pool, mode_id):
+            logger.debug(
+                "account mode quota fetch skipped: token={}... pool={} mode_id={} reason=unsupported_mode",
+                token[:10], pool, mode_id,
+            )
+            return None
         try:
             from app.dataplane.reverse.protocol.xai_usage import fetch_mode_quota
             return await fetch_mode_quota(token, mode_id)
+        except UpstreamError:
+            raise
         except Exception as exc:
-            logger.debug("Usage fetch failed: token={}... mode={} error={}", token[:10], mode_id, exc)
+            logger.debug("account mode quota fetch failed: token={}... pool={} mode_id={} error={}", token[:10], pool, mode_id, exc)
             return None
 
     # ------------------------------------------------------------------
@@ -82,11 +101,11 @@ class AccountRefreshService:
     async def refresh_on_import(self, tokens: list[str]) -> RefreshResult:
         """Called after bulk import — sync real quotas for all accounts."""
         records = await self._repo.get_accounts(tokens)
-        active  = [r for r in records if not r.is_deleted()]
+        active  = [r for r in records if is_manageable(r)]
         if not active:
             return RefreshResult(checked=len(records))
 
-        concurrency = get_config("account.refresh.usage_concurrency", 10)
+        concurrency = get_config("account.refresh.usage_concurrency", 50)
         results = await run_batch(
             active,
             lambda r: self._refresh_one(r, apply_fallback=True),
@@ -102,7 +121,12 @@ class AccountRefreshService:
         record = (await self._repo.get_accounts([token]) or [None])[0]
         if record is None or record.is_deleted():
             return
-        window = await self._fetch_mode_quota(token, mode_id)
+        try:
+            window = await self._fetch_mode_quota(token, record.pool, mode_id)
+        except UpstreamError as exc:
+            if await self._expire_invalid_credentials(record, exc):
+                return
+            raise
         await self._apply_single_mode(record, mode_id, window, is_use=True, use_at_ms=now_ms())
 
     async def refresh_scheduled(self, pool: str | None = None) -> RefreshResult:
@@ -110,14 +134,14 @@ class AccountRefreshService:
 
         Args:
             pool: When set, only refreshes accounts belonging to that pool.
-                  When ``None``, refreshes all pools (legacy / manual trigger path).
+                  When ``None``, refreshes all pools.
         """
         snapshot = await self._repo.runtime_snapshot()
-        records  = snapshot.items
+        records  = [r for r in snapshot.items if is_manageable(r)]
         if pool is not None:
             records = [r for r in records if r.pool == pool]
 
-        concurrency = get_config("account.refresh.usage_concurrency", 10)
+        concurrency = get_config("account.refresh.usage_concurrency", 50)
         results = await run_batch(
             records,
             lambda r: self._refresh_one(r, apply_fallback=True),
@@ -147,8 +171,8 @@ class AccountRefreshService:
 
     async def refresh_tokens(self, tokens: list[str]) -> RefreshResult:
         """Explicit refresh for a list of tokens (admin / manual trigger)."""
-        records = await self._repo.get_accounts(tokens)
-        concurrency = get_config("account.refresh.usage_concurrency", 10)
+        records = [r for r in await self._repo.get_accounts(tokens) if is_manageable(r)]
+        concurrency = get_config("account.refresh.usage_concurrency", 50)
         results = await run_batch(records, self._refresh_one, concurrency=concurrency)
         agg = RefreshResult()
         for r in results:
@@ -175,7 +199,12 @@ class AccountRefreshService:
         if record.is_deleted():
             return RefreshResult()
 
-        windows = await self._fetch_all_quotas(record.token)
+        try:
+            windows = await self._fetch_all_quotas(record.token, record.pool)
+        except UpstreamError as exc:
+            if await self._expire_invalid_credentials(record, exc):
+                return RefreshResult(checked=1, expired=1, failed=0)
+            raise
 
         # API call completely failed — no real data available.
         if windows is None:
@@ -189,8 +218,6 @@ class AccountRefreshService:
         now      = now_ms()
         patches: dict[str, dict] = {}
         refreshed = False
-
-        _MODE_KEYS = {0: "quota_auto", 1: "quota_fast", 2: "quota_expert", 3: "quota_heavy"}
 
         for mode in ALL_MODES_WITH_HEAVY:
             mode_id = int(mode)
@@ -211,7 +238,7 @@ class AccountRefreshService:
                         source         = QuotaSource.ESTIMATED,
                     ).to_dict()
                 elif existing.is_window_expired(now):
-                    default = default_quota_set(record.pool).get(mode_id)
+                    default = default_quota_window(record.pool, mode_id)
                     if default is None:
                         continue
                     patches[_MODE_KEYS[mode_id]] = QuotaWindow(
@@ -231,7 +258,7 @@ class AccountRefreshService:
         pool_patch = inferred if inferred != record.pool else None
         if pool_patch:
             logger.info(
-                "Pool auto-updated: token={}... {} → {}",
+                "account pool updated from live quota: token={}... previous_pool={} current_pool={}",
                 record.token[:10], record.pool, inferred,
             )
 
@@ -259,8 +286,6 @@ class AccountRefreshService:
         now = now_ms()
         patches: dict[str, dict] = {}
 
-        _MODE_KEYS = {0: "quota_auto", 1: "quota_fast", 2: "quota_expert", 3: "quota_heavy"}
-
         for mode in ALL_MODES_WITH_HEAVY:
             mode_id  = int(mode)
             existing = qs.get(mode_id)
@@ -276,7 +301,7 @@ class AccountRefreshService:
                     source         = QuotaSource.ESTIMATED,
                 ).to_dict()
             elif existing.is_window_expired(now):
-                default = default_quota_set(record.pool).get(mode_id)
+                default = default_quota_window(record.pool, mode_id)
                 if default is None:
                     continue
                 patches[_MODE_KEYS[mode_id]] = QuotaWindow(
@@ -294,10 +319,14 @@ class AccountRefreshService:
 
         return RefreshResult(checked=1, failed=1)
 
-    async def record_failure_async(self, token: str, mode_id: int) -> None:
+    async def record_failure_async(self, token: str, mode_id: int, exc: BaseException | None = None) -> None:
         """Fire-and-forget: persist failure counter and timestamp after a failed call."""
         from .commands import AccountPatch
         try:
+            if exc is not None:
+                record = next(iter(await self._repo.get_accounts([token])), None)
+                if record is not None and await self._expire_invalid_credentials(record, exc):
+                    return
             await self._repo.patch_accounts([
                 AccountPatch(
                     token            = token,
@@ -306,7 +335,7 @@ class AccountRefreshService:
                 )
             ])
         except Exception as exc:
-            logger.debug("Failure record failed: token={}... error={}", token[:10], exc)
+            logger.debug("account failure record update failed: token={}... error={}", token[:10], exc)
 
     async def _apply_single_mode(
         self,
@@ -318,20 +347,34 @@ class AccountRefreshService:
         use_at_ms: int | None = None,
     ) -> None:
         qs = record.quota_set()
-        if window is not None:
-            win = window
-        else:
-            # API failed after a real call — always decrement by 1 since the call consumed quota.
-            existing = qs.get(mode_id)
-            win = QuotaWindow(
-                remaining      = max(0, existing.remaining - 1),
-                total          = existing.total,
-                window_seconds = existing.window_seconds,
-                reset_at       = existing.reset_at,
-                synced_at      = existing.synced_at,
-                source         = QuotaSource.ESTIMATED,
+        mode_key = _MODE_KEYS.get(mode_id)
+        if mode_key is None:
+            logger.warning(
+                "account single-mode sync skipped: token={}... pool={} mode_id={} reason=unknown_mode",
+                record.token[:10], record.pool, mode_id,
             )
-        mode_key = {0: "quota_auto", 1: "quota_fast", 2: "quota_expert"}[mode_id]
+            return
+
+        quota_patch: dict[str, dict] = {}
+        if window is not None:
+            quota_patch[mode_key] = window.to_dict()
+        else:
+            existing = qs.get(mode_id)
+            if existing is not None:
+                quota_patch[mode_key] = QuotaWindow(
+                    remaining      = max(0, existing.remaining - 1),
+                    total          = existing.total,
+                    window_seconds = existing.window_seconds,
+                    reset_at       = existing.reset_at,
+                    synced_at      = existing.synced_at,
+                    source         = QuotaSource.ESTIMATED,
+                ).to_dict()
+            else:
+                logger.debug(
+                    "account single-mode quota patch skipped: token={}... pool={} mode_id={} reason=unsupported_mode",
+                    record.token[:10], record.pool, mode_id,
+                )
+
         from .commands import AccountPatch
         await self._repo.patch_accounts([
             AccountPatch(
@@ -340,9 +383,19 @@ class AccountRefreshService:
                 usage_sync_delta = 1 if window is not None else None,
                 usage_use_delta  = 1 if is_use else None,
                 last_use_at      = use_at_ms if is_use else None,
-                **{mode_key: win.to_dict()},  # type: ignore[arg-type]
+                **quota_patch,  # type: ignore[arg-type]
             )
         ])
+
+    async def _expire_invalid_credentials(self, record: AccountRecord, exc: UpstreamError) -> bool:
+        from .invalid_credentials import mark_account_invalid_credentials
+
+        return await mark_account_invalid_credentials(
+            self._repo,
+            record.token,
+            exc,
+            source="usage refresh",
+        )
 
 
 __all__ = ["AccountRefreshService", "RefreshResult"]

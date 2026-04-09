@@ -4,6 +4,7 @@ window.renderAdminHeader = async function renderAdminHeader() {
   let appVersion = '';
   let updateInfo = null;
   let updateStatus = 'idle';
+  let updatePromise = null;
 
   const languageCodes = {
     zh: 'CN',
@@ -94,18 +95,26 @@ window.renderAdminHeader = async function renderAdminHeader() {
     }
   };
 
-  const loadUpdate = async () => {
+  const refreshUpdate = async (force = false) => {
+    if (updatePromise) return updatePromise;
+    if (force) updateInfo = null;
     updateStatus = 'loading';
-    try {
-      const res = await fetch('/meta/update', { cache: 'no-store' });
-      if (!res.ok) throw new Error('update unavailable');
-      const data = await res.json();
-      updateInfo = data && typeof data === 'object' ? data : null;
-      updateStatus = 'ready';
-    } catch {
-      updateInfo = null;
-      updateStatus = 'error';
-    }
+    updatePromise = (async () => {
+      try {
+        const path = force ? '/meta/update?force=true' : '/meta/update';
+        const res = await fetch(path, { cache: 'no-store' });
+        if (!res.ok) throw new Error('update unavailable');
+        const data = await res.json();
+        updateInfo = data && typeof data === 'object' ? data : null;
+        updateStatus = 'ready';
+      } catch {
+        updateInfo = null;
+        updateStatus = 'error';
+      }
+    })().finally(() => {
+      updatePromise = null;
+    });
+    return updatePromise;
   };
 
   const text = (key, fallback, params) => {
@@ -352,6 +361,7 @@ window.renderAdminHeader = async function renderAdminHeader() {
         </div>
         <div class="admin-version-modal-notes" id="admin-version-modal-notes"></div>
         <div class="modal-footer">
+          <button id="admin-version-modal-refresh" type="button" class="btn btn-ghost"></button>
           <a id="admin-version-modal-link" class="btn btn-ghost admin-version-modal-link" href="#" target="_blank" rel="noopener"></a>
           <button id="admin-version-modal-close" type="button" class="btn btn-primary"></button>
         </div>
@@ -376,8 +386,7 @@ window.renderAdminHeader = async function renderAdminHeader() {
     return overlay;
   };
 
-  const openVersionModal = () => {
-    const overlay = ensureVersionModal();
+  const renderVersionModal = (overlay = ensureVersionModal()) => {
     const title = overlay.querySelector('#admin-version-modal-title');
     const badge = overlay.querySelector('#admin-version-modal-badge');
     const status = overlay.querySelector('#admin-version-modal-status');
@@ -389,6 +398,7 @@ window.renderAdminHeader = async function renderAdminHeader() {
     const publishedValue = overlay.querySelector('#admin-version-modal-published');
     const notes = overlay.querySelector('#admin-version-modal-notes');
     const link = overlay.querySelector('#admin-version-modal-link');
+    const refresh = overlay.querySelector('#admin-version-modal-refresh');
     const close = overlay.querySelector('#admin-version-modal-close');
     const latestVersion = String(updateInfo?.latest_version || appVersion || '').trim();
     const currentVersion = String(appVersion || updateInfo?.current_version || '').trim();
@@ -410,30 +420,36 @@ window.renderAdminHeader = async function renderAdminHeader() {
     }
 
     if (status) {
+      status.textContent = '';
+      status.className = 'admin-version-modal-status is-hidden';
+    }
+
+    if (badge) {
       if (updateStatus === 'loading') {
-        status.textContent = text('header.versionChecking', 'Checking for updates...');
-        status.className = 'admin-version-modal-status is-muted';
+        badge.hidden = false;
+        badge.textContent = text('header.versionChecking', 'Checking for updates...');
+        badge.className = 'admin-version-modal-badge is-muted';
       } else if (updateStatus === 'error' || !updateInfo || updateInfo.status === 'error') {
-        status.textContent = text('header.versionUnavailable', 'Unable to check for updates right now.');
-        status.className = 'admin-version-modal-status is-muted';
+        badge.hidden = false;
+        badge.textContent = text('header.versionUnavailable', 'Unable to check for updates right now.');
+        badge.className = 'admin-version-modal-badge is-muted';
       } else if (updateInfo.update_available) {
-        status.textContent = '';
-        status.className = 'admin-version-modal-status is-hidden';
-        if (badge) {
-          badge.hidden = false;
-          badge.textContent = text('header.versionUpdateAvailable', 'A new version is available.');
-          badge.className = 'admin-version-modal-badge is-update';
-        }
+        badge.hidden = false;
+        badge.textContent = text('header.versionUpdateAvailable', 'A new version is available.');
+        badge.className = 'admin-version-modal-badge is-update';
       } else {
-        status.textContent = text('header.versionUpToDate', 'You are already on the latest version.');
-        status.className = 'admin-version-modal-status is-current';
+        badge.hidden = false;
+        badge.textContent = text('header.versionUpToDate', 'You are already on the latest version.');
+        badge.className = 'admin-version-modal-badge is-current';
       }
     }
 
     if (notes) {
-      if (updateStatus === 'error' || !updateInfo || updateInfo.status === 'error') {
-        notes.innerHTML = `<p>${escapeHtml(text('header.versionUnavailable', 'Unable to check for updates right now.'))}</p>`;
+      if (updateStatus === 'loading' || updateStatus === 'error' || !updateInfo || updateInfo.status === 'error') {
+        notes.hidden = true;
+        notes.innerHTML = '';
       } else {
+        notes.hidden = false;
         notes.innerHTML = renderReleaseNotes(releaseNotes);
       }
     }
@@ -452,12 +468,31 @@ window.renderAdminHeader = async function renderAdminHeader() {
       }
     }
 
+    if (refresh instanceof HTMLButtonElement) {
+      refresh.textContent = text('header.versionRefresh', 'Check Now');
+      refresh.disabled = updateStatus === 'loading';
+    }
+
     if (close instanceof HTMLButtonElement) {
       close.textContent = text('header.versionClose', 'Close');
     }
 
     overlay.classList.add('open');
     overlay.setAttribute('aria-hidden', 'false');
+  };
+
+  const openVersionModal = async () => {
+    const overlay = ensureVersionModal();
+    updateStatus = 'loading';
+    renderVersionModal(overlay);
+    try {
+      await refreshUpdate(false);
+    } finally {
+      applyVersion();
+      if (overlay.classList.contains('open')) {
+        renderVersionModal(overlay);
+      }
+    }
   };
 
   const applyVersion = () => {
@@ -480,11 +515,13 @@ window.renderAdminHeader = async function renderAdminHeader() {
     node.classList.toggle('has-update', Boolean(updateInfo?.update_available));
     node.setAttribute('role', 'button');
     node.setAttribute('tabindex', '0');
-    node.onclick = openVersionModal;
+    node.onclick = () => {
+      void openVersionModal();
+    };
     node.onkeydown = (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
-        openVersionModal();
+        void openVersionModal();
       }
     };
   };
@@ -567,7 +604,16 @@ window.renderAdminHeader = async function renderAdminHeader() {
   applyVersion();
   syncLanguageMenu?.();
 
-  void loadUpdate().then(() => {
-    applyVersion();
+  const versionModal = ensureVersionModal();
+  versionModal.querySelector('#admin-version-modal-refresh')?.addEventListener('click', async () => {
+    renderVersionModal(versionModal);
+    try {
+      await refreshUpdate(true);
+    } finally {
+      applyVersion();
+      if (versionModal.classList.contains('open')) {
+        renderVersionModal(versionModal);
+      }
+    }
   });
 };

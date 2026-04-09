@@ -76,7 +76,7 @@ def build_chat_payload(
         payload.update({k: v for k, v in request_overrides.items() if v is not None})
 
     logger.debug(
-        "Chat payload: mode={} msg_len={} files={}",
+        "chat payload built: mode={} message_len={} file_count={}",
         MODE_STRINGS[mode_id], len(message), len(file_attachments),
     )
     return payload
@@ -193,7 +193,7 @@ class StreamAdapter:
         """Parse one JSON ``data:`` payload; return 0-N events."""
         try:
             obj = orjson.loads(data)
-        except Exception:
+        except (orjson.JSONDecodeError, ValueError, TypeError):
             return []
 
         result = obj.get("result")
@@ -281,7 +281,7 @@ class StreamAdapter:
         """Cache card data; emit image event on progress=100."""
         try:
             jd = orjson.loads(card_raw["jsonData"])
-        except Exception:
+        except (orjson.JSONDecodeError, ValueError, TypeError, KeyError):
             return []
 
         card_id = jd.get("id", "")

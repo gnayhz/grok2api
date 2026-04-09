@@ -49,7 +49,7 @@ class AccountDirectory:
         table = await _bootstrap(self._repo)
         async with self._lock:
             self._table = table
-        logger.info("AccountDirectory ready: size={}", table.size)
+        logger.info("account directory ready: size={}", table.size)
 
     async def sync_if_changed(self) -> bool:
         """Apply incremental changes since last revision.
@@ -67,7 +67,7 @@ class AccountDirectory:
             changed = await apply_changes(table, self._repo)
             if changed:
                 logger.debug(
-                    "AccountDirectory synced: revision={} size={}",
+                    "account directory synced: revision={} size={}",
                     table.revision, table.size,
                 )
             return changed
@@ -88,7 +88,7 @@ class AccountDirectory:
         """Select and reserve the best available account slot.
 
         ``pool_candidates`` is tried in order; the first pool with an available
-        account wins.  A plain ``int`` is accepted for backward compatibility.
+        account wins. A plain ``int`` is accepted and wrapped into a tuple.
 
         Returns an AccountLease, or None if no account is available.
         """
@@ -186,7 +186,7 @@ class AccountDirectory:
                 fb.apply_rate_limited(table, idx, mode_id)
                 fb.update_last_fail(table, idx, ts)
 
-            elif kind == FeedbackKind.AUTH_FAILURE:
+            elif kind == FeedbackKind.UNAUTHORIZED:
                 fb.apply_auth_failure(table, idx)
                 fb.update_last_fail(table, idx, ts)
                 fb.apply_status_change(table, idx, int(StatusId.EXPIRED))

@@ -116,7 +116,7 @@ async def imagine_ws(websocket: WebSocket):
             if not token:
                 await _send({
                     "type": "error",
-                    "message": "No available tokens.",
+                    "message": "No available accounts for this model tier",
                     "code": "rate_limit_exceeded",
                 })
                 return
@@ -149,7 +149,11 @@ async def imagine_ws(websocket: WebSocket):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.warning("Imagine stream error: {}", exc)
+            logger.error(
+                "webui imagine run failed: error_type={} error={}",
+                type(exc).__name__,
+                exc,
+            )
             await _send({
                 "type": "error",
                 "message": str(exc),
@@ -219,7 +223,11 @@ async def imagine_ws(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        logger.warning("WebSocket error: {}", exc)
+        logger.error(
+            "webui imagine websocket handler failed: error_type={} error={}",
+            type(exc).__name__,
+            exc,
+        )
     finally:
         await _stop_run()
         try:

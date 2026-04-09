@@ -1,8 +1,11 @@
 """Typed configuration snapshot — built once at startup, read-only at runtime."""
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
+
+import tomli_w
 
 from .loader import get_nested, load_config
 
@@ -18,31 +21,62 @@ def _resolve_user_path() -> Path:
     return _DATA_DIR / "config.toml"
 
 
+def _mtime(path: Path) -> float:
+    """Return file mtime, or 0.0 if the file does not exist."""
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0.0
+
+
 class ConfigSnapshot:
     """Immutable view over the loaded configuration dict.
 
-    Call ``load()`` once during application startup.  All subsequent reads
-    via ``get()`` are lock-free and non-blocking.
+    Reloads from disk only when a config file's mtime changes, so the
+    per-request overhead is a pair of stat() syscalls rather than full
+    TOML parsing on every request.
     """
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
         self._loaded = False
         self._lock = asyncio.Lock()
+        self._mtime_defaults: float = 0.0
+        self._mtime_user: float = 0.0
 
     async def load(
         self,
         defaults_path: Path | None = None,
         user_path: Path | None = None,
     ) -> None:
-        """Load configuration files.  Idempotent — subsequent calls reload."""
+        """Reload config if any source file changed since last load.
+
+        Safe to call on every request — skips disk I/O when nothing changed.
+        Pass explicit paths only during testing; production uses the defaults.
+        """
+        dp = defaults_path or _resolve_defaults_path()
+        up = user_path or _resolve_user_path()
+
+        mt_dp = _mtime(dp)
+        mt_up = _mtime(up)
+
+        # Fast path: files unchanged — skip lock and disk I/O entirely.
+        if self._loaded and mt_dp == self._mtime_defaults and mt_up == self._mtime_user:
+            return
+
         async with self._lock:
-            dp = defaults_path or _resolve_defaults_path()
-            up = user_path or _resolve_user_path()
+            # Re-check under lock to avoid redundant reloads under concurrency.
+            mt_dp = _mtime(dp)
+            mt_up = _mtime(up)
+            if self._loaded and mt_dp == self._mtime_defaults and mt_up == self._mtime_user:
+                return
+
             if not dp.exists():
                 raise RuntimeError(f"Missing required defaults config: {dp}")
             self._data = await asyncio.to_thread(load_config, dp, up)
             self._loaded = True
+            self._mtime_defaults = mt_dp
+            self._mtime_user = mt_up
 
     async def ensure_loaded(self) -> None:
         """Load with defaults if not yet loaded."""
@@ -94,36 +128,18 @@ class ConfigSnapshot:
         async with self._lock:
             from .loader import _deep_merge
             self._data = _deep_merge(self._data, patch)
-            # Persist to user config file.
             user_path = _resolve_user_path()
             await asyncio.to_thread(self._write_toml, user_path, self._data)
+            # Invalidate cached mtime so the next load() call re-reads the file
+            # and other workers pick up the change on their next request.
+            self._mtime_user = 0.0
 
     @staticmethod
     def _write_toml(path: Path, data: dict[str, Any]) -> None:
         """Write config dict to TOML file."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            import tomli_w
-            with open(path, "wb") as fh:
-                tomli_w.dump(data, fh)
-        except ImportError:
-            # Fallback: write as minimal TOML manually.
-            import json
-            with open(path, "w") as fh:
-                for section, values in data.items():
-                    if isinstance(values, dict):
-                        fh.write(f"\n[{section}]\n")
-                        for k, v in values.items():
-                            if isinstance(v, bool):
-                                fh.write(f"{k} = {'true' if v else 'false'}\n")
-                            elif isinstance(v, (int, float)):
-                                fh.write(f"{k} = {v}\n")
-                            elif isinstance(v, str):
-                                fh.write(f'{k} = {json.dumps(v)}\n')
-                            elif isinstance(v, list):
-                                fh.write(f"{k} = {json.dumps(v)}\n")
-                            else:
-                                fh.write(f'{k} = {json.dumps(v)}\n')
+        with open(path, "wb") as fh:
+            tomli_w.dump(data, fh)
 
     def raw(self) -> dict[str, Any]:
         """Return a shallow copy of the underlying data dict."""

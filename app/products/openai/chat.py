@@ -8,10 +8,11 @@ import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.platform.errors import RateLimitError, UpstreamError
+from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
 from app.platform.storage import image_files_dir
 from app.control.account.runtime import get_refresh_service
+from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.account.enums import FeedbackKind
@@ -21,10 +22,23 @@ from app.dataplane.proxy.adapters.session import ResettableSession, build_sessio
 from app.dataplane.reverse.protocol.xai_chat import build_chat_payload, classify_line, StreamAdapter
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import upload_from_input
+from app.dataplane.reverse.protocol.tool_prompt import (
+    build_tool_system_prompt, extract_tool_names, inject_into_message, tool_calls_to_xml,
+)
+from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
 from ._format import (
     make_response_id, make_stream_chunk, make_thinking_chunk, make_chat_response,
+    make_tool_call_chunk, make_tool_call_done_chunk, make_tool_call_response,
     estimate_tokens, build_usage,
 )
+from ._tool_sieve import ToolSieve
+
+
+def _log_task_exception(task: "asyncio.Task") -> None:
+    """Done-callback: log exceptions from fire-and-forget tasks."""
+    exc = task.exception() if not task.cancelled() else None
+    if exc:
+        logger.warning("background task failed: task={} error={}", task.get_name(), exc)
 
 
 async def _quota_sync(token: str, mode_id: int) -> None:
@@ -33,18 +47,18 @@ async def _quota_sync(token: str, mode_id: int) -> None:
         svc = get_refresh_service()
         if svc:
             await svc.refresh_call_async(token, mode_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("chat quota sync failed: token={}... mode_id={} error={}", token[:10], mode_id, exc)
 
 
-async def _fail_sync(token: str, mode_id: int) -> None:
+async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None) -> None:
     """Fire-and-forget: persist failure counter after a failed call."""
     try:
         svc = get_refresh_service()
         if svc:
-            await svc.record_failure_async(token, mode_id)
-    except Exception:
-        pass
+            await svc.record_failure_async(token, mode_id, exc)
+    except Exception as e:
+        logger.warning("chat fail sync error: token={}... mode_id={} error={}", token[:10], mode_id, e)
 
 
 def _parse_retry_codes(s: str) -> frozenset[int]:
@@ -59,14 +73,7 @@ def _parse_retry_codes(s: str) -> frozenset[int]:
 
 def _feedback_kind(exc: BaseException) -> "FeedbackKind":
     """Map an upstream exception to the appropriate FeedbackKind."""
-    status = getattr(exc, "status", 0)
-    if status == 429:
-        return FeedbackKind.RATE_LIMITED
-    if status == 401:
-        return FeedbackKind.AUTH_FAILURE
-    if status == 403:
-        return FeedbackKind.FORBIDDEN
-    return FeedbackKind.SERVER_ERROR
+    return feedback_kind_for_error(exc)
 
 
 async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
@@ -107,11 +114,7 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
       base64    — ![image](data:...) markdown
     """
     cfg = get_config()
-    fmt = cfg.get_str("features.image_format", "grok_url")
-
-    # Backward compatibility: old "url" value → local_url
-    if fmt == "url":
-        fmt = "local_url"
+    fmt = _normalize_image_format(cfg.get_str("features.image_format", "grok_url"))
 
     # Formats that don't need downloading
     if fmt == "grok_url":
@@ -123,7 +126,7 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
     try:
         raw, mime = await _download_image_bytes(token, url)
     except Exception as exc:
-        logger.warning("Image download failed, falling back to raw URL: {}", exc)
+        logger.warning("chat image download failed: fallback_to=upstream_url error={}", exc)
         return url
 
     if fmt == "base64":
@@ -140,15 +143,47 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
     return f"![image]({local_url})"  # local_md
 
 
+def _normalize_image_format(value: str | None) -> str:
+    fmt = (value or "grok_url").strip().lower()
+    if fmt not in {"grok_url", "local_url", "grok_md", "local_md", "base64"}:
+        raise ValidationError(
+            "image_format must be one of [grok_url, local_url, grok_md, local_md, base64]",
+            param="features.image_format",
+        )
+    return fmt
+
+
 def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
     """Flatten OpenAI messages into a single prompt string + file attachments."""
     parts: list[str] = []
     files: list[str] = []
 
     for msg in messages:
-        role    = msg.get("role", "user")
-        content = msg.get("content", "")
+        role       = msg.get("role", "user")
+        content    = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls")
 
+        # ── role=tool: tool execution result ─────────────────────────────────
+        if role == "tool":
+            tool_call_id = msg.get("tool_call_id", "")
+            label = f"[tool result for {tool_call_id}]" if tool_call_id else "[tool result]"
+            text = content.strip() if isinstance(content, str) else ""
+            if text:
+                parts.append(f"{label}:\n{text}")
+            continue
+
+        # ── role=assistant with tool_calls: reconstruct as XML ────────────────
+        if role == "assistant" and tool_calls:
+            xml = tool_calls_to_xml(tool_calls)
+            # Prepend any accompanying text content (rare but valid)
+            text = content.strip() if isinstance(content, str) else ""
+            if text:
+                parts.append(f"[assistant]: {text}\n{xml}")
+            else:
+                parts.append(f"[assistant]:\n{xml}")
+            continue
+
+        # ── normal content handling ───────────────────────────────────────────
         if isinstance(content, str):
             if content.strip():
                 parts.append(f"[{role}]: {content.strip()}")
@@ -170,10 +205,6 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
                     data  = inner.get("data") or inner.get("file_data", "")
                     if data:
                         files.append(data)
-
-        tool_calls = msg.get("tool_calls")
-        if role == "assistant" and tool_calls:
-            parts.append(f"[assistant tool_calls]: {orjson.dumps(tool_calls).decode()}")
 
     return "\n\n".join(parts), files
 
@@ -269,10 +300,11 @@ async def completions(
     """
     cfg        = get_config()
     spec       = resolve_model(model)
+    mode_id    = int(spec.mode_id)   # cast once, reuse everywhere
     is_stream  = stream   if stream   is not None else cfg.get_bool("features.stream",   True)
     emit_think = thinking if thinking is not None else cfg.get_bool("features.thinking", True)
 
-    logger.info("Chat request: model={} stream={} msgs={}", model, is_stream, len(messages))
+    logger.info("chat request accepted: model={} stream={} message_count={}", model, is_stream, len(messages))
 
     message, files = _extract_message(messages)
     if not message.strip():
@@ -288,9 +320,13 @@ async def completions(
     response_id   = make_response_id()
     timeout_s     = cfg.get_float("chat.timeout", 120.0)
 
-    tool_overrides: dict | None = None
+    # ── Tool call setup ───────────────────────────────────────────────────────
+    tool_names: list[str] = []
     if tools:
-        tool_overrides = {"tools": tools, "toolChoice": tool_choice or "auto"}
+        tool_names = extract_tool_names(tools)
+        tool_prompt = build_tool_system_prompt(tools, tool_choice)
+        message = inject_into_message(message, tool_prompt)
+    tool_overrides: dict | None = None
 
     # ── Streaming path ────────────────────────────────────────────────────────
     if is_stream:
@@ -299,7 +335,7 @@ async def completions(
             for attempt in range(max_retries + 1):
                 acct = await directory.reserve(
                     pool_candidates = spec.pool_candidates(),
-                    mode_id         = int(spec.mode_id),
+                    mode_id         = mode_id,
                     now_s_override  = now_s(),
                     exclude_tokens  = excluded or None,
                 )
@@ -315,6 +351,8 @@ async def completions(
                 try:
                     try:
                         ended = False
+                        sieve = ToolSieve(tool_names)
+                        tool_calls_emitted = False
                         async for line in _stream_chat(
                             token             = token,
                             mode_id           = spec.mode_id,
@@ -325,18 +363,43 @@ async def completions(
                             timeout_s         = timeout_s,
                         ):
                             event_type, data = classify_line(line)
-                            logger.debug("SSE: type={} data_len={}", event_type, len(data))
+                            logger.debug("chat sse frame received: event_type={} data_len={}", event_type, len(data))
                             if event_type == "done":
                                 break
                             if event_type != "data" or not data:
                                 continue
                             events = adapter.feed(data)
                             if not events:
-                                logger.debug("StreamAdapter skip: data[:120]={}", data[:120])
+                                logger.debug("chat stream adapter skipped frame: preview={}", data[:120])
                             for ev in events:
+                                if tool_calls_emitted:
+                                    break  # already sent [DONE], drop remaining events
                                 if ev.kind == "text":
-                                    chunk = make_stream_chunk(response_id, model, ev.content)
-                                    yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                    if tool_names:
+                                        safe_text, parsed_calls = sieve.feed(ev.content)
+                                        if safe_text:
+                                            chunk = make_stream_chunk(response_id, model, safe_text)
+                                            yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                        if parsed_calls is not None:
+                                            for i, tc in enumerate(parsed_calls):
+                                                chunk = make_tool_call_chunk(
+                                                    response_id, model, i,
+                                                    tc.call_id, tc.name, tc.arguments,
+                                                    is_first=True,
+                                                )
+                                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                            done_chunk = make_tool_call_done_chunk(response_id, model)
+                                            yield f"data: {orjson.dumps(done_chunk).decode()}\n\n"
+                                            yield "data: [DONE]\n\n"
+                                            tool_calls_emitted = True
+                                            success = True
+                                            logger.info("chat stream tool_calls: attempt={}/{} model={} call_count={}",
+                                                        attempt + 1, max_retries + 1, model, len(parsed_calls))
+                                            ended = True
+                                            break  # stop processing remaining events in this batch
+                                    else:
+                                        chunk = make_stream_chunk(response_id, model, ev.content)
+                                        yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                                 elif ev.kind == "thinking" and emit_think:
                                     chunk = make_thinking_chunk(response_id, model, ev.content)
                                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
@@ -346,28 +409,48 @@ async def completions(
                             if ended:
                                 break
 
-                        for url, img_id in adapter.image_urls:
-                            img_text = await _resolve_image(token, url, img_id)
-                            chunk = make_stream_chunk(response_id, model, img_text + "\n")
-                            yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                        if not tool_calls_emitted and tool_names:
+                            # Stream ended — flush sieve for any buffered XML
+                            flushed_calls = sieve.flush()
+                            if flushed_calls:
+                                for i, tc in enumerate(flushed_calls):
+                                    chunk = make_tool_call_chunk(
+                                        response_id, model, i,
+                                        tc.call_id, tc.name, tc.arguments,
+                                        is_first=True,
+                                    )
+                                    yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                done_chunk = make_tool_call_done_chunk(response_id, model)
+                                yield f"data: {orjson.dumps(done_chunk).decode()}\n\n"
+                                yield "data: [DONE]\n\n"
+                                tool_calls_emitted = True
+                                success = True
+                                logger.info("chat stream tool_calls (flushed): model={} call_count={}",
+                                            model, len(flushed_calls))
 
-                        references = adapter.references_suffix()
-                        if references:
-                            chunk = make_stream_chunk(response_id, model, references)
-                            yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                        if not tool_calls_emitted:
+                            for url, img_id in adapter.image_urls:
+                                img_text = await _resolve_image(token, url, img_id)
+                                chunk = make_stream_chunk(response_id, model, img_text + "\n")
+                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
-                        final = make_stream_chunk(response_id, model, "", is_final=True)
-                        yield f"data: {orjson.dumps(final).decode()}\n\n"
-                        yield "data: [DONE]\n\n"
-                        success = True
-                        logger.info("Chat stream done (attempt {}/{}): model={} images={}",
-                                    attempt + 1, max_retries + 1, model, len(adapter.image_urls))
+                            references = adapter.references_suffix()
+                            if references:
+                                chunk = make_stream_chunk(response_id, model, references)
+                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+
+                            final = make_stream_chunk(response_id, model, "", is_final=True)
+                            yield f"data: {orjson.dumps(final).decode()}\n\n"
+                            yield "data: [DONE]\n\n"
+                            success = True
+                            logger.info("chat stream completed: attempt={}/{} model={} image_count={}",
+                                        attempt + 1, max_retries + 1, model, len(adapter.image_urls))
 
                     except UpstreamError as exc:
                         fail_exc = exc
                         if exc.status in retry_codes and attempt < max_retries:
                             _retry = True
-                            logger.warning("Chat stream retry {}/{}: status={} token={}...",
+                            logger.warning("chat stream retry scheduled: attempt={}/{} status={} token={}...",
                                            attempt + 1, max_retries, exc.status, token[:8])
                         else:
                             raise
@@ -375,11 +458,11 @@ async def completions(
                 finally:
                     await directory.release(acct)
                     kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-                    await directory.feedback(token, kind, int(spec.mode_id), now_s_val=now_s())
+                    await directory.feedback(token, kind, mode_id, now_s_val=now_s())
                     if success:
-                        asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
+                        asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(_log_task_exception)
                     else:
-                        asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                        asyncio.create_task(_fail_sync(token, mode_id, fail_exc)).add_done_callback(_log_task_exception)
 
                 if success or not _retry:
                     return
@@ -389,11 +472,12 @@ async def completions(
 
     # ── Non-streaming path ────────────────────────────────────────────────────
     excluded: list[str] = []
+    token    = ""
     adapter  = StreamAdapter()
     for attempt in range(max_retries + 1):
         acct = await directory.reserve(
             pool_candidates = spec.pool_candidates(),
-            mode_id         = int(spec.mode_id),
+            mode_id         = mode_id,
             now_s_override  = now_s(),
             exclude_tokens  = excluded or None,
         )
@@ -404,7 +488,7 @@ async def completions(
         success  = False
         _retry   = False
         fail_exc: BaseException | None = None
-        adapter  = StreamAdapter()
+        adapter  = StreamAdapter()   # fresh adapter per attempt
 
         try:
             try:
@@ -435,7 +519,7 @@ async def completions(
                 fail_exc = exc
                 if exc.status in retry_codes and attempt < max_retries:
                     _retry = True
-                    logger.warning("Chat retry {}/{}: status={} token={}...",
+                    logger.warning("chat retry scheduled: attempt={}/{} status={} token={}...",
                                    attempt + 1, max_retries, exc.status, token[:8])
                 else:
                     raise
@@ -443,22 +527,29 @@ async def completions(
         finally:
             await directory.release(acct)
             kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-            await directory.feedback(token, kind, int(spec.mode_id))
+            await directory.feedback(token, kind, mode_id, now_s_val=now_s())
             if success:
-                asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
+                asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(_log_task_exception)
             else:
-                asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                asyncio.create_task(_fail_sync(token, mode_id, fail_exc)).add_done_callback(_log_task_exception)
 
         if success or not _retry:
             break
         excluded.append(token)
 
     full_text = "".join(adapter.text_buf)
-    for url, img_id in adapter.image_urls:
-        img_text = await _resolve_image(token, url, img_id)
-        if full_text:
-            full_text += "\n\n"
-        full_text += img_text
+    if adapter.image_urls:
+        img_texts = await asyncio.gather(
+            *[_resolve_image(token, url, img_id) for url, img_id in adapter.image_urls],
+            return_exceptions=True,
+        )
+        for img_text in img_texts:
+            if isinstance(img_text, BaseException):
+                logger.warning("chat image resolve failed: error={}", img_text)
+            elif isinstance(img_text, str):
+                if full_text:
+                    full_text += "\n\n"
+                full_text += img_text
 
     references = adapter.references_suffix()
     if references:
@@ -466,7 +557,20 @@ async def completions(
 
     thinking_text = ("".join(adapter.thinking_buf) or None) if emit_think else None
 
-    logger.info("Chat non-stream done (attempt {}/{}): model={} text_len={} think_len={} images={}",
+    # ── Tool call detection (non-streaming) ──────────────────────────────────
+    if tool_names:
+        parse_result = parse_tool_calls(full_text, tool_names)
+        if parse_result.calls:
+            logger.info("chat request tool_calls: attempt={}/{} model={} call_count={}",
+                        attempt + 1, max_retries + 1, model, len(parse_result.calls))
+            pt = estimate_tokens(message) + 4
+            return make_tool_call_response(
+                model, parse_result.calls,
+                response_id = response_id,
+                usage       = build_usage(pt, sum(estimate_tokens(tc.arguments) for tc in parse_result.calls)),
+            )
+
+    logger.info("chat request completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
                 attempt + 1, max_retries + 1, model, len(full_text),
                 len(thinking_text or ""), len(adapter.image_urls))
 

@@ -10,27 +10,38 @@ from .spec import ModelSpec
 
 MODELS: tuple[ModelSpec, ...] = (
     # === Chat ==============================================================
-    # Basic
-    ModelSpec("grok-4.20-0309",                  ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309"),
-    ModelSpec("grok-4.20-0309-non-reasoning",    ModeId.FAST,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309-non-reasoning"),
-    ModelSpec("grok-4.20-0309-reasoning",        ModeId.EXPERT, Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309-reasoning"),
-    # Heavy
-    ModelSpec("grok-4.20-multi-agent-0309",      ModeId.HEAVY,  Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20-multi-agent-0309"),
+
+    # Basic+
+    ModelSpec("grok-4.20-0309-non-reasoning",           ModeId.FAST,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning"),
+    ModelSpec("grok-4.20-0309",                         ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309"),
+    ModelSpec("grok-4.20-0309-reasoning",               ModeId.EXPERT, Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning"),
+    # Super+
+    ModelSpec("grok-4.20-0309-non-reasoning-super",     ModeId.FAST,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning Super"),
+    ModelSpec("grok-4.20-0309-super",                   ModeId.AUTO,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Super"),
+    ModelSpec("grok-4.20-0309-reasoning-super",         ModeId.EXPERT, Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning Super"),
+    # Heavy+
+    ModelSpec("grok-4.20-0309-non-reasoning-heavy",     ModeId.FAST,   Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning Heavy"),
+    ModelSpec("grok-4.20-0309-heavy",                   ModeId.AUTO,   Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 0309 Heavy"),
+    ModelSpec("grok-4.20-0309-reasoning-heavy",         ModeId.EXPERT, Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning Heavy"),
+    ModelSpec("grok-4.20-multi-agent-0309",             ModeId.HEAVY,  Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 Multi-Agent 0309"),
     
     # === Image ==============================================================
-    # Basic
-    ModelSpec("grok-imagine-image-lite",         ModeId.FAST,   Tier.BASIC, Capability.IMAGE,      True, "Grok Imagine Image Lite"),
-    # Super
-    ModelSpec("grok-imagine-image",              ModeId.AUTO,   Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image"),
-    ModelSpec("grok-imagine-image-pro",          ModeId.AUTO,   Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image Pro"),
+
+    # Basic+
+    ModelSpec("grok-imagine-image-lite",                ModeId.FAST,   Tier.BASIC, Capability.IMAGE,      True, "Grok Imagine Image Lite"),
+    # Super+
+    ModelSpec("grok-imagine-image",                     ModeId.AUTO,   Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image"),
+    ModelSpec("grok-imagine-image-pro",                 ModeId.AUTO,   Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image Pro"),
     
     # === Image Edit =========================================================
-    # Super
-    ModelSpec("grok-imagine-image-edit",         ModeId.AUTO,   Tier.SUPER, Capability.IMAGE_EDIT, True, "Grok Imagine Image Edit"),
+
+    # Super+
+    ModelSpec("grok-imagine-image-edit",                ModeId.AUTO,   Tier.SUPER, Capability.IMAGE_EDIT, True, "Grok Imagine Image Edit"),
     
     # === Video ==============================================================
-    # Super
-    ModelSpec("grok-imagine-video",              ModeId.AUTO,   Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
+
+    # Super+
+    ModelSpec("grok-imagine-video",                     ModeId.AUTO,   Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
 )
 
 # ---------------------------------------------------------------------------

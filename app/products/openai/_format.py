@@ -28,7 +28,7 @@ def estimate_tokens(value: Any) -> int:
     if not isinstance(value, str):
         try:
             value = orjson.dumps(value).decode()
-        except Exception:
+        except (TypeError, ValueError):
             value = str(value)
     text = value.strip()
     if not text:
@@ -152,7 +152,7 @@ def make_chat_response(
 # ---------------------------------------------------------------------------
 
 def make_resp_id(prefix: str) -> str:
-    """Generate a Responses API item ID, e.g. resp_xxx / rs_xxx / msg_xxx."""
+    """Generate a Responses API item ID, e.g. resp_xxx / rs_xxx / msg_xxx / fc_xxx."""
     return f"{prefix}_{int(time.time() * 1000)}{os.urandom(4).hex()}"
 
 
@@ -190,12 +190,128 @@ def format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
 
 
+# ---------------------------------------------------------------------------
+# Tool call format (Chat Completions)
+# ---------------------------------------------------------------------------
+
+def make_tool_call_chunk(
+    response_id: str,
+    model:       str,
+    index:       int,
+    call_id:     str,
+    name:        str,
+    arguments:   str,
+    *,
+    is_first: bool = False,
+) -> dict:
+    """A streaming delta chunk carrying a tool_calls item.
+
+    On the first chunk for a given call index set *is_first=True* — this
+    emits the id/type/name fields.  Subsequent chunks carry only the
+    arguments delta.
+    """
+    if is_first:
+        tool_call_delta = {
+            "index": index,
+            "id":    call_id,
+            "type":  "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+    else:
+        tool_call_delta = {
+            "index": index,
+            "function": {"arguments": arguments},
+        }
+    return {
+        "id":      response_id,
+        "object":  "chat.completion.chunk",
+        "created": int(time.time()),
+        "model":   model,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role":       "assistant",
+                "content":    None,
+                "tool_calls": [tool_call_delta],
+            },
+        }],
+    }
+
+
+def make_tool_call_done_chunk(
+    response_id: str,
+    model:       str,
+    *,
+    usage: dict | None = None,
+) -> dict:
+    """Final streaming chunk with finish_reason='tool_calls'."""
+    chunk: dict = {
+        "id":      response_id,
+        "object":  "chat.completion.chunk",
+        "created": int(time.time()),
+        "model":   model,
+        "choices": [{
+            "index":         0,
+            "delta":         {},
+            "finish_reason": "tool_calls",
+        }],
+    }
+    if usage is not None:
+        chunk["usage"] = usage
+    return chunk
+
+
+def make_tool_call_response(
+    model:      str,
+    tool_calls: list,
+    *,
+    response_id: str | None = None,
+    usage:       dict | None = None,
+) -> dict:
+    """Non-streaming chat completion response carrying tool_calls."""
+    from app.dataplane.reverse.protocol.tool_parser import ParsedToolCall
+    rid = response_id or make_response_id()
+    tc_list = [
+        {
+            "id":   tc.call_id,
+            "type": "function",
+            "function": {
+                "name":      tc.name,
+                "arguments": tc.arguments,
+            },
+        }
+        for tc in tool_calls
+        if isinstance(tc, ParsedToolCall)
+    ]
+    args_tokens = sum(estimate_tokens(tc.arguments) for tc in tool_calls if isinstance(tc, ParsedToolCall))
+    ct = args_tokens
+    pt = _PROMPT_OVERHEAD
+    return {
+        "id":      rid,
+        "object":  "chat.completion",
+        "created": int(time.time()),
+        "model":   model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role":       "assistant",
+                "content":    None,
+                "tool_calls": tc_list,
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": usage or build_usage(pt, ct),
+    }
+
+
 __all__ = [
     # shared
     "estimate_tokens",
     # chat completions
     "make_response_id", "build_usage",
     "make_stream_chunk", "make_thinking_chunk", "make_chat_response",
+    # tool calls
+    "make_tool_call_chunk", "make_tool_call_done_chunk", "make_tool_call_response",
     # responses api
     "make_resp_id", "build_resp_usage", "make_resp_object", "format_sse",
 ]

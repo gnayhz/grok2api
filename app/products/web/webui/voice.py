@@ -8,7 +8,7 @@ from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.auth.middleware import verify_webui_key
 
-router = APIRouter(prefix="/webui/api", dependencies=[Depends(verify_webui_key)])
+router = APIRouter(prefix="/webui/api", dependencies=[Depends(verify_webui_key)], tags=["WebUI - Voice"])
 
 
 class VoiceTokenResponse(BaseModel):

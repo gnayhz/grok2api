@@ -4,18 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-_TOML_AVAILABLE = False
-try:
-    import tomllib  # Python 3.11+
-
-    _TOML_AVAILABLE = True
-except ImportError:
-    try:
-        import tomli as tomllib  # type: ignore[no-redef]
-
-        _TOML_AVAILABLE = True
-    except ImportError:
-        pass
+import tomllib
 
 
 def _flatten(mapping: dict[str, Any], prefix: str = "") -> dict[str, Any]:
@@ -43,10 +32,6 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 def load_toml(path: Path) -> dict[str, Any]:
     """Load a TOML file and return the raw nested dict."""
-    if not _TOML_AVAILABLE:
-        raise RuntimeError(
-            "No TOML parser found. Install Python 3.11+ or add 'tomli' to dependencies."
-        )
     if not path.exists():
         return {}
     with open(path, "rb") as fh:

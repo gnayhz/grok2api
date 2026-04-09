@@ -67,29 +67,75 @@
     .sec-panel { display:none }
     .sec-panel.active { display:block }
 
-    /* Sub-tabs (image / video) */
-    .filter-bar { display:flex; align-items:center; gap:6px; margin-bottom:14px }
-    .ftab { height:30px; padding:0 12px; border-radius:999px; font-size:12px; font-weight:500; color:#8f8f8f; background:#f5f5f5; display:flex; align-items:center; gap:6px; transition:background .15s, color .15s; white-space:nowrap }
-    .ftab:hover { color:#555; background:#f1f1f1 }
-    .ftab.active { background:#111; color:#fff }
-    .ftab-n { min-width:18px; height:18px; padding:0 5px; border-radius:999px; background:rgba(255,255,255,.72); font-size:11px; font-weight:600; color:inherit; display:inline-flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums }
-    .ftab.active .ftab-n { background:rgba(255,255,255,.16); color:#fff }
-
     /* Toolbar */
-    .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap }
-    .table-toolbar-left { flex:1; display:flex; align-items:center; gap:6px }
-    .table-toolbar-actions { display:flex; align-items:center; gap:8px }
-    .toolbar-action { height:28px; padding:0 12px; border-radius:999px; background:#fafafa; font-size:12px; font-weight:500; color:#5f5f5f; white-space:nowrap }
-    .toolbar-action:hover { background:#f3f3f3 }
-    .toolbar-action-danger { color:#b42318; background:#fff5f4; border-color:#f3d2cf }
-    .toolbar-action-danger:hover { background:#feeceb; border-color:#eab8b3 }
-    .pagi-btn  { width:26px; height:26px; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; background:#fafafa; border:1px solid #ececec; color:#666 }
-    .pagi-btn:hover { background:#f3f3f3 }
+    .table-toolbar {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:8px;
+      flex-wrap:wrap;
+      color:#8f8f8f;
+      font-size:12px;
+      font-weight:500;
+      font-family:inherit;
+    }
+    .table-toolbar-left { flex:1 }
+    .table-toolbar-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+    .toolbar-icon-btn {
+      width:28px;
+      height:28px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      color:inherit;
+      flex:0 0 auto;
+      font:inherit;
+    }
+    .toolbar-icon-btn:hover { color:#555 }
+    .toolbar-icon-btn svg {
+      width:14px;
+      height:14px;
+      stroke:currentColor;
+      stroke-linecap:round;
+      stroke-linejoin:round;
+      fill:none;
+    }
+    .toolbar-icon-btn-danger { color:inherit }
+    .toolbar-icon-btn-danger:hover { color:#555 }
+    .toolbar-page-size {
+      width:96px !important;
+      height:28px;
+      border-radius:999px;
+      font:inherit;
+      color:inherit;
+      background:#fafafa;
+      border-color:transparent;
+      flex:0 0 auto;
+    }
+    .pagi-btn  {
+      width:28px;
+      height:28px;
+      border-radius:6px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      color:inherit;
+      transition:background .1s, color .1s;
+      font:inherit;
+    }
+    .pagi-btn:hover { background:var(--border) }
     .pagi-btn:disabled { opacity:.35; pointer-events:none }
-    .pagi-meta { display:flex; align-items:center; gap:8px; min-height:26px }
-    .pagi-page { font-size:12px; font-weight:500; color:#444 }
+    .pagi-meta { display:flex; align-items:center; gap:0; min-height:28px; min-width:0; color:inherit; font:inherit; flex-wrap:nowrap }
+    .pagi-page { min-width:0; padding:0 4px; font:inherit; color:inherit; font-variant-numeric:tabular-nums; white-space:nowrap }
     .pagi-dot { width:4px; height:4px; border-radius:50%; background:#d4d4d4; flex:0 0 auto }
     .pagi-info { font-size:11px; color:#a3a3a3 }
+    .asset-summary { font-size:12px; color:#a3a3a3 }
+    .cb {
+      width:14px;
+      height:14px;
+      accent-color:#111;
+      vertical-align:middle;
+    }
 
     /* Table */
     .table-card { background:#fff; border:none; border-radius:14px; overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch }
@@ -133,20 +179,29 @@
     .row-actions {
       display:flex;
       align-items:center;
-      gap:10px;
-      flex-wrap:wrap;
+      gap:8px;
+      flex-wrap:nowrap;
+      white-space:nowrap;
     }
     .row-action {
       color:#929292;
-      font-size:11px;
-      font-weight:500;
+      width:22px;
+      height:22px;
       display:inline-flex;
       align-items:center;
       justify-content:center;
-      white-space:nowrap;
+      flex:0 0 auto;
     }
     .row-action:hover { color:#555 }
     .row-action-danger { color:#b7726a }
+    .row-action svg {
+      width:13px;
+      height:13px;
+      stroke:currentColor;
+      stroke-linecap:round;
+      stroke-linejoin:round;
+      fill:none;
+    }
     .meta-badge {
       display:inline-flex;
       align-items:center;
@@ -160,14 +215,6 @@
     }
 
     /* Online asset panel */
-    .asset-desc {
-      max-width:620px;
-      margin-bottom:14px;
-      font-size:11px;
-      color:#9a9a9a;
-      line-height:1.6;
-    }
-    .asset-desc strong { color:#666; font-weight:600; margin-right:4px }
     /* asset sub-rows */
     .sub-row td { background:#fafafa; padding:9px 16px 9px 36px; font-size:12px; color:#666; border-top:1px solid #f5f5f5 }
     .sub-row:hover td { background:#f5f5f5 }
@@ -183,17 +230,21 @@
 
     @media (max-width: 840px) {
       .page-hd,
-      .section-head,
-      .table-toolbar {
+      .section-head {
         flex-direction:column;
         align-items:flex-start;
       }
-      .table-toolbar-left {
-        width:100%;
-        justify-content:flex-start;
-        flex-wrap:wrap;
+      .table-toolbar {
+        flex-wrap:nowrap;
+        overflow-x:auto;
+        overflow-y:hidden;
+        -webkit-overflow-scrolling:touch;
       }
-      .table-toolbar-actions { width:100% }
+      .table-toolbar-left,
+      .table-toolbar-actions {
+        flex-wrap:nowrap;
+        flex-shrink:0;
+      }
       .stat-grid {
         grid-template-columns:repeat(2, minmax(0, 1fr));
       }
@@ -212,12 +263,6 @@
     <div>
       <div class="page-title" data-i18n="cache.pageHeading">缓存管理</div>
       <div class="page-sub" data-i18n="cache.pageSubtitle">统一查看本地缓存文件与账户在线资产，并支持按类型清理。</div>
-    </div>
-    <div class="page-actions">
-      <button class="page-action-btn" onclick="refreshAll()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        <span data-i18n="cache.refresh">刷新</span>
-      </button>
     </div>
   </div>
 
@@ -267,40 +312,42 @@
 
   <div class="section-head">
     <div class="section-title" data-i18n="cache.sectionDetails">缓存明细</div>
-    <div class="sec-tabs">
-      <button class="sec-tab active" onclick="switchSection('local')" data-i18n="cache.tabLocal">本地缓存</button>
-      <button class="sec-tab" onclick="switchSection('online')" data-i18n="cache.tabOnline">在线资产</button>
-    </div>
+  </div>
+  <div class="sec-tabs" style="margin:-2px 0 14px">
+    <button class="sec-tab active" onclick="switchView('image')" data-cache-view="image" data-i18n="cache.tabLocalImage">本地图片</button>
+    <button class="sec-tab" onclick="switchView('video')" data-cache-view="video" data-i18n="cache.tabLocalVideo">本地视频</button>
+    <button class="sec-tab" onclick="switchView('online')" data-cache-view="online" data-i18n="cache.tabOnline">在线资产</button>
   </div>
 
   <!-- ── 本地缓存 panel ─────────────────────────────────────────── -->
   <div class="sec-panel active" id="panel-local">
-
-    <div class="filter-bar">
-      <button class="ftab active" onclick="switchType('image')" id="ftab-image">
-        <span data-i18n="cache.typeImage">图片</span> <span class="ftab-n" id="ftab-img-n">0</span>
-      </button>
-      <button class="ftab" onclick="switchType('video')" id="ftab-video">
-        <span data-i18n="cache.typeVideo">视频</span> <span class="ftab-n" id="ftab-vid-n">0</span>
-      </button>
-    </div>
-
     <div class="table-toolbar">
-      <div class="table-toolbar-left">
+      <div class="table-toolbar-left" style="display:flex;align-items:center;gap:6px">
         <button class="pagi-btn" onclick="prevPage()" id="btn-prev" disabled>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <div class="pagi-meta">
           <span class="pagi-page" id="pagi-page">第 0 / 0 页</span>
-          <span class="pagi-dot" aria-hidden="true"></span>
-          <span class="pagi-info" id="pagi-info">共 0 个文件</span>
         </div>
         <button class="pagi-btn" onclick="nextPage()" id="btn-next" disabled>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
       <div class="table-toolbar-actions">
-        <button class="toolbar-action toolbar-action-danger" onclick="clearLocal()" id="btn-clear" data-i18n="cache.clearCurrent">清空当前缓存</button>
+        <button class="toolbar-icon-btn toolbar-icon-btn-danger" onclick="clearLocal()" id="btn-clear">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
+        </button>
+        <button class="toolbar-icon-btn toolbar-icon-btn-danger" onclick="deleteSelectedLocal()" id="btn-local-delete-selected" style="display:none">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
+        </button>
+        <select class="input toolbar-page-size" id="page-size-sel" onchange="changePageSize(this.value)">
+          <option value="50">50 / 页</option>
+          <option value="100">100 / 页</option>
+          <option value="200">200 / 页</option>
+          <option value="500">500 / 页</option>
+          <option value="1000">1000 / 页</option>
+          <option value="2000">2000 / 页</option>
+        </select>
       </div>
     </div>
 
@@ -308,10 +355,11 @@
       <table>
         <thead>
           <tr>
+            <th style="width:36px"><input type="checkbox" class="cb" id="cb-local-all" onchange="toggleAllLocal(this.checked)"></th>
             <th data-i18n="cache.colFileName">文件名</th>
             <th style="width:100px" data-i18n="cache.colSize">大小</th>
             <th style="width:160px" data-i18n="cache.colModified">修改时间</th>
-            <th style="width:64px" data-i18n="cache.colActions">操作</th>
+            <th style="width:56px" data-i18n="cache.colActions">操作</th>
           </tr>
         </thead>
         <tbody id="cache-tbody"></tbody>
@@ -321,37 +369,36 @@
 
   <!-- ── 在线资产 panel ──────────────────────────────────────────── -->
   <div class="sec-panel" id="panel-online">
-    <div class="asset-desc">
-      <strong data-i18n="cache.onlineAssetLead">在线资产</strong><span data-i18n="cache.onlineAssetDesc">指账户在 Grok 平台侧保存的图片与附件。清理仅影响远端文件，不会删除本地缓存。</span>
-    </div>
-
     <div class="table-toolbar" style="margin-bottom:14px">
-      <div class="table-toolbar-left" style="gap:10px">
-        <button class="page-action-btn" onclick="loadAssets()" id="btn-load-assets">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-          <span data-i18n="cache.loadAssets">加载资产列表</span>
-        </button>
-        <span id="asset-summary" style="font-size:12px;color:#aaa"></span>
+      <div class="table-toolbar-left">
+        <span id="asset-summary" class="asset-summary"></span>
       </div>
-      <div class="table-toolbar-actions" style="gap:10px">
-<button class="toolbar-action toolbar-action-danger" onclick="clearAllAssets()" id="btn-clear-all-assets" style="display:none">
-          <span data-i18n="cache.clearAll">清理全部</span>
+      <div class="table-toolbar-actions">
+        <button class="toolbar-icon-btn" onclick="loadAssets()" id="btn-load-assets">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
-        <button class="toolbar-action toolbar-action-danger" onclick="cancelAssetClear()" id="btn-asset-cancel" style="display:none">
-          <span data-i18n="cache.cancel">取消</span>
+        <button class="toolbar-icon-btn toolbar-icon-btn-danger" onclick="clearAllAssets()" id="btn-clear-all-assets" style="display:none">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
+        </button>
+        <button class="toolbar-icon-btn toolbar-icon-btn-danger" onclick="clearSelectedAssets()" id="btn-clear-selected-assets" style="display:none">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
+        </button>
+        <button class="toolbar-icon-btn toolbar-icon-btn-danger" onclick="cancelAssetClear()" id="btn-asset-cancel" style="display:none">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M6 6 18 18"/><path d="M18 6 6 18"/></svg>
         </button>
       </div>
     </div>
 
 
-    <div class="table-card table-freeze-last" id="assets-table-wrap" style="display:none">
+    <div class="table-card table-freeze-last" id="assets-table-wrap">
       <table>
         <thead>
           <tr>
+            <th style="width:36px"><input type="checkbox" class="cb" id="cb-asset-all" onchange="toggleAllAssets(this.checked)"></th>
             <th style="width:32px"></th>
             <th data-i18n="cache.colToken">Token</th>
             <th style="width:72px" data-i18n="cache.colFileCount">文件数</th>
-            <th style="width:100px" data-i18n="cache.colActions">操作</th>
+            <th style="width:56px" data-i18n="cache.colActions">操作</th>
           </tr>
         </thead>
         <tbody id="assets-tbody"></tbody>
@@ -366,18 +413,25 @@
 <script src="/static/js/admin-header.js"></script>
 <script src="/static/js/toast.js"></script>
 <script>
+const PAGE_SIZE_KEY = 'admin.cache.page_size';
+const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000];
 const REFRESH_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
 const SPINNER_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="animation:spin .8s linear infinite"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
 
 let _type = 'image';
+let _view = 'image';
 let _page = 1;
-let _pageSize = 100;
+let _pageSize = loadSavedPageSize();
 let _total = 0;
+let _localItems = [];
+const _localSel = new Set();
 let _assetData = [];
 let _assetTotal = 0;
 let _expanded = {};
+const _assetSel = new Set();
 let _assetTaskId = null;
 let _assetEs = null;
+let _assetLoaded = false;
 
 function tr(key, params, fallback) {
   const value = t(key, params);
@@ -396,13 +450,46 @@ function getTypeNoun(type = _type) {
   return tr(type === 'image' ? 'cache.typeImageNoun' : 'cache.typeVideoNoun', null, type === 'image' ? '图片' : '视频');
 }
 
+function loadSavedPageSize() {
+  const raw = Number(localStorage.getItem(PAGE_SIZE_KEY));
+  return PAGE_SIZE_OPTIONS.includes(raw) ? raw : 100;
+}
+
 function setLoadAssetsButton(labelKey, fallback, spinning = false) {
   const btn = document.getElementById('btn-load-assets');
   if (!btn) return;
-  btn.innerHTML = `${spinning ? SPINNER_ICON : REFRESH_ICON}<span>${tr(labelKey, null, fallback)}</span>`;
+  btn.innerHTML = spinning ? SPINNER_ICON : REFRESH_ICON;
+  const label = tr(labelKey, null, fallback);
+  btn.setAttribute('data-tip', label);
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('title', label);
+}
+
+function applyToolbarI18n() {
+  const tips = [
+    ['btn-clear', 'cache.clearCurrent', '清空当前缓存'],
+    ['btn-local-delete-selected', 'cache.deleteSelected', '删除选中'],
+    ['btn-load-assets', 'cache.loadAssets', '加载资产列表'],
+    ['btn-clear-all-assets', 'cache.clearAll', '清理全部'],
+    ['btn-clear-selected-assets', 'cache.clearSelected', '清理选中'],
+    ['btn-asset-cancel', 'cache.cancel', '取消'],
+  ];
+  tips.forEach(([id, key, fallback]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const label = tr(key, null, fallback);
+    el.setAttribute('data-tip', label);
+    el.setAttribute('aria-label', label);
+    el.setAttribute('title', label);
+  });
 }
 
 function updateAssetSummary() {
+  if (!_assetLoaded) {
+    document.getElementById('asset-summary').textContent = tr('cache.assetSummaryIdle', null, '点击右侧获取在线资产');
+    document.getElementById('btn-clear-all-assets').style.display = 'none';
+    return;
+  }
   const totalAssets = _assetTotal || _assetData.reduce((sum, row) => sum + (row.count || 0), 0);
   document.getElementById('asset-summary').textContent = tr(
     'cache.assetSummary',
@@ -414,6 +501,12 @@ function updateAssetSummary() {
 
 function applyCacheI18n() {
   document.title = tr('cache.pageTitle', null, 'Grok2API - 缓存管理');
+  document.querySelectorAll('#page-size-sel option').forEach((opt) => {
+    opt.textContent = tr('cache.pageSizeOption', { n: opt.value }, `${opt.value} / 页`);
+  });
+  const pageSizeSel = document.getElementById('page-size-sel');
+  if (pageSizeSel) pageSizeSel.value = String(_pageSize);
+  applyToolbarI18n();
   setLoadAssetsButton('cache.loadAssets', '加载资产列表');
   _renderPagi();
   if (_assetData.length) {
@@ -445,8 +538,6 @@ async function loadStats() {
     document.getElementById('s-img-size').textContent = _fmtMb(img.size_mb);
     document.getElementById('s-vid-count').textContent = vid.count ?? 0;
     document.getElementById('s-vid-size').textContent = _fmtMb(vid.size_mb);
-    document.getElementById('ftab-img-n').textContent = img.count ?? 0;
-    document.getElementById('ftab-vid-n').textContent = vid.count ?? 0;
   } catch (e) {
     console.warn('stats error', e);
   }
@@ -456,8 +547,11 @@ async function loadList() {
   try {
     const d = await _api('GET', `/cache/list?type=${_type}&page=${_page}&page_size=${_pageSize}`);
     _total = d.total ?? 0;
-    _renderTable(d.items || []);
+    _localItems = d.items || [];
+    _reconcileLocalSelection();
+    _renderTable(_localItems);
     _renderPagi();
+    updateLocalBatchButtons();
   } catch (e) {
     showToast(tr('cache.loadFailed', { message: e.message }, `加载失败: ${e.message}`), 'error');
   }
@@ -465,12 +559,14 @@ async function loadList() {
 
 function _renderTable(items) {
   const tbody = document.getElementById('cache-tbody');
+  syncLocalSelectAll();
   if (!items.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="table-empty">${_esc(tr('cache.emptyLocal', null, '暂无缓存文件'))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="table-empty">${_esc(tr('cache.emptyLocal', null, '暂无缓存文件'))}</td></tr>`;
     return;
   }
   tbody.innerHTML = items.map((f) => `
     <tr>
+      <td><input type="checkbox" class="cb local-row-cb" data-name="${_esc(f.name)}" ${_localSel.has(f.name) ? 'checked' : ''} onchange="toggleLocalRow(this)"></td>
       <td>
         <div class="row-name">
           <span class="row-icon" aria-hidden="true">
@@ -484,14 +580,14 @@ function _renderTable(items) {
       </td>
       <td>${_fmtBytes(f.size_bytes)}</td>
       <td>${_fmtTime(f.modified_at)}</td>
-      <td><div class="row-actions"><button class="row-action row-action-danger" onclick="deleteFile('${_esc(f.name)}')">${_esc(tr('cache.actionDelete', null, '删除'))}</button></div></td>
+      <td><div class="row-actions"><button class="row-action" onclick="viewFile('${_esc(f.name)}')" title="${_esc(tr('cache.actionView', null, '查看'))}" aria-label="${_esc(tr('cache.actionView', null, '查看'))}"><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg></button><button class="row-action row-action-danger" onclick="deleteFile('${_esc(f.name)}')" title="${_esc(tr('cache.actionDelete', null, '删除'))}" aria-label="${_esc(tr('cache.actionDelete', null, '删除'))}"><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg></button></div></td>
     </tr>`).join('');
+  syncLocalSelectAll();
 }
 
 function _renderPagi() {
   const pages = Math.max(1, Math.ceil(_total / _pageSize));
   document.getElementById('pagi-page').textContent = tr('cache.pageIndicator', { current: _page, total: pages }, `第 ${_page} / ${pages} 页`);
-  document.getElementById('pagi-info').textContent = tr('cache.fileCount', { n: _total }, `共 ${_total} 个文件`);
   document.getElementById('btn-prev').disabled = _page <= 1;
   document.getElementById('btn-next').disabled = _page >= pages;
 }
@@ -511,29 +607,30 @@ function nextPage() {
   }
 }
 
-function switchSection(section) {
-  document.querySelectorAll('.sec-tab').forEach((el, i) => el.classList.toggle('active', ['local', 'online'][i] === section));
-  document.getElementById('panel-local').classList.toggle('active', section === 'local');
-  document.getElementById('panel-online').classList.toggle('active', section === 'online');
-}
-
-function switchType(type) {
-  _type = type;
+function changePageSize(value) {
+  const next = Number(value);
+  _pageSize = PAGE_SIZE_OPTIONS.includes(next) ? next : 100;
+  localStorage.setItem(PAGE_SIZE_KEY, String(_pageSize));
   _page = 1;
-  document.getElementById('ftab-image').classList.toggle('active', type === 'image');
-  document.getElementById('ftab-video').classList.toggle('active', type === 'video');
   loadList();
 }
 
-function refreshAll() {
-  loadStats();
-  loadList();
-  if (
-    document.getElementById('panel-online').classList.contains('active') &&
-    document.getElementById('assets-table-wrap').style.display !== 'none'
-  ) {
-    loadAssets();
+function switchView(view) {
+  _view = view;
+  const isOnline = view === 'online';
+  document.querySelectorAll('[data-cache-view]').forEach((el) => {
+    el.classList.toggle('active', el.dataset.cacheView === view);
+  });
+  document.getElementById('panel-local').classList.toggle('active', !isOnline);
+  document.getElementById('panel-online').classList.toggle('active', isOnline);
+  if (isOnline) {
+    clearLocalSelection(false);
+    return;
   }
+  clearAssetSelection(false);
+  _type = view;
+  _page = 1;
+  loadList();
 }
 
 async function clearLocal() {
@@ -553,6 +650,7 @@ async function clearLocal() {
 async function deleteFile(name) {
   try {
     await _api('POST', '/cache/item/delete', { type: _type, name });
+    _localSel.delete(name);
     showToast(tr('cache.deleted', null, '已删除'));
     loadStats();
     loadList();
@@ -561,20 +659,46 @@ async function deleteFile(name) {
   }
 }
 
+function viewFile(name) {
+  const url = localFileUrl(name);
+  if (!url) {
+    showToast(tr('cache.viewUnavailable', null, '当前文件暂不支持查看'), 'error');
+    return;
+  }
+  window.open(url, '_blank', 'noopener');
+}
+
+function localFileUrl(name) {
+  const raw = String(name || '');
+  const dot = raw.lastIndexOf('.');
+  if (dot <= 0) return '';
+  const id = raw.slice(0, dot);
+  return _type === 'video'
+    ? `/v1/files/video?id=${encodeURIComponent(id)}`
+    : `/v1/files/image?id=${encodeURIComponent(id)}`;
+}
+
 async function loadAssets() {
   const btn = document.getElementById('btn-load-assets');
   btn.disabled = true;
   setLoadAssetsButton('cache.loading', '加载中…', true);
-  document.getElementById('asset-summary').textContent = '';
   try {
     const d = await _api('GET', '/assets');
+    _assetLoaded = true;
     _assetData = d.tokens || [];
     _assetTotal = d.total_assets ?? _assetData.reduce((sum, row) => sum + (row.count || 0), 0);
     _expanded = {};
+    _reconcileAssetSelection();
     _renderAssets();
     updateAssetSummary();
-    document.getElementById('assets-table-wrap').style.display = '';
   } catch (e) {
+    _assetLoaded = false;
+    _assetData = [];
+    _assetTotal = 0;
+    _expanded = {};
+    _assetSel.clear();
+    _renderAssets();
+    updateAssetSummary();
     showToast(tr('cache.loadFailed', { message: e.message }, `加载失败: ${e.message}`), 'error');
   } finally {
     btn.disabled = false;
@@ -584,8 +708,13 @@ async function loadAssets() {
 
 function _renderAssets() {
   const tbody = document.getElementById('assets-tbody');
+  syncAssetSelectAll();
+  if (!_assetLoaded) {
+    tbody.innerHTML = `<tr><td colspan="5" class="table-empty">${_esc(tr('cache.emptyAssetsIdle', null, '点击右上角获取在线资产列表'))}</td></tr>`;
+    return;
+  }
   if (!_assetData.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="table-empty">${_esc(tr('cache.emptyAccounts', null, '暂无账户数据'))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="table-empty">${_esc(tr('cache.emptyAccounts', null, '暂无账户数据'))}</td></tr>`;
     return;
   }
 
@@ -601,6 +730,7 @@ function _renderAssets() {
     const hasItems = row.count > 0;
     rows.push(`
       <tr>
+        <td><input type="checkbox" class="cb asset-row-cb" data-token="${_esc(row.token)}" ${_assetSel.has(row.token) ? 'checked' : ''} onchange="toggleAssetRow(this)"></td>
         <td style="padding:10px 8px 10px 14px">
           ${hasItems ? `<button class="expand-btn${isOpen ? ' open' : ''}" onclick="toggleExpand('${_esc(row.masked)}')" title="${_esc(isOpen ? collapseLabel : expandLabel)}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
@@ -619,7 +749,7 @@ function _renderAssets() {
           <span class="asset-count-badge${hasItems ? ' has-items' : ''}">${row.count}</span>
         </td>
         <td>
-          ${hasItems ? `<div class="row-actions"><button class="row-action row-action-danger" onclick="clearTokenAssets('${_esc(row.token)}','${_esc(row.masked)}')">${_esc(clearLabel)}</button></div>` : ''}
+          ${hasItems ? `<div class="row-actions"><button class="row-action row-action-danger" onclick="clearTokenAssets('${_esc(row.token)}','${_esc(row.masked)}')" title="${_esc(clearLabel)}" aria-label="${_esc(clearLabel)}"><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg></button></div>` : ''}
         </td>
       </tr>`);
 
@@ -627,6 +757,7 @@ function _renderAssets() {
       for (const asset of row.assets) {
         rows.push(`
           <tr class="sub-row">
+            <td></td>
             <td></td>
             <td>
               <div class="row-name">
@@ -639,13 +770,15 @@ function _renderAssets() {
             </td>
             <td style="color:#aaa;font-size:11px">${asset.size ? _fmtBytes(asset.size) : _esc(naLabel)}</td>
             <td>
-              <div class="row-actions"><button class="row-action row-action-danger" onclick="deleteAssetItem('${_esc(row.token)}','${_esc(row.masked)}','${_esc(asset.id)}')">${_esc(deleteLabel)}</button></div>
+              <div class="row-actions"><button class="row-action row-action-danger" onclick="deleteAssetItem('${_esc(row.token)}','${_esc(row.masked)}','${_esc(asset.id)}')" title="${_esc(deleteLabel)}" aria-label="${_esc(deleteLabel)}"><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg></button></div>
             </td>
           </tr>`);
       }
     }
   }
   tbody.innerHTML = rows.join('');
+  syncAssetSelectAll();
+  updateAssetBatchButtons();
 }
 
 function toggleExpand(masked) {
@@ -681,22 +814,169 @@ async function deleteAssetItem(token, masked, assetId) {
   }
 }
 
-async function clearAllAssets() {
-  const withAssets = _assetData.filter((row) => row.count > 0);
-  if (!withAssets.length) return;
-  if (!confirm(tr('cache.clearAllConfirm', { n: withAssets.length }, `确定要清理全部 ${withAssets.length} 个账户的在线资产吗？此操作不可撤销。`))) return;
+function _reconcileLocalSelection() {
+  const names = new Set(_localItems.map((item) => item.name));
+  [..._localSel].forEach((name) => {
+    if (!names.has(name)) _localSel.delete(name);
+  });
+}
 
-  const tokens = withAssets.map((row) => row.token);
-  const btnClear = document.getElementById('btn-clear-all-assets');
+function syncLocalSelectAll() {
+  const cbAll = document.getElementById('cb-local-all');
+  if (!cbAll) return;
+  if (!_localItems.length) {
+    cbAll.checked = false;
+    cbAll.indeterminate = false;
+    return;
+  }
+  const selected = _localItems.filter((item) => _localSel.has(item.name)).length;
+  cbAll.checked = selected === _localItems.length;
+  cbAll.indeterminate = selected > 0 && selected < _localItems.length;
+}
+
+function toggleAllLocal(checked) {
+  _localItems.forEach((item) => {
+    if (checked) _localSel.add(item.name);
+    else _localSel.delete(item.name);
+  });
+  document.querySelectorAll('.local-row-cb').forEach((el) => { el.checked = checked; });
+  syncLocalSelectAll();
+  updateLocalBatchButtons();
+}
+
+function toggleLocalRow(el) {
+  const name = el.dataset.name;
+  if (!name) return;
+  if (el.checked) _localSel.add(name);
+  else _localSel.delete(name);
+  syncLocalSelectAll();
+  updateLocalBatchButtons();
+}
+
+function clearLocalSelection(render = true) {
+  _localSel.clear();
+  syncLocalSelectAll();
+  updateLocalBatchButtons();
+  if (render) {
+    document.querySelectorAll('.local-row-cb').forEach((el) => { el.checked = false; });
+  }
+}
+
+function updateLocalBatchButtons() {
+  const show = _localSel.size > 0;
+  const btnDelete = document.getElementById('btn-local-delete-selected');
+  const btnClear = document.getElementById('btn-clear');
+  if (btnDelete) btnDelete.style.display = show ? '' : 'none';
+  if (btnClear) btnClear.style.display = show ? 'none' : '';
+}
+
+async function deleteSelectedLocal() {
+  const names = _localItems.filter((item) => _localSel.has(item.name)).map((item) => item.name);
+  if (!names.length) return;
+  if (!confirm(tr('cache.deleteSelectedConfirm', { n: names.length }, `确定要删除选中的 ${names.length} 个文件吗？`))) return;
+  try {
+    const d = await _api('POST', '/cache/items/delete', { type: _type, names });
+    const deleted = d.result?.deleted ?? names.length;
+    showToast(tr('cache.deleteSelectedDone', { count: deleted }, `已删除 ${deleted} 个文件`), 'success');
+    clearLocalSelection();
+    loadStats();
+    loadList();
+  } catch (e) {
+    showToast(tr('cache.deleteFailed', { message: e.message }, `删除失败: ${e.message}`), 'error');
+  }
+}
+
+function _reconcileAssetSelection() {
+  const tokens = new Set(_assetData.map((row) => row.token));
+  [..._assetSel].forEach((token) => {
+    if (!tokens.has(token)) _assetSel.delete(token);
+  });
+}
+
+function syncAssetSelectAll() {
+  const cbAll = document.getElementById('cb-asset-all');
+  if (!cbAll) return;
+  if (!_assetData.length) {
+    cbAll.checked = false;
+    cbAll.indeterminate = false;
+    return;
+  }
+  const selected = _assetData.filter((row) => _assetSel.has(row.token)).length;
+  cbAll.checked = selected === _assetData.length;
+  cbAll.indeterminate = selected > 0 && selected < _assetData.length;
+}
+
+function toggleAllAssets(checked) {
+  _assetData.forEach((row) => {
+    if (checked) _assetSel.add(row.token);
+    else _assetSel.delete(row.token);
+  });
+  document.querySelectorAll('.asset-row-cb').forEach((el) => { el.checked = checked; });
+  syncAssetSelectAll();
+  updateAssetBatchButtons();
+}
+
+function toggleAssetRow(el) {
+  const token = el.dataset.token;
+  if (!token) return;
+  if (el.checked) _assetSel.add(token);
+  else _assetSel.delete(token);
+  syncAssetSelectAll();
+  updateAssetBatchButtons();
+}
+
+function clearAssetSelection(render = true) {
+  _assetSel.clear();
+  syncAssetSelectAll();
+  updateAssetBatchButtons();
+  if (render) {
+    document.querySelectorAll('.asset-row-cb').forEach((el) => { el.checked = false; });
+  }
+}
+
+function updateAssetBatchButtons() {
+  const selected = _assetData.filter((row) => _assetSel.has(row.token) && row.count > 0).length;
+  const btnClearAll = document.getElementById('btn-clear-all-assets');
+  const btnClearSelected = document.getElementById('btn-clear-selected-assets');
+  const showSelection = _assetSel.size > 0;
+  if (btnClearSelected) btnClearSelected.style.display = selected > 0 ? '' : 'none';
+  if (btnClearAll) btnClearAll.style.display = !showSelection && _assetData.some((row) => row.count > 0) ? '' : 'none';
+}
+
+async function clearSelectedAssets() {
+  const tokens = _assetData.filter((row) => _assetSel.has(row.token) && row.count > 0).map((row) => row.token);
+  if (!tokens.length) return;
+  await runAssetClear(tokens);
+}
+
+async function clearAllAssets() {
+  const tokens = _assetData.filter((row) => row.count > 0).map((row) => row.token);
+  if (!tokens.length) return;
+  await runAssetClear(tokens);
+}
+
+async function runAssetClear(tokens) {
+  const allTokens = _assetData.filter((row) => row.count > 0).map((row) => row.token);
+  const isAll = tokens.length === allTokens.length;
+  if (isAll) {
+    if (!confirm(tr('cache.clearAllConfirm', { n: tokens.length }, `确定要清理全部 ${tokens.length} 个账户的在线资产吗？此操作不可撤销。`))) return;
+  } else {
+    if (!confirm(tr('cache.clearSelectedConfirm', { n: tokens.length }, `确定要清理选中的 ${tokens.length} 个账户在线资产吗？`))) return;
+  }
+
+  const btnClearAll = document.getElementById('btn-clear-all-assets');
+  const btnClearSelected = document.getElementById('btn-clear-selected-assets');
   const btnCancel = document.getElementById('btn-asset-cancel');
 
-  btnClear.style.display = 'none';
-  btnCancel.style.display = '';
+  if (btnClearAll) btnClearAll.style.display = 'none';
+  if (btnClearSelected) btnClearSelected.style.display = 'none';
+  if (btnCancel) btnCancel.style.display = '';
   const progress = showProgressToast(tr('cache.clearingAssets', null, '正在清理在线资产…'));
   let finalReceived = false;
 
   function cleanup() {
-    btnCancel.style.display = 'none';
+    if (btnCancel) btnCancel.style.display = 'none';
+    updateAssetBatchButtons();
   }
 
   function done(es) {
@@ -727,13 +1007,14 @@ async function clearAllAssets() {
             tr('cache.clearAllDone', { ok: summary.ok ?? 0, fail: summary.fail ?? 0 }, `清理完成：成功 ${summary.ok ?? 0}，失败 ${summary.fail ?? 0}`),
             (summary.fail ?? 0) > 0 ? 'error' : 'success'
           );
+          clearAssetSelection(false);
           loadAssets();
         } else if (ev.type === 'cancelled') {
           progress.finish(tr('cache.cancelled', null, '已取消'), 'error');
-          btnClear.style.display = '';
+          updateAssetBatchButtons();
         } else {
           progress.finish(ev.error || tr('cache.clearFailedPlain', null, '清理失败'), 'error');
-          btnClear.style.display = '';
+          updateAssetBatchButtons();
         }
       }
     };
@@ -746,13 +1027,11 @@ async function clearAllAssets() {
       if (this.readyState === EventSource.CLOSED) {
         _assetEs = null;
         cleanup();
-        btnClear.style.display = '';
         progress.finish(tr('cache.connectionInterrupted', null, '连接中断'), 'error');
       }
     };
   } catch (e) {
     cleanup();
-    btnClear.style.display = '';
     progress.finish(tr('cache.startFailed', { message: e.message }, `启动失败: ${e.message}`), 'error');
   }
 }
@@ -802,6 +1081,7 @@ function _esc(value) {
   }
   loadStats();
   loadList();
+  _renderAssets();
 })();
 </script>
 </body>

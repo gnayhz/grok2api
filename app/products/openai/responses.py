@@ -17,11 +17,104 @@ from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 
-from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind
+from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception
 from ._format import (
     estimate_tokens,
     make_resp_id, build_resp_usage, make_resp_object, format_sse,
 )
+from app.dataplane.reverse.protocol.tool_prompt import (
+    build_tool_system_prompt, extract_tool_names, inject_into_message, tool_calls_to_xml,
+)
+from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
+from ._tool_sieve import ToolSieve
+
+
+# ---------------------------------------------------------------------------
+# Tool format normalisation
+# ---------------------------------------------------------------------------
+
+def _to_chat_tools(tools: list[dict]) -> list[dict]:
+    """Normalise Responses API tool format → Chat Completions format.
+
+    Responses API:  {type, name, description, parameters}       (flat)
+    Chat Completions: {type, function: {name, description, parameters}}
+
+    Already-wrapped tools are passed through unchanged so this is safe to
+    call regardless of which format the caller used.
+    """
+    normalised = []
+    for tool in tools:
+        if tool.get("type") == "function" and "function" not in tool and "name" in tool:
+            normalised.append({
+                "type": "function",
+                "function": {
+                    "name":        tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "parameters":  tool.get("parameters"),
+                },
+            })
+        else:
+            normalised.append(tool)
+    return normalised
+
+
+# ---------------------------------------------------------------------------
+# Tool call helpers (Responses API format)
+# ---------------------------------------------------------------------------
+
+def _build_fc_items(calls: list) -> list[dict]:
+    """Allocate stable IDs and build function_call output items for response.completed."""
+    return [
+        {
+            "id":        make_resp_id("fc"),
+            "type":      "function_call",
+            "call_id":   tc.call_id,
+            "name":      tc.name,
+            "arguments": tc.arguments,
+            "status":    "completed",
+        }
+        for tc in calls
+    ]
+
+
+async def _emit_fc_events(items: list[dict], base_idx: int):
+    """Async generator — yields SSE events for pre-built function_call items.
+
+    Using pre-built items ensures the IDs in the streaming events match those
+    in the final response.completed payload.
+    """
+    for i, item in enumerate(items):
+        out_idx    = base_idx + i
+        fc_item_id = item["id"]
+        yield format_sse("response.output_item.added", {
+            "type":         "response.output_item.added",
+            "output_index": out_idx,
+            "item": {
+                "id":        fc_item_id,
+                "type":      "function_call",
+                "call_id":   item["call_id"],
+                "name":      item["name"],
+                "arguments": "",
+                "status":    "in_progress",
+            },
+        })
+        yield format_sse("response.function_call_arguments.delta", {
+            "type":         "response.function_call_arguments.delta",
+            "item_id":      fc_item_id,
+            "output_index": out_idx,
+            "delta":        item["arguments"],
+        })
+        yield format_sse("response.function_call_arguments.done", {
+            "type":         "response.function_call_arguments.done",
+            "item_id":      fc_item_id,
+            "output_index": out_idx,
+            "arguments":    item["arguments"],
+        })
+        yield format_sse("response.output_item.done", {
+            "type":         "response.output_item.done",
+            "output_index": out_idx,
+            "item":         item,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +122,12 @@ from ._format import (
 # ---------------------------------------------------------------------------
 
 def _parse_input(input_val: str | list) -> list[dict]:
-    """Convert Responses API input to our internal messages list."""
+    """Convert Responses API input to our internal messages list.
+
+    Handles message, function_call, and function_call_output item types.
+    function_call → assistant message with tool_calls
+    function_call_output → tool result message
+    """
     if isinstance(input_val, str):
         return [{"role": "user", "content": input_val}]
 
@@ -38,8 +136,36 @@ def _parse_input(input_val: str | list) -> list[dict]:
         if not isinstance(item, dict):
             continue
         item_type = item.get("type", "message" if "role" in item else None)
+
+        if item_type == "function_call":
+            # Reconstruct as assistant message with tool_calls (Chat Completions format)
+            call_id = item.get("call_id", "")
+            name    = item.get("name", "")
+            args    = item.get("arguments", "{}")
+            messages.append({
+                "role":    "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id":   call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args},
+                }],
+            })
+            continue
+
+        if item_type == "function_call_output":
+            # Reconstruct as tool result message
+            call_id = item.get("call_id", "")
+            output  = item.get("output", "")
+            messages.append({
+                "role":         "tool",
+                "tool_call_id": call_id,
+                "content":      output,
+            })
+            continue
+
         if item_type != "message":
-            continue  # skip reasoning items, function_call_output, etc.
+            continue  # skip reasoning items, etc.
 
         role    = item.get("role", "user")
         content = item.get("content", "")
@@ -78,10 +204,13 @@ async def create(
     emit_think:   bool,
     temperature:  float,
     top_p:        float,
+    tools:        list[dict] | None = None,
+    tool_choice:  Any = None,
 ) -> dict | AsyncGenerator[str, None]:
 
-    cfg  = get_config()
-    spec = resolve_model(model)
+    cfg     = get_config()
+    spec    = resolve_model(model)
+    mode_id = int(spec.mode_id)   # cast once, reuse everywhere
 
     messages: list[dict] = []
     if instructions:
@@ -91,6 +220,16 @@ async def create(
     message, files = _extract_message(messages)
     if not message.strip():
         raise UpstreamError("Empty message after extraction", status=400)
+
+    # Tool prompt injection — only modify the message text, never the Grok payload
+    # Normalise to Chat Completions format first (Responses API uses a flat structure)
+    tool_names: list[str] = []
+    if tools:
+        chat_tools = _to_chat_tools(tools)
+        tool_names = extract_tool_names(chat_tools)
+        tool_prompt = build_tool_system_prompt(chat_tools, tool_choice)
+        message = inject_into_message(message, tool_prompt)
+        logger.info("responses tool injection: tool_names={} choice={}", tool_names, tool_choice)
 
     from app.dataplane.account import _directory as _acct_dir
     if _acct_dir is None:
@@ -112,7 +251,7 @@ async def create(
         for attempt in range(max_retries + 1):
             acct = await directory.reserve(
                 pool_candidates = spec.pool_candidates(),
-                mode_id         = int(spec.mode_id),
+                mode_id         = mode_id,
                 now_s_override  = now_s(),
                 exclude_tokens  = excluded or None,
             )
@@ -126,9 +265,12 @@ async def create(
             adapter           = StreamAdapter()
             think_buf:  list[str] = []
             text_buf:   list[str] = []
-            reasoning_started = False
-            reasoning_closed  = False
-            message_started   = False
+            reasoning_started   = False
+            reasoning_closed    = False
+            message_started     = False
+            sieve               = ToolSieve(tool_names) if tool_names else None
+            tool_calls_emitted  = False
+            detected_fc_items: list[dict] = []
 
             try:
                 try:
@@ -145,6 +287,9 @@ async def create(
                         files     = files,
                         timeout_s = timeout_s,
                     ):
+                        if tool_calls_emitted:
+                            break
+
                         event_type, data = classify_line(line)
                         if event_type == "done":
                             break
@@ -209,33 +354,50 @@ async def create(
                                         },
                                     })
 
-                                msg_idx = 1 if reasoning_started else 0
-                                if not message_started:
-                                    message_started = True
-                                    yield format_sse("response.output_item.added", {
-                                        "type":         "response.output_item.added",
-                                        "output_index": msg_idx,
-                                        "item":         {
-                                            "id": message_id, "type": "message",
-                                            "role": "assistant", "content": [], "status": "in_progress",
-                                        },
-                                    })
-                                    yield format_sse("response.content_part.added", {
-                                        "type":          "response.content_part.added",
+                                # Feed through ToolSieve if tools are active
+                                if sieve is not None:
+                                    safe_text, calls = sieve.feed(ev.content)
+                                    if calls is not None:
+                                        fc_items = _build_fc_items(calls)
+                                        detected_fc_items = fc_items
+                                        base_idx = 1 if reasoning_started else 0
+                                        async for evt in _emit_fc_events(fc_items, base_idx):
+                                            yield evt
+                                        tool_calls_emitted = True
+                                        ended = True
+                                        break
+                                    text_chunk = safe_text
+                                else:
+                                    text_chunk = ev.content
+
+                                if text_chunk:
+                                    msg_idx = 1 if reasoning_started else 0
+                                    if not message_started:
+                                        message_started = True
+                                        yield format_sse("response.output_item.added", {
+                                            "type":         "response.output_item.added",
+                                            "output_index": msg_idx,
+                                            "item":         {
+                                                "id": message_id, "type": "message",
+                                                "role": "assistant", "content": [], "status": "in_progress",
+                                            },
+                                        })
+                                        yield format_sse("response.content_part.added", {
+                                            "type":          "response.content_part.added",
+                                            "item_id":       message_id,
+                                            "output_index":  msg_idx,
+                                            "content_index": 0,
+                                            "part":          {"type": "output_text", "text": "", "annotations": []},
+                                        })
+
+                                    text_buf.append(text_chunk)
+                                    yield format_sse("response.output_text.delta", {
+                                        "type":          "response.output_text.delta",
                                         "item_id":       message_id,
                                         "output_index":  msg_idx,
                                         "content_index": 0,
-                                        "part":          {"type": "output_text", "text": "", "annotations": []},
+                                        "delta":         text_chunk,
                                     })
-
-                                text_buf.append(ev.content)
-                                yield format_sse("response.output_text.delta", {
-                                    "type":          "response.output_text.delta",
-                                    "item_id":       message_id,
-                                    "output_index":  msg_idx,
-                                    "content_index": 0,
-                                    "delta":         ev.content,
-                                })
 
                             elif ev.kind == "soft_stop":
                                 ended = True
@@ -244,99 +406,137 @@ async def create(
                         if ended:
                             break
 
-                    # Images
-                    msg_idx = 1 if reasoning_started else 0
-                    for url, img_id in adapter.image_urls:
-                        img_text = await _resolve_image(token, url, img_id)
-                        img_md   = img_text + "\n"
-                        text_buf.append(img_md)
-                        if message_started:
-                            yield format_sse("response.output_text.delta", {
-                                "type":          "response.output_text.delta",
-                                "item_id":       message_id,
-                                "output_index":  msg_idx,
-                                "content_index": 0,
-                                "delta":         img_md,
-                            })
+                    # Flush sieve after stream ends (incomplete XML at end of stream)
+                    if sieve is not None and not tool_calls_emitted:
+                        calls = sieve.flush()
+                        if calls:
+                            fc_items = _build_fc_items(calls)
+                            detected_fc_items = fc_items
+                            base_idx = 1 if reasoning_started else 0
+                            async for evt in _emit_fc_events(fc_items, base_idx):
+                                yield evt
+                            tool_calls_emitted = True
 
-                    references = adapter.references_suffix()
-                    if references:
-                        text_buf.append(references)
-                        if message_started:
-                            yield format_sse("response.output_text.delta", {
-                                "type":          "response.output_text.delta",
-                                "item_id":       message_id,
-                                "output_index":  msg_idx,
-                                "content_index": 0,
-                                "delta":         references,
-                            })
-
-                    full_text = "".join(text_buf)
-                    if message_started:
-                        yield format_sse("response.output_text.done", {
-                            "type":          "response.output_text.done",
-                            "item_id":       message_id,
-                            "output_index":  msg_idx,
-                            "content_index": 0,
-                            "text":          full_text,
-                        })
-                        yield format_sse("response.content_part.done", {
-                            "type":          "response.content_part.done",
-                            "item_id":       message_id,
-                            "output_index":  msg_idx,
-                            "content_index": 0,
-                            "part":          {"type": "output_text", "text": full_text, "annotations": []},
-                        })
-                        yield format_sse("response.output_item.done", {
-                            "type":         "response.output_item.done",
-                            "output_index": msg_idx,
-                            "item":         {
-                                "id":      message_id,
-                                "type":    "message",
-                                "role":    "assistant",
-                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                    if tool_calls_emitted:
+                        # Build output with function_call items only
+                        full_think = "".join(think_buf)
+                        output: list[dict] = []
+                        if reasoning_started and full_think:
+                            output.append({
+                                "id":      reasoning_id,
+                                "type":    "reasoning",
+                                "summary": [{"type": "summary_text", "text": full_think}],
                                 "status":  "completed",
-                            },
+                            })
+                        output.extend(detected_fc_items)
+                        pt = estimate_tokens(message) + 4
+                        ct = sum(estimate_tokens(item["arguments"]) for item in detected_fc_items)
+                        rt = estimate_tokens(full_think) if full_think else 0
+                        yield format_sse("response.completed", {
+                            "type":     "response.completed",
+                            "response": make_resp_object(
+                                response_id, model, "completed", output,
+                                build_resp_usage(pt, ct + rt, rt),
+                            ),
                         })
+                        yield "data: [DONE]\n\n"
+                        success = True
+                        logger.info("responses stream tool_calls: attempt={}/{} model={}",
+                                    attempt + 1, max_retries + 1, model)
+                    else:
+                        # Normal text path
+                        msg_idx = 1 if reasoning_started else 0
+                        for url, img_id in adapter.image_urls:
+                            img_text = await _resolve_image(token, url, img_id)
+                            img_md   = img_text + "\n"
+                            text_buf.append(img_md)
+                            if message_started:
+                                yield format_sse("response.output_text.delta", {
+                                    "type":          "response.output_text.delta",
+                                    "item_id":       message_id,
+                                    "output_index":  msg_idx,
+                                    "content_index": 0,
+                                    "delta":         img_md,
+                                })
 
-                    full_think = "".join(think_buf)
-                    output: list[dict] = []
-                    if reasoning_started and full_think:
+                        references = adapter.references_suffix()
+                        if references:
+                            text_buf.append(references)
+                            if message_started:
+                                yield format_sse("response.output_text.delta", {
+                                    "type":          "response.output_text.delta",
+                                    "item_id":       message_id,
+                                    "output_index":  msg_idx,
+                                    "content_index": 0,
+                                    "delta":         references,
+                                })
+
+                        full_text = "".join(text_buf)
+                        if message_started:
+                            yield format_sse("response.output_text.done", {
+                                "type":          "response.output_text.done",
+                                "item_id":       message_id,
+                                "output_index":  msg_idx,
+                                "content_index": 0,
+                                "text":          full_text,
+                            })
+                            yield format_sse("response.content_part.done", {
+                                "type":          "response.content_part.done",
+                                "item_id":       message_id,
+                                "output_index":  msg_idx,
+                                "content_index": 0,
+                                "part":          {"type": "output_text", "text": full_text, "annotations": []},
+                            })
+                            yield format_sse("response.output_item.done", {
+                                "type":         "response.output_item.done",
+                                "output_index": msg_idx,
+                                "item":         {
+                                    "id":      message_id,
+                                    "type":    "message",
+                                    "role":    "assistant",
+                                    "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                                    "status":  "completed",
+                                },
+                            })
+
+                        full_think = "".join(think_buf)
+                        output = []
+                        if reasoning_started and full_think:
+                            output.append({
+                                "id":      reasoning_id,
+                                "type":    "reasoning",
+                                "summary": [{"type": "summary_text", "text": full_think}],
+                                "status":  "completed",
+                            })
                         output.append({
-                            "id":      reasoning_id,
-                            "type":    "reasoning",
-                            "summary": [{"type": "summary_text", "text": full_think}],
+                            "id":      message_id,
+                            "type":    "message",
+                            "role":    "assistant",
+                            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
                             "status":  "completed",
                         })
-                    output.append({
-                        "id":      message_id,
-                        "type":    "message",
-                        "role":    "assistant",
-                        "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                        "status":  "completed",
-                    })
 
-                    pt  = estimate_tokens(message) + 4
-                    ct  = estimate_tokens(full_text)
-                    rt  = estimate_tokens(full_think) if full_think else 0
-                    yield format_sse("response.completed", {
-                        "type":     "response.completed",
-                        "response": make_resp_object(
-                            response_id, model, "completed", output,
-                            build_resp_usage(pt, ct + rt, rt),
-                        ),
-                    })
-                    yield "data: [DONE]\n\n"
-                    success = True
-                    logger.info("Responses stream done (attempt {}/{}): model={} text_len={} think_len={} images={}",
-                                attempt + 1, max_retries + 1, model,
-                                len(full_text), len(full_think), len(adapter.image_urls))
+                        pt  = estimate_tokens(message) + 4
+                        ct  = estimate_tokens(full_text)
+                        rt  = estimate_tokens(full_think) if full_think else 0
+                        yield format_sse("response.completed", {
+                            "type":     "response.completed",
+                            "response": make_resp_object(
+                                response_id, model, "completed", output,
+                                build_resp_usage(pt, ct + rt, rt),
+                            ),
+                        })
+                        yield "data: [DONE]\n\n"
+                        success = True
+                        logger.info("responses stream completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
+                                    attempt + 1, max_retries + 1, model,
+                                    len(full_text), len(full_think), len(adapter.image_urls))
 
                 except UpstreamError as exc:
                     fail_exc = exc
                     if exc.status in retry_codes and attempt < max_retries:
                         _retry = True
-                        logger.warning("Responses stream retry {}/{}: status={} token={}...",
+                        logger.warning("responses stream retry scheduled: attempt={}/{} status={} token={}...",
                                        attempt + 1, max_retries, exc.status, token[:8])
                     else:
                         raise
@@ -344,11 +544,11 @@ async def create(
             finally:
                 await directory.release(acct)
                 kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-                await directory.feedback(token, kind, int(spec.mode_id), now_s_val=now_s())
+                await directory.feedback(token, kind, mode_id, now_s_val=now_s())
                 if success:
-                    asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
+                    asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(_log_task_exception)
                 else:
-                    asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                    asyncio.create_task(_fail_sync(token, mode_id, fail_exc)).add_done_callback(_log_task_exception)
 
             if success or not _retry:
                 return
@@ -361,11 +561,12 @@ async def create(
     # Non-streaming
     # -------------------------------------------------------------------------
     excluded: list[str] = []
+    token    = ""
     adapter  = StreamAdapter()
     for attempt in range(max_retries + 1):
         acct = await directory.reserve(
             pool_candidates = spec.pool_candidates(),
-            mode_id         = int(spec.mode_id),
+            mode_id         = mode_id,
             now_s_override  = now_s(),
             exclude_tokens  = excluded or None,
         )
@@ -376,7 +577,7 @@ async def create(
         success  = False
         _retry   = False
         fail_exc: BaseException | None = None
-        adapter  = StreamAdapter()
+        adapter  = StreamAdapter()   # fresh adapter per attempt
 
         try:
             try:
@@ -405,7 +606,7 @@ async def create(
                 fail_exc = exc
                 if exc.status in retry_codes and attempt < max_retries:
                     _retry = True
-                    logger.warning("Responses retry {}/{}: status={} token={}...",
+                    logger.warning("responses retry scheduled: attempt={}/{} status={} token={}...",
                                    attempt + 1, max_retries, exc.status, token[:8])
                 else:
                     raise
@@ -413,32 +614,61 @@ async def create(
         finally:
             await directory.release(acct)
             kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-            await directory.feedback(token, kind, int(spec.mode_id))
+            await directory.feedback(token, kind, mode_id)
             if success:
-                asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
+                asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(_log_task_exception)
             else:
-                asyncio.create_task(_fail_sync(token, int(spec.mode_id)))
+                asyncio.create_task(_fail_sync(token, mode_id, fail_exc)).add_done_callback(_log_task_exception)
 
         if success or not _retry:
             break
         excluded.append(token)
 
     full_text = "".join(adapter.text_buf)
-    for url, img_id in adapter.image_urls:
-        img_text = await _resolve_image(token, url, img_id)
-        if full_text:
-            full_text += "\n\n"
-        full_text += img_text
+    if adapter.image_urls:
+        img_texts = await asyncio.gather(
+            *[_resolve_image(token, url, img_id) for url, img_id in adapter.image_urls],
+            return_exceptions=True,
+        )
+        for img_text in img_texts:
+            if isinstance(img_text, BaseException):
+                logger.warning("responses image resolve failed: error={}", img_text)
+            elif isinstance(img_text, str):
+                if full_text:
+                    full_text += "\n\n"
+                full_text += img_text
     references = adapter.references_suffix()
     if references:
         full_text += references
 
     full_think = ("".join(adapter.thinking_buf) or "") if emit_think else ""
 
-    logger.info("Responses non-stream done: model={} text_len={} think_len={} images={}",
+    # Check for tool calls in the accumulated text
+    if tool_names:
+        tc_result = parse_tool_calls(full_text, tool_names)
+        if tc_result.calls:
+            output: list[dict] = []
+            if full_think:
+                output.append({
+                    "id":      reasoning_id,
+                    "type":    "reasoning",
+                    "summary": [{"type": "summary_text", "text": full_think}],
+                    "status":  "completed",
+                })
+            output.extend(_build_fc_items(tc_result.calls))
+            pt = estimate_tokens(message) + 4
+            ct = sum(estimate_tokens(tc.arguments) for tc in tc_result.calls)
+            rt = estimate_tokens(full_think) if full_think else 0
+            logger.info("responses tool_calls: model={} calls={}", model, len(tc_result.calls))
+            return make_resp_object(
+                response_id, model, "completed", output,
+                build_resp_usage(pt, ct + rt, rt),
+            )
+
+    logger.info("responses request completed: model={} text_len={} reasoning_len={} image_count={}",
                 model, len(full_text), len(full_think), len(adapter.image_urls))
 
-    output: list[dict] = []
+    output = []
     if full_think:
         output.append({
             "id":      reasoning_id,

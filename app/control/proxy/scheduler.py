@@ -24,13 +24,13 @@ class ProxyClearanceScheduler:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info("ProxyClearanceScheduler started")
+        logger.info("proxy clearance scheduler started")
 
     def stop(self) -> None:
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
-        logger.info("ProxyClearanceScheduler stopped")
+        logger.info("proxy clearance scheduler stopped")
 
     async def _loop(self) -> None:
         while self._running:
@@ -43,16 +43,20 @@ class ProxyClearanceScheduler:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("ProxyClearanceScheduler error: {}", exc)
+                logger.error(
+                    "proxy clearance scheduler loop failed: error_type={} error={}",
+                    type(exc).__name__,
+                    exc,
+                )
                 await asyncio.sleep(60)
 
     async def _refresh(self) -> None:
         """Reload proxy configuration (which triggers bundle refresh)."""
         try:
             await self._directory.load()
-            logger.debug("Proxy clearance refresh completed")
+            logger.debug("proxy clearance refresh completed")
         except Exception as exc:
-            logger.warning("Proxy clearance refresh failed: {}", exc)
+            logger.warning("proxy clearance refresh failed: error={}", exc)
 
     def _get_interval(self) -> int:
         """Return refresh interval in seconds from config."""

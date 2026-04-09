@@ -70,7 +70,7 @@ class GrpcClient:
             compact = b"".join(body.split())
             try:
                 return base64.b64decode(compact, validate=True)
-            except Exception:
+            except ValueError:
                 pass
         return body
 
@@ -135,19 +135,16 @@ class GrpcClient:
         raw_code = str(trailers.get("grpc-status", "")).strip()
         try:
             code = int(raw_code)
-        except Exception:
+        except ValueError:
             code = -1
 
         if code not in (0, -1):
-            try:
-                logger.error(
-                    "gRPC error response: status={} message={} content_type={}",
-                    code,
-                    trailers.get("grpc-message", ""),
-                    content_type or "",
-                )
-            except Exception:
-                pass
+            logger.error(
+                "grpc response reported error: grpc_status={} grpc_message={} content_type={}",
+                code,
+                trailers.get("grpc-message", ""),
+                content_type or "",
+            )
 
         return messages, trailers
 
@@ -158,7 +155,7 @@ class GrpcClient:
         msg = str(trailers.get("grpc-message", "")).strip()
         try:
             code = int(raw)
-        except Exception:
+        except ValueError:
             code = -1
         return GrpcStatus(code=code, message=msg)
 

@@ -127,7 +127,11 @@ async def _execute_transport(
             error=str(exc),
         )
     except Exception as exc:
-        logger.error("Transport error: {}", exc)
+        logger.error(
+            "reverse transport execution failed: error_type={} error={}",
+            type(exc).__name__,
+            exc,
+        )
         return ReverseResult(
             category=ResultCategory.TRANSPORT_ERR,
             error=str(exc),
@@ -169,7 +173,7 @@ async def _apply_feedback_and_release(
             proxy_runtime = await get_proxy_runtime()
             await proxy_runtime.feedback(leases.proxy_lease, proxy_fb)
     except Exception as exc:
-        logger.debug("Feedback error (non-fatal): {}", exc)
+        logger.debug("reverse feedback update failed (non-fatal): error={}", exc)
 
 
 __all__ = ["execute"]

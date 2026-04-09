@@ -18,12 +18,14 @@ from pydantic import BaseModel, RootModel
 
 from app.platform.errors import AppError, ErrorKind, ValidationError
 from app.platform.logging.logger import logger
+from app.platform.runtime.clock import now_ms
 from app.control.account.commands import (
     AccountPatch,
     AccountUpsert,
     BulkReplacePoolCommand,
     ListAccountsQuery,
 )
+from app.control.account.enums import AccountStatus
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
 
 from . import get_refresh_svc, get_repo
 
-router = APIRouter()
+router = APIRouter(tags=["Admin - Tokens"])
 
 # ---------------------------------------------------------------------------
 # Token sanitisation
@@ -80,13 +82,18 @@ class EditTokenRequest(BaseModel):
     pool: str = "basic"
 
 
+class ToggleTokenDisabledRequest(BaseModel):
+    token: str
+    disabled: bool
+
+
 class TokenImportItem(BaseModel):
     token: str
     tags: list[str] = []
 
 
 class SaveTokensRequest(RootModel[dict[str, list[str | TokenImportItem]]]):
-    """Legacy bulk-save payload keyed by pool name."""
+    """Bulk-save payload keyed by pool name."""
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +172,7 @@ async def save_tokens(
             all_tokens.extend(u.token for u in upserts)
             total_upserted += len(upserts)
 
-    logger.info("Admin: saved {} tokens across pools", total_upserted)
+    logger.info("admin tokens saved across pools: saved_count={}", total_upserted)
     if all_tokens:
         asyncio.create_task(_refresh_imported(refresh_svc, all_tokens))
     return _json({"status": "success", "count": total_upserted})
@@ -201,18 +208,22 @@ async def add_tokens(
 
     upserts = [AccountUpsert(token=t, pool=requested_pool, tags=req.tags) for t in new_tokens]
     result = await repo.upsert_accounts(upserts)
-    logger.info("Admin: added {} new tokens to pool={} (skipped {} existing)",
-                len(new_tokens), requested_pool, len(existing))
+    logger.info(
+        "admin tokens added: pool={} added_count={} skipped_count={}",
+        requested_pool,
+        len(new_tokens),
+        len(existing),
+    )
 
     if sync_auto_detect:
         try:
             refresh_result = await refresh_svc.refresh_on_import(new_tokens)
             logger.info(
-                "Admin: auto-detect sync completed for {} tokens (refreshed={} failed={})",
+                "admin auto-detect quota sync completed: token_count={} refreshed={} failed={}",
                 len(new_tokens), refresh_result.refreshed, refresh_result.failed,
             )
         except Exception as exc:
-            logger.warning("Admin: auto-detect sync failed for {} tokens: {}", len(new_tokens), exc)
+            logger.warning("admin auto-detect quota sync failed: token_count={} error={}", len(new_tokens), exc)
     else:
         asyncio.create_task(_refresh_imported(refresh_svc, new_tokens))
 
@@ -233,7 +244,7 @@ async def delete_tokens(
     if not cleaned:
         raise ValidationError("No valid tokens provided", param="tokens")
     await repo.delete_accounts(cleaned)
-    logger.info("Admin: deleted {} tokens", len(cleaned))
+    logger.info("admin tokens deleted: deleted_count={}", len(cleaned))
     return _json({"deleted": len(cleaned)})
 
 
@@ -277,7 +288,7 @@ async def edit_token(
     )])
 
     if old_token == new_token:
-        logger.info("Admin: updated token {} pool={}", _mask(new_token), pool)
+        logger.info("admin token updated: token={} pool={}", _mask(new_token), pool)
         return _json({"status": "success", "token": new_token, "pool": pool})
 
     qs = record.quota_set()
@@ -301,8 +312,50 @@ async def edit_token(
     )])
     await repo.delete_accounts([old_token])
 
-    logger.info("Admin: edited token {} -> {} pool={}", _mask(old_token), _mask(new_token), pool)
+    logger.info("admin token replaced: previous_token={} current_token={} pool={}", _mask(old_token), _mask(new_token), pool)
     return _json({"status": "success", "token": new_token, "pool": pool})
+
+
+@router.post("/tokens/disabled")
+async def toggle_token_disabled(
+    req: ToggleTokenDisabledRequest,
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    token = _sanitize(req.token)
+    if not token:
+        raise ValidationError("Token is required", param="token")
+
+    records = await repo.get_accounts([token])
+    if not records:
+        raise AppError(
+            "Account not found",
+            kind=ErrorKind.VALIDATION,
+            code="account_not_found",
+            status=404,
+        )
+    record = records[0]
+
+    if req.disabled:
+        await repo.patch_accounts([AccountPatch(
+            token=token,
+            status=AccountStatus.DISABLED,
+            state_reason="operator_disabled",
+            ext_merge={
+                **record.ext,
+                "disabled_at": now_ms(),
+                "disabled_reason": "operator_disabled",
+            },
+        )])
+        logger.info("admin token disabled: token={}", _mask(token))
+        return _json({"status": "success", "token": token, "disabled": True})
+
+    await repo.patch_accounts([AccountPatch(
+        token=token,
+        status=AccountStatus.ACTIVE,
+        clear_failures=True,
+    )])
+    logger.info("admin token restored: token={}", _mask(token))
+    return _json({"status": "success", "token": token, "disabled": False})
 
 
 @router.put("/tokens/pool")
@@ -314,7 +367,7 @@ async def replace_pool(
     cleaned = [t for t in (_sanitize(t) for t in req.tokens) if t]
     upserts = [AccountUpsert(token=t, pool=req.pool, tags=req.tags) for t in cleaned]
     await repo.replace_pool(BulkReplacePoolCommand(pool=req.pool, upserts=upserts))
-    logger.info("Admin: replaced pool={} with {} tokens", req.pool, len(cleaned))
+    logger.info("admin pool replaced: pool={} token_count={}", req.pool, len(cleaned))
     if cleaned:
         asyncio.create_task(_refresh_imported(refresh_svc, cleaned))
     return _json({"pool": req.pool, "count": len(cleaned)})
@@ -327,6 +380,6 @@ async def replace_pool(
 async def _refresh_imported(svc: "AccountRefreshService", tokens: list[str]) -> None:
     try:
         await svc.refresh_on_import(tokens)
-        logger.info("Import quota sync done for {} tokens", len(tokens))
+        logger.info("admin import quota sync completed: token_count={}", len(tokens))
     except Exception as exc:
-        logger.debug("Import quota sync failed: {}", exc)
+        logger.warning("admin import quota sync failed: token_count={} error={}", len(tokens), exc)

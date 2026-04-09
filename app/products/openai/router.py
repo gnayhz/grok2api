@@ -6,13 +6,16 @@ import mimetypes
 from typing import Annotated, AsyncGenerator, AsyncIterable, Literal
 
 import orjson
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
+from app.control.account.state_machine import is_manageable
 from app.platform.auth.middleware import verify_api_key
 from app.platform.errors import AppError, ValidationError
+from app.platform.logging.logger import logger
 from app.platform.storage import image_files_dir, video_files_dir
 from app.control.model import registry as model_registry
+from app.control.model.spec import ModelSpec
 from .schemas import (
     ChatCompletionRequest,
     ImageGenerationRequest,
@@ -23,15 +26,47 @@ from .schemas import (
 from .chat import completions as chat_completions
 
 router = APIRouter(prefix="/v1", dependencies=[Depends(verify_api_key)])
+_POOL_ID_TO_NAME = {0: "basic", 1: "super", 2: "heavy"}
+_TAG_MODELS = "OpenAI - Models"
+_TAG_CHAT = "OpenAI - Chat"
+_TAG_RESPONSES = "OpenAI - Responses"
+_TAG_IMAGES = "OpenAI - Images"
+_TAG_VIDEOS = "OpenAI - Videos"
+_TAG_FILES = "OpenAI - Files"
+
+
+async def _available_pools(request: Request) -> frozenset[str]:
+    repo = getattr(request.app.state, "repository", None)
+    if repo is None:
+        return frozenset()
+
+    snapshot = await repo.runtime_snapshot()
+    pools = {
+        record.pool
+        for record in snapshot.items
+        if is_manageable(record)
+    }
+    return frozenset(pools)
+
+
+def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
+    if not spec.enabled:
+        return False
+    candidates = {
+        _POOL_ID_TO_NAME[pool_id]
+        for pool_id in spec.pool_candidates()
+    }
+    return bool(candidates & pools)
 
 
 # ---------------------------------------------------------------------------
 # /v1/models
 # ---------------------------------------------------------------------------
 
-@router.get("/models")
-async def list_models():
+@router.get("/models", tags=[_TAG_MODELS])
+async def list_models(request: Request):
     import time
+    pools = await _available_pools(request)
     models = [
         {
             "id":       m.model_name,
@@ -41,15 +76,17 @@ async def list_models():
             "name":     m.public_name,
         }
         for m in model_registry.list_enabled()
+        if _model_available_for_pools(m, pools)
     ]
     return JSONResponse({"object": "list", "data": models})
 
 
-@router.get("/models/{model_id}")
-async def get_model_endpoint(model_id: str):
+@router.get("/models/{model_id}", tags=[_TAG_MODELS])
+async def get_model_endpoint(model_id: str, request: Request):
     import time
     spec = model_registry.get(model_id)
-    if spec is None or not spec.enabled:
+    pools = await _available_pools(request)
+    if spec is None or not _model_available_for_pools(spec, pools):
         return JSONResponse(
             {"error": {"message": f"Model {model_id!r} not found", "type": "invalid_request_error"}},
             status_code=404,
@@ -98,7 +135,7 @@ _LITE_IMAGE_MODELS = {"grok-imagine-image-lite"}
 
 def _validate_chat(req: ChatCompletionRequest) -> None:
     from app.platform.errors import ValidationError
-    spec = model_registry.resolve(req.model)
+    spec = model_registry.get(req.model)
     if spec is None or not spec.enabled:
         raise ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",
@@ -157,11 +194,16 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
     return f"data:{mime};base64,{blob_b64}"
 
 
-@router.post("/chat/completions")
+@router.post("/chat/completions", tags=[_TAG_CHAT])
 async def chat_completions_endpoint(req: ChatCompletionRequest):
     _validate_chat(req)
 
-    spec     = model_registry.resolve(req.model)
+    spec     = model_registry.get(req.model)
+    if spec is None:
+        raise ValidationError(
+            f"Model {req.model!r} does not exist or you do not have access to it.",
+            param="model", code="model_not_found",
+        )
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
     try:
@@ -233,6 +275,12 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
     except AppError:
         raise
     except Exception as exc:
+        logger.exception(
+            "chat completions endpoint failed: model={} stream={} error={}",
+            req.model,
+            req.stream,
+            exc,
+        )
         if req.stream is not False:
             _err_msg = str(exc)  # capture before Python clears the except-scope variable
             async def _err_stream():
@@ -267,12 +315,12 @@ async def _safe_sse_responses(stream) -> AsyncGenerator[str, None]:
         yield "data: [DONE]\n\n"
 
 
-@router.post("/responses")
+@router.post("/responses", tags=[_TAG_RESPONSES])
 async def responses_endpoint(req: ResponsesCreateRequest):
     from app.platform.config.snapshot import get_config
     from app.platform.errors import ValidationError as _ValidationError
 
-    spec = model_registry.resolve(req.model)
+    spec = model_registry.get(req.model)
     if spec is None or not spec.enabled:
         raise _ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",
@@ -302,6 +350,8 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         emit_think   = emit_think,
         temperature  = req.temperature or 0.8,
         top_p        = req.top_p or 0.95,
+        tools        = req.tools or None,
+        tool_choice  = req.tool_choice,
     )
 
     if isinstance(result, dict):
@@ -317,7 +367,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
 # /v1/images/generations (standalone image endpoint)
 # ---------------------------------------------------------------------------
 
-@router.post("/images/generations")
+@router.post("/images/generations", tags=[_TAG_IMAGES])
 async def image_generations(req: ImageGenerationRequest):
     spec = model_registry.get(req.model)
     if spec is None or not spec.enabled or not spec.is_image():
@@ -341,7 +391,7 @@ async def image_generations(req: ImageGenerationRequest):
 # /v1/videos (OpenAI videos.create surface)
 # ---------------------------------------------------------------------------
 
-@router.post("/videos")
+@router.post("/videos", tags=[_TAG_VIDEOS])
 async def videos_create(
     model: Annotated[str, Form(...)],
     prompt: Annotated[str, Form(...)],
@@ -371,13 +421,13 @@ async def videos_create(
     return JSONResponse(result)
 
 
-@router.get("/videos/{video_id}")
+@router.get("/videos/{video_id}", tags=[_TAG_VIDEOS])
 async def videos_retrieve(video_id: str):
     from .video import retrieve
     return JSONResponse(await retrieve(video_id))
 
 
-@router.get("/videos/{video_id}/content")
+@router.get("/videos/{video_id}/content", tags=[_TAG_VIDEOS])
 async def videos_content(video_id: str):
     from .video import content_path
     path = await content_path(video_id)
@@ -388,7 +438,7 @@ async def videos_content(video_id: str):
 # /v1/images/edits (standalone image-edit endpoint)
 # ---------------------------------------------------------------------------
 
-@router.post("/images/edits")
+@router.post("/images/edits", tags=[_TAG_IMAGES])
 async def image_edits(
     model: Annotated[str, Form(...)],
     prompt: Annotated[str, Form(...)],
@@ -433,7 +483,7 @@ async def image_edits(
 # /v1/files/image — serve locally saved images
 # ---------------------------------------------------------------------------
 
-@router.get("/files/video")
+@router.get("/files/video", tags=[_TAG_FILES])
 async def serve_video(id: str = Query(..., description="Video file ID")):
     """Serve a locally cached video by file ID."""
     import re
@@ -448,7 +498,7 @@ async def serve_video(id: str = Query(..., description="Video file ID")):
     raise ValidationError(f"Video {id!r} not found", param="id")
 
 
-@router.get("/files/image")
+@router.get("/files/image", tags=[_TAG_FILES])
 async def serve_image(id: str = Query(..., description="Image file ID")):
     """Serve a locally cached image by file ID."""
     import re

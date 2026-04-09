@@ -75,7 +75,7 @@ def _sanitize_proxy_config(payload: dict[str, Any]) -> dict[str, Any]:
     if not changed:
         return dict(payload)
 
-    logger.warning("Sanitized proxy config fields before saving")
+    logger.warning("admin config payload sanitized before save: section=proxy")
     result = dict(payload)
     result["proxy"] = sanitized
     return result
@@ -117,6 +117,7 @@ def get_refresh_svc(request: Request) -> "AccountRefreshService":
 # ---------------------------------------------------------------------------
 
 router = APIRouter(prefix="/admin/api", dependencies=[Depends(verify_admin_key)])
+_TAG_ADMIN_SYSTEM = "Admin - System"
 
 # Mount sub-modules
 from .tokens import router as _tokens_router                          # noqa: E402
@@ -134,12 +135,12 @@ router.include_router(_cache_router)
 # Lightweight inline endpoints (no separate file needed)
 # ---------------------------------------------------------------------------
 
-@router.get("/verify")
+@router.get("/verify", tags=[_TAG_ADMIN_SYSTEM])
 async def admin_verify():
     return {"status": "success"}
 
 
-@router.get("/config")
+@router.get("/config", tags=[_TAG_ADMIN_SYSTEM])
 async def get_config_endpoint():
     return Response(
         content=orjson.dumps(config.raw()),
@@ -147,7 +148,7 @@ async def get_config_endpoint():
     )
 
 
-@router.post("/config")
+@router.post("/config", tags=[_TAG_ADMIN_SYSTEM])
 async def update_config(req: ConfigPatchRequest):
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
@@ -156,12 +157,12 @@ async def update_config(req: ConfigPatchRequest):
     return {"status": "success", "message": "配置已更新"}
 
 
-@router.get("/storage")
+@router.get("/storage", tags=[_TAG_ADMIN_SYSTEM])
 async def get_storage_mode():
     return {"type": get_repository_backend()}
 
 
-@router.get("/status")
+@router.get("/status", tags=[_TAG_ADMIN_SYSTEM])
 async def runtime_status():
     from app.dataplane.account import _directory
     if _directory is None:
@@ -181,7 +182,7 @@ async def runtime_status():
     )
 
 
-@router.post("/sync")
+@router.post("/sync", tags=[_TAG_ADMIN_SYSTEM])
 async def force_sync():
     from app.dataplane.account import _directory
     if _directory is None:

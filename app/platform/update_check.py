@@ -13,7 +13,7 @@ import aiohttp
 from app.platform.meta import get_project_version
 
 _RELEASES_URL = "https://api.github.com/repos/chenyme/grok2api/releases"
-_CACHE_TTL_SECONDS = 1800.0
+_CACHE_TTL_SECONDS = 86400.0
 _ERROR_TTL_SECONDS = 300.0
 _LOCK = asyncio.Lock()
 _CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
@@ -129,18 +129,18 @@ async def _fetch_latest_release() -> dict[str, Any]:
             return release
 
 
-async def get_latest_release_info() -> dict[str, Any]:
+async def get_latest_release_info(force: bool = False) -> dict[str, Any]:
     now = time.monotonic()
     cached = _CACHE.get("payload")
     expires_at = float(_CACHE.get("expires_at") or 0.0)
-    if cached and expires_at > now:
+    if not force and cached and expires_at > now:
         return cached
 
     async with _LOCK:
         cached = _CACHE.get("payload")
         expires_at = float(_CACHE.get("expires_at") or 0.0)
         now = time.monotonic()
-        if cached and expires_at > now:
+        if not force and cached and expires_at > now:
             return cached
 
         try:

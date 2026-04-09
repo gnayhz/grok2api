@@ -55,7 +55,7 @@ async def post_stream(
             except Exception:
                 body = ""
             logger.error(
-                "HTTP POST failed: url={} status={} body={}",
+                "http stream post failed: url={} status={} body={}",
                 url, response.status_code, body,
             )
             await session.close()
@@ -110,7 +110,7 @@ async def post_json(
         body_bytes = response.content
         if response.status_code not in (200, 201, 204):
             body_text = body_bytes.decode("utf-8", "replace")[:400]
-            logger.error("HTTP POST JSON failed: url={} status={} body={}", url, response.status_code, body_text)
+            logger.error("http json post failed: url={} status={} body={}", url, response.status_code, body_text)
             raise UpstreamError(f"Upstream returned {response.status_code}", status=response.status_code, body=body_text)
         return orjson.loads(body_bytes) if body_bytes.strip() else {}
 
@@ -153,7 +153,7 @@ async def get_json(
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:400]
             logger.error(
-                "HTTP GET failed: url={} status={} body={}",
+                "http json get failed: url={} status={} body={}",
                 url, response.status_code, body_text,
             )
             raise UpstreamError(
@@ -196,7 +196,7 @@ async def delete_json(
         if response.status_code not in (200, 204):
             body_text = body_bytes.decode("utf-8", "replace")[:400]
             logger.error(
-                "HTTP DELETE failed: url={} status={} body={}",
+                "http json delete failed: url={} status={} body={}",
                 url, response.status_code, body_text,
             )
             raise UpstreamError(
@@ -252,7 +252,7 @@ async def get_bytes_stream(
             except Exception:
                 body = ""
             logger.error(
-                "HTTP GET stream failed: url={} status={} body={}",
+                "http byte stream get failed: url={} status={} body={}",
                 url, response.status_code, body,
             )
             await session.close()

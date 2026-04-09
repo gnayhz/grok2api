@@ -12,8 +12,4 @@ if [ ! -f "$DATA_DIR/config.toml" ]; then
   cp "$DEFAULT_CONFIG" "$DATA_DIR/config.toml"
 fi
 
-if [ ! -f "$DATA_DIR/token.json" ]; then
-  echo "{}" > "$DATA_DIR/token.json"
-fi
-
-chmod 600 "$DATA_DIR/config.toml" "$DATA_DIR/token.json" || true
+chmod 600 "$DATA_DIR/config.toml" || true

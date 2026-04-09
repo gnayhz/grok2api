@@ -44,9 +44,9 @@ def _build_connector(
         kwargs: dict = {"ssl": ssl_ctx}
         if rdns is not None:
             kwargs["rdns"] = rdns
-        logger.debug("WebSocket via SOCKS proxy: {}", proxy_url)
+        logger.debug("websocket connector selected: proxy_type=socks proxy_url={}", proxy_url)
         return ProxyConnector.from_url(normalized, **kwargs), None
-    logger.debug("WebSocket via HTTP proxy: {}", proxy_url)
+    logger.debug("websocket connector selected: proxy_type=http proxy_url={}", proxy_url)
     return aiohttp.TCPConnector(ssl=ssl_ctx), proxy_url
 
 
@@ -106,8 +106,7 @@ class WebSocketClient:
 
         try:
             extra: dict[str, Any] = dict(ws_kwargs or {})
-            skip_ssl = cfg.get_bool("proxy.egress.skip_ssl_verify",
-                                    cfg.get_bool("proxy.skip_proxy_ssl_verify", False)) and bool(proxy_url)
+            skip_ssl = cfg.get_bool("proxy.egress.skip_ssl_verify", False) and bool(proxy_url)
 
             if skip_ssl and urlparse(proxy_url).scheme.lower() == "https":
                 proxy_ssl = ssl.create_default_context()

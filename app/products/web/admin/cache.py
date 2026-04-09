@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from app.platform.errors import AppError, ErrorKind
 from app.platform.storage import image_files_dir, video_files_dir
 
-router = APIRouter(prefix="/cache")
+router = APIRouter(prefix="/cache", tags=["Admin - Cache"])
 
 # ---------------------------------------------------------------------------
 # Lightweight local media cache service.
@@ -25,6 +25,11 @@ class ClearCacheRequest(BaseModel):
 class DeleteCacheItemRequest(BaseModel):
     type: Literal["image", "video"] = "image"
     name: str
+
+
+class DeleteCacheItemsRequest(BaseModel):
+    type: Literal["image", "video"] = "image"
+    names: list[str]
 
 
 def _dir(media_type: str) -> Path:
@@ -123,3 +128,35 @@ async def delete_local_item(req: DeleteCacheItemRequest):
         )
     target.unlink(missing_ok=True)
     return {"status": "success", "result": {"deleted": req.name}}
+
+
+@router.post("/items/delete")
+async def delete_local_items(req: DeleteCacheItemsRequest):
+    names = [name.strip() for name in req.names if name and name.strip()]
+    if not names:
+        raise AppError(
+            "Missing file names",
+            kind=ErrorKind.VALIDATION,
+            code="missing_file_names",
+            status=400,
+        )
+
+    cache_dir = _dir(req.type)
+    deleted = 0
+    missing = 0
+
+    for name in names:
+        target = cache_dir / name
+        if target.is_file():
+            target.unlink(missing_ok=True)
+            deleted += 1
+        else:
+            missing += 1
+
+    return {
+        "status": "success",
+        "result": {
+            "deleted": deleted,
+            "missing": missing,
+        },
+    }

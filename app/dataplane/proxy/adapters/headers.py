@@ -37,7 +37,7 @@ def _sanitize(value: Optional[str], *, field: str, strip_spaces: bool = False) -
     out = re.sub(r"\s+", "", out) if strip_spaces else out.strip()
     out = out.encode("latin-1", errors="ignore").decode("latin-1")
     if out != raw:
-        logger.debug("Header '{}' sanitized: len {} → {}", field, len(raw), len(out))
+        logger.debug("header sanitized: field={} original_len={} sanitized_len={}", field, len(raw), len(out))
     return out
 
 
@@ -242,7 +242,7 @@ def build_http_headers(
     headers["Cookie"] = build_sso_cookie(cookie_token, lease=lease)
 
     _log = {k: ("<redacted>" if k == "Cookie" else v) for k, v in headers.items()}
-    logger.debug("Built HTTP headers: {}", orjson.dumps(_log).decode())
+    logger.debug("http headers built: header_count={} headers_json={}", len(headers), orjson.dumps(_log).decode())
     return headers
 
 

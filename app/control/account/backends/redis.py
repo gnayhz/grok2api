@@ -20,12 +20,9 @@ from ..models import (
     AccountRecord,
     RuntimeSnapshot,
 )
-from ..quota_defaults import default_quota_set
+from redis.asyncio import Redis
 
-try:
-    from redis.asyncio import Redis
-except ImportError:
-    Redis = None  # type: ignore[assignment,misc]
+from ..quota_defaults import default_quota_set
 
 _KEY_REV      = "accounts:rev"
 _KEY_RECORD   = "accounts:record:{token}"
@@ -205,7 +202,7 @@ class RedisAccountRepository:
         for item in items:
             try:
                 token = AccountRecord.model_validate({"token": item.token, "pool": item.pool}).token
-            except Exception:
+            except ValueError:
                 continue
             pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
             qs   = default_quota_set(pool)
