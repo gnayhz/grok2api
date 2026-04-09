@@ -18,6 +18,7 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
 from app.platform.runtime.clock import now_s
+from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimate_tool_call_tokens
 from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
@@ -30,7 +31,6 @@ from app.products.openai.chat import (
     _stream_chat, _extract_message, _resolve_image,
     _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception,
 )
-from app.products.openai._format import estimate_tokens
 from app.products.openai._tool_sieve import ToolSieve
 
 
@@ -339,6 +339,7 @@ async def create(
             text_started          = False
             sieve                 = ToolSieve(tool_names) if tool_names else None
             tool_calls_emitted    = False
+            tool_output_tokens    = 0
             block_index           = 0  # tracks next content_block index
 
             try:
@@ -353,7 +354,7 @@ async def create(
                             "model":       model,
                             "content":     [],
                             "stop_reason": None,
-                            "usage":       {"input_tokens": estimate_tokens(internal_message) + 4, "output_tokens": 0},
+                            "usage":       {"input_tokens": estimate_prompt_tokens(internal_message), "output_tokens": 0},
                         },
                     })
                     yield _sse("ping", {"type": "ping"})
@@ -431,6 +432,7 @@ async def create(
                                                 "index": block_index,
                                             })
                                             block_index += 1
+                                        tool_output_tokens = estimate_tool_call_tokens(calls)
                                         tool_calls_emitted = True
                                         ended = True
                                         break
@@ -496,17 +498,14 @@ async def create(
                                     "index": block_index,
                                 })
                                 block_index += 1
+                            tool_output_tokens = estimate_tool_call_tokens(calls)
                             tool_calls_emitted = True
 
                     if tool_calls_emitted:
-                        out_tokens = sum(
-                            estimate_tokens(text_buf) + 4
-                            for _ in [1]   # placeholder; sieve tracks args internally
-                        )
                         yield _sse("message_delta", {
                             "type":  "message_delta",
                             "delta": {"stop_reason": "tool_use", "stop_sequence": None},
-                            "usage": {"output_tokens": out_tokens},
+                            "usage": {"output_tokens": tool_output_tokens},
                         })
                         yield _sse("message_stop", {"type": "message_stop"})
                         yield "data: [DONE]\n\n"
@@ -696,7 +695,7 @@ async def create(
 
     full_think = ("".join(adapter.thinking_buf) or "") if emit_think else ""
 
-    in_tokens  = estimate_tokens(internal_message) + 4
+    in_tokens  = estimate_prompt_tokens(internal_message)
     out_tokens = estimate_tokens(full_text)
     if full_think:
         out_tokens += estimate_tokens(full_think)
@@ -717,7 +716,7 @@ async def create(
                     "name":  call.name,
                     "input": parsed_input,
                 })
-            ct = sum(estimate_tokens(c.arguments) for c in tc_result.calls)
+            ct = estimate_tool_call_tokens(tc_result.calls)
             logger.info("messages tool_calls: model={} calls={}", model, len(tc_result.calls))
             return _build_message_response(msg_id, model, content, "tool_use", in_tokens, ct)
 

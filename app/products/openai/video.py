@@ -1006,6 +1006,7 @@ async def completions(
     return make_chat_response(
         model,
         content,
+        prompt_content=prompt,
         response_id=response_id,
         reasoning_content=reasoning,
     )

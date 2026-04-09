@@ -13,13 +13,13 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
 from app.platform.runtime.clock import now_s
+from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimate_tool_call_tokens
 from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 
 from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception
 from ._format import (
-    estimate_tokens,
     make_resp_id, build_resp_usage, make_resp_object, format_sse,
 )
 from app.dataplane.reverse.protocol.tool_prompt import (
@@ -429,8 +429,8 @@ async def create(
                                 "status":  "completed",
                             })
                         output.extend(detected_fc_items)
-                        pt = estimate_tokens(message) + 4
-                        ct = sum(estimate_tokens(item["arguments"]) for item in detected_fc_items)
+                        pt = estimate_prompt_tokens(message)
+                        ct = estimate_tool_call_tokens(detected_fc_items)
                         rt = estimate_tokens(full_think) if full_think else 0
                         yield format_sse("response.completed", {
                             "type":     "response.completed",
@@ -516,7 +516,7 @@ async def create(
                             "status":  "completed",
                         })
 
-                        pt  = estimate_tokens(message) + 4
+                        pt  = estimate_prompt_tokens(message)
                         ct  = estimate_tokens(full_text)
                         rt  = estimate_tokens(full_think) if full_think else 0
                         yield format_sse("response.completed", {
@@ -656,8 +656,8 @@ async def create(
                     "status":  "completed",
                 })
             output.extend(_build_fc_items(tc_result.calls))
-            pt = estimate_tokens(message) + 4
-            ct = sum(estimate_tokens(tc.arguments) for tc in tc_result.calls)
+            pt = estimate_prompt_tokens(message)
+            ct = estimate_tool_call_tokens(tc_result.calls)
             rt = estimate_tokens(full_think) if full_think else 0
             logger.info("responses tool_calls: model={} calls={}", model, len(tc_result.calls))
             return make_resp_object(
@@ -684,7 +684,7 @@ async def create(
         "status":  "completed",
     })
 
-    pt = estimate_tokens(message) + 4
+    pt = estimate_prompt_tokens(message)
     ct = estimate_tokens(full_text)
     rt = estimate_tokens(full_think) if full_think else 0
     return make_resp_object(

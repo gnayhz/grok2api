@@ -429,6 +429,7 @@ async def generate(
         return make_chat_response(
             model,
             content,
+            prompt_content=prompt,
             response_id=response_id,
             reasoning_content=reasoning,
         )
@@ -541,6 +542,7 @@ async def _generate_lite(
         return make_chat_response(
             spec.model_name,
             content,
+            prompt_content=prompt,
             response_id=response_id,
             reasoning_content=reasoning,
         )
@@ -1156,6 +1158,7 @@ async def edit(
         return make_chat_response(
             model,
             content,
+            prompt_content=prompt,
             response_id=response_id,
             reasoning_content=reasoning,
         )

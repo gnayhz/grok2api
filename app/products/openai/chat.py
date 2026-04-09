@@ -10,6 +10,7 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
+from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimate_tool_call_tokens
 from app.platform.storage import image_files_dir
 from app.control.account.runtime import get_refresh_service
 from app.control.account.invalid_credentials import feedback_kind_for_error
@@ -29,7 +30,7 @@ from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
 from ._format import (
     make_response_id, make_stream_chunk, make_thinking_chunk, make_chat_response,
     make_tool_call_chunk, make_tool_call_done_chunk, make_tool_call_response,
-    estimate_tokens, build_usage,
+    build_usage,
 )
 from ._tool_sieve import ToolSieve
 
@@ -563,22 +564,24 @@ async def completions(
         if parse_result.calls:
             logger.info("chat request tool_calls: attempt={}/{} model={} call_count={}",
                         attempt + 1, max_retries + 1, model, len(parse_result.calls))
-            pt = estimate_tokens(message) + 4
+            pt = estimate_prompt_tokens(message)
             return make_tool_call_response(
                 model, parse_result.calls,
+                prompt_content = message,
                 response_id = response_id,
-                usage       = build_usage(pt, sum(estimate_tokens(tc.arguments) for tc in parse_result.calls)),
+                usage       = build_usage(pt, estimate_tool_call_tokens(parse_result.calls)),
             )
 
     logger.info("chat request completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
                 attempt + 1, max_retries + 1, model, len(full_text),
                 len(thinking_text or ""), len(adapter.image_urls))
 
-    pt = estimate_tokens(message) + 4
+    pt = estimate_prompt_tokens(message)
     ct = estimate_tokens(full_text)
     rt = estimate_tokens(thinking_text) if thinking_text else 0
     return make_chat_response(
         model, full_text,
+        prompt_content     = message,
         response_id       = response_id,
         reasoning_content = thinking_text,
         usage             = build_usage(pt, ct + rt, reasoning_tokens=rt),

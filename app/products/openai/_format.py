@@ -5,37 +5,12 @@ Two sections:
   - Responses API format     (make_resp_id, make_resp_object, …)
 """
 
-import math
 import os
-import re
 import time
 from typing import Any
 
 import orjson
-
-_SEGMENT_RE     = re.compile(r"\w+|[^\w\s]", re.UNICODE)
-_PROMPT_OVERHEAD = 4
-
-
-# ---------------------------------------------------------------------------
-# Shared
-# ---------------------------------------------------------------------------
-
-def estimate_tokens(value: Any) -> int:
-    """Lightweight token count estimate (UTF-8 bytes / 4, min 1 if non-empty)."""
-    if value is None:
-        return 0
-    if not isinstance(value, str):
-        try:
-            value = orjson.dumps(value).decode()
-        except (TypeError, ValueError):
-            value = str(value)
-    text = value.strip()
-    if not text:
-        return 0
-    byte_est    = math.ceil(len(text.encode()) / 4)
-    segment_est = math.ceil(len(_SEGMENT_RE.findall(text)) * 0.75)
-    return max(1, byte_est, segment_est)
+from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimate_tool_call_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -119,12 +94,13 @@ def make_chat_response(
     model:   str,
     content: str,
     *,
+    prompt_content:     Any | None  = None,
     response_id:       str | None  = None,
     usage:             dict | None = None,
     reasoning_content: str | None  = None,
 ) -> dict:
     rid = response_id or make_response_id()
-    pt  = estimate_tokens(content) + _PROMPT_OVERHEAD
+    pt  = estimate_prompt_tokens(prompt_content)
     ct  = estimate_tokens(content)
     rt  = estimate_tokens(reasoning_content) if reasoning_content else 0
     ct += rt
@@ -265,6 +241,7 @@ def make_tool_call_response(
     model:      str,
     tool_calls: list,
     *,
+    prompt_content: Any | None = None,
     response_id: str | None = None,
     usage:       dict | None = None,
 ) -> dict:
@@ -283,9 +260,8 @@ def make_tool_call_response(
         for tc in tool_calls
         if isinstance(tc, ParsedToolCall)
     ]
-    args_tokens = sum(estimate_tokens(tc.arguments) for tc in tool_calls if isinstance(tc, ParsedToolCall))
-    ct = args_tokens
-    pt = _PROMPT_OVERHEAD
+    ct = estimate_tool_call_tokens(tool_calls)
+    pt = estimate_prompt_tokens(prompt_content)
     return {
         "id":      rid,
         "object":  "chat.completion",
@@ -305,8 +281,6 @@ def make_tool_call_response(
 
 
 __all__ = [
-    # shared
-    "estimate_tokens",
     # chat completions
     "make_response_id", "build_usage",
     "make_stream_chunk", "make_thinking_chunk", "make_chat_response",
