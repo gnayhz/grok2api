@@ -25,7 +25,7 @@ from .schemas import (
 )
 from .chat import completions as chat_completions
 
-router = APIRouter(prefix="/v1", dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/v1")
 _POOL_ID_TO_NAME = {0: "basic", 1: "super", 2: "heavy"}
 _TAG_MODELS = "OpenAI - Models"
 _TAG_CHAT = "OpenAI - Chat"
@@ -63,7 +63,7 @@ def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
 # /v1/models
 # ---------------------------------------------------------------------------
 
-@router.get("/models", tags=[_TAG_MODELS])
+@router.get("/models", tags=[_TAG_MODELS], dependencies=[Depends(verify_api_key)])
 async def list_models(request: Request):
     import time
     pools = await _available_pools(request)
@@ -81,7 +81,7 @@ async def list_models(request: Request):
     return JSONResponse({"object": "list", "data": models})
 
 
-@router.get("/models/{model_id}", tags=[_TAG_MODELS])
+@router.get("/models/{model_id}", tags=[_TAG_MODELS], dependencies=[Depends(verify_api_key)])
 async def get_model_endpoint(model_id: str, request: Request):
     import time
     spec = model_registry.get(model_id)
@@ -194,7 +194,7 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
     return f"data:{mime};base64,{blob_b64}"
 
 
-@router.post("/chat/completions", tags=[_TAG_CHAT])
+@router.post("/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)])
 async def chat_completions_endpoint(req: ChatCompletionRequest):
     _validate_chat(req)
 
@@ -315,7 +315,7 @@ async def _safe_sse_responses(stream) -> AsyncGenerator[str, None]:
         yield "data: [DONE]\n\n"
 
 
-@router.post("/responses", tags=[_TAG_RESPONSES])
+@router.post("/responses", tags=[_TAG_RESPONSES], dependencies=[Depends(verify_api_key)])
 async def responses_endpoint(req: ResponsesCreateRequest):
     from app.platform.config.snapshot import get_config
     from app.platform.errors import ValidationError as _ValidationError
@@ -367,7 +367,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
 # /v1/images/generations (standalone image endpoint)
 # ---------------------------------------------------------------------------
 
-@router.post("/images/generations", tags=[_TAG_IMAGES])
+@router.post("/images/generations", tags=[_TAG_IMAGES], dependencies=[Depends(verify_api_key)])
 async def image_generations(req: ImageGenerationRequest):
     spec = model_registry.get(req.model)
     if spec is None or not spec.enabled or not spec.is_image():
@@ -391,7 +391,7 @@ async def image_generations(req: ImageGenerationRequest):
 # /v1/videos (OpenAI videos.create surface)
 # ---------------------------------------------------------------------------
 
-@router.post("/videos", tags=[_TAG_VIDEOS])
+@router.post("/videos", tags=[_TAG_VIDEOS], dependencies=[Depends(verify_api_key)])
 async def videos_create(
     model: Annotated[str, Form(...)],
     prompt: Annotated[str, Form(...)],
@@ -421,13 +421,13 @@ async def videos_create(
     return JSONResponse(result)
 
 
-@router.get("/videos/{video_id}", tags=[_TAG_VIDEOS])
+@router.get("/videos/{video_id}", tags=[_TAG_VIDEOS], dependencies=[Depends(verify_api_key)])
 async def videos_retrieve(video_id: str):
     from .video import retrieve
     return JSONResponse(await retrieve(video_id))
 
 
-@router.get("/videos/{video_id}/content", tags=[_TAG_VIDEOS])
+@router.get("/videos/{video_id}/content", tags=[_TAG_VIDEOS], dependencies=[Depends(verify_api_key)])
 async def videos_content(video_id: str):
     from .video import content_path
     path = await content_path(video_id)
@@ -438,7 +438,7 @@ async def videos_content(video_id: str):
 # /v1/images/edits (standalone image-edit endpoint)
 # ---------------------------------------------------------------------------
 
-@router.post("/images/edits", tags=[_TAG_IMAGES])
+@router.post("/images/edits", tags=[_TAG_IMAGES], dependencies=[Depends(verify_api_key)])
 async def image_edits(
     model: Annotated[str, Form(...)],
     prompt: Annotated[str, Form(...)],

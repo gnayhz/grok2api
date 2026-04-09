@@ -232,20 +232,20 @@ docker compose up -d
 
 ## API Overview
 
-| Endpoint | Body | Streaming | Description |
-| :-- | :-- | :-- | :-- |
-| `GET /v1/models` | None | No | List currently enabled models |
-| `GET /v1/models/{model_id}` | None | No | Retrieve one model |
-| `POST /v1/chat/completions` | JSON | Yes | Unified entry point for chat, image, and video |
-| `POST /v1/responses` | JSON | Yes | OpenAI Responses API compatible subset |
-| `POST /v1/messages` | JSON | Yes | Anthropic Messages API compatible endpoint |
-| `POST /v1/images/generations` | JSON | No | Standalone image generation endpoint |
-| `POST /v1/images/edits` | `multipart/form-data` | No | Standalone image editing endpoint |
-| `POST /v1/videos` | `multipart/form-data` | No | Asynchronous video job creation |
-| `GET /v1/videos/{video_id}` | None | No | Retrieve a video job |
-| `GET /v1/videos/{video_id}/content` | None | No | Fetch the final video file |
-| `GET /v1/files/image?id=...` | None | No | Fetch a locally cached image |
-| `GET /v1/files/video?id=...` | None | No | Fetch a locally cached video |
+| Endpoint | Auth Required | Description |
+| :-- | :-- | :-- |
+| `GET /v1/models` | Yes | List currently enabled models |
+| `GET /v1/models/{model_id}` | Yes | Retrieve one model |
+| `POST /v1/chat/completions` | Yes | Unified entry point for chat, image, and video |
+| `POST /v1/responses` | Yes | OpenAI Responses API compatible subset |
+| `POST /v1/messages` | Yes | Anthropic Messages API compatible endpoint |
+| `POST /v1/images/generations` | Yes | Standalone image generation endpoint |
+| `POST /v1/images/edits` | Yes | Standalone image editing endpoint |
+| `POST /v1/videos` | Yes | Asynchronous video job creation |
+| `GET /v1/videos/{video_id}` | Yes | Retrieve a video job |
+| `GET /v1/videos/{video_id}/content` | Yes | Fetch the final video file |
+| `GET /v1/files/image?id=...` | No | Fetch a locally cached image |
+| `GET /v1/files/video?id=...` | No | Fetch a locally cached video |
 
 <br>
 
@@ -355,6 +355,29 @@ curl http://localhost:8000/v1/responses \
     "model": "grok-4.20-0309",
     "input": "Explain quantum tunneling",
     "stream": true
+  }'
+```
+
+<br>
+</details>
+
+<details>
+<summary><code>POST /v1/messages</code></summary>
+<br>
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -d '{
+    "model": "grok-4.20-0309",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain quantum tunneling in three sentences"
+      }
+    ]
   }'
 ```
 

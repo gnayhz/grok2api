@@ -233,20 +233,20 @@ docker compose up -d
 
 ## API 一览
 
-| 接口 | 请求体 | 流式 | 说明 |
-| :-- | :-- | :-- | :-- |
-| `GET /v1/models` | 无 | 否 | 列出当前启用模型 |
-| `GET /v1/models/{model_id}` | 无 | 否 | 获取单个模型信息 |
-| `POST /v1/chat/completions` | JSON | 是 | 对话 / 图像 / 视频统一入口 |
-| `POST /v1/responses` | JSON | 是 | OpenAI Responses API 兼容子集 |
-| `POST /v1/messages` | JSON | 是 | Anthropic Messages API 兼容接口 |
-| `POST /v1/images/generations` | JSON | 否 | 独立图像生成接口 |
-| `POST /v1/images/edits` | `multipart/form-data` | 否 | 独立图像编辑接口 |
-| `POST /v1/videos` | `multipart/form-data` | 否 | 异步视频任务创建 |
-| `GET /v1/videos/{video_id}` | 无 | 否 | 查询视频任务 |
-| `GET /v1/videos/{video_id}/content` | 无 | 否 | 获取最终视频文件 |
-| `GET /v1/files/image?id=...` | 无 | 否 | 获取本地缓存图片 |
-| `GET /v1/files/video?id=...` | 无 | 否 | 获取本地缓存视频 |
+| 接口 | 是否鉴权 | 说明 |
+| :-- | :-- | :-- |
+| `GET /v1/models` | 是 | 列出当前启用模型 |
+| `GET /v1/models/{model_id}` | 是 | 获取单个模型信息 |
+| `POST /v1/chat/completions` | 是 | 对话 / 图像 / 视频统一入口 |
+| `POST /v1/responses` | 是 | OpenAI Responses API 兼容子集 |
+| `POST /v1/messages` | 是 | Anthropic Messages API 兼容接口 |
+| `POST /v1/images/generations` | 是 | 独立图像生成接口 |
+| `POST /v1/images/edits` | 是 | 独立图像编辑接口 |
+| `POST /v1/videos` | 是 | 异步视频任务创建 |
+| `GET /v1/videos/{video_id}` | 是 | 查询视频任务 |
+| `GET /v1/videos/{video_id}/content` | 是 | 获取最终视频文件 |
+| `GET /v1/files/image?id=...` | 否 | 获取本地缓存图片 |
+| `GET /v1/files/video?id=...` | 否 | 获取本地缓存视频 |
 
 <br>
 
@@ -356,6 +356,29 @@ curl http://localhost:8000/v1/responses \
     "model": "grok-4.20-0309",
     "input": "解释一下量子隧穿",
     "stream": true
+  }'
+```
+
+<br>
+</details>
+
+<details>
+<summary><code>POST /v1/messages</code></summary>
+<br>
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -d '{
+    "model": "grok-4.20-0309",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "用三句话解释量子隧穿"
+      }
+    ]
   }'
 ```
 
