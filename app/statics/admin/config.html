@@ -602,6 +602,7 @@ let SCHEMA = [];
 let _cfg = {};        // loaded config (nested)
 let _dirty = {};      // { "section.key": newValue }
 let _activeTab = SCHEMA_DEF[0].id;
+let _configLoaded = false;
 
 function tr(key, params, fallback) {
   const value = t(key, params);
@@ -645,6 +646,7 @@ function buildSchema() {
 function applyConfigI18n() {
   document.title = tr('config.pageTitle', null, 'Grok2API - 配置管理');
   SCHEMA = buildSchema();
+  if (!_configLoaded) return;
   renderAll();
   _refreshDirtyState();
 }
@@ -966,6 +968,8 @@ function _refreshDirtyState() {
 async function load() {
   try {
     _cfg = await _api('GET', '/config');
+    _dirty = {};
+    _configLoaded = true;
     if (!SCHEMA.length) SCHEMA = buildSchema();
     renderAll();
     _refreshDirtyState();
@@ -1011,8 +1015,6 @@ function doReset() {
 (async () => {
   try {
     SCHEMA = buildSchema();
-    renderAll();
-    _refreshDirtyState();
 
     waitI18n().then(() => {
       applyConfigI18n();
