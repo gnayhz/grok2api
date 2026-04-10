@@ -6,6 +6,7 @@ only the DDL fragments and upsert syntax differ.
 
 import json
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -60,6 +61,143 @@ meta_table = sa.Table(
     sa.Column("key",   sa.String(128), primary_key=True),
     sa.Column("value", sa.Text, nullable=False),
 )
+
+_SQL_SSL_PARAM_KEYS = ("sslmode", "ssl-mode", "ssl")
+
+_PG_SSL_MODE_ALIASES: dict[str, str] = {
+    "disable": "disable",
+    "disabled": "disable",
+    "false": "disable",
+    "0": "disable",
+    "no": "disable",
+    "off": "disable",
+    "prefer": "prefer",
+    "preferred": "prefer",
+    "allow": "allow",
+    "require": "require",
+    "required": "require",
+    "true": "require",
+    "1": "require",
+    "yes": "require",
+    "on": "require",
+    "verify-ca": "verify-ca",
+    "verify_ca": "verify-ca",
+    "verify-full": "verify-full",
+    "verify_full": "verify-full",
+    "verify-identity": "verify-full",
+    "verify_identity": "verify-full",
+}
+
+_MYSQL_SSL_MODE_ALIASES: dict[str, str] = {
+    "disable": "disabled",
+    "disabled": "disabled",
+    "false": "disabled",
+    "0": "disabled",
+    "no": "disabled",
+    "off": "disabled",
+    "prefer": "preferred",
+    "preferred": "preferred",
+    "allow": "preferred",
+    "require": "required",
+    "required": "required",
+    "true": "required",
+    "1": "required",
+    "yes": "required",
+    "on": "required",
+    "verify-ca": "verify_ca",
+    "verify_ca": "verify_ca",
+    "verify-full": "verify_identity",
+    "verify_full": "verify_identity",
+    "verify-identity": "verify_identity",
+    "verify_identity": "verify_identity",
+}
+
+
+def _normalize_sql_url(dialect: str, url: str) -> str:
+    """Rewrite SQL URLs to the async SQLAlchemy dialect form."""
+    if not url or "://" not in url:
+        return url
+    if dialect == "mysql":
+        if url.startswith("mysql://"):
+            return f"mysql+aiomysql://{url[len('mysql://') :]}"
+        if url.startswith("mariadb://"):
+            return f"mysql+aiomysql://{url[len('mariadb://') :]}"
+        if url.startswith("mariadb+aiomysql://"):
+            return f"mysql+aiomysql://{url[len('mariadb+aiomysql://') :]}"
+        return url
+    if url.startswith("postgres://"):
+        return f"postgresql+asyncpg://{url[len('postgres://') :]}"
+    if url.startswith("postgresql://"):
+        return f"postgresql+asyncpg://{url[len('postgresql://') :]}"
+    if url.startswith("pgsql://"):
+        return f"postgresql+asyncpg://{url[len('pgsql://') :]}"
+    return url
+
+
+def _normalize_ssl_mode(dialect: str, raw_mode: str) -> str:
+    if not raw_mode:
+        raise ValueError("SSL mode cannot be empty")
+
+    mode = raw_mode.strip().lower().replace(" ", "")
+    if dialect == "mysql":
+        canonical = _MYSQL_SSL_MODE_ALIASES.get(mode)
+    else:
+        canonical = _PG_SSL_MODE_ALIASES.get(mode)
+    if not canonical:
+        raise ValueError(f"Unsupported SSL mode {raw_mode!r} for SQL dialect {dialect!r}")
+    return canonical
+
+
+def _build_mysql_ssl_context(mode: str):
+    import ssl
+
+    if mode == "disabled":
+        return None
+
+    ctx = ssl.create_default_context()
+    if mode in ("preferred", "required"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif mode == "verify_ca":
+        ctx.check_hostname = False
+    return ctx
+
+
+def _build_sql_connect_args(dialect: str, raw_ssl_mode: str | None) -> dict[str, Any] | None:
+    if not raw_ssl_mode:
+        return None
+
+    mode = _normalize_ssl_mode(dialect, raw_ssl_mode)
+    if dialect == "mysql":
+        ctx = _build_mysql_ssl_context(mode)
+        return {"ssl": ctx} if ctx is not None else None
+    return {"ssl": mode}
+
+
+def _prepare_sql_url_and_connect_args(
+    dialect: str,
+    url: str,
+) -> tuple[str, dict[str, Any] | None]:
+    """Strip SSL query params from the URL and translate them to connect_args."""
+    normalized_url = _normalize_sql_url(dialect, url)
+    if "://" not in normalized_url:
+        return normalized_url, None
+
+    parsed = urlparse(normalized_url)
+    ssl_mode: str | None = None
+    filtered_query_items: list[tuple[str, str]] = []
+    ssl_param_keys = {key.lower() for key in _SQL_SSL_PARAM_KEYS}
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key.lower() in ssl_param_keys:
+            if ssl_mode is None and value:
+                ssl_mode = value
+            continue
+        filtered_query_items.append((key, value))
+
+    cleaned_url = urlunparse(
+        parsed._replace(query=urlencode(filtered_query_items, doseq=True))
+    )
+    return cleaned_url, _build_sql_connect_args(dialect, ssl_mode)
 
 
 def _row_to_record(row: Any) -> AccountRecord:
@@ -247,7 +385,6 @@ class SqlAccountRepository:
                 if row is None:
                     continue
                 record = _row_to_record(row)
-                qs = record.quota_set()
 
                 updates: dict[str, Any] = {"updated_at": ts, "revision": rev}
                 if patch.pool is not None:
@@ -414,12 +551,26 @@ class SqlAccountRepository:
 
 def create_mysql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for MySQL."""
-    return create_async_engine(url, pool_size=10, max_overflow=20, pool_pre_ping=True)
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args("mysql", url)
+    return create_async_engine(
+        normalized_url,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        **({"connect_args": connect_args} if connect_args else {}),
+    )
 
 
 def create_pgsql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for PostgreSQL."""
-    return create_async_engine(url, pool_size=10, max_overflow=20, pool_pre_ping=True)
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args("postgresql", url)
+    return create_async_engine(
+        normalized_url,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        **({"connect_args": connect_args} if connect_args else {}),
+    )
 
 
 __all__ = ["SqlAccountRepository", "create_mysql_engine", "create_pgsql_engine"]
