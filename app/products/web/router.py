@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from app.platform.auth.middleware import is_webui_enabled, verify_webui_key
 from app.platform.meta import get_project_version
 from app.platform.update_check import get_latest_release_info
+from .static_html import serve_static_html
 from .admin import router as admin_api_router
 from .webui import router as webui_router
 
@@ -27,6 +28,10 @@ def _serve(path: str) -> FileResponse:
     return FileResponse(f)
 
 
+def _serve_html(path: str):
+    return serve_static_html(_DIR / path)
+
+
 # --- Admin pages ---
 @router.get("/admin", include_in_schema=False)
 async def admin_root():
@@ -34,19 +39,19 @@ async def admin_root():
 
 @router.get("/admin/login", include_in_schema=False)
 async def admin_login():
-    return _serve("admin/login.html")
+    return _serve_html("admin/login.html")
 
 @router.get("/admin/account", include_in_schema=False)
 async def admin_account():
-    return _serve("admin/account.html")
+    return _serve_html("admin/account.html")
 
 @router.get("/admin/config", include_in_schema=False)
 async def admin_config():
-    return _serve("admin/config.html")
+    return _serve_html("admin/config.html")
 
 @router.get("/admin/cache", include_in_schema=False)
 async def admin_cache():
-    return _serve("admin/cache.html")
+    return _serve_html("admin/cache.html")
 
 
 # --- WebUI ---
@@ -58,7 +63,7 @@ async def webui_root():
 async def webui_login():
     if not is_webui_enabled():
         raise HTTPException(404, "Not Found")
-    return _serve("webui/login.html")
+    return _serve_html("webui/login.html")
 
 @router.get("/webui/api/verify", dependencies=[Depends(verify_webui_key)], tags=["WebUI - System"])
 async def webui_verify():

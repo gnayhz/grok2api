@@ -481,4 +481,7 @@
   if (typeof renderWebuiHeader === 'function') {
     void renderWebuiHeader();
   }
+  if (typeof renderSiteFooter === 'function') {
+    void renderSiteFooter();
+  }
 })();

@@ -621,6 +621,7 @@
 
   async function boot() {
     await renderWebuiHeader?.();
+    await renderSiteFooter?.();
     window.I18n?.apply?.(document);
     if (!await ensureAccess()) return;
     syncAspectRatioIndicator();

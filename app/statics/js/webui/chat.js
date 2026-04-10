@@ -1471,6 +1471,7 @@
 
   async function boot() {
     await renderWebuiHeader?.();
+    await renderSiteFooter?.();
     if (window.I18n?.apply) I18n.apply(document);
     renderSendButton();
     window.I18n?.onReady?.(renderSendButton);

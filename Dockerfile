@@ -61,7 +61,7 @@ WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
 
-COPY config.defaults.toml ./
+COPY pyproject.toml config.defaults.toml ./
 COPY app ./app
 COPY scripts ./scripts
 

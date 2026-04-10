@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title data-i18n="config.pageTitle">Grok2API - 配置管理</title>
-  <link rel="icon" href="/favicon.ico">
+  <link rel="icon" href="/favicon.ico?v={{APP_VERSION}}">
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
-  <link href="/static/css/app.css" rel="stylesheet">
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
   <style>
     body { background: #FAF9F5 }
 
@@ -101,10 +101,39 @@
     .cfg-row.modified { background:#fffaf0 }
     .cfg-row.modified:hover { background:#fff6e7 }
     .cfg-label-col { min-width:0; display:grid; gap:3px; align-content:start }
-    .cfg-label { font-size:12px; font-weight:600; color:#222; line-height:1.35 }
+    .cfg-label {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      font-size:12px;
+      font-weight:600;
+      color:#222;
+      line-height:1.35;
+    }
     .cfg-desc  { max-width:520px; font-size:11px; color:#9a9a9a; line-height:1.45 }
     .cfg-input-col { min-width:0; display:flex; align-items:center; justify-content:flex-start; gap:8px }
     .cfg-input-col.is-bool { justify-content:flex-end }
+    .cfg-inline-action {
+      width:16px;
+      height:16px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding:0;
+      color:#9a9a9a;
+      border:0;
+      background:transparent;
+      cursor:pointer;
+      flex-shrink:0;
+      transition:color .15s, opacity .15s, transform .15s;
+    }
+    .cfg-inline-action:hover { color:#222; transform:translateY(-.5px) }
+    .cfg-inline-action:disabled {
+      opacity:.32;
+      cursor:not-allowed;
+      pointer-events:none;
+    }
+    .cfg-inline-action svg { width:14px; height:14px; display:block }
 
     /* Inputs */
     .cfg-text {
@@ -287,10 +316,11 @@
   </div>
 </div>
 
-<script src="/static/js/i18n.js"></script>
-<script src="/static/js/auth.js"></script>
-<script src="/static/js/admin-header.js"></script>
-<script src="/static/js/toast.js"></script>
+<script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
 <script>
 // ── Config schema ──────────────────────────────────────────────────────────
 // Each group has a `section` (full dotted TOML path, e.g. "proxy.egress").
@@ -677,6 +707,11 @@ function _fullPath(section, key) { return `${section}.${key}`; }
 // Get the current value of a field from loaded config.
 function _getValue(section, key) { return _getByPath(_cfg, _fullPath(section, key)); }
 
+function _getCurrentValue(section, key) {
+  const fp = _fullPath(section, key);
+  return fp in _dirty ? _dirty[fp] : _getValue(section, key);
+}
+
 // ── Render ──────────────────────────────────────────────────────────────────
 function _el(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -784,9 +819,26 @@ function renderRow(field, section) {
 
   const dot   = _el('span', { class: 'cfg-modified-dot' });
   const input = renderInput(field, section, isDirty ? _dirty[fp] : value);
+  const labelChildren = [field.label];
+
+  if (section === 'app' && field.key === 'webui_enabled') {
+    const btn = _el('button', {
+      class: 'cfg-inline-action',
+      type: 'button',
+      title: '打开 WebUI',
+      'aria-label': '打开 WebUI',
+      'data-webui-link': 'true',
+      onclick: () => window.open('/webui/login', '_blank', 'noopener,noreferrer'),
+    });
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5"/><path d="M10 14 19 5"/><path d="M19 14v5h-14v-14h5"/></svg>';
+    btn.disabled = !Boolean(_getCurrentValue(section, field.key));
+    labelChildren.push(btn);
+  }
+
+  labelChildren.push(dot);
 
   const labelCol = _el('div', { class: 'cfg-label-col' },
-    _el('div', { class: 'cfg-label' }, field.label, dot),
+    _el('div', { class: 'cfg-label' }, labelChildren),
     field.desc ? _el('div', { class: 'cfg-desc' }, field.desc) : null,
   );
   const inputCol = _el('div', { class: `cfg-input-col${field.type === 'bool' ? ' is-bool' : ''}` }, input);
@@ -866,6 +918,14 @@ function _refreshDirtyState() {
       : n === 1
         ? tr('config.unsavedSingle', { n }, '存在 1 项未保存的更改')
         : tr('config.unsavedMultiple', { n }, `存在 ${n} 项未保存的更改`);
+
+  const webuiLinkBtn = document.querySelector('[data-webui-link="true"]');
+  if (webuiLinkBtn) {
+    const enabled = Boolean(_getCurrentValue('app', 'webui_enabled'));
+    webuiLinkBtn.disabled = !enabled;
+    webuiLinkBtn.title = enabled ? '打开 WebUI' : '启用 WebUI 后可打开';
+    webuiLinkBtn.setAttribute('aria-label', webuiLinkBtn.title);
+  }
 
   // Update showIf conditional rows
   document.querySelectorAll('.cfg-row[data-show-if]').forEach(row => {
@@ -961,6 +1021,7 @@ function doReset() {
     });
 
     await renderAdminHeader?.();
+    await renderSiteFooter?.();
     const key = await adminKey.get();
     if (!key || !await verifyKey(ADMIN_API + '/verify', key).catch(() => false))
       return location.href = '/admin/login';

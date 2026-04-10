@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title data-i18n="webui.chat.pageTitle">Grok2API - WebChat</title>
-  <link rel="icon" href="/favicon.ico">
+  <link rel="icon" href="/favicon.ico?v={{APP_VERSION}}">
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
-  <link href="/static/css/app.css" rel="stylesheet">
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
 </head>
 <body class="webui-page">
   <div id="webui-header" data-active="/webui/chat"></div>
@@ -30,12 +30,6 @@
       <section class="webui-sidebar-sessions">
         <div id="sessionList" class="webui-session-list"></div>
       </section>
-
-      <div class="webui-sidebar-settings">
-        <label class="webui-control">
-          <select id="modelSelect" class="input" data-i18n-aria-label="webui.chat.modelLabel"></select>
-        </label>
-      </div>
     </aside>
 
     <section class="webui-workspace">
@@ -60,6 +54,9 @@
             <input id="fileInput" type="file" hidden multiple>
             <textarea id="promptInput" class="input webui-textarea" placeholder="输入你的问题，Enter 发送，Shift+Enter 换行" data-i18n-placeholder="webui.chat.promptPlaceholder"></textarea>
             <div class="webui-sendbar">
+              <label class="webui-sendbar-model">
+                <select id="modelSelect" class="input" data-i18n-aria-label="webui.chat.modelLabel"></select>
+              </label>
               <button id="sendBtn" class="webui-primary-btn" type="button" data-i18n="webui.chat.send">发送</button>
             </div>
           </div>
@@ -82,11 +79,12 @@
     </div>
   </div>
 
-  <script src="/static/js/i18n.js"></script>
-  <script src="/static/js/auth.js"></script>
-  <script src="/static/js/toast.js"></script>
-  <script src="/static/js/webui-header.js"></script>
+  <script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/webui-header.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="/static/js/webui/chat.js"></script>
+  <script src="/static/js/webui/chat.js?v={{APP_VERSION}}"></script>
 </body>
 </html>
