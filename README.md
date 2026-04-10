@@ -31,6 +31,7 @@ flowchart LR
 
     subgraph Products["Products"]
         OpenAI["OpenAI APIs\n/v1/*"]
+        Anthropic["Anthropic APIs\n/v1/messages"]
         Web["Web Products\n/admin /webui/*"]
     end
 
@@ -49,18 +50,27 @@ flowchart LR
     subgraph Platform["Platform"]
         Config["Config Snapshot"]
         Auth["Auth"]
+        Tokens["Token Estimation"]
         Storage["Storage"]
         Log["Logging"]
     end
 
     API --> OpenAI
+    API --> Anthropic
     API --> Web
 
     OpenAI --> Models
     OpenAI --> AccountDP
     OpenAI --> ProxyDP
     OpenAI --> Reverse
+    OpenAI --> Tokens
     OpenAI --> Storage
+
+    Anthropic --> Models
+    Anthropic --> AccountDP
+    Anthropic --> ProxyDP
+    Anthropic --> Reverse
+    Anthropic --> Tokens
 
     Web --> Accounts
     Web --> Config
