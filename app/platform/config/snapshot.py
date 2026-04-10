@@ -1,28 +1,21 @@
-"""Typed configuration snapshot — built once at startup, read-only at runtime."""
+"""Typed configuration snapshot — built once at startup, reloaded on change."""
 
 import asyncio
 import os
 from pathlib import Path
 from typing import Any
 
-import tomli_w
-
-from .loader import get_nested, load_config
+from .loader import _deep_merge, get_nested, load_toml
+from .backends import ConfigBackend, create_config_backend
 
 _BASE_DIR = Path(__file__).resolve().parents[3]  # project root
-_DATA_DIR = _BASE_DIR / "data"
 
 
 def _resolve_defaults_path() -> Path:
     return _BASE_DIR / "config.defaults.toml"
 
 
-def _resolve_user_path() -> Path:
-    return _DATA_DIR / "config.toml"
-
-
 def _mtime(path: Path) -> float:
-    """Return file mtime, or 0.0 if the file does not exist."""
     try:
         return os.stat(path).st_mtime
     except OSError:
@@ -32,59 +25,67 @@ def _mtime(path: Path) -> float:
 class ConfigSnapshot:
     """Immutable view over the loaded configuration dict.
 
-    Reloads from disk only when a config file's mtime changes, so the
-    per-request overhead is a pair of stat() syscalls rather than full
-    TOML parsing on every request.
+    Loading strategy (lowest → highest priority):
+      1. ``config.defaults.toml``  — shipped defaults (read-only, ConfigMap)
+      2. Backend user overrides    — toml file or Redis (admin hot-update target)
+      3. ``GROK_*`` env vars       — always win
+
+    Change detection is cheap: one stat() (toml) or one Redis GET (redis) per
+    request on the fast path.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, backend: ConfigBackend | None = None) -> None:
         self._data: dict[str, Any] = {}
         self._loaded = False
         self._lock = asyncio.Lock()
         self._mtime_defaults: float = 0.0
-        self._mtime_user: float = 0.0
+        self._version: object = None
+        self._backend: ConfigBackend | None = backend
 
-    async def load(
-        self,
-        defaults_path: Path | None = None,
-        user_path: Path | None = None,
-    ) -> None:
-        """Reload config if any source file changed since last load.
+    def _get_backend(self) -> ConfigBackend:
+        if self._backend is None:
+            self._backend = create_config_backend()
+        return self._backend
 
-        Safe to call on every request — skips disk I/O when nothing changed.
-        Pass explicit paths only during testing; production uses the defaults.
+    async def load(self, defaults_path: Path | None = None) -> None:
+        """Reload config if defaults or backend overrides changed.
+
+        Safe to call on every request — skips I/O when nothing changed.
+        Pass *defaults_path* only during testing.
         """
         dp = defaults_path or _resolve_defaults_path()
-        up = user_path or _resolve_user_path()
+        backend = self._get_backend()
 
         mt_dp = _mtime(dp)
-        mt_up = _mtime(up)
+        ver = await backend.version()
 
-        # Fast path: files unchanged — skip lock and disk I/O entirely.
-        if self._loaded and mt_dp == self._mtime_defaults and mt_up == self._mtime_user:
+        # Fast path: nothing changed.
+        if self._loaded and mt_dp == self._mtime_defaults and ver == self._version:
             return
 
         async with self._lock:
-            # Re-check under lock to avoid redundant reloads under concurrency.
             mt_dp = _mtime(dp)
-            mt_up = _mtime(up)
-            if self._loaded and mt_dp == self._mtime_defaults and mt_up == self._mtime_user:
+            ver = await backend.version()
+            if self._loaded and mt_dp == self._mtime_defaults and ver == self._version:
                 return
 
             if not dp.exists():
                 raise RuntimeError(f"Missing required defaults config: {dp}")
-            self._data = await asyncio.to_thread(load_config, dp, up)
+
+            defaults = await asyncio.to_thread(load_toml, dp)
+            user_overrides = await backend.load()
+            self._data = _deep_merge(defaults, user_overrides)
+            self._data = _apply_env(self._data)
+
             self._loaded = True
             self._mtime_defaults = mt_dp
-            self._mtime_user = mt_up
+            self._version = ver
 
     async def ensure_loaded(self) -> None:
-        """Load with defaults if not yet loaded."""
         if not self._loaded:
             await self.load()
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Retrieve a value by dotted key (e.g. ``"account.refresh.enabled"``)."""
         return get_nested(self._data, key, default)
 
     def get_int(self, key: str, default: int = 0) -> int:
@@ -124,26 +125,31 @@ class ConfigSnapshot:
         return [val]
 
     async def update(self, patch: dict[str, Any]) -> None:
-        """Merge *patch* into the current config and persist to user config file."""
+        """Persist only the changed keys in *patch* via backend."""
+        backend = self._get_backend()
         async with self._lock:
-            from .loader import _deep_merge
-            self._data = _deep_merge(self._data, patch)
-            user_path = _resolve_user_path()
-            await asyncio.to_thread(self._write_toml, user_path, self._data)
-            # Invalidate cached mtime so the next load() call re-reads the file
-            # and other workers pick up the change on their next request.
-            self._mtime_user = 0.0
-
-    @staticmethod
-    def _write_toml(path: Path, data: dict[str, Any]) -> None:
-        """Write config dict to TOML file."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as fh:
-            tomli_w.dump(data, fh)
+            await backend.apply_patch(patch)
+            # Invalidate so next load() call pulls the new version.
+            self._version = None
 
     def raw(self) -> dict[str, Any]:
-        """Return a shallow copy of the underlying data dict."""
         return dict(self._data)
+
+
+# ---------------------------------------------------------------------------
+# Env-var override layer (GROK_SECTION_KEY → section.key)
+# ---------------------------------------------------------------------------
+
+def _apply_env(data: dict[str, Any], prefix: str = "GROK_") -> dict[str, Any]:
+    prefix_len = len(prefix)
+    for env_key, env_val in os.environ.items():
+        if not env_key.startswith(prefix):
+            continue
+        parts = env_key[prefix_len:].lower().split("_", 1)
+        if len(parts) == 2:
+            section, key = parts
+            data.setdefault(section, {})[key] = env_val
+    return data
 
 
 # Module-level singleton — imported everywhere.
@@ -151,11 +157,6 @@ config = ConfigSnapshot()
 
 
 def get_config(key: str | None = None, default: Any = None) -> Any:
-    """Convenience wrapper around the module-level ``config`` singleton.
-
-    Without arguments, returns the ``ConfigSnapshot`` instance itself.
-    With a *key*, returns the config value at that dotted path.
-    """
     if key is None:
         return config
     return config.get(key, default)

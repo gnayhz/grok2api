@@ -30,7 +30,7 @@ metadata = sa.MetaData()
 accounts_table = sa.Table(
     _TBL_ACCOUNTS,
     metadata,
-    sa.Column("token",            sa.Text,    primary_key=True),
+    sa.Column("token",            sa.String(512), primary_key=True),
     sa.Column("pool",             sa.Text,    nullable=False, default="basic"),
     sa.Column("status",           sa.Text,    nullable=False, default="active"),
     sa.Column("created_at",       sa.BigInteger, nullable=False),
@@ -57,7 +57,7 @@ accounts_table = sa.Table(
 meta_table = sa.Table(
     _TBL_META,
     metadata,
-    sa.Column("key",   sa.Text, primary_key=True),
+    sa.Column("key",   sa.String(128), primary_key=True),
     sa.Column("value", sa.Text, nullable=False),
 )
 
@@ -143,10 +143,11 @@ class SqlAccountRepository:
                     .on_conflict_do_nothing()
                 )
             else:
+                from sqlalchemy.dialects.mysql import insert as my_insert
                 await conn.execute(
-                    sa.text(
-                        "INSERT IGNORE INTO account_meta (key, value) VALUES ('revision', '0')"
-                    )
+                    my_insert(meta_table)
+                    .values(key="revision", value="0")
+                    .on_duplicate_key_update(value="0")
                 )
 
     async def get_revision(self) -> int:

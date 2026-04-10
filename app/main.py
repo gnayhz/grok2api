@@ -108,6 +108,16 @@ async def lifespan(app: FastAPI):
 
     repo      = create_repository()
     await repo.initialize()
+
+    # 2a. First-boot migrations (config seed / account migration from SQLite).
+    from app.platform.startup import run_startup_migrations
+    await run_startup_migrations(
+        config_backend=_config._get_backend(),
+        account_repo=repo,
+    )
+    # Reload config in case it was just seeded/migrated into the backend.
+    await _config.load()
+
     directory = await get_account_directory(repo)
 
     # Expose repository on app.state for admin handlers.
