@@ -19,7 +19,7 @@ def create_repository() -> AccountRepository:
     Supported values:
       ``local``      — SQLite (default, single-process)
       ``redis``      — Redis hash + sorted-set layout
-      ``mysql``      — MySQL via asyncmy / SQLAlchemy
+      ``mysql``      — MySQL via aiomysql / SQLAlchemy
       ``postgresql`` — PostgreSQL via asyncpg / SQLAlchemy
     """
     backend = get_repository_backend()

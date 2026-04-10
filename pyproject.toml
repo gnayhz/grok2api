@@ -8,7 +8,6 @@ dependencies = [
     "aiohttp>=3.13.4",
     "aiohttp-socks>=0.11.0",
     "aiomysql>=0.2.0",
-    "asyncmy>=0.2.11",
     "asyncpg>=0.31.0",
     "certifi>=2025.10.5",
     "cryptography>=46.0.7",
