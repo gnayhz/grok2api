@@ -1,7 +1,7 @@
 """Control-plane proxy domain models."""
 
 from enum import IntEnum, StrEnum
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, Field
 
@@ -29,7 +29,7 @@ class ClearanceMode(StrEnum):
     FLARESOLVERR = "flaresolverr" # maintained by FlareSolverr
 
     @classmethod
-    def parse(cls, value: str | "ClearanceMode") -> "ClearanceMode":
+    def parse(cls, value: str | Self) -> Self:
         if isinstance(value, cls):
             return value
         normalized = str(value or "").strip().lower()
