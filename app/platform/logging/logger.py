@@ -13,6 +13,13 @@ logger = _loguru_logger
 _configured = False
 
 
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def setup_logging(
     *,
     level: str = "INFO",
@@ -70,10 +77,11 @@ def reload_logging(
 ) -> None:
     """Re-configure logging from runtime values (called after config loads)."""
     level = os.getenv("LOG_LEVEL", default_level)
+    file_logging = _get_env_bool("LOG_FILE_ENABLED", True)
     setup_logging(
         level=level,
         json_console=json_console,
-        file_logging=True,
+        file_logging=file_logging,
         max_files=max_files,
     )
 

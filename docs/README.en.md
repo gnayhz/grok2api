@@ -167,6 +167,7 @@ docker compose up -d
 | :-- | :-- | :-- |
 | `TZ` | Time zone | `Asia/Shanghai` |
 | `LOG_LEVEL` | Log level | `INFO` |
+| `LOG_FILE_ENABLED` | Write local log files | `true` |
 | `ACCOUNT_SYNC_INTERVAL` | Account directory incremental sync interval in seconds | `30` |
 | `SERVER_HOST` | Service bind address | `0.0.0.0` |
 | `SERVER_PORT` | Service port | `8000` |
