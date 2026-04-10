@@ -28,6 +28,7 @@ from app.platform.logging.logger import logger, setup_logging, reload_logging
 from app.platform.config.snapshot import config as _config
 from app.platform.errors import AppError
 from app.platform.meta import get_project_version
+from app.platform.paths import data_path
 
 
 load_dotenv()
@@ -37,7 +38,7 @@ load_dotenv()
 # Scheduler leader-election via advisory file lock
 # ---------------------------------------------------------------------------
 
-_LOCK_FILE = Path(__file__).resolve().parent.parent / "data" / ".scheduler.lock"
+_LOCK_FILE = data_path(".scheduler.lock")
 _lock_fd: int | None = None
 
 

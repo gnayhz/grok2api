@@ -4,9 +4,9 @@
   "env": {
     "LOG_LEVEL": "INFO",
     "LOG_FILE_ENABLED": "false",
+    "DATA_DIR": "/tmp/data",
+    "LOG_DIR": "/tmp/logs",
     "ACCOUNT_STORAGE": "local",
-    "ACCOUNT_LOCAL_PATH": "/tmp/data/accounts.db",
-    "CONFIG_LOCAL_PATH": "/tmp/data/config.toml",
     "ACCOUNT_REDIS_URL": "redis://localhost:6379/0",
     "ACCOUNT_MYSQL_URL": "",
     "ACCOUNT_POSTGRESQL_URL": ""

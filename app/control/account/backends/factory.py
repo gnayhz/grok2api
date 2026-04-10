@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from app.platform.paths import data_path
 from ..repository import AccountRepository
 
-_DEFAULT_LOCAL_PATH = "data/accounts.db"
 _SUPPORTED_BACKENDS = {"local", "redis", "mysql", "postgresql"}
 
 
@@ -79,7 +79,7 @@ def _get_required_env(name: str) -> str:
 
 
 def _resolve_local_db_path() -> Path:
-    path_str = _get_env("ACCOUNT_LOCAL_PATH", _DEFAULT_LOCAL_PATH)
+    path_str = _get_env("ACCOUNT_LOCAL_PATH", str(data_path("accounts.db")))
     db_path = Path(path_str)
     if not db_path.is_absolute():
         db_path = Path(__file__).resolve().parents[4] / db_path

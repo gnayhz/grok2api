@@ -3,9 +3,8 @@
 import os
 from pathlib import Path
 
+from app.platform.paths import data_path
 from .base import ConfigBackend
-
-_DEFAULT_USER_PATH = "data/config.toml"
 
 
 def get_config_backend_name() -> str:
@@ -16,7 +15,7 @@ def get_config_backend_name() -> str:
 def create_config_backend() -> ConfigBackend:
     """Instantiate the config backend that matches the account storage backend.
 
-    ``ACCOUNT_STORAGE=local``       → TOML file (data/config.toml)
+    ``ACCOUNT_STORAGE=local``       → TOML file (``${DATA_DIR}/config.toml``)
     ``ACCOUNT_STORAGE=redis``       → Redis  (ACCOUNT_REDIS_URL)
     ``ACCOUNT_STORAGE=mysql``       → MySQL  (ACCOUNT_MYSQL_URL)
     ``ACCOUNT_STORAGE=postgresql``  → PostgreSQL (ACCOUNT_POSTGRESQL_URL)
@@ -38,7 +37,7 @@ def create_config_backend() -> ConfigBackend:
 def _make_toml() -> ConfigBackend:
     from .toml import TomlConfigBackend
 
-    path_str = os.getenv("CONFIG_LOCAL_PATH", _DEFAULT_USER_PATH).strip()
+    path_str = os.getenv("CONFIG_LOCAL_PATH", str(data_path("config.toml"))).strip()
     path = Path(path_str)
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[5] / path

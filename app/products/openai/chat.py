@@ -95,7 +95,7 @@ async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
 
 
 def _save_image(raw: bytes, mime: str, image_id: str) -> str:
-    """Save raw bytes to data/files/images/, return the file ID."""
+    """Save raw bytes to ``${DATA_DIR}/files/images`` and return the file ID."""
     img_dir = image_files_dir()
     ext = ".png" if "png" in mime else ".jpg"
     path = img_dir / f"{image_id}{ext}"
