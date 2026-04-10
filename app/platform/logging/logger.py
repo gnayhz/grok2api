@@ -19,7 +19,6 @@ def setup_logging(
     json_console: bool = False,
     file_logging: bool = True,
     log_dir: Path | None = None,
-    max_file_size_mb: int = 100,
     max_files: int = 7,
 ) -> None:
     """Configure loguru sinks.  Safe to call multiple times (idempotent)."""
@@ -48,14 +47,12 @@ def setup_logging(
     if file_logging:
         _dir = log_dir or (Path.cwd() / "logs")
         _dir.mkdir(parents=True, exist_ok=True)
-        rotation = f"{max_file_size_mb} MB" if max_file_size_mb > 0 else None
-        retention = max_files if max_files > 0 else None
         logger.add(
-            str(_dir / "app.log"),
+            str(_dir / "app_{time:YYYY-MM-DD}.log"),
             level="DEBUG",
             format=fmt_text,
-            rotation=rotation,
-            retention=retention,
+            rotation="00:00",       # new file every day at midnight
+            retention=max_files,    # keep the last N daily files
             enqueue=True,
             encoding="utf-8",
             backtrace=False,
@@ -69,7 +66,6 @@ def reload_logging(
     *,
     default_level: str = "INFO",
     json_console: bool = False,
-    max_file_size_mb: int = 100,
     max_files: int = 7,
 ) -> None:
     """Re-configure logging from runtime values (called after config loads)."""
@@ -78,7 +74,6 @@ def reload_logging(
         level=level,
         json_console=json_console,
         file_logging=True,
-        max_file_size_mb=max_file_size_mb,
         max_files=max_files,
     )
 
