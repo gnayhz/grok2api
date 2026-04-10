@@ -3,6 +3,7 @@
   "version": 2,
   "env": {
     "LOG_LEVEL": "INFO",
+    "LOG_FILE_ENABLED": "false",
     "ACCOUNT_STORAGE": "local",
     "ACCOUNT_LOCAL_PATH": "/tmp/data/accounts.db",
     "ACCOUNT_REDIS_URL": "redis://localhost:6379/0",
