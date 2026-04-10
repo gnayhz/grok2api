@@ -46,9 +46,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # push main → latest（排除 tag 触发）
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            # tag 推送 → 版本号
+            type=raw,value=latest,enable=${{ github.ref_type == 'branch' }}
+            type=ref,event=tag
             type=semver,pattern={{version}}
 
       - name: Build and push Docker image
