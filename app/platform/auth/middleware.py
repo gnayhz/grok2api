@@ -68,7 +68,7 @@ async def verify_api_key(
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing or invalid Authorization header.")
 
-    if token not in allowed_keys:
+    if not any(hmac.compare_digest(token, k) for k in allowed_keys):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid API key.")
 
 
