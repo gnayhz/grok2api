@@ -20,6 +20,7 @@ from app.dataplane.proxy.adapters.headers import build_sso_cookie
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
 from app.dataplane.reverse.protocol.xai_assets import resolve_asset_reference
+from app.control.proxy.feedback import build_feedback
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 
 _UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
@@ -143,13 +144,10 @@ async def _upload_file_inner(
                 "asset upload request failed: status={} body={}",
                 response.status_code, body_text,
             )
+            is_cloudflare = "just a moment" in body_text.lower()
             await proxy.feedback(
                 lease,
-                ProxyFeedback(
-                    kind        = ProxyFeedbackKind.UPSTREAM_5XX if response.status_code >= 500
-                                  else ProxyFeedbackKind.FORBIDDEN,
-                    status_code = response.status_code,
-                ),
+                build_feedback(response.status_code, is_cloudflare=is_cloudflare),
             )
             raise UpstreamError(
                 f"Asset upload returned {response.status_code}",

@@ -32,6 +32,11 @@ def _serve_html(path: str):
     return serve_static_html(_DIR / path)
 
 
+@router.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse("/admin")
+
+
 # --- Admin pages ---
 @router.get("/admin", include_in_schema=False)
 async def admin_root():
