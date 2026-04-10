@@ -1,5 +1,7 @@
 """XAI rate-limits API protocol — fetch live quota data per mode."""
 
+import asyncio
+
 import orjson
 
 from app.platform.errors import UpstreamError
@@ -124,7 +126,10 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
     """Fetch quota window for a single mode. Returns QuotaWindow or None."""
     mode_name = _MODE_NAMES.get(mode_id, "auto")
     try:
-        body = await _do_fetch(token, mode_name)
+        body = await asyncio.wait_for(_do_fetch(token, mode_name), timeout=25.0)
+    except asyncio.TimeoutError:
+        logger.debug("rate-limits fetch timed out: token={}... mode={}", token[:10], mode_name)
+        return None
     except Exception as exc:
         if is_invalid_credentials_error(exc):
             raise

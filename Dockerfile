@@ -71,7 +71,7 @@ RUN mkdir -p /app/data /app/logs \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO /dev/null http://localhost:${SERVER_PORT}/health || exit 1
+    CMD ["sh", "-c", "wget -qO /dev/null http://127.0.0.1:${SERVER_PORT}/health || exit 1"]
 
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 CMD ["sh", "-c", "exec granian --interface asgi --host ${SERVER_HOST} --port ${SERVER_PORT} --workers ${SERVER_WORKERS} app.main:app"]

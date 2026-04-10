@@ -13,7 +13,7 @@ MODELS: tuple[ModelSpec, ...] = (
 
     # Basic+
     ModelSpec("grok-4.20-0309-non-reasoning",           ModeId.FAST,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning"),
-    ModelSpec("grok-4.20-0309",                         ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20-0309"),
+    ModelSpec("grok-4.20-0309",                         ModeId.AUTO,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309"),
     ModelSpec("grok-4.20-0309-reasoning",               ModeId.EXPERT, Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning"),
     # Super+
     ModelSpec("grok-4.20-0309-non-reasoning-super",     ModeId.FAST,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning Super"),
