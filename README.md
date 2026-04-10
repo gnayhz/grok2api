@@ -14,8 +14,9 @@
 <br>
 
 Grok2API 是一个基于 **FastAPI** 构建的 Grok 网关，支持将 Grok Web 能力以 OpenAI 兼容 API 的方式转换。核心特性：
-- OpenAI 兼容接口：`/v1/chat/completions`、`/v1/responses`、`/v1/images/generations`、`/v1/images/edits`、`/v1/videos`
-- 支持流式与非流式对话、显式思考输出、函数工具结构透传
+- OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/images/generations`、`/v1/images/edits`、`/v1/videos`、`/v1/videos/{video_id}`、`/v1/videos/{video_id}/content`
+- Anthropic 兼容接口：`/v1/messages`
+- 支持流式与非流式对话、显式思考输出、函数工具结构透传，以及统一的 token / usage 统计
 - 支持多账号池、层级选号、失败反馈、额度同步与自动维护
 - 支持本地缓存图片、视频与本地代理链接返回
 - 支持文生图、图像编辑、文生视频、图生视频
@@ -30,28 +31,32 @@ flowchart LR
     Client["Clients\nOpenAI SDK / curl / Browser"] --> API["FastAPI App"]
 
     subgraph Products["Products"]
+        direction TB
         OpenAI["OpenAI APIs\n/v1/*"]
         Anthropic["Anthropic APIs\n/v1/messages"]
         Web["Web Products\n/admin /webui/*"]
     end
 
     subgraph Control["Control"]
+        direction TB
         Models["Model Registry"]
         Accounts["Account Services"]
         Proxies["Proxy Services"]
     end
 
     subgraph Dataplane["Dataplane"]
+        direction TB
+        Reverse["Reverse Protocol + Transport"]
         AccountDP["AccountDirectory"]
         ProxyDP["Proxy Runtime"]
-        Reverse["Reverse Protocol + Transport"]
     end
 
     subgraph Platform["Platform"]
-        Config["Config Snapshot"]
-        Auth["Auth"]
+        direction TB
         Tokens["Token Estimation"]
         Storage["Storage"]
+        Config["Config Snapshot"]
+        Auth["Auth"]
         Log["Logging"]
     end
 
