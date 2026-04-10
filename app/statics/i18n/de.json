@@ -371,6 +371,7 @@
         "memory": { "label": "Konversationsspeicher" },
         "stream": { "label": "Standard-Streaming" },
         "thinking": { "label": "Standard-Ausgabe für Reasoning" },
+        "thinkingSummary": { "label": "Kompakte Reasoning-Ausgabe" },
         "dynamicStatsig": { "label": "Dynamisches Statsig" },
         "enableNsfw": { "label": "NSFW-Erzeugung zulassen" },
         "customInstruction": { "label": "Globale Zusatzanweisung" },

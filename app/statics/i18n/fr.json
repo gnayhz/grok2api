@@ -371,6 +371,7 @@
         "memory": { "label": "Mémoire conversationnelle" },
         "stream": { "label": "Streaming par défaut" },
         "thinking": { "label": "Sortie de raisonnement par défaut" },
+        "thinkingSummary": { "label": "Raisonnement condensé" },
         "dynamicStatsig": { "label": "Statsig dynamique" },
         "enableNsfw": { "label": "Autoriser la génération NSFW" },
         "customInstruction": { "label": "Instruction globale supplémentaire" },

@@ -398,6 +398,10 @@
           "label": "Default Reasoning Output",
           "desc": "Default value applied when the request does not explicitly provide the thinking parameter. When enabled, reasoning steps are returned in reasoning_content."
         },
+        "thinkingSummary": {
+          "label": "Condensed Reasoning",
+          "desc": "When enabled, reasoning steps are condensed into a structured summary. When disabled, the full raw reasoning stream is output, with multi-agent collaboration details and tool call traces."
+        },
         "dynamicStatsig": {
           "label": "Dynamic Statsig",
           "desc": "Generates a fresh Statsig device fingerprint for each request to reduce the likelihood of risk-control challenges."

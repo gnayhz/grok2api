@@ -149,6 +149,20 @@ _GROK_RENDER_RE = re.compile(
 
 _IMAGE_BASE = "https://assets.grok.com/"
 
+# 工具使用卡片 → emoji 单行格式化映射（详细模式专用）
+# 格式: tool_name → (emoji, (可展示的参数 key 列表))
+_TOOL_FMT: dict[str, tuple[str, tuple[str, ...]]] = {
+    "web_search":          ("🔍", ("query", "q")),
+    "x_search":            ("🔍", ("query",)),
+    "x_keyword_search":    ("🔍", ("query",)),
+    "x_semantic_search":   ("🔍", ("query",)),
+    "browse_page":         ("🌐", ("url",)),
+    "search_images":       ("🖼️", ("image_description", "imageDescription")),
+    "image_search":        ("🖼️", ("image_description", "imageDescription")),
+    "chatroom_send":       ("📋", ("message",)),
+    "code_execution":      ("💻", ()),
+}
+
 
 class StreamAdapter:
     """Parse upstream SSE frames and emit :class:`FrameEvent` objects.
@@ -163,6 +177,9 @@ class StreamAdapter:
         "_citation_map",
         "_emitted_reasoning_keys",
         "_reasoning",
+        "_summary_mode",
+        "_last_rollout",
+        "_content_started",
         "thinking_buf",
         "text_buf",
         "image_urls",
@@ -173,7 +190,11 @@ class StreamAdapter:
         self._citation_order: list[str] = []
         self._citation_map: dict[str, int] = {}
         self._emitted_reasoning_keys: set[str] = set()
-        self._reasoning = ReasoningAggregator()
+        # 思维链模式：精简摘要 / 详细原始流
+        self._summary_mode: bool = get_config().get_bool("features.thinking_summary", False)
+        self._last_rollout: str = ""
+        self._content_started: bool = False
+        self._reasoning = ReasoningAggregator() if self._summary_mode else None
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
         self.image_urls: list[tuple[str, str]] = []   # [(url, imageUuid), ...]
@@ -217,14 +238,29 @@ class StreamAdapter:
         step_id = resp.get("messageStepId")
 
         if tag == "tool_usage_card":
-            for line in self._summarize_tool_usage(resp, rollout=rollout, step_id=step_id):
-                self._append_reasoning(
-                    events,
-                    line,
-                    rollout=rollout,
-                    tag=tag,
-                    step_id=step_id,
-                )
+            # 正文已开始后的迟到 tool card：静默丢弃
+            if self._content_started:
+                return events
+            if self._summary_mode:
+                # 精简模式：走 ReasoningAggregator 提炼摘要
+                for line in self._summarize_tool_usage_summary(
+                    resp, rollout=rollout, step_id=step_id,
+                ):
+                    self._append_reasoning(
+                        events, line,
+                        rollout=rollout, tag=tag, step_id=step_id,
+                    )
+            else:
+                # 详细模式：格式化为 emoji 单行（含 Agent 身份）
+                line = self._format_tool_card(resp, rollout=rollout)
+                if line:
+                    # 同步 Agent 标识，确保后续 Grok summary 能正确插前缀
+                    if rollout:
+                        self._last_rollout = rollout
+                    self._append_reasoning(
+                        events, line,
+                        rollout=rollout, tag=tag, step_id=step_id,
+                    )
             return events   # card events (if any) already added
 
         # ── raw_function_result ───────────────────────────────────
@@ -235,25 +271,51 @@ class StreamAdapter:
         if resp.get("toolUsageCardId") and not resp.get("webSearchResults") and not resp.get("codeExecutionResult"):
             return events
 
-        # ── thinking token ────────────────────────────────────────
+        # ── 思维链 token 处理 ──────────────────────────────────────
         if token is not None and think is True:
-            for line in self._reasoning.on_thinking(
-                str(token),
-                tag=tag,
-                rollout=rollout,
-                step_id=step_id if isinstance(step_id, int) else None,
-            ):
+            # 正文已开始后的迟到 thinking：写入 buf（非流式可用）但不发事件（流式不显示）
+            if self._content_started:
+                raw = str(token).strip()
+                if raw:
+                    formatted = raw if raw.endswith("\n") else raw + "\n"
+                    self.thinking_buf.append(formatted)
+                return events
+            if self._summary_mode:
+                # 精简模式：走 ReasoningAggregator 提炼摘要
+                for line in self._reasoning.on_thinking(
+                    str(token), tag=tag, rollout=rollout,
+                    step_id=step_id if isinstance(step_id, int) else None,
+                ):
+                    self._append_reasoning(
+                        events, line,
+                        rollout=rollout, tag=tag, step_id=step_id,
+                    )
+            else:
+                # 详细模式：Agent 切换时插入身份前缀，原始 token 直接透传
+                raw = str(token)
+                # 去掉 Grok summary 自带的 "- " 前缀，避免触发 markdown 列表缩进
+                if raw.startswith("- "):
+                    raw = raw[2:]
+                if not raw:
+                    return events
+                agent = rollout or ""
+                if agent and agent != self._last_rollout:
+                    self._last_rollout = agent
+                    # Agent 切换标识：绕过去重，直接写 buf + 发 event（同一 Agent 可多次出现）
+                    header = f"\n[{agent}]\n"
+                    self.thinking_buf.append(header)
+                    events.append(FrameEvent(
+                        "thinking", header, rollout_id=agent,
+                    ))
                 self._append_reasoning(
-                    events,
-                    line,
-                    rollout=rollout,
-                    tag=tag,
-                    step_id=step_id,
+                    events, raw,
+                    rollout=rollout, tag=tag, step_id=step_id,
                 )
             return events
 
         # ── final text token (needs cleaning) ─────────────────────
         if token is not None and think is not True and tag == "final":
+            self._content_started = True
             cleaned = self._clean_token(token)
             if cleaned:
                 self.text_buf.append(cleaned)
@@ -355,15 +417,25 @@ class StreamAdapter:
         tag: str | None,
         step_id: Any,
     ) -> None:
-        text = line.strip()
-        if not text:
-            return
+        """将思维链文本追加到 thinking_buf 和事件列表（双模式去重）"""
+        if self._summary_mode:
+            # 精简模式：激进去重（移除标点/空格后比较）
+            text = line.strip()
+            if not text:
+                return
+            key = self._normalize_key(text)
+        else:
+            # 详细模式：精确去重（rollout + 原文）
+            text = line
+            if not text:
+                return
+            key = f"{rollout or ''}:{text}"
 
-        key = self._normalize_key(text)
         if key in self._emitted_reasoning_keys:
             return
-
         self._emitted_reasoning_keys.add(key)
+
+        # 统一用 \n 换行（去掉 "- " 前缀后不再有列表上下文，普通 \n 即可）
         formatted = text if text.endswith("\n") else text + "\n"
         self.thinking_buf.append(formatted)
         events.append(FrameEvent(
@@ -375,40 +447,51 @@ class StreamAdapter:
         ))
 
     def _flush_pending_reasoning(self, events: list[FrameEvent]) -> None:
-        for line in self._reasoning.finalize():
-            self._append_reasoning(
-                events,
-                line,
-                rollout="",
-                tag="summary",
-                step_id=None,
-            )
+        """flush ReasoningAggregator 缓冲事件（仅精简模式有效）"""
+        if self._summary_mode and self._reasoning is not None:
+            for line in self._reasoning.finalize():
+                self._append_reasoning(events, line, rollout="", tag="summary", step_id=None)
 
-    def _summarize_tool_usage(self, resp: dict[str, Any], *, rollout: str | None, step_id: int | None) -> list[str]:
+    @staticmethod
+    def _extract_tool_info(resp: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """从 toolUsageCard 提取工具名（snake_case）和参数"""
         card = resp.get("toolUsageCard")
         if not isinstance(card, dict):
-            return []
-
-        tool_name = ""
-        args: dict[str, Any] = {}
+            return "", {}
         for key, value in card.items():
             if key == "toolUsageCardId" or not isinstance(value, dict):
                 continue
+            # camelCase → snake_case
             tool_name = re.sub(r"(?<!^)([A-Z])", r"_\1", key).lower()
             raw_args = value.get("args")
-            if isinstance(raw_args, dict):
-                args = raw_args
-            break
+            return tool_name, (raw_args if isinstance(raw_args, dict) else {})
+        return "", {}
 
+    # 精简模式：走 ReasoningAggregator 提炼摘要
+    def _summarize_tool_usage_summary(self, resp: dict[str, Any], *, rollout: str | None, step_id: int | None) -> list[str]:
+        tool_name, args = self._extract_tool_info(resp)
         if not tool_name:
             return []
+        return self._reasoning.on_tool_usage(tool_name, args, rollout=rollout, step_id=step_id)
 
-        return self._reasoning.on_tool_usage(
-            tool_name,
-            args,
-            rollout=rollout,
-            step_id=step_id,
-        )
+    # 详细模式：格式化为 emoji 单行（含 Agent 身份）
+    def _format_tool_card(self, resp: dict[str, Any], *, rollout: str | None) -> str:
+        tool_name, args = self._extract_tool_info(resp)
+        if not tool_name:
+            return ""
+        emoji, arg_keys = _TOOL_FMT.get(tool_name, ("🔧", ()))
+        # 提取要展示的参数值
+        display_arg = ""
+        for ak in arg_keys:
+            val = args.get(ak)
+            if val:
+                display_arg = str(val).strip()
+                break
+        # 构造 Agent 前缀（不加前导 \n，由 _append_reasoning 统一处理换行）
+        prefix = f"[{rollout}] " if rollout else ""
+        if display_arg:
+            return f"{prefix}{emoji} {tool_name}: {display_arg}"
+        return f"{prefix}{emoji} {tool_name}"
 
     def _normalize_key(self, text: str) -> str:
         lowered = text.lower()
