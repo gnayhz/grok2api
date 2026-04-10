@@ -24,9 +24,18 @@ class EgressMode(StrEnum):
 
 
 class ClearanceMode(StrEnum):
-    NONE    = "none"     # no CF clearance required
-    MANUAL  = "manual"   # operator-supplied cf_cookies
-    MANAGED = "managed"  # maintained by FlareSolverr
+    NONE         = "none"         # no CF clearance required
+    MANUAL       = "manual"       # operator-supplied cf_cookies
+    FLARESOLVERR = "flaresolverr" # maintained by FlareSolverr
+
+    @classmethod
+    def parse(cls, value: str | "ClearanceMode") -> "ClearanceMode":
+        if isinstance(value, cls):
+            return value
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return cls.NONE
+        return cls(normalized)
 
 
 class EgressNodeState(IntEnum):

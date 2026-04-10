@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.119%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Version](https://img.shields.io/badge/version-2.0.0.rc0-111827)](../pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](../LICENSE)
-[![中文](https://img.shields.io/badge/中文-2563EB?logo=bookstack&logoColor=white)](../REAMDE.md)
+[![中文](https://img.shields.io/badge/中文-2563EB?logo=bookstack&logoColor=white)](../README.md)
 [![Project%20Docs](https://img.shields.io/badge/Project%20Docs-0F766E?logo=readthedocs&logoColor=white)](https://blog.cheny.me/blog/posts/grok2api)
 
 > [!NOTE]
@@ -13,8 +13,9 @@
 <br>
 
 Grok2API is a **FastAPI**-based Grok gateway that exposes Grok Web capabilities through OpenAI-compatible APIs. Core features:
-- OpenAI-compatible endpoints: `/v1/chat/completions`, `/v1/responses`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`
-- Streaming and non-streaming chat, explicit reasoning output, and function-tool structure passthrough
+- OpenAI-compatible endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/responses`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/videos/{video_id}`, `/v1/videos/{video_id}/content`
+- Anthropic-compatible endpoint: `/v1/messages`
+- Streaming and non-streaming chat, explicit reasoning output, function-tool structure passthrough, and unified token / usage accounting
 - Multi-account pools, tier-aware selection, failure feedback, quota synchronization, and automatic maintenance
 - Local image/video caching and locally proxied media URLs
 - Text-to-image, image editing, text-to-video, and image-to-video support
@@ -29,28 +30,32 @@ flowchart LR
     Client["Clients\nOpenAI SDK / curl / Browser"] --> API["FastAPI App"]
 
     subgraph Products["Products"]
+        direction TB
         OpenAI["OpenAI APIs\n/v1/*"]
         Anthropic["Anthropic APIs\n/v1/messages"]
         Web["Web Products\n/admin /webui/*"]
     end
 
     subgraph Control["Control"]
+        direction TB
         Models["Model Registry"]
         Accounts["Account Services"]
         Proxies["Proxy Services"]
     end
 
     subgraph Dataplane["Dataplane"]
+        direction TB
+        Reverse["Reverse Protocol + Transport"]
         AccountDP["AccountDirectory"]
         ProxyDP["Proxy Runtime"]
-        Reverse["Reverse Protocol + Transport"]
     end
 
     subgraph Platform["Platform"]
-        Config["Config Snapshot"]
-        Auth["Auth"]
+        direction TB
         Tokens["Token Estimation"]
         Storage["Storage"]
+        Config["Config Snapshot"]
+        Auth["Auth"]
         Log["Logging"]
     end
 

@@ -45,7 +45,7 @@ class ProxyDirectory:
         """Load proxy configuration from the current config snapshot."""
         cfg = get_config()
         self._egress_mode    = EgressMode(cfg.get_str("proxy.egress.mode", "direct"))
-        self._clearance_mode = ClearanceMode(cfg.get_str("proxy.clearance.mode", "none"))
+        self._clearance_mode = ClearanceMode.parse(cfg.get_str("proxy.clearance.mode", "none"))
 
         nodes: list[EgressNode]          = []
         resource_nodes: list[EgressNode] = []
