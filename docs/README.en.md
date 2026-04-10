@@ -110,7 +110,7 @@ docker compose up -d
 
 ### Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,ACCOUNT_STORAGE,ACCOUNT_LOCAL_PATH,CONFIG_LOCAL_PATH,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,LOG_DIR,ACCOUNT_STORAGE,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL)
 
 ### Render
 
@@ -156,7 +156,7 @@ docker compose up -d
 | Location | Purpose | Effective Time |
 | :-- | :-- | :-- |
 | `.env` | Pre-start configuration | At service startup |
-| `data/config.toml` | Runtime configuration | Effective immediately after save |
+| `${DATA_DIR}/config.toml` | Runtime configuration | Effective immediately after save |
 | `config.defaults.toml` | Default template | On first initialization |
 
 
@@ -173,8 +173,9 @@ docker compose up -d
 | `SERVER_PORT` | Service port | `8000` |
 | `SERVER_WORKERS` | Granian worker count | `1` |
 | `HOST_PORT` | Docker Compose published host port | `8000` |
+| `DATA_DIR` | Local data directory | `./data` |
+| `LOG_DIR` | Local log directory | `./logs` |
 | `ACCOUNT_STORAGE` | Account storage backend | `local` |
-| `ACCOUNT_LOCAL_PATH` | SQLite path for `local` mode | `data/accounts.db` |
 | `ACCOUNT_REDIS_URL` | Redis DSN for `redis` mode | `""` |
 | `ACCOUNT_MYSQL_URL` | SQLAlchemy DSN for `mysql` mode | `""` |
 | `ACCOUNT_POSTGRESQL_URL` | SQLAlchemy DSN for `postgresql` mode | `""` |

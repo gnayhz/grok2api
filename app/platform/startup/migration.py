@@ -2,21 +2,21 @@
 
 Config migration
 ----------------
-local   : seeds data/config.toml from config.defaults.toml if the file
-          does not exist yet — gives users an editable copy on first run.
-redis / sql : if the backend is empty (version == 0) AND data/config.toml
-          exists, migrates the user overrides into the DB backend.
-          If data/config.toml does not exist either, nothing is written
-          (defaults are always loaded from config.defaults.toml at runtime).
+local   : seeds ``${DATA_DIR}/config.toml`` from ``config.defaults.toml`` if
+          the file does not exist yet — gives users an editable copy on first run.
+redis / sql : if the backend is empty (version == 0) AND
+          ``${DATA_DIR}/config.toml`` exists, migrates the user overrides into
+          the DB backend. If it does not exist either, nothing is written
+          (defaults are always loaded from ``config.defaults.toml`` at runtime).
 
 Account migration
 -----------------
 Runs only when ACCOUNT_STORAGE != "local".
-If data/accounts.db (the previous local SQLite store) exists AND the
+If ``${DATA_DIR}/accounts.db`` (the previous local SQLite store) exists AND the
 target backend is empty (revision == 0), all accounts are copied into the
 new backend — preserving pool, status, quota, usage stats, and timestamps.
 After a successful migration the SQLite file is renamed to
-data/accounts.db.migrated so the same migration is never re-run.
+``${DATA_DIR}/accounts.db.migrated`` so the same migration is never re-run.
 """
 
 from __future__ import annotations
@@ -28,15 +28,16 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from app.platform.paths import data_path
+
 if TYPE_CHECKING:
     from app.control.account.repository import AccountRepository
     from app.platform.config.backends.base import ConfigBackend
 
 _BASE_DIR     = Path(__file__).resolve().parents[3]
-_DATA_DIR     = _BASE_DIR / "data"
 _DEFAULTS_PATH = _BASE_DIR / "config.defaults.toml"
-_USER_CFG_PATH = _DATA_DIR / "config.toml"
-_LOCAL_DB_PATH = _DATA_DIR / "accounts.db"
+_USER_CFG_PATH = data_path("config.toml")
+_LOCAL_DB_PATH = data_path("accounts.db")
 _BATCH         = 500  # accounts per upsert/patch batch
 
 
@@ -64,10 +65,10 @@ async def _migrate_config(backend: "ConfigBackend") -> None:
     backend_name = get_config_backend_name()
 
     if backend_name == "local":
-        # Seed data/config.toml from defaults so users have an editable file.
+        # Seed ${DATA_DIR}/config.toml from defaults so users have an editable file.
         if not _USER_CFG_PATH.exists() and _DEFAULTS_PATH.exists():
             await asyncio.to_thread(shutil.copy2, _DEFAULTS_PATH, _USER_CFG_PATH)
-            logger.info("config: seeded data/config.toml from config.defaults.toml")
+            logger.info("config: seeded {} from config.defaults.toml", _USER_CFG_PATH)
         return
 
     # DB / Redis backends — migrate only if backend is empty.
@@ -79,7 +80,8 @@ async def _migrate_config(backend: "ConfigBackend") -> None:
         if user_data:
             await backend.apply_patch(user_data)
             logger.info(
-                "config: migrated data/config.toml → {} backend ({} keys)",
+                "config: migrated {} -> {} backend ({} keys)",
+                _USER_CFG_PATH,
                 backend_name,
                 _count_keys(user_data),
             )

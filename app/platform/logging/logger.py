@@ -7,6 +7,8 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 
+from app.platform.paths import log_dir as get_log_dir
+
 # Re-export as the canonical logger so imports stay uniform.
 logger = _loguru_logger
 
@@ -52,7 +54,7 @@ def setup_logging(
     )
 
     if file_logging:
-        _dir = log_dir or (Path.cwd() / "logs")
+        _dir = log_dir or get_log_dir()
         _dir.mkdir(parents=True, exist_ok=True)
         logger.add(
             str(_dir / "app_{time:YYYY-MM-DD}.log"),

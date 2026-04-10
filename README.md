@@ -111,7 +111,7 @@ docker compose up -d
 
 ### Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,ACCOUNT_STORAGE,ACCOUNT_LOCAL_PATH,CONFIG_LOCAL_PATH,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,LOG_DIR,ACCOUNT_STORAGE,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL)
 
 ### Render
 
@@ -157,7 +157,7 @@ docker compose up -d
 | 位置 | 用途 | 生效时机 |
 | :-- | :-- | :-- |
 | `.env` | 启动前配置 | 服务启动时 |
-| `data/config.toml` | 运行时配置 | 保存后即时生效 |
+| `${DATA_DIR}/config.toml` | 运行时配置 | 保存后即时生效 |
 | `config.defaults.toml` | 默认模板 | 首次初始化时 |
 
 
@@ -174,8 +174,9 @@ docker compose up -d
 | `SERVER_PORT` | 服务监听端口 | `8000` |
 | `SERVER_WORKERS` | Granian worker 数量 | `1` |
 | `HOST_PORT` | Docker Compose 宿主机映射端口 | `8000` |
+| `DATA_DIR` | 本地数据目录 | `./data` |
+| `LOG_DIR` | 本地日志目录 | `./logs` |
 | `ACCOUNT_STORAGE` | 账号存储后端 | `local` |
-| `ACCOUNT_LOCAL_PATH` | `local` 模式 SQLite 路径 | `data/accounts.db` |
 | `ACCOUNT_REDIS_URL` | `redis` 模式 Redis DSN | `""` |
 | `ACCOUNT_MYSQL_URL` | `mysql` 模式 SQLAlchemy DSN | `""` |
 | `ACCOUNT_POSTGRESQL_URL` | `postgresql` 模式 SQLAlchemy DSN | `""` |
