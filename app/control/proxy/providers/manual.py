@@ -9,7 +9,7 @@ class ManualClearanceProvider:
 
     def build_bundle(self, *, affinity_key: str) -> ClearanceBundle | None:
         cfg = get_config()
-        mode = cfg.get_str("proxy.clearance.mode", "none")
+        mode = ClearanceMode.parse(cfg.get_str("proxy.clearance.mode", "none"))
         if mode != ClearanceMode.MANUAL:
             return None
         return ClearanceBundle(

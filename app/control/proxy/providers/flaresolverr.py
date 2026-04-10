@@ -37,8 +37,8 @@ class FlareSolverrClearanceProvider:
         proxy_url:    str,
     ) -> ClearanceBundle | None:
         cfg = get_config()
-        mode = cfg.get_str("proxy.clearance.mode", "none")
-        if mode != ClearanceMode.MANAGED:
+        mode = ClearanceMode.parse(cfg.get_str("proxy.clearance.mode", "none"))
+        if mode != ClearanceMode.FLARESOLVERR:
             return None
         fs_url      = cfg.get_str("proxy.clearance.flaresolverr_url", "")
         timeout_sec = cfg.get_int("proxy.clearance.timeout_sec", 60)
@@ -58,7 +58,7 @@ class FlareSolverrClearanceProvider:
             return None
 
         return ClearanceBundle(
-            bundle_id    = f"managed:{affinity_key}",
+            bundle_id    = f"flaresolverr:{affinity_key}",
             cf_cookies   = result.get("cookies", ""),
             user_agent   = result.get("user_agent", ""),
             affinity_key = affinity_key,
