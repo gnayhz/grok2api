@@ -120,7 +120,6 @@ async def apply_changes(
                 table._update_slot(existing, **args, old_tags=old_tags, new_tags=tags)
             else:
                 table._append_slot(record.token, **args, tags=tags)
-                table.size += 1
 
             changed = True
 
