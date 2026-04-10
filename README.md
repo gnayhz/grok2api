@@ -168,6 +168,7 @@ docker compose up -d
 | :-- | :-- | :-- |
 | `TZ` | 时区 | `Asia/Shanghai` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
+| `LOG_FILE_ENABLED` | 写入本地文件日志 | `true` |
 | `ACCOUNT_SYNC_INTERVAL` | 账号目录增量同步间隔（秒） | `30` |
 | `SERVER_HOST` | 服务监听地址 | `0.0.0.0` |
 | `SERVER_PORT` | 服务监听端口 | `8000` |
