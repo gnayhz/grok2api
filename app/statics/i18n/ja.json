@@ -371,6 +371,7 @@
         "memory": { "label": "会話メモリ" },
         "stream": { "label": "デフォルトのストリーミング" },
         "thinking": { "label": "デフォルトの推論出力" },
+        "thinkingSummary": { "label": "思考要約出力" },
         "dynamicStatsig": { "label": "動的 Statsig" },
         "enableNsfw": { "label": "NSFW 生成を許可" },
         "customInstruction": { "label": "グローバル補助指示" },

@@ -398,6 +398,10 @@
           "label": "默认思考输出",
           "desc": "请求未显式指定 thinking 参数时所采用的默认值。启用后将在 reasoning_content 字段返回思考过程。"
         },
+        "thinkingSummary": {
+          "label": "思考精简输出",
+          "desc": "启用后将思考过程提炼为结构化摘要。关闭时输出完整的原始推理过程，支持多 Agent 模型的协作详情与工具调用展示。"
+        },
         "dynamicStatsig": {
           "label": "动态 Statsig",
           "desc": "为每次请求动态生成 Statsig 设备指纹，以降低风控拦截概率。"
