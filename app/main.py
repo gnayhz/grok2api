@@ -18,6 +18,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -27,6 +28,9 @@ from app.platform.logging.logger import logger, setup_logging, reload_logging
 from app.platform.config.snapshot import config as _config
 from app.platform.errors import AppError
 from app.platform.meta import get_project_version
+
+
+load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ def _try_acquire_scheduler_lock() -> bool:
     except BlockingIOError:
         # Another worker already holds the lock.
         return False
-    except (OSError, AttributeError):
+    except (ImportError, OSError, AttributeError):
         # fcntl unavailable (Windows) or unexpected FS error — treat as leader.
         return True
 
@@ -67,7 +71,7 @@ def _release_scheduler_lock() -> None:
         import fcntl
         fcntl.flock(_lock_fd, fcntl.LOCK_UN)
         os.close(_lock_fd)
-    except OSError:
+    except (ImportError, OSError):
         pass
     _lock_fd = None
 
