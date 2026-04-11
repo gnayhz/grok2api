@@ -5,7 +5,9 @@ only the DDL fragments and upsert syntax differ.
 """
 
 import json
+import os
 import ssl
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -135,6 +137,10 @@ _MYSQL_SSL_MODE_ALIASES: dict[str, str] = {
     "verify_identity": "verify_identity",
 }
 
+_ENGINE_CACHE_LOCK = Lock()
+_ENGINE_CACHE: dict[tuple[str, str], AsyncEngine] = {}
+_ENGINE_KEYS_BY_ID: dict[int, set[tuple[str, str]]] = {}
+
 
 def _normalize_sql_url(dialect: str, url: str) -> str:
     """Rewrite SQL URLs to the async SQLAlchemy dialect form."""
@@ -155,6 +161,16 @@ def _normalize_sql_url(dialect: str, url: str) -> str:
     if url.startswith("pgsql://"):
         return f"postgresql+asyncpg://{url[len('pgsql://') :]}"
     return url
+
+
+def _get_env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
 
 
 def _normalize_ssl_mode(dialect: str, raw_mode: str) -> str:
@@ -334,6 +350,43 @@ def _prepare_sql_url_and_connect_args(
     return cleaned_url, _build_sql_connect_args(dialect, ssl_options)
 
 
+def _sql_engine_kwargs(connect_args: dict[str, Any] | None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "pool_size": _get_env_int("ACCOUNT_SQL_POOL_SIZE", 1, minimum=1),
+        "max_overflow": _get_env_int("ACCOUNT_SQL_MAX_OVERFLOW", 0, minimum=0),
+        "pool_timeout": _get_env_int("ACCOUNT_SQL_POOL_TIMEOUT", 30, minimum=1),
+        "pool_recycle": _get_env_int("ACCOUNT_SQL_POOL_RECYCLE", 1800, minimum=0),
+        "pool_pre_ping": True,
+        "pool_use_lifo": True,
+    }
+    if connect_args:
+        kwargs["connect_args"] = connect_args
+    return kwargs
+
+
+def _get_or_create_engine(
+    cache_key: tuple[str, str],
+    normalized_url: str,
+    connect_args: dict[str, Any] | None,
+) -> AsyncEngine:
+    with _ENGINE_CACHE_LOCK:
+        engine = _ENGINE_CACHE.get(cache_key)
+        if engine is not None:
+            return engine
+
+        engine = create_async_engine(normalized_url, **_sql_engine_kwargs(connect_args))
+        _ENGINE_CACHE[cache_key] = engine
+        _ENGINE_KEYS_BY_ID.setdefault(id(engine), set()).add(cache_key)
+        return engine
+
+
+def _evict_cached_engine(engine: AsyncEngine) -> None:
+    with _ENGINE_CACHE_LOCK:
+        for key in _ENGINE_KEYS_BY_ID.pop(id(engine), set()):
+            if _ENGINE_CACHE.get(key) is engine:
+                _ENGINE_CACHE.pop(key, None)
+
+
 def _row_to_record(row: Any) -> AccountRecord:
     d = dict(row._mapping)
     d["tags"]  = json.loads(d.get("tags")  or "[]")
@@ -352,10 +405,17 @@ def _row_to_record(row: Any) -> AccountRecord:
 class SqlAccountRepository:
     """Async SQLAlchemy-based repository for MySQL / PostgreSQL."""
 
-    def __init__(self, engine: AsyncEngine, *, dialect: str = "mysql") -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        dialect: str = "mysql",
+        dispose_engine: bool = True,
+    ) -> None:
         self._engine  = engine
         self._dialect = dialect   # "mysql" | "postgresql"
         self._session = async_sessionmaker(engine, expire_on_commit=False)
+        self._dispose_engine = dispose_engine
 
     # ------------------------------------------------------------------
     # Revision helpers (run inside a transaction)
@@ -680,31 +740,23 @@ class SqlAccountRepository:
 
     async def close(self) -> None:
         """Dispose the SQLAlchemy connection pool."""
-        await self._engine.dispose()
+        if self._dispose_engine:
+            _evict_cached_engine(self._engine)
+            await self._engine.dispose()
 
 
 def create_mysql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for MySQL."""
-    normalized_url, connect_args = _prepare_sql_url_and_connect_args("mysql", url)
-    return create_async_engine(
-        normalized_url,
-        pool_size=10,
-        max_overflow=20,
-        pool_pre_ping=True,
-        **({"connect_args": connect_args} if connect_args else {}),
-    )
+    raw_url = (url or "").strip()
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args("mysql", raw_url)
+    return _get_or_create_engine(("mysql", raw_url), normalized_url, connect_args)
 
 
 def create_pgsql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for PostgreSQL."""
-    normalized_url, connect_args = _prepare_sql_url_and_connect_args("postgresql", url)
-    return create_async_engine(
-        normalized_url,
-        pool_size=10,
-        max_overflow=20,
-        pool_pre_ping=True,
-        **({"connect_args": connect_args} if connect_args else {}),
-    )
+    raw_url = (url or "").strip()
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args("postgresql", raw_url)
+    return _get_or_create_engine(("postgresql", raw_url), normalized_url, connect_args)
 
 
 __all__ = ["SqlAccountRepository", "create_mysql_engine", "create_pgsql_engine"]
