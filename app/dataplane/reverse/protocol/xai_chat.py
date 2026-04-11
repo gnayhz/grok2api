@@ -175,6 +175,7 @@ class StreamAdapter:
         "_card_cache",
         "_citation_order",
         "_citation_map",
+        "_last_citation_index",
         "_emitted_reasoning_keys",
         "_reasoning",
         "_summary_mode",
@@ -189,6 +190,7 @@ class StreamAdapter:
         self._card_cache: dict[str, dict] = {}
         self._citation_order: list[str] = []
         self._citation_map: dict[str, int] = {}
+        self._last_citation_index: int = -1
         self._emitted_reasoning_keys: set[str] = set()
         # 思维链模式：精简摘要 / 详细原始流
         self._summary_mode: bool = get_config().get_bool("features.thinking_summary", False)
@@ -199,12 +201,10 @@ class StreamAdapter:
         self.text_buf: list[str] = []
         self.image_urls: list[tuple[str, str]] = []   # [(url, imageUuid), ...]
 
+    # 引用已内联为 [[N]](url) 格式，无需末尾附录
     def references_suffix(self) -> str:
-        """Return a stable, language-neutral reference list for collected citations."""
-        if not self._citation_order:
-            return ""
-        lines = [f"[{index}] {url}" for index, url in enumerate(self._citation_order, start=1)]
-        return "\n\n" + "\n".join(lines)
+        """No-op — citations are now inlined as ``[[N]](url)`` markdown links."""
+        return ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -374,7 +374,9 @@ class StreamAdapter:
     def _clean_token(self, token: str) -> str:
         if "<grok:render" not in token:
             return token
-        return _GROK_RENDER_RE.sub(self._render_replace, token)
+        cleaned = _GROK_RENDER_RE.sub(self._render_replace, token)
+        # 去除引用标签替换后残留的独占空白行（如 "\n [[1]](...)" → " [[1]](...)"）
+        return cleaned.lstrip("\n") if cleaned.startswith("\n") and "[[" in cleaned else cleaned
 
     def _render_replace(self, m: re.Match) -> str:
         card_id     = m.group(1)
@@ -404,7 +406,11 @@ class StreamAdapter:
                 self._citation_order.append(url)
                 index = len(self._citation_order)
                 self._citation_map[url] = index
-            return f" [{index}]"
+            # 连续相同引用去重
+            if index == self._last_citation_index:
+                return ""
+            self._last_citation_index = index
+            return f" [[{index}]]({url})"
 
         return ""
 
