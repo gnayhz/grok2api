@@ -346,20 +346,6 @@ const SCHEMA_DEF = [
         section: 'logging',
         fields: [
           {
-            key: 'level',
-            label: '控制台日志等级',
-            labelKey: 'config.schema.fields.logLevel.label',
-            type: 'select',
-            options: [
-              { value: 'DEBUG', label: 'DEBUG' },
-              { value: 'INFO', label: 'INFO' },
-              { value: 'WARNING', label: 'WARNING' },
-              { value: 'ERROR', label: 'ERROR' },
-            ],
-            desc: '控制台输出的最低日志等级。默认 INFO。',
-            descKey: 'config.schema.fields.logLevel.desc',
-          },
-          {
             key: 'file_level',
             label: '文件日志等级',
             labelKey: 'config.schema.fields.fileLogLevel.label',

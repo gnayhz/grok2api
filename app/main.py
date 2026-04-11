@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
     # 1. Load configuration.
     await _config.load()
     reload_logging(
-        default_level=_config.get_str("logging.level", "INFO"),
+        level=os.getenv("LOG_LEVEL", "INFO"),
         file_level=_config.get_str("logging.file_level", "") or None,
         max_files=_config.get_int("logging.max_files", 7),
     )
