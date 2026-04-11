@@ -116,17 +116,7 @@ async def _do_fetch(token: str, mode_name: str) -> dict:
         return body
     except Exception as exc:
         status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
-        kind = (
-            ProxyFeedbackKind.RATE_LIMITED
-            if status == 429
-            else ProxyFeedbackKind.CHALLENGE
-            if status == 403
-            else ProxyFeedbackKind.UNAUTHORIZED
-            if status == 401
-            else ProxyFeedbackKind.UPSTREAM_5XX
-            if status and status >= 500
-            else ProxyFeedbackKind.TRANSPORT_ERROR
-        )
+        kind = _proxy_feedback_kind_for_error(exc, status=status)
         await proxy.feedback(lease, ProxyFeedback(kind=kind, status_code=status))
         raise
 
@@ -211,6 +201,29 @@ def is_invalid_credentials_error(exc: BaseException) -> bool:
     if exc.status not in (400, 403):
         return False
     return is_invalid_credentials_body(str(exc.details.get("body", "") or ""))
+
+
+def _proxy_feedback_kind_for_error(
+    exc: BaseException,
+    *,
+    status: int | None,
+):
+    """Map quota-fetch failures to proxy feedback without burning healthy clearance."""
+    from app.control.proxy.models import ProxyFeedbackKind
+
+    # Invalid or blocked accounts are account problems, not proxy problems.
+    if is_invalid_credentials_error(exc):
+        return ProxyFeedbackKind.FORBIDDEN
+
+    if status == 429:
+        return ProxyFeedbackKind.RATE_LIMITED
+    if status == 403:
+        return ProxyFeedbackKind.CHALLENGE
+    if status == 401:
+        return ProxyFeedbackKind.UNAUTHORIZED
+    if status and status >= 500:
+        return ProxyFeedbackKind.UPSTREAM_5XX
+    return ProxyFeedbackKind.TRANSPORT_ERROR
 
 
 __all__ = [
