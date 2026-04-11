@@ -94,7 +94,11 @@ setup_logging(
 async def lifespan(app: FastAPI):
     # 1. Load configuration.
     await _config.load()
-    reload_logging()
+    reload_logging(
+        default_level=_config.get_str("logging.level", "INFO"),
+        file_level=_config.get_str("logging.file_level", "") or None,
+        max_files=_config.get_int("logging.max_files", 7),
+    )
     logger.info(
         "application startup: service=grok2api python={} platform={}",
         sys.version.split()[0],

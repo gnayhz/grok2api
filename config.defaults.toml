@@ -12,6 +12,16 @@ webui_enabled = false
 webui_key = ""
 
 
+# ==================== 日志配置 ====================
+[logging]
+# 日志等级：DEBUG / INFO / WARNING / ERROR
+level = "INFO"
+# 日志文件等级（文件可独立于控制台）
+file_level = "INFO"
+# 日志文件最大保留数量（按天轮转）
+max_files = 7
+
+
 # ==================== 应用功能 ====================
 [features]
 # 是否启用临时对话
