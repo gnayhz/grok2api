@@ -241,8 +241,7 @@ def build_http_headers(
     headers.update(_client_hints(browser, raw_ua))
     headers["Cookie"] = build_sso_cookie(cookie_token, lease=lease)
 
-    _log = {k: ("<redacted>" if k == "Cookie" else v) for k, v in headers.items()}
-    logger.debug("http headers built: header_count={} headers_json={}", len(headers), orjson.dumps(_log).decode())
+    logger.debug("http headers built: header_count={}", len(headers))
     return headers
 
 

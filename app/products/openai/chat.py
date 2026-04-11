@@ -364,14 +364,11 @@ async def completions(
                             timeout_s         = timeout_s,
                         ):
                             event_type, data = classify_line(line)
-                            logger.debug("chat sse frame received: event_type={} data_len={}", event_type, len(data))
                             if event_type == "done":
                                 break
                             if event_type != "data" or not data:
                                 continue
                             events = adapter.feed(data)
-                            if not events:
-                                logger.debug("chat stream adapter skipped frame: preview={}", data[:120])
                             for ev in events:
                                 if tool_calls_emitted:
                                     break  # already sent [DONE], drop remaining events

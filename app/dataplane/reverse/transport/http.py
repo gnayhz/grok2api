@@ -110,7 +110,7 @@ async def post_json(
         body_bytes = response.content
         if response.status_code not in (200, 201, 204):
             body_text = body_bytes.decode("utf-8", "replace")[:400]
-            logger.error("http json post failed: url={} status={} body={}", url, response.status_code, body_text)
+            logger.warning("http json post failed: url={} status={}", url, response.status_code)
             raise UpstreamError(f"Upstream returned {response.status_code}", status=response.status_code, body=body_text)
         return orjson.loads(body_bytes) if body_bytes.strip() else {}
 
