@@ -243,6 +243,7 @@ def apply_feedback(
                 state_reason = None
                 ext.pop(_COOLDOWN_UNTIL_KEY,  None)
                 ext.pop(_COOLDOWN_REASON_KEY, None)
+                ext.pop(_FORBIDDEN_STRIKE_KEY, None)
 
     elif feedback.kind == FeedbackKind.DISABLE:
         status       = AccountStatus.DISABLED

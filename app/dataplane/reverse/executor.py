@@ -153,11 +153,13 @@ async def _apply_feedback_and_release(
         # Account feedback via the directory's feedback API.
         from app.control.account.enums import FeedbackKind
         _CATEGORY_TO_FEEDBACK = {
-            ResultCategory.SUCCESS:      FeedbackKind.SUCCESS,
-            ResultCategory.RATE_LIMITED:  FeedbackKind.RATE_LIMITED,
-            ResultCategory.AUTH_FAILURE:  FeedbackKind.UNAUTHORIZED,
-            ResultCategory.FORBIDDEN:     FeedbackKind.FORBIDDEN,
-            ResultCategory.UPSTREAM_5XX:  FeedbackKind.SERVER_ERROR,
+            ResultCategory.SUCCESS:       FeedbackKind.SUCCESS,
+            ResultCategory.RATE_LIMITED:   FeedbackKind.RATE_LIMITED,
+            ResultCategory.AUTH_FAILURE:   FeedbackKind.UNAUTHORIZED,
+            ResultCategory.FORBIDDEN:      FeedbackKind.FORBIDDEN,
+            ResultCategory.UPSTREAM_5XX:   FeedbackKind.SERVER_ERROR,
+            ResultCategory.TRANSPORT_ERR:  FeedbackKind.SERVER_ERROR,
+            ResultCategory.UNKNOWN:        FeedbackKind.SERVER_ERROR,
         }
         fb_kind = _CATEGORY_TO_FEEDBACK.get(result.category)
         if fb_kind is not None:

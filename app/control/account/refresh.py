@@ -10,7 +10,7 @@ from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 from app.platform.runtime.batch import run_batch
 from app.control.model.enums import ALL_MODES_WITH_HEAVY
-from .enums import AccountStatus, QuotaSource
+from .enums import AccountStatus, FeedbackKind, QuotaSource
 from .models import AccountRecord, QuotaWindow
 from .quota_defaults import default_quota_window, infer_pool, supported_mode_ids, supports_mode
 from .state_machine import is_manageable
@@ -322,11 +322,41 @@ class AccountRefreshService:
     async def record_failure_async(self, token: str, mode_id: int, exc: BaseException | None = None) -> None:
         """Fire-and-forget: persist failure counter and timestamp after a failed call."""
         from .commands import AccountPatch
+        from .state_machine import AccountFeedback, apply_feedback
         try:
             if exc is not None:
                 record = next(iter(await self._repo.get_accounts([token])), None)
                 if record is not None and await self._expire_invalid_credentials(record, exc):
                     return
+                status_code = getattr(exc, "status", 0)
+                if status_code == 403:
+                    if record is None:
+                        record = next(iter(await self._repo.get_accounts([token])), None)
+                    if record is not None:
+                        reason = getattr(exc, "body", "") or "forbidden"
+                        fb = AccountFeedback(
+                            kind=FeedbackKind.FORBIDDEN,
+                            mode_id=mode_id,
+                            reason=str(reason)[:120],
+                        )
+                        updated = apply_feedback(record, fb)
+                        await self._repo.patch_accounts([
+                            AccountPatch(
+                                token            = token,
+                                status           = updated.status,
+                                state_reason     = updated.state_reason,
+                                usage_fail_delta = 1,
+                                last_fail_at     = updated.last_fail_at,
+                                last_fail_reason = updated.last_fail_reason,
+                                ext_merge        = updated.ext,
+                            )
+                        ])
+                        logger.info(
+                            "account forbidden feedback applied: token={}... mode_id={} status={} strikes={}",
+                            token[:10], mode_id, updated.status,
+                            updated.ext.get("forbidden_strikes", 0),
+                        )
+                        return
             await self._repo.patch_accounts([
                 AccountPatch(
                     token            = token,

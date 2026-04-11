@@ -8,12 +8,13 @@ from ..shared.enums import ALL_MODE_IDS, StatusId
 from .table import AccountRuntimeTable
 
 # Health adjustment constants.
-_SUCCESS_STEP       = 0.12
-_AUTH_FACTOR        = 0.55
-_FORBIDDEN_FACTOR   = 0.25
-_RATE_LIMIT_FACTOR  = 0.45
-_MIN_HEALTH         = 0.05
-_MAX_HEALTH         = 1.0
+_SUCCESS_STEP         = 0.12
+_AUTH_FACTOR          = 0.55
+_FORBIDDEN_FACTOR     = 0.25
+_RATE_LIMIT_FACTOR    = 0.45
+_SERVER_ERROR_FACTOR  = 0.75
+_MIN_HEALTH           = 0.05
+_MAX_HEALTH           = 1.0
 
 
 def apply_success(table: AccountRuntimeTable, idx: int, mode_id: int) -> None:
@@ -52,6 +53,11 @@ def apply_auth_failure(table: AccountRuntimeTable, idx: int) -> None:
 def apply_forbidden(table: AccountRuntimeTable, idx: int) -> None:
     """Reduce health heavily on 403."""
     _adjust_health(table, idx, _FORBIDDEN_FACTOR)
+
+
+def apply_server_error(table: AccountRuntimeTable, idx: int) -> None:
+    """Mildly reduce health on 5xx / transport errors."""
+    _adjust_health(table, idx, _SERVER_ERROR_FACTOR)
 
 
 def apply_status_change(table: AccountRuntimeTable, idx: int, new_status_id: int) -> None:
