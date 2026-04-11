@@ -3,7 +3,6 @@
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 from loguru import logger as _loguru_logger
 
@@ -62,8 +61,8 @@ def setup_logging(
             str(_dir / "app_{time:YYYY-MM-DD}.log"),
             level=_file_level,
             format=fmt_text,
-            rotation="00:00",       # new file every day at midnight
-            retention=max_files,    # keep the last N daily files
+            rotation="00:00",  # new file every day at midnight
+            retention=max_files,  # keep the last N daily files
             enqueue=True,
             encoding="utf-8",
             backtrace=False,
@@ -75,17 +74,18 @@ def setup_logging(
 
 def reload_logging(
     *,
+    level: str | None = None,
     default_level: str = "INFO",
     json_console: bool = False,
     max_files: int = 7,
     file_level: str | None = None,
 ) -> None:
     """Re-configure logging from runtime values (called after config loads)."""
-    level = os.getenv("LOG_LEVEL", default_level)
+    resolved_level = (level or "").strip() or os.getenv("LOG_LEVEL", default_level)
     file_logging = _get_env_bool("LOG_FILE_ENABLED", True)
     setup_logging(
-        level=level,
-        file_level=file_level or level,
+        level=resolved_level,
+        file_level=file_level or resolved_level,
         json_console=json_console,
         file_logging=file_logging,
         max_files=max_files,

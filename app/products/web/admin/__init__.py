@@ -26,13 +26,27 @@ if TYPE_CHECKING:
 # Shared DI dependencies — inject via Depends, no try/except per call
 # ---------------------------------------------------------------------------
 
-_CFG_CHAR_REPLACEMENTS = str.maketrans({
-    "\u2010": "-", "\u2011": "-", "\u2012": "-",
-    "\u2013": "-", "\u2014": "-", "\u2212": "-",
-    "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-    "\u00a0": " ", "\u2007": " ", "\u202f": " ",
-    "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
-})
+_CFG_CHAR_REPLACEMENTS = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u00a0": " ",
+        "\u2007": " ",
+        "\u202f": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\ufeff": "",
+    }
+)
 
 _STARTUP_ONLY_CONFIG_PREFIXES = (
     "account.storage",
@@ -64,7 +78,11 @@ def _sanitize_proxy_config(payload: dict[str, Any]) -> dict[str, Any]:
 
     sanitized = dict(proxy)
     changed = False
-    for key, strip_spaces in [("user_agent", False), ("cf_cookies", False), ("cf_clearance", True)]:
+    for key, strip_spaces in [
+        ("user_agent", False),
+        ("cf_cookies", False),
+        ("cf_clearance", True),
+    ]:
         if key not in sanitized:
             continue
         raw = sanitized[key]
@@ -120,10 +138,10 @@ router = APIRouter(prefix="/admin/api", dependencies=[Depends(verify_admin_key)]
 _TAG_ADMIN_SYSTEM = "Admin - System"
 
 # Mount sub-modules
-from .tokens import router as _tokens_router                          # noqa: E402
-from .batch import router as _batch_router                            # noqa: E402
-from .assets import router as _assets_router                          # noqa: E402
-from .cache import router as _cache_router                            # noqa: E402
+from .tokens import router as _tokens_router  # noqa: E402
+from .batch import router as _batch_router  # noqa: E402
+from .assets import router as _assets_router  # noqa: E402
+from .cache import router as _cache_router  # noqa: E402
 
 router.include_router(_tokens_router)
 router.include_router(_batch_router)
@@ -134,6 +152,7 @@ router.include_router(_cache_router)
 # ---------------------------------------------------------------------------
 # Lightweight inline endpoints (no separate file needed)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/verify", tags=[_TAG_ADMIN_SYSTEM])
 async def admin_verify():
@@ -155,7 +174,7 @@ async def update_config(req: ConfigPatchRequest):
     await config.update(patch)
     await config.load()
     reload_logging(
-        default_level=config.get_str("logging.level", "INFO"),
+        level=config.get_str("logging.level", "INFO"),
         file_level=config.get_str("logging.file_level", "") or None,
         max_files=config.get_int("logging.max_files", 7),
     )
@@ -170,6 +189,7 @@ async def get_storage_mode():
 @router.get("/status", tags=[_TAG_ADMIN_SYSTEM])
 async def runtime_status():
     from app.dataplane.account import _directory
+
     if _directory is None:
         raise AppError(
             "Account directory not initialised",
@@ -178,11 +198,13 @@ async def runtime_status():
             status=503,
         )
     return Response(
-        content=orjson.dumps({
-            "status": "ok",
-            "size": _directory.size,
-            "revision": _directory.revision,
-        }),
+        content=orjson.dumps(
+            {
+                "status": "ok",
+                "size": _directory.size,
+                "revision": _directory.revision,
+            }
+        ),
         media_type="application/json",
     )
 
@@ -190,6 +212,7 @@ async def runtime_status():
 @router.post("/sync", tags=[_TAG_ADMIN_SYSTEM])
 async def force_sync():
     from app.dataplane.account import _directory
+
     if _directory is None:
         raise AppError(
             "Account directory not initialised",
