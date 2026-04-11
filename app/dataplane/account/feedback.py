@@ -136,6 +136,7 @@ __all__ = [
     "apply_rate_limited",
     "apply_auth_failure",
     "apply_forbidden",
+    "apply_server_error",
     "apply_status_change",
     "apply_quota_update",
     "increment_inflight",

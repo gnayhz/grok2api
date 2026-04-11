@@ -330,10 +330,8 @@ class AccountRefreshService:
                     return
                 status_code = getattr(exc, "status", 0)
                 if status_code == 403:
-                    if record is None:
-                        record = next(iter(await self._repo.get_accounts([token])), None)
                     if record is not None:
-                        reason = getattr(exc, "body", "") or "forbidden"
+                        reason = (exc.details.get("body", "") if isinstance(exc, UpstreamError) else "") or "forbidden"
                         fb = AccountFeedback(
                             kind=FeedbackKind.FORBIDDEN,
                             mode_id=mode_id,

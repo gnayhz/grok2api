@@ -194,7 +194,6 @@ class AccountDirectory:
             elif kind == FeedbackKind.FORBIDDEN:
                 fb.apply_forbidden(table, idx)
                 fb.update_last_fail(table, idx, ts)
-                fb.apply_status_change(table, idx, int(StatusId.DISABLED))
 
             elif kind == FeedbackKind.SERVER_ERROR:
                 fb.apply_server_error(table, idx)

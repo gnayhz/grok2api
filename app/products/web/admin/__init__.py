@@ -153,6 +153,7 @@ async def update_config(req: ConfigPatchRequest):
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
     await config.update(patch)
+    await config.load()
     reload_logging(
         default_level=config.get_str("logging.level", "INFO"),
         file_level=config.get_str("logging.file_level", "") or None,
