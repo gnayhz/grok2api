@@ -12,6 +12,12 @@ from app.platform.paths import log_dir as get_log_dir
 logger = _loguru_logger
 
 _configured = False
+_console_sink_id: int | None = None
+_file_sink_id: int | None = None
+_console_level = "INFO"
+_json_console = False
+_file_logging = True
+_log_dir_override: Path | None = None
 
 
 def _get_env_bool(name: str, default: bool) -> bool:
@@ -31,9 +37,12 @@ def setup_logging(
     max_files: int = 7,
 ) -> None:
     """Configure loguru sinks.  Safe to call multiple times (idempotent)."""
-    global _configured
+    global _configured, _console_sink_id, _file_sink_id
+    global _console_level, _json_console, _file_logging, _log_dir_override
 
     logger.remove()
+    _console_sink_id = None
+    _file_sink_id = None
 
     fmt_text = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
@@ -43,9 +52,10 @@ def setup_logging(
     )
     fmt_json = "{time} | {level} | {name}:{function}:{line} | {message}"
 
-    logger.add(
+    resolved_level = level.upper()
+    _console_sink_id = logger.add(
         sys.stdout,
-        level=level.upper(),
+        level=resolved_level,
         format=fmt_json if json_console else fmt_text,
         colorize=not json_console,
         enqueue=False,
@@ -54,22 +64,18 @@ def setup_logging(
     )
 
     if file_logging:
-        _dir = log_dir or get_log_dir()
-        _dir.mkdir(parents=True, exist_ok=True)
-        _file_level = (file_level or level).upper()
-        logger.add(
-            str(_dir / "app_{time:YYYY-MM-DD}.log"),
-            level=_file_level,
-            format=fmt_text,
-            rotation="00:00",  # new file every day at midnight
-            retention=max_files,  # keep the last N daily files
-            enqueue=True,
-            encoding="utf-8",
-            backtrace=False,
-            diagnose=False,
+        _add_file_sink(
+            file_level=(file_level or resolved_level).upper(),
+            max_files=max_files,
+            log_dir=log_dir,
+            fmt_text=fmt_text,
         )
 
     _configured = True
+    _console_level = resolved_level
+    _json_console = json_console
+    _file_logging = file_logging
+    _log_dir_override = log_dir
 
 
 def reload_logging(
@@ -92,4 +98,62 @@ def reload_logging(
     )
 
 
-__all__ = ["logger", "setup_logging", "reload_logging"]
+def reload_file_logging(
+    *,
+    file_level: str | None = None,
+    max_files: int = 7,
+) -> None:
+    """Re-configure only the file sink, preserving the current console output."""
+    global _file_sink_id, _file_logging
+
+    if not _configured:
+        reload_logging(file_level=file_level, max_files=max_files)
+        return
+
+    if _file_sink_id is not None:
+        logger.remove(_file_sink_id)
+        _file_sink_id = None
+
+    _file_logging = _get_env_bool("LOG_FILE_ENABLED", True)
+    if not _file_logging:
+        return
+
+    fmt_text = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>"
+    )
+    _add_file_sink(
+        file_level=(file_level or _console_level).upper(),
+        max_files=max_files,
+        log_dir=_log_dir_override,
+        fmt_text=fmt_text,
+    )
+
+
+def _add_file_sink(
+    *,
+    file_level: str,
+    max_files: int,
+    log_dir: Path | None,
+    fmt_text: str,
+) -> None:
+    global _file_sink_id
+
+    _dir = log_dir or get_log_dir()
+    _dir.mkdir(parents=True, exist_ok=True)
+    _file_sink_id = logger.add(
+        str(_dir / "app_{time:YYYY-MM-DD}.log"),
+        level=file_level,
+        format=fmt_text,
+        rotation="00:00",  # new file every day at midnight
+        retention=max_files,  # keep the last N daily files
+        enqueue=True,
+        encoding="utf-8",
+        backtrace=False,
+        diagnose=False,
+    )
+
+
+__all__ = ["logger", "setup_logging", "reload_logging", "reload_file_logging"]

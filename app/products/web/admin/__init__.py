@@ -16,7 +16,7 @@ from app.control.account.backends.factory import get_repository_backend
 from app.platform.auth.middleware import verify_admin_key
 from app.platform.config.snapshot import config
 from app.platform.errors import AppError, ErrorKind, ValidationError
-from app.platform.logging.logger import logger, reload_logging
+from app.platform.logging.logger import logger, reload_file_logging
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -78,18 +78,33 @@ def _sanitize_proxy_config(payload: dict[str, Any]) -> dict[str, Any]:
 
     sanitized = dict(proxy)
     changed = False
-    for key, strip_spaces in [
-        ("user_agent", False),
-        ("cf_cookies", False),
-        ("cf_clearance", True),
-    ]:
-        if key not in sanitized:
-            continue
-        raw = sanitized[key]
-        val = _sanitize_text(raw, remove_all_spaces=strip_spaces)
-        if val != raw:
-            sanitized[key] = val
+
+    def _sanitize_fields(target: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        normalized = dict(target)
+        local_changed = False
+        for key, strip_spaces in [
+            ("user_agent", False),
+            ("cf_cookies", False),
+            ("cf_clearance", True),
+        ]:
+            if key not in normalized:
+                continue
+            raw = normalized[key]
+            val = _sanitize_text(raw, remove_all_spaces=strip_spaces)
+            if val != raw:
+                normalized[key] = val
+                local_changed = True
+        return normalized, local_changed
+
+    sanitized, changed = _sanitize_fields(sanitized)
+
+    clearance = sanitized.get("clearance")
+    if isinstance(clearance, dict):
+        sanitized_clearance, clearance_changed = _sanitize_fields(clearance)
+        if clearance_changed:
+            sanitized["clearance"] = sanitized_clearance
             changed = True
+
     if not changed:
         return dict(payload)
 
@@ -173,8 +188,7 @@ async def update_config(req: ConfigPatchRequest):
     _ensure_runtime_patch_allowed(patch)
     await config.update(patch)
     await config.load()
-    reload_logging(
-        level=config.get_str("logging.level", "INFO"),
+    reload_file_logging(
         file_level=config.get_str("logging.file_level", "") or None,
         max_files=config.get_int("logging.max_files", 7),
     )
