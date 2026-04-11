@@ -647,6 +647,7 @@ let _dirty = {};      // { "section.key": newValue }
 let _activeTab = SCHEMA_DEF[0].id;
 
 function tr(key, params, fallback) {
+  if (!key) return fallback ?? '';
   const value = t(key, params);
   return value === key ? (fallback ?? key) : value;
 }
