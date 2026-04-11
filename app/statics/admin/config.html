@@ -645,6 +645,7 @@ let SCHEMA = [];
 let _cfg = {};        // loaded config (nested)
 let _dirty = {};      // { "section.key": newValue }
 let _activeTab = SCHEMA_DEF[0].id;
+let _configLoaded = false;
 
 function tr(key, params, fallback) {
   if (!key) return fallback ?? '';
@@ -689,8 +690,9 @@ function buildSchema() {
 function applyConfigI18n() {
   document.title = tr('config.pageTitle', null, 'Grok2API - 配置管理');
   SCHEMA = buildSchema();
+  if (!_configLoaded) return;
   renderAll();
-  _refreshDirtyState();
+  _refreshDirtyState({ autoNormalizeSelects: false });
 }
 
 // ── API ────────────────────────────────────────────────────────────────────
@@ -950,7 +952,7 @@ function _refreshRow(section, key) {
   if (row) row.classList.toggle('modified', _fullPath(section, key) in _dirty);
 }
 
-function _refreshDirtyState() {
+function _refreshDirtyState({ autoNormalizeSelects = true } = {}) {
   const n = Object.keys(_dirty).length;
   document.getElementById('btn-save').disabled  = n === 0;
   document.getElementById('btn-reset').disabled = n === 0;
@@ -985,7 +987,7 @@ function _refreshDirtyState() {
       const isDisabled = _evalDisabledWhen(o.dataset.disabledWhen);
       o.disabled = isDisabled;
       o.title = isDisabled ? (o.dataset.disabledTip || '') : '';
-      if (isDisabled && o.selected) anyChanged = true;
+      if (autoNormalizeSelects && isDisabled && o.selected) anyChanged = true;
     });
     // If the currently selected option became disabled, switch to first enabled
     if (anyChanged) {
@@ -1010,9 +1012,11 @@ function _refreshDirtyState() {
 async function load() {
   try {
     _cfg = await _api('GET', '/config');
+    _dirty = {};
+    _configLoaded = true;
     if (!SCHEMA.length) SCHEMA = buildSchema();
     renderAll();
-    _refreshDirtyState();
+    _refreshDirtyState({ autoNormalizeSelects: false });
   } catch (e) {
     showToast(tr('config.loadFailed', { message: e.message }, `配置加载失败: ${e.message}`), 'error');
   }
@@ -1035,7 +1039,7 @@ async function doSave() {
     _dirty = {};
     // Re-render to clear modified state
     renderAll();
-    _refreshDirtyState();
+    _refreshDirtyState({ autoNormalizeSelects: false });
     showToast(tr('config.saveSuccess', null, '更改已保存'), 'success');
   } catch (e) {
     showToast(tr('config.saveFailed', { message: e.message }, `保存更改失败: ${e.message}`), 'error');
@@ -1047,7 +1051,7 @@ function doReset() {
   if (!Object.keys(_dirty).length) return;
   _dirty = {};
   renderAll();
-  _refreshDirtyState();
+  _refreshDirtyState({ autoNormalizeSelects: false });
   showToast(tr('config.resetSuccess', null, '未保存的更改已撤销'), 'info');
 }
 
@@ -1055,8 +1059,6 @@ function doReset() {
 (async () => {
   try {
     SCHEMA = buildSchema();
-    renderAll();
-    _refreshDirtyState();
 
     waitI18n().then(() => {
       applyConfigI18n();

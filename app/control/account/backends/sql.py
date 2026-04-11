@@ -5,7 +5,9 @@ only the DDL fragments and upsert syntax differ.
 """
 
 import json
+import ssl
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -60,6 +62,276 @@ meta_table = sa.Table(
     sa.Column("key",   sa.String(128), primary_key=True),
     sa.Column("value", sa.Text, nullable=False),
 )
+
+_SQL_SSL_MODE_PARAM_KEYS = ("sslmode", "ssl-mode", "ssl")
+_PG_SSL_CERT_PARAM_KEYS = ("sslrootcert", "sslcert", "sslkey")
+_PG_SSL_UNSUPPORTED_PARAM_KEYS = (
+    "sslcrl",
+    "sslpassword",
+    "sslnegotiation",
+    "ssl_min_protocol_version",
+    "ssl_max_protocol_version",
+)
+_PG_SSL_QUERY_PARAM_KEYS = (
+    *_SQL_SSL_MODE_PARAM_KEYS,
+    *_PG_SSL_CERT_PARAM_KEYS,
+    *_PG_SSL_UNSUPPORTED_PARAM_KEYS,
+)
+_MYSQL_SSL_CERT_PARAM_KEYS = ("ssl-ca", "ssl-capath", "ssl-cert", "ssl-key")
+_MYSQL_SSL_OPTIONAL_PARAM_KEYS = ("ssl-check-hostname", "ssl-cipher")
+_MYSQL_SSL_QUERY_PARAM_KEYS = (
+    *_SQL_SSL_MODE_PARAM_KEYS,
+    *_MYSQL_SSL_CERT_PARAM_KEYS,
+    *_MYSQL_SSL_OPTIONAL_PARAM_KEYS,
+)
+_SSL_BOOL_TRUE = {"1", "true", "yes", "on"}
+_SSL_BOOL_FALSE = {"0", "false", "no", "off"}
+
+_PG_SSL_MODE_ALIASES: dict[str, str] = {
+    "disable": "disable",
+    "disabled": "disable",
+    "false": "disable",
+    "0": "disable",
+    "no": "disable",
+    "off": "disable",
+    "prefer": "prefer",
+    "preferred": "prefer",
+    "allow": "allow",
+    "require": "require",
+    "required": "require",
+    "true": "require",
+    "1": "require",
+    "yes": "require",
+    "on": "require",
+    "verify-ca": "verify-ca",
+    "verify_ca": "verify-ca",
+    "verify-full": "verify-full",
+    "verify_full": "verify-full",
+    "verify-identity": "verify-full",
+    "verify_identity": "verify-full",
+}
+
+_MYSQL_SSL_MODE_ALIASES: dict[str, str] = {
+    "disable": "disabled",
+    "disabled": "disabled",
+    "false": "disabled",
+    "0": "disabled",
+    "no": "disabled",
+    "off": "disabled",
+    "prefer": "preferred",
+    "preferred": "preferred",
+    "allow": "preferred",
+    "require": "required",
+    "required": "required",
+    "true": "required",
+    "1": "required",
+    "yes": "required",
+    "on": "required",
+    "verify-ca": "verify_ca",
+    "verify_ca": "verify_ca",
+    "verify-full": "verify_identity",
+    "verify_full": "verify_identity",
+    "verify-identity": "verify_identity",
+    "verify_identity": "verify_identity",
+}
+
+
+def _normalize_sql_url(dialect: str, url: str) -> str:
+    """Rewrite SQL URLs to the async SQLAlchemy dialect form."""
+    if not url or "://" not in url:
+        return url
+    if dialect == "mysql":
+        if url.startswith("mysql://"):
+            return f"mysql+aiomysql://{url[len('mysql://') :]}"
+        if url.startswith("mariadb://"):
+            return f"mysql+aiomysql://{url[len('mariadb://') :]}"
+        if url.startswith("mariadb+aiomysql://"):
+            return f"mysql+aiomysql://{url[len('mariadb+aiomysql://') :]}"
+        return url
+    if url.startswith("postgres://"):
+        return f"postgresql+asyncpg://{url[len('postgres://') :]}"
+    if url.startswith("postgresql://"):
+        return f"postgresql+asyncpg://{url[len('postgresql://') :]}"
+    if url.startswith("pgsql://"):
+        return f"postgresql+asyncpg://{url[len('pgsql://') :]}"
+    return url
+
+
+def _normalize_ssl_mode(dialect: str, raw_mode: str) -> str:
+    if not raw_mode:
+        raise ValueError("SSL mode cannot be empty")
+
+    mode = raw_mode.strip().lower().replace(" ", "")
+    if dialect == "mysql":
+        canonical = _MYSQL_SSL_MODE_ALIASES.get(mode)
+    else:
+        canonical = _PG_SSL_MODE_ALIASES.get(mode)
+    if not canonical:
+        raise ValueError(f"Unsupported SSL mode {raw_mode!r} for SQL dialect {dialect!r}")
+    return canonical
+
+
+def _has_ssl_options(options: dict[str, str], keys: tuple[str, ...]) -> bool:
+    return any(options.get(key) for key in keys)
+
+
+def _parse_ssl_bool(name: str, raw_value: str | None) -> bool | None:
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip().lower()
+    if not value:
+        return None
+    if value in _SSL_BOOL_TRUE:
+        return True
+    if value in _SSL_BOOL_FALSE:
+        return False
+    raise ValueError(f"Unsupported boolean value {raw_value!r} for SQL SSL option {name!r}")
+
+
+def _extract_sql_ssl_options(
+    dialect: str,
+    url: str,
+) -> tuple[str, dict[str, str]]:
+    parsed = urlparse(url)
+    ssl_query_keys = _PG_SSL_QUERY_PARAM_KEYS if dialect == "postgresql" else _MYSQL_SSL_QUERY_PARAM_KEYS
+    ssl_options: dict[str, str] = {}
+    filtered_query_items: list[tuple[str, str]] = []
+    ssl_param_keys = {key.lower() for key in ssl_query_keys}
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        key_lower = key.lower()
+        if key_lower in ssl_param_keys:
+            normalized_value = value.strip()
+            if key_lower not in ssl_options:
+                ssl_options[key_lower] = normalized_value
+            continue
+        filtered_query_items.append((key, value))
+
+    cleaned_url = urlunparse(
+        parsed._replace(query=urlencode(filtered_query_items, doseq=True))
+    )
+    return cleaned_url, ssl_options
+
+
+def _resolve_ssl_mode(dialect: str, ssl_options: dict[str, str]) -> str | None:
+    raw_ssl_mode = next(
+        (ssl_options.get(key) for key in _SQL_SSL_MODE_PARAM_KEYS if ssl_options.get(key)),
+        None,
+    )
+    if raw_ssl_mode:
+        return _normalize_ssl_mode(dialect, raw_ssl_mode)
+
+    if ssl_options:
+        if dialect == "postgresql":
+            raise ValueError("PostgreSQL SSL URL parameters require sslmode to be set explicitly")
+        raise ValueError("MySQL SSL URL parameters require ssl-mode to be set explicitly")
+    return None
+
+
+def _validate_pg_ssl_options(mode: str | None, ssl_options: dict[str, str]) -> None:
+    unsupported = [
+        key for key in _PG_SSL_UNSUPPORTED_PARAM_KEYS
+        if ssl_options.get(key)
+    ]
+    if unsupported:
+        joined = ", ".join(sorted(unsupported))
+        raise ValueError(f"Unsupported PostgreSQL SSL URL parameter(s): {joined}")
+    if mode == "disable" and _has_ssl_options(ssl_options, _PG_SSL_CERT_PARAM_KEYS):
+        raise ValueError("PostgreSQL SSL certificate parameters cannot be used with sslmode=disable")
+    if mode in {"allow", "prefer"} and _has_ssl_options(ssl_options, _PG_SSL_CERT_PARAM_KEYS):
+        raise ValueError("PostgreSQL sslmode=allow/prefer is not supported with certificate URL parameters")
+
+
+def _build_pg_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLContext:
+    sslrootcert = ssl_options.get("sslrootcert") or None
+    sslcert = ssl_options.get("sslcert") or None
+    sslkey = ssl_options.get("sslkey") or None
+
+    ctx = ssl.create_default_context(cafile=sslrootcert)
+    if mode == "require":
+        ctx.check_hostname = False
+        if not sslrootcert:
+            ctx.verify_mode = ssl.CERT_NONE
+    elif mode == "verify-ca":
+        ctx.check_hostname = False
+    else:
+        ctx.check_hostname = True
+
+    if sslcert:
+        ctx.load_cert_chain(certfile=sslcert, keyfile=sslkey or None)
+    elif sslkey:
+        raise ValueError("PostgreSQL sslkey requires sslcert")
+    return ctx
+
+
+def _build_mysql_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLContext | None:
+    if mode == "disabled":
+        if _has_ssl_options(ssl_options, _MYSQL_SSL_CERT_PARAM_KEYS):
+            raise ValueError("MySQL SSL certificate parameters cannot be used with ssl-mode=disabled")
+        return None
+    if mode == "preferred":
+        raise ValueError("MySQL ssl-mode=allow/prefer is not supported by aiomysql")
+
+    ssl_ca = ssl_options.get("ssl-ca") or None
+    ssl_capath = ssl_options.get("ssl-capath") or None
+    ssl_cert = ssl_options.get("ssl-cert") or None
+    ssl_key = ssl_options.get("ssl-key") or None
+    ssl_check_hostname = _parse_ssl_bool("ssl-check-hostname", ssl_options.get("ssl-check-hostname"))
+    ssl_cipher = ssl_options.get("ssl-cipher") or None
+
+    ctx = ssl.create_default_context(cafile=ssl_ca, capath=ssl_capath)
+    if mode in ("preferred", "required"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif mode == "verify_ca":
+        ctx.check_hostname = False
+    else:
+        ctx.check_hostname = True
+
+    if ssl_check_hostname is not None:
+        if mode == "required" and ssl_check_hostname:
+            raise ValueError("MySQL ssl-check-hostname=true requires ssl-mode=verify_identity")
+        ctx.check_hostname = ssl_check_hostname
+    if ssl_cipher:
+        ctx.set_ciphers(ssl_cipher)
+    if ssl_cert:
+        ctx.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key or None)
+    elif ssl_key:
+        raise ValueError("MySQL ssl-key requires ssl-cert")
+    return ctx
+
+
+def _build_sql_connect_args(
+    dialect: str,
+    ssl_options: dict[str, str],
+) -> dict[str, Any] | None:
+    mode = _resolve_ssl_mode(dialect, ssl_options)
+    if not mode:
+        return None
+
+    if dialect == "mysql":
+        ctx = _build_mysql_ssl_context(mode, ssl_options)
+        return {"ssl": ctx} if ctx is not None else None
+
+    _validate_pg_ssl_options(mode, ssl_options)
+    if _has_ssl_options(ssl_options, _PG_SSL_CERT_PARAM_KEYS):
+        return {"ssl": _build_pg_ssl_context(mode, ssl_options)}
+    if mode == "disable":
+        return None
+    return {"ssl": mode}
+
+
+def _prepare_sql_url_and_connect_args(
+    dialect: str,
+    url: str,
+) -> tuple[str, dict[str, Any] | None]:
+    """Strip SSL query params from the URL and translate them to connect_args."""
+    normalized_url = _normalize_sql_url(dialect, url)
+    if "://" not in normalized_url:
+        return normalized_url, None
+
+    cleaned_url, ssl_options = _extract_sql_ssl_options(dialect, normalized_url)
+    return cleaned_url, _build_sql_connect_args(dialect, ssl_options)
 
 
 def _row_to_record(row: Any) -> AccountRecord:
@@ -247,7 +519,6 @@ class SqlAccountRepository:
                 if row is None:
                     continue
                 record = _row_to_record(row)
-                qs = record.quota_set()
 
                 updates: dict[str, Any] = {"updated_at": ts, "revision": rev}
                 if patch.pool is not None:
@@ -414,12 +685,26 @@ class SqlAccountRepository:
 
 def create_mysql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for MySQL."""
-    return create_async_engine(url, pool_size=10, max_overflow=20, pool_pre_ping=True)
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args("mysql", url)
+    return create_async_engine(
+        normalized_url,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        **({"connect_args": connect_args} if connect_args else {}),
+    )
 
 
 def create_pgsql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for PostgreSQL."""
-    return create_async_engine(url, pool_size=10, max_overflow=20, pool_pre_ping=True)
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args("postgresql", url)
+    return create_async_engine(
+        normalized_url,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        **({"connect_args": connect_args} if connect_args else {}),
+    )
 
 
 __all__ = ["SqlAccountRepository", "create_mysql_engine", "create_pgsql_engine"]
