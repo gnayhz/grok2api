@@ -180,6 +180,10 @@ docker compose up -d
 | `ACCOUNT_REDIS_URL` | `redis` 模式 Redis DSN | `""` |
 | `ACCOUNT_MYSQL_URL` | `mysql` 模式 SQLAlchemy DSN | `""` |
 | `ACCOUNT_POSTGRESQL_URL` | `postgresql` 模式 SQLAlchemy DSN | `""` |
+| `ACCOUNT_SQL_POOL_SIZE` | SQL 连接池核心连接数 | `5` |
+| `ACCOUNT_SQL_MAX_OVERFLOW` | SQL 连接池最大溢出连接数 | `10` |
+| `ACCOUNT_SQL_POOL_TIMEOUT` | 等待连接池空闲连接的超时时间（秒） | `30` |
+| `ACCOUNT_SQL_POOL_RECYCLE` | 连接最大复用时间（秒），超时后自动重连 | `1800` |
 
 ### 系统配置项
 
