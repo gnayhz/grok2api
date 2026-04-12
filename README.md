@@ -190,6 +190,7 @@ docker compose up -d
 | 分组 | 关键项 |
 | :-- | :-- |
 | `app` | `app_key`, `app_url`, `api_key`, `webui_enabled`, `webui_key` |
+| `logging` | `file_level`, `max_files` |
 | `features` | `temporary`, `memory`, `stream`, `thinking`, `dynamic_statsig`, `enable_nsfw`, `custom_instruction`, `image_format`, `video_format` |
 | `proxy.egress` | `mode`, `proxy_url`, `proxy_pool`, `resource_proxy_url`, `resource_proxy_pool`, `skip_ssl_verify` |
 | `proxy.clearance` | `mode`, `cf_cookies`, `user_agent`, `browser`, `flaresolverr_url`, `timeout_sec`, `refresh_interval` |

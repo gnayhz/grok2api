@@ -341,6 +341,34 @@ const SCHEMA_DEF = [
           { key: 'webui_key', label: 'WebUI 访问密码', labelKey: 'config.schema.fields.webuiKey.label', type: 'password', desc: 'WebUI 的访问鉴权密码。配置后访问时必须提供。', descKey: 'config.schema.fields.webuiKey.desc', rand: true, showIf: 'app.webui_enabled' },
         ]
       },
+      {
+        title: '日志配置', titleKey: 'config.schema.groups.logging',
+        section: 'logging',
+        fields: [
+          {
+            key: 'file_level',
+            label: '文件日志等级',
+            labelKey: 'config.schema.fields.fileLogLevel.label',
+            type: 'select',
+            options: [
+              { value: 'DEBUG', label: 'DEBUG' },
+              { value: 'INFO', label: 'INFO' },
+              { value: 'WARNING', label: 'WARNING' },
+              { value: 'ERROR', label: 'ERROR' },
+            ],
+            desc: '日志文件写入的最低等级，可独立于控制台配置。默认 INFO。',
+            descKey: 'config.schema.fields.fileLogLevel.desc',
+          },
+          {
+            key: 'max_files',
+            label: '日志保留天数',
+            labelKey: 'config.schema.fields.logMaxFiles.label',
+            type: 'number',
+            desc: '按天轮转时最多保留的日志文件数量。默认 7。',
+            descKey: 'config.schema.fields.logMaxFiles.desc',
+          },
+        ]
+      },
     ]
   },
   {
@@ -606,6 +634,7 @@ let _activeTab = SCHEMA_DEF[0].id;
 let _configLoaded = false;
 
 function tr(key, params, fallback) {
+  if (!key) return fallback ?? '';
   const value = t(key, params);
   return value === key ? (fallback ?? key) : value;
 }
