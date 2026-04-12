@@ -33,6 +33,8 @@ class ProxyClearanceScheduler:
         logger.info("proxy clearance scheduler stopped")
 
     async def _loop(self) -> None:
+        # Warm up immediately on start so the first request doesn't block.
+        await self._warm_up()
         while self._running:
             try:
                 interval = self._get_interval()
@@ -50,10 +52,19 @@ class ProxyClearanceScheduler:
                 )
                 await asyncio.sleep(60)
 
-    async def _refresh(self) -> None:
-        """Reload proxy configuration (which triggers bundle refresh)."""
+    async def _warm_up(self) -> None:
+        """Pre-fetch clearance bundles without invalidating existing ones."""
         try:
-            await self._directory.load()
+            await self._directory.warm_up()
+            logger.debug("proxy clearance warm-up completed")
+        except Exception as exc:
+            logger.warning("proxy clearance warm-up failed: error={}", exc)
+
+    async def _refresh(self) -> None:
+        """Invalidate cached clearance bundles and pre-fetch fresh ones."""
+        try:
+            await self._directory.invalidate_clearance()
+            await self._directory.warm_up()
             logger.debug("proxy clearance refresh completed")
         except Exception as exc:
             logger.warning("proxy clearance refresh failed: error={}", exc)
