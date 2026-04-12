@@ -125,4 +125,6 @@ class SqlConfigBackend(ConfigBackend):
 
     async def close(self) -> None:
         if self._dispose_engine:
+            from app.control.account.backends.sql import _evict_cached_engine
+            _evict_cached_engine(self._engine)
             await self._engine.dispose()
