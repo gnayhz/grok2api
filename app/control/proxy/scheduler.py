@@ -61,10 +61,13 @@ class ProxyClearanceScheduler:
             logger.warning("proxy clearance warm-up failed: error={}", exc)
 
     async def _refresh(self) -> None:
-        """Invalidate cached clearance bundles and pre-fetch fresh ones."""
+        """Build fresh clearance bundles and swap atomically (build-then-swap).
+
+        Old bundles are kept if FlareSolverr is unavailable, so a transient
+        refresh failure never leaves requests without clearance.
+        """
         try:
-            await self._directory.invalidate_clearance()
-            await self._directory.warm_up()
+            await self._directory.refresh_clearance_safe()
             logger.debug("proxy clearance refresh completed")
         except Exception as exc:
             logger.warning("proxy clearance refresh failed: error={}", exc)
