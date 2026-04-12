@@ -39,6 +39,9 @@ class ProxyDirectory:
         self._flare           = FlareSolverrClearanceProvider()
         self._egress_mode:    EgressMode    = EgressMode.DIRECT
         self._clearance_mode: ClearanceMode = ClearanceMode.NONE
+        # Pool cursor for PROXY_POOL mode: sticky routing with failure-driven rotate.
+        # Incremented on node failure; all callers see the same cursor under _lock.
+        self._pool_cursor:    int           = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -127,6 +130,26 @@ class ProxyDirectory:
                         update={"state": ClearanceBundleState.INVALID}
                     )
 
+        # In PROXY_POOL mode, rotate to the next node on any failure so the
+        # next acquire() prefers a different egress rather than hammering the
+        # same broken node.
+        if (
+            self._egress_mode == EgressMode.PROXY_POOL
+            and lease.proxy_url
+            and result.kind in (
+                ProxyFeedbackKind.CHALLENGE,
+                ProxyFeedbackKind.UNAUTHORIZED,
+                ProxyFeedbackKind.FORBIDDEN,
+                ProxyFeedbackKind.TRANSPORT_ERROR,
+            )
+        ):
+            async with self._lock:
+                self._pool_cursor += 1
+                logger.debug(
+                    "proxy pool cursor advanced: proxy={} kind={} cursor={}",
+                    lease.proxy_url, result.kind, self._pool_cursor,
+                )
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -142,8 +165,9 @@ class ProxyDirectory:
                 return None
             if self._egress_mode == EgressMode.SINGLE_PROXY:
                 return nodes[0].proxy_url
-            # PROXY_POOL: pick least-inflight node.
-            return min(nodes, key=lambda n: n.inflight).proxy_url
+            # PROXY_POOL: sticky routing — use current cursor, rotate on failure.
+            idx = self._pool_cursor % len(nodes)
+            return nodes[idx].proxy_url
 
     async def _get_or_build_bundle(
         self,
@@ -208,8 +232,8 @@ class ProxyDirectory:
     async def warm_up(self) -> None:
         """Pre-fetch clearance bundles for all configured affinity keys.
 
-        Called once at startup and after each scheduled invalidation so that
-        the first real request does not have to wait for FlareSolverr.
+        Called once at startup so the first real request does not have to wait
+        for FlareSolverr.  Does NOT invalidate existing bundles first.
         """
         if self._clearance_mode == ClearanceMode.NONE:
             return
@@ -225,6 +249,47 @@ class ProxyDirectory:
                 affinity_key = affinity,
                 proxy_url    = proxy_url,
             )
+
+    async def refresh_clearance_safe(self) -> None:
+        """Scheduled clearance refresh: build new bundles then swap atomically.
+
+        Unlike ``invalidate_clearance() + warm_up()``, this never discards a
+        working bundle before a replacement is ready.  If FlareSolverr is
+        temporarily unavailable the old bundle remains valid and continues to
+        serve requests.
+        """
+        if self._clearance_mode == ClearanceMode.NONE:
+            return
+        async with self._lock:
+            nodes    = list(self._nodes)
+            existing = set(self._bundles.keys())
+
+        affinity_items = (
+            [(n.proxy_url or "direct", n.proxy_url or "") for n in nodes]
+            if nodes
+            else [("direct", "")]
+        )
+        # Also refresh bundles for keys that no longer have a matching node
+        # (e.g. pool was reconfigured) so stale entries get cleaned up.
+        all_keys = {a for a, _ in affinity_items} | existing
+
+        for affinity in all_keys:
+            proxy_url = "" if affinity == "direct" else affinity
+            if self._clearance_mode == ClearanceMode.MANUAL:
+                new_bundle = self._manual.build_bundle(affinity_key=affinity)
+            else:
+                new_bundle = await self._flare.refresh_bundle(
+                    affinity_key = affinity,
+                    proxy_url    = proxy_url,
+                )
+            if new_bundle:
+                async with self._lock:
+                    self._bundles[affinity] = new_bundle
+                logger.debug("clearance bundle refreshed: affinity={}", affinity)
+            else:
+                logger.warning(
+                    "clearance refresh failed, keeping old bundle: affinity={}", affinity
+                )
 
     # ------------------------------------------------------------------
     # Properties
