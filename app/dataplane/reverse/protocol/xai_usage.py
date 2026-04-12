@@ -196,6 +196,7 @@ def is_invalid_credentials_body(body: str) -> bool:
     text = str(body or "").lower()
     return (
         "invalid-credentials" in text
+        or "bad-credentials" in text
         or "failed to look up session id" in text
         or "blocked-user" in text
         or "email-domain-rejected" in text
@@ -210,7 +211,7 @@ def is_invalid_credentials_error(exc: BaseException) -> bool:
     """Return whether *exc* indicates the account is invalid or blocked."""
     if not isinstance(exc, UpstreamError):
         return False
-    if exc.status not in (400, 403):
+    if exc.status not in (400, 401, 403):
         return False
     return is_invalid_credentials_body(str(exc.details.get("body", "") or ""))
 
