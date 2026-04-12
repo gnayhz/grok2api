@@ -205,10 +205,14 @@ async def lifespan(app: FastAPI):
             _SYNC_IDLE_INTERVAL,
         )
 
-    # 5. Initialise proxy directory.
+    # 5. Initialise proxy directory and start clearance refresh scheduler.
     from app.control.proxy import get_proxy_directory
+    from app.control.proxy.scheduler import ProxyClearanceScheduler
 
-    await get_proxy_directory()
+    proxy_dir = await get_proxy_directory()
+    proxy_scheduler = ProxyClearanceScheduler(proxy_dir)
+    if is_leader:
+        proxy_scheduler.start()
 
     logger.info("application startup completed")
     yield
@@ -225,6 +229,7 @@ async def lifespan(app: FastAPI):
 
     if is_leader:
         scheduler.stop()
+        proxy_scheduler.stop()
         _release_scheduler_lock()
 
     set_refresh_service(None)

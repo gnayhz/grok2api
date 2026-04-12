@@ -32,6 +32,9 @@ class ProxyDirectory:
         self._resource_nodes: list[EgressNode]          = []  # for media downloads
         self._bundles:        dict[str, ClearanceBundle] = {}
         self._lock            = asyncio.Lock()
+        # Single-flight guard: at most one FlareSolverr call per affinity key.
+        # Other coroutines wait on the Event until the active refresh completes.
+        self._refresh_events: dict[str, asyncio.Event]  = {}
         self._manual          = ManualClearanceProvider()
         self._flare           = FlareSolverrClearanceProvider()
         self._egress_mode:    EgressMode    = EgressMode.DIRECT
@@ -151,24 +154,77 @@ class ProxyDirectory:
         if self._clearance_mode == ClearanceMode.NONE:
             return None
 
-        async with self._lock:
-            existing = self._bundles.get(affinity_key)
-            if existing and existing.state.value == 0:   # VALID
-                return existing
+        # Single-flight: only one coroutine fetches clearance per affinity key.
+        # Concurrent callers wait on the Event and retry once it fires.
+        while True:
+            async with self._lock:
+                bundle = self._bundles.get(affinity_key)
+                if bundle and bundle.state.value == 0:   # VALID
+                    return bundle
+                event = self._refresh_events.get(affinity_key)
+                if event is None:
+                    # This coroutine wins the right to refresh.
+                    event = asyncio.Event()
+                    self._refresh_events[affinity_key] = event
+                    break
+            # Another coroutine is already refreshing — wait for it, then retry.
+            await event.wait()
 
-        if self._clearance_mode == ClearanceMode.MANUAL:
-            bundle = self._manual.build_bundle(affinity_key=affinity_key)
-        else:
-            bundle = await self._flare.refresh_bundle(
-                affinity_key = affinity_key,
+        try:
+            if self._clearance_mode == ClearanceMode.MANUAL:
+                bundle = self._manual.build_bundle(affinity_key=affinity_key)
+            else:
+                bundle = await self._flare.refresh_bundle(
+                    affinity_key = affinity_key,
+                    proxy_url    = proxy_url,
+                )
+            if bundle:
+                async with self._lock:
+                    self._bundles[affinity_key] = bundle
+            return bundle
+        finally:
+            async with self._lock:
+                self._refresh_events.pop(affinity_key, None)
+            event.set()  # Wake all waiters so they retry with the new bundle.
+
+    # ------------------------------------------------------------------
+    # Clearance lifecycle helpers (used by ProxyClearanceScheduler)
+    # ------------------------------------------------------------------
+
+    async def invalidate_clearance(self) -> None:
+        """Mark all cached clearance bundles as invalid.
+
+        The next ``acquire()`` call for each affinity key will trigger a fresh
+        FlareSolverr fetch (serialised by the single-flight guard).
+        """
+        from .models import ClearanceBundleState
+        async with self._lock:
+            self._bundles = {
+                k: b.model_copy(update={"state": ClearanceBundleState.INVALID})
+                for k, b in self._bundles.items()
+            }
+        logger.debug("clearance bundles invalidated: count={}", len(self._bundles))
+
+    async def warm_up(self) -> None:
+        """Pre-fetch clearance bundles for all configured affinity keys.
+
+        Called once at startup and after each scheduled invalidation so that
+        the first real request does not have to wait for FlareSolverr.
+        """
+        if self._clearance_mode == ClearanceMode.NONE:
+            return
+        async with self._lock:
+            nodes = list(self._nodes)
+        affinity_keys = (
+            [(n.proxy_url or "direct", n.proxy_url or "") for n in nodes]
+            if nodes
+            else [("direct", "")]
+        )
+        for affinity, proxy_url in affinity_keys:
+            await self._get_or_build_bundle(
+                affinity_key = affinity,
                 proxy_url    = proxy_url,
             )
-
-        if bundle:
-            async with self._lock:
-                self._bundles[affinity_key] = bundle
-
-        return bundle
 
     # ------------------------------------------------------------------
     # Properties
