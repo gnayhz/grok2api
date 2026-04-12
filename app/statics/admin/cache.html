@@ -468,6 +468,7 @@ function invalidateLocalView() {
 
 function invalidateAssetView() {
   _assetViewVersion += 1;
+}
 
 function getLocalView() {
   if (_localViewCache && _localViewCacheVersion === _localViewVersion) return _localViewCache;
