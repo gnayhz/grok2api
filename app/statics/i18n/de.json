@@ -415,7 +415,6 @@
         "assetDeleteTimeout": { "label": "Asset-Lösch-Timeout (s)" },
         "streamTimeout": { "label": "Streaming-Leerlauf-Timeout (s)" },
         "interRoundWait": { "label": "Wartezeit zwischen Runden (s)" },
-        "logLevel": { "label": "Konsolen-Protokollebene", "desc": "Mindeststufe für die Konsolenausgabe. Standard: INFO." },
         "fileLogLevel": { "label": "Datei-Protokollebene", "desc": "Mindeststufe für Protokolldateien, unabhängig von der Konsole konfigurierbar. Standard: INFO." },
         "logMaxFiles": { "label": "Protokoll-Aufbewahrung (Tage)", "desc": "Maximale Anzahl täglicher Protokolldateien bei der Rotation. Standard: 7." }
       }

@@ -415,7 +415,6 @@
         "assetDeleteTimeout": { "label": "Tiempo de espera de eliminación de Asset (s)" },
         "streamTimeout": { "label": "Tiempo de espera de inactividad en streaming (s)" },
         "interRoundWait": { "label": "Espera entre rondas (s)" },
-        "logLevel": { "label": "Nivel de registro en consola", "desc": "Nivel mínimo de registro en la consola. Por defecto: INFO." },
         "fileLogLevel": { "label": "Nivel de registro en archivo", "desc": "Nivel mínimo escrito en archivos de registro, configurable independientemente de la consola. Por defecto: INFO." },
         "logMaxFiles": { "label": "Retención de registros (días)", "desc": "Número máximo de archivos de registro diarios a conservar durante la rotación. Por defecto: 7." }
       }

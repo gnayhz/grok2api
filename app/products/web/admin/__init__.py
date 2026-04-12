@@ -187,6 +187,9 @@ async def update_config(req: ConfigPatchRequest):
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
     await config.update(patch)
+    # config.update() only writes to the backend and invalidates the in-memory
+    # snapshot (_version = None); it does not refresh the data.  load() is
+    # required here so that get_str/get_int calls below return the new values.
     await config.load()
     reload_file_logging(
         file_level=config.get_str("logging.file_level", "") or None,

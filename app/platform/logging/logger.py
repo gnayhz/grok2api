@@ -19,6 +19,13 @@ _json_console = False
 _file_logging = True
 _log_dir_override: Path | None = None
 
+_FMT_TEXT = (
+    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+    "<level>{level: <8}</level> | "
+    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+    "<level>{message}</level>"
+)
+
 
 def _get_env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -44,19 +51,13 @@ def setup_logging(
     _console_sink_id = None
     _file_sink_id = None
 
-    fmt_text = (
-        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-        "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-        "<level>{message}</level>"
-    )
     fmt_json = "{time} | {level} | {name}:{function}:{line} | {message}"
 
     resolved_level = level.upper()
     _console_sink_id = logger.add(
         sys.stdout,
         level=resolved_level,
-        format=fmt_json if json_console else fmt_text,
+        format=fmt_json if json_console else _FMT_TEXT,
         colorize=not json_console,
         enqueue=False,
         backtrace=False,
@@ -68,7 +69,6 @@ def setup_logging(
             file_level=(file_level or resolved_level).upper(),
             max_files=max_files,
             log_dir=log_dir,
-            fmt_text=fmt_text,
         )
 
     _configured = True
@@ -118,17 +118,10 @@ def reload_file_logging(
     if not _file_logging:
         return
 
-    fmt_text = (
-        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-        "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-        "<level>{message}</level>"
-    )
     _add_file_sink(
         file_level=(file_level or _console_level).upper(),
         max_files=max_files,
         log_dir=_log_dir_override,
-        fmt_text=fmt_text,
     )
 
 
@@ -137,7 +130,6 @@ def _add_file_sink(
     file_level: str,
     max_files: int,
     log_dir: Path | None,
-    fmt_text: str,
 ) -> None:
     global _file_sink_id
 
@@ -146,7 +138,7 @@ def _add_file_sink(
     _file_sink_id = logger.add(
         str(_dir / "app_{time:YYYY-MM-DD}.log"),
         level=file_level,
-        format=fmt_text,
+        format=_FMT_TEXT,
         rotation="00:00",  # new file every day at midnight
         retention=max_files,  # keep the last N daily files
         enqueue=True,

@@ -134,10 +134,22 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
     except Exception as exc:
         if is_invalid_credentials_error(exc):
             raise
+        logger.debug(
+            "rate-limits fetch failed: token={}... mode={} error={}",
+            token[:10],
+            mode_name,
+            exc,
+        )
         return None
 
     data = parse_rate_limits(body)
     if data is None:
+        logger.debug(
+            "rate-limits response missing quota fields: token={}... mode={} body={}",
+            token[:10],
+            mode_name,
+            body,
+        )
         return None
 
     return _to_quota_window(data, now_ms())

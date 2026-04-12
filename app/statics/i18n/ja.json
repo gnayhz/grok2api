@@ -415,7 +415,6 @@
         "assetDeleteTimeout": { "label": "Asset 削除タイムアウト（秒）" },
         "streamTimeout": { "label": "ストリーミング待機タイムアウト（秒）" },
         "interRoundWait": { "label": "ラウンド間待機時間（秒）" },
-        "logLevel": { "label": "コンソールログレベル", "desc": "コンソールに出力する最低ログレベル。デフォルト: INFO。" },
         "fileLogLevel": { "label": "ファイルログレベル", "desc": "ログファイルに書き込む最低レベル。コンソールとは独立して設定できます。デフォルト: INFO。" },
         "logMaxFiles": { "label": "ログ保持日数", "desc": "日次ローテーション時に保持するログファイルの最大数。デフォルト: 7。" }
       }

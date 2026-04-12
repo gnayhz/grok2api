@@ -415,7 +415,6 @@
         "assetDeleteTimeout": { "label": "Délai de suppression Asset (s)" },
         "streamTimeout": { "label": "Délai d’inactivité du streaming (s)" },
         "interRoundWait": { "label": "Attente inter-cycle (s)" },
-        "logLevel": { "label": "Niveau de journal console", "desc": "Niveau minimum des journaux affichés dans la console. Par défaut : INFO." },
         "fileLogLevel": { "label": "Niveau de journal fichier", "desc": "Niveau minimum écrit dans les fichiers de journal, configurable indépendamment de la console. Par défaut : INFO." },
         "logMaxFiles": { "label": "Rétention des journaux (jours)", "desc": "Nombre maximum de fichiers de journal quotidiens conservés lors de la rotation. Par défaut : 7." }
       }
