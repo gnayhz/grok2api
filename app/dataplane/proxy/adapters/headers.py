@@ -167,23 +167,32 @@ def _resolve_profile(lease: ProxyLease | None) -> tuple[str, str, str]:
     empty string.  This prevents bare requests with no User-Agent when running
     in direct mode or when FlareSolverr has not yet delivered a bundle.
 
-    Backward-compat: cf_clearance is also probed at the legacy ``proxy.cf_clearance``
-    path so that configs migrated from v1.x (where clearance was refreshed by a
-    sidecar writing the flat key) keep working. The legacy ``proxy.cf_cookies``
-    / ``proxy.user_agent`` paths are similarly honored as a last-resort fallback.
+    Priority order (flat legacy first, nested fallback second):
+      - ``proxy.cf_clearance`` / ``proxy.cf_cookies`` / ``proxy.user_agent``
+        (flat v1.x-style keys, written by external cf-refresher sidecars)
+      - ``proxy.clearance.cf_clearance`` / ``proxy.clearance.cf_cookies`` /
+        ``proxy.clearance.user_agent`` (nested v2.x schema, populated by
+        ``config.defaults.toml`` and the internal clearance manager)
+
+    Rationale: when an external sidecar refreshes cf_clearance and writes to
+    the flat keys, those values must *override* the stale defaults shipped in
+    ``config.defaults.toml`` under ``[proxy.clearance]``. Previously the order
+    was reversed, so a non-empty placeholder UA in defaults shadowed the fresh
+    UA supplied by the refresher, causing a UA/cf_clearance mismatch and a 403
+    from Cloudflare (the cookie is bound to the UA of the acquiring browser).
     """
     cfg = get_config()
     cfg_cookies = (
-        cfg.get_str("proxy.clearance.cf_cookies", "")
-        or cfg.get_str("proxy.cf_cookies", "")
+        cfg.get_str("proxy.cf_cookies", "")
+        or cfg.get_str("proxy.clearance.cf_cookies", "")
     )
     cfg_ua = (
-        cfg.get_str("proxy.clearance.user_agent", "")
-        or cfg.get_str("proxy.user_agent", "")
+        cfg.get_str("proxy.user_agent", "")
+        or cfg.get_str("proxy.clearance.user_agent", "")
     )
     cfg_clearance = (
-        cfg.get_str("proxy.clearance.cf_clearance", "")
-        or cfg.get_str("proxy.cf_clearance", "")
+        cfg.get_str("proxy.cf_clearance", "")
+        or cfg.get_str("proxy.clearance.cf_clearance", "")
     )
     if lease is not None:
         return (
