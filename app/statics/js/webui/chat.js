@@ -243,13 +243,51 @@
     return html.join('') || '<p></p>';
   }
 
+  function _extractMath(source) {
+    const placeholders = [];
+    // Display math: $$...$$ (must come before inline to avoid double-match)
+    let out = source.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => {
+      const i = placeholders.length;
+      placeholders.push({ tex, display: true });
+      return `\x02MATH${i}\x03`;
+    });
+    // Inline math: $...$  (single-line only, no space at edges to avoid false positives)
+    out = out.replace(/\$([^\n$]+?)\$/g, (_, tex) => {
+      const i = placeholders.length;
+      placeholders.push({ tex, display: false });
+      return `\x02MATH${i}\x03`;
+    });
+    return { out, placeholders };
+  }
+
   function renderRichMarkdown(source) {
     if (window.marked && typeof window.marked.parse === 'function') {
-      const rendered = window.marked.parse(normalizeMediaContent(source), {
+      let toRender = normalizeMediaContent(source);
+      let placeholders = [];
+
+      if (window.katex) {
+        const extracted = _extractMath(toRender);
+        toRender = extracted.out;
+        placeholders = extracted.placeholders;
+      }
+
+      let rendered = window.marked.parse(toRender, {
         async: false,
         breaks: true,
         gfm: true,
       });
+
+      if (window.katex && placeholders.length) {
+        rendered = rendered.replace(/\x02MATH(\d+)\x03/g, (_, idx) => {
+          const { tex, display } = placeholders[parseInt(idx, 10)];
+          try {
+            return window.katex.renderToString(tex, { displayMode: display, throwOnError: false });
+          } catch (_e) {
+            return escapeHtml(display ? `$$${tex}$$` : `$${tex}$`);
+          }
+        });
+      }
+
       return sanitizeRenderedHtml(rendered);
     }
     return renderMarkdown(source);
