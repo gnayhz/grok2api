@@ -36,6 +36,8 @@ thinking_summary = false
 dynamic_statsig = true
 # 是否允许生成 NSFW 图片
 enable_nsfw = true
+# 当 Grok 执行网络搜索时，在响应末尾追加搜索信源链接（## Sources 段落）
+show_search_sources = false
 # 全局附加指令
 custom_instruction = ""
 

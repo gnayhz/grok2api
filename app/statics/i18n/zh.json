@@ -411,6 +411,10 @@
           "label": "允许 NSFW 生成",
           "desc": "允许图像生成接口绕过 NSFW 内容过滤。"
         },
+        "showSearchSources": {
+          "label": "搜索信源",
+          "desc": "当 Grok 执行网络搜索时，在响应末尾追加搜索信源链接（## Sources 段落）。"
+        },
         "customInstruction": {
           "label": "全局附加指令",
           "desc": "为每次请求注入统一的 system 消息，用于约束模型行为或固定角色设定。"

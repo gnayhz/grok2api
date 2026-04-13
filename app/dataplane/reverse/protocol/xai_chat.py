@@ -181,6 +181,8 @@ class StreamAdapter:
         "_summary_mode",
         "_last_rollout",
         "_content_started",
+        "_web_search_results",
+        "_web_search_urls_seen",
         "thinking_buf",
         "text_buf",
         "image_urls",
@@ -197,14 +199,28 @@ class StreamAdapter:
         self._last_rollout: str = ""
         self._content_started: bool = False
         self._reasoning = ReasoningAggregator() if self._summary_mode else None
+        self._web_search_results: list[dict] = []
+        self._web_search_urls_seen: set[str] = set()
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
         self.image_urls: list[tuple[str, str]] = []   # [(url, imageUuid), ...]
 
-    # 引用已内联为 [[N]](url) 格式，无需末尾附录
+    # 搜索信源追加：当配置启用且有 webSearchResults 时，格式化为 ## Sources 段落
+    # 标记行 [grok2api-sources]: # 是 markdown link reference definition，渲染器不显示，
+    # 用于 _extract_message() 在多轮对话中精确识别并剥离前轮的 Sources 段落
     def references_suffix(self) -> str:
-        """No-op — citations are now inlined as ``[[N]](url)`` markdown links."""
-        return ""
+        """当有搜索信源且配置启用时，格式化为 ## Sources markdown 段落。"""
+        if not self._web_search_results:
+            return ""
+        if not get_config().get_bool("features.show_search_sources", False):
+            return ""
+        lines = ["\n\n## Sources", "[grok2api-sources]: #"]
+        for item in self._web_search_results:
+            title = item.get("title") or item.get("url", "")
+            # 转义 Markdown 链接文本中的特殊字符，防止 []\ 打坏语法
+            title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+            lines.append(f"- [{title}]({item['url']})")
+        return "\n".join(lines) + "\n"
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,6 +246,33 @@ class StreamAdapter:
         card_raw = resp.get("cardAttachment")
         if card_raw:
             events.extend(self._handle_card(card_raw))
+
+        # ── 采集 webSearchResults（搜索信源，多帧累积去重）───────
+        wsr = resp.get("webSearchResults")
+        if wsr and isinstance(wsr, dict):
+            for item in wsr.get("results", []):
+                if isinstance(item, dict) and item.get("url"):
+                    url = item["url"]
+                    if url not in self._web_search_urls_seen:
+                        self._web_search_urls_seen.add(url)
+                        self._web_search_results.append(item)
+
+        # ── 采集 xSearchResults（X/Twitter 帖子信源，多帧累积去重）──
+        xsr = resp.get("xSearchResults")
+        if xsr and isinstance(xsr, dict):
+            for item in xsr.get("results", []):
+                if isinstance(item, dict) and item.get("postId") and item.get("username"):
+                    url = f"https://x.com/{item['username']}/status/{item['postId']}"
+                    if url not in self._web_search_urls_seen:
+                        self._web_search_urls_seen.add(url)
+                        # 构造 title：归一化空白，text 为空退回 @username
+                        # Markdown 转义统一在 references_suffix() 中处理
+                        raw = re.sub(r"\s+", " ", (item.get("text") or "")).strip()
+                        if raw:
+                            title = f"𝕏/@{item['username']}: {raw[:50]}{'...' if len(raw) > 50 else ''}"
+                        else:
+                            title = f"𝕏/@{item['username']}"
+                        self._web_search_results.append({"url": url, "title": title})
 
         token   = resp.get("token")
         think   = resp.get("isThinking")

@@ -411,6 +411,10 @@
           "label": "Allow NSFW Generation",
           "desc": "Permits the image generation endpoint to bypass NSFW content filtering."
         },
+        "showSearchSources": {
+          "label": "Search Sources",
+          "desc": "Append search source links (## Sources section) at the end of responses when Grok performs web search."
+        },
         "customInstruction": {
           "label": "Global Supplemental Instruction",
           "desc": "Injects a consistent system message into every request to enforce model behavior or establish a fixed role."

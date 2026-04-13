@@ -375,6 +375,7 @@
         "thinkingSummary": { "label": "Raisonnement condensé" },
         "dynamicStatsig": { "label": "Statsig dynamique" },
         "enableNsfw": { "label": "Autoriser la génération NSFW" },
+        "showSearchSources": { "label": "Sources de recherche" },
         "customInstruction": { "label": "Instruction globale supplémentaire" },
         "imageFormat": { "label": "Format de sortie image" },
         "videoFormat": { "label": "Format de sortie vidéo" },

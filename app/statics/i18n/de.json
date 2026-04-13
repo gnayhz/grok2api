@@ -375,6 +375,7 @@
         "thinkingSummary": { "label": "Kompakte Reasoning-Ausgabe" },
         "dynamicStatsig": { "label": "Dynamisches Statsig" },
         "enableNsfw": { "label": "NSFW-Erzeugung zulassen" },
+        "showSearchSources": { "label": "Suchquellen" },
         "customInstruction": { "label": "Globale Zusatzanweisung" },
         "imageFormat": { "label": "Bildausgabeformat" },
         "videoFormat": { "label": "Videoausgabeformat" },

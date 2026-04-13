@@ -375,6 +375,7 @@
         "thinkingSummary": { "label": "思考要約出力" },
         "dynamicStatsig": { "label": "動的 Statsig" },
         "enableNsfw": { "label": "NSFW 生成を許可" },
+        "showSearchSources": { "label": "検索ソース" },
         "customInstruction": { "label": "グローバル補助指示" },
         "imageFormat": { "label": "画像出力形式" },
         "videoFormat": { "label": "動画出力形式" },
