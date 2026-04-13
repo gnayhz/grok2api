@@ -50,6 +50,7 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
+from app.products._account_selection import reserve_account
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
@@ -400,9 +401,9 @@ async def completions(
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
             for attempt in range(max_retries + 1):
-                acct = await directory.reserve(
-                    pool_candidates=spec.pool_candidates(),
-                    mode_id=mode_id,
+                acct, selected_mode_id = await reserve_account(
+                    directory,
+                    spec,
                     now_s_override=now_s(),
                     exclude_tokens=excluded or None,
                 )
@@ -422,7 +423,7 @@ async def completions(
                         tool_calls_emitted = False
                         async for line in _stream_chat(
                             token=token,
-                            mode_id=spec.mode_id,
+                            mode_id=ModeId(selected_mode_id),
                             message=message,
                             files=files,
                             tool_overrides=tool_overrides,
@@ -570,14 +571,14 @@ async def completions(
                         if fail_exc
                         else FeedbackKind.SERVER_ERROR
                     )
-                    await directory.feedback(token, kind, mode_id, now_s_val=now_s())
+                    await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
                     if success:
                         asyncio.create_task(
-                            _quota_sync(token, mode_id)
+                            _quota_sync(token, selected_mode_id)
                         ).add_done_callback(_log_task_exception)
                     else:
                         asyncio.create_task(
-                            _fail_sync(token, mode_id, fail_exc)
+                            _fail_sync(token, selected_mode_id, fail_exc)
                         ).add_done_callback(_log_task_exception)
 
                 if success or not _retry:
@@ -591,9 +592,9 @@ async def completions(
     token = ""
     adapter = StreamAdapter()
     for attempt in range(max_retries + 1):
-        acct = await directory.reserve(
-            pool_candidates=spec.pool_candidates(),
-            mode_id=mode_id,
+        acct, selected_mode_id = await reserve_account(
+            directory,
+            spec,
             now_s_override=now_s(),
             exclude_tokens=excluded or None,
         )
@@ -610,7 +611,7 @@ async def completions(
             try:
                 async for line in _stream_chat(
                     token=token,
-                    mode_id=spec.mode_id,
+                    mode_id=ModeId(selected_mode_id),
                     message=message,
                     files=files,
                     tool_overrides=tool_overrides,
@@ -654,14 +655,14 @@ async def completions(
                 if fail_exc
                 else FeedbackKind.SERVER_ERROR
             )
-            await directory.feedback(token, kind, mode_id, now_s_val=now_s())
+            await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
             if success:
-                asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(
+                asyncio.create_task(_quota_sync(token, selected_mode_id)).add_done_callback(
                     _log_task_exception
                 )
             else:
                 asyncio.create_task(
-                    _fail_sync(token, mode_id, fail_exc)
+                    _fail_sync(token, selected_mode_id, fail_exc)
                 ).add_done_callback(_log_task_exception)
 
         if success or not _retry:
