@@ -29,6 +29,7 @@ from app.dataplane.reverse.protocol.xai_chat import (
     classify_line,
     StreamAdapter,
 )
+from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_error
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import upload_from_input
 from app.dataplane.reverse.protocol.tool_prompt import (
@@ -117,8 +118,6 @@ def _configured_retry_codes(cfg) -> frozenset[int]:
 
 def _should_retry_upstream(exc: UpstreamError, retry_codes: frozenset[int]) -> bool:
     """Return whether this upstream error should switch to another token."""
-    from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_error
-
     return exc.status in retry_codes or is_invalid_credentials_error(exc)
 
 
