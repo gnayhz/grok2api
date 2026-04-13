@@ -23,7 +23,10 @@ from app.control.model.enums import ModeId
 from app.control.account.enums import FeedbackKind
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy import get_proxy_runtime
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import (
+    ResettableSession,
+    build_session_kwargs,
+)
 from app.dataplane.reverse.protocol.xai_chat import (
     build_chat_payload,
     classify_line,
@@ -59,6 +62,25 @@ def _log_task_exception(task: "asyncio.Task") -> None:
         logger.warning("background task failed: task={} error={}", task.get_name(), exc)
 
 
+def _upstream_body_excerpt(exc: UpstreamError, *, limit: int = 240) -> str:
+    details = getattr(exc, "details", {})
+    if not isinstance(details, dict):
+        return "-"
+    body = str(details.get("body", "") or "").replace("\n", "\\n")
+    return body[:limit] or "-"
+
+
+def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamError:
+    if isinstance(exc, UpstreamError):
+        return exc
+    body = str(exc).replace("\n", "\\n")[:400]
+    return UpstreamError(
+        f"{context}: {exc}",
+        status=502,
+        body=body,
+    )
+
+
 async def _quota_sync(token: str, mode_id: int) -> None:
     """Fire-and-forget: fetch real quota after a successful call."""
     try:
@@ -82,6 +104,16 @@ async def _fail_sync(
         svc = get_refresh_service()
         if svc:
             await svc.record_failure_async(token, mode_id, exc)
+            if getattr(exc, "status", None) == 429:
+                result = await svc.refresh_on_demand()
+                logger.info(
+                    "account on-demand refresh triggered: token={}... mode_id={} refreshed={} failed={} rate_limited={}",
+                    token[:10],
+                    mode_id,
+                    result.refreshed,
+                    result.failed,
+                    result.rate_limited,
+                )
     except Exception as e:
         logger.warning(
             "chat fail sync error: token={}... mode_id={} error={}",
@@ -315,13 +347,16 @@ async def _stream_chat(
     session_kwargs = build_session_kwargs(lease=lease)
 
     async with ResettableSession(**session_kwargs) as session:
-        response = await session.post(
-            CHAT,
-            headers=headers,
-            data=payload_bytes,
-            timeout=timeout_s,
-            stream=True,
-        )
+        try:
+            response = await session.post(
+                CHAT,
+                headers=headers,
+                data=payload_bytes,
+                timeout=timeout_s,
+                stream=True,
+            )
+        except Exception as exc:
+            raise _transport_upstream_error(exc, context="Chat transport failed") from exc
 
         if response.status_code != 200:
             try:
@@ -334,8 +369,11 @@ async def _stream_chat(
                 body=body,
             )
 
-        async for line in response.aiter_lines():
-            yield line
+        try:
+            async for line in response.aiter_lines():
+                yield line
+        except Exception as exc:
+            raise _transport_upstream_error(exc, context="Chat stream read failed") from exc
 
 
 async def completions(
@@ -559,6 +597,14 @@ async def completions(
                                 token[:8],
                             )
                         else:
+                            logger.warning(
+                                "chat stream upstream failed: attempt={}/{} model={} status={} body={}",
+                                attempt + 1,
+                                max_retries + 1,
+                                model,
+                                exc.status,
+                                _upstream_body_excerpt(exc),
+                            )
                             raise
 
                 finally:
@@ -643,6 +689,14 @@ async def completions(
                         token[:8],
                     )
                 else:
+                    logger.warning(
+                        "chat upstream failed: attempt={}/{} model={} status={} body={}",
+                        attempt + 1,
+                        max_retries + 1,
+                        model,
+                        exc.status,
+                        _upstream_body_excerpt(exc),
+                    )
                     raise
 
         finally:

@@ -197,6 +197,7 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
 @router.post("/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)])
 async def chat_completions_endpoint(req: ChatCompletionRequest):
     _validate_chat(req)
+    is_stream = req.stream is True
 
     spec     = model_registry.get(req.model)
     if spec is None:
@@ -218,7 +219,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 n               = cfg.n or 1,
                 size            = cfg.size or "1024x1024",
                 response_format = cfg.response_format or "url",
-                stream          = bool(req.stream),
+                stream          = is_stream,
                 chat_format     = True,
             )
 
@@ -241,7 +242,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 n               = n,
                 size            = size,
                 response_format = fmt,
-                stream          = bool(req.stream),
+                stream          = is_stream,
                 chat_format     = True,
             )
 
@@ -253,7 +254,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             result = await vid_comp(
                 model           = req.model,
                 messages        = messages,
-                stream          = req.stream,
+                stream          = is_stream,
                 seconds         = vcfg.seconds or 6,
                 size            = vcfg.size or "720x1280",
                 resolution_name = vcfg.resolution_name,
@@ -264,7 +265,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             result = await chat_completions(
                 model       = req.model,
                 messages    = messages,
-                stream      = req.stream,
+                stream      = is_stream,
                 thinking    = req.thinking,
                 tools       = req.tools,
                 tool_choice = req.tool_choice,
@@ -278,10 +279,10 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
         logger.exception(
             "chat completions endpoint failed: model={} stream={} error={}",
             req.model,
-            req.stream,
+            is_stream,
             exc,
         )
-        if req.stream is not False:
+        if is_stream:
             _err_msg = str(exc)  # capture before Python clears the except-scope variable
             async def _err_stream():
                 payload = orjson.dumps({"error": {"message": _err_msg, "type": "server_error"}}).decode()
@@ -330,7 +331,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         raise _ValidationError("input cannot be empty", param="input")
 
     cfg        = get_config()
-    is_stream  = req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
+    is_stream  = req.stream is True
 
     # Map reasoning param → emit_think flag.
     # reasoning=None → use config; reasoning.effort="none" → off; otherwise on.

@@ -18,7 +18,7 @@ from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 
-from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception
+from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception, _upstream_body_excerpt
 from .chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
     make_resp_id, build_resp_usage, make_resp_object, format_sse,
@@ -548,6 +548,14 @@ async def create(
                         logger.warning("responses stream retry scheduled: attempt={}/{} status={} token={}...",
                                        attempt + 1, max_retries, exc.status, token[:8])
                     else:
+                        logger.warning(
+                            "responses stream upstream failed: attempt={}/{} model={} status={} body={}",
+                            attempt + 1,
+                            max_retries + 1,
+                            model,
+                            exc.status,
+                            _upstream_body_excerpt(exc),
+                        )
                         raise
 
             finally:
@@ -618,6 +626,14 @@ async def create(
                     logger.warning("responses retry scheduled: attempt={}/{} status={} token={}...",
                                    attempt + 1, max_retries, exc.status, token[:8])
                 else:
+                    logger.warning(
+                        "responses upstream failed: attempt={}/{} model={} status={} body={}",
+                        attempt + 1,
+                        max_retries + 1,
+                        model,
+                        exc.status,
+                        _upstream_body_excerpt(exc),
+                    )
                     raise
 
         finally:
