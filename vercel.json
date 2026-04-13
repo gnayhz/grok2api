@@ -6,8 +6,8 @@
     "LOG_FILE_ENABLED": "false",
     "DATA_DIR": "/tmp/data",
     "LOG_DIR": "/tmp/logs",
-    "ACCOUNT_STORAGE": "local",
-    "ACCOUNT_REDIS_URL": "redis://localhost:6379/0",
+    "ACCOUNT_STORAGE": "",
+    "ACCOUNT_REDIS_URL": "",
     "ACCOUNT_MYSQL_URL": "",
     "ACCOUNT_POSTGRESQL_URL": ""
   }

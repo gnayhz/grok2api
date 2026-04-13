@@ -332,11 +332,11 @@ def _build_sql_connect_args(
         return {"ssl": ctx} if ctx is not None else None
 
     _validate_pg_ssl_options(mode, ssl_options)
-    if _has_ssl_options(ssl_options, _PG_SSL_CERT_PARAM_KEYS):
-        return {"ssl": _build_pg_ssl_context(mode, ssl_options)}
     if mode == "disable":
         return None
-    return {"ssl": mode}
+    # asyncpg does not accept ssl= as a plain string (e.g. "require").
+    # Always build a proper ssl.SSLContext so the driver can use it directly.
+    return {"ssl": _build_pg_ssl_context(mode, ssl_options)}
 
 
 def _prepare_sql_url_and_connect_args(
