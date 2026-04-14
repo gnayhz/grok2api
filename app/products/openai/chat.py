@@ -502,6 +502,10 @@ async def completions(
                                 done_chunk = make_tool_call_done_chunk(
                                     response_id, model
                                 )
+                                # 注入结构化搜索信源（tool_calls 场景）
+                                sources = adapter.search_sources_list()
+                                if sources:
+                                    done_chunk["search_sources"] = sources
                                 yield f"data: {orjson.dumps(done_chunk).decode()}\n\n"
                                 yield "data: [DONE]\n\n"
                                 tool_calls_emitted = True
@@ -530,6 +534,10 @@ async def completions(
                             final = make_stream_chunk(
                                 response_id, model, "", is_final=True
                             )
+                            # 注入结构化搜索信源到 chunk 根对象（避免 delta strict schema 拒绝）
+                            sources = adapter.search_sources_list()
+                            if sources:
+                                final["search_sources"] = sources
                             yield f"data: {orjson.dumps(final).decode()}\n\n"
                             yield "data: [DONE]\n\n"
                             success = True
@@ -694,13 +702,18 @@ async def completions(
                 len(parse_result.calls),
             )
             pt = estimate_prompt_tokens(message)
-            return make_tool_call_response(
+            resp = make_tool_call_response(
                 model,
                 parse_result.calls,
                 prompt_content=message,
                 response_id=response_id,
                 usage=build_usage(pt, estimate_tool_call_tokens(parse_result.calls)),
             )
+            # 注入结构化搜索信源（tool_calls 场景）
+            sources = adapter.search_sources_list()
+            if sources:
+                resp["search_sources"] = sources
+            return resp
 
     logger.info(
         "chat request completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
@@ -721,6 +734,7 @@ async def completions(
         prompt_content=message,
         response_id=response_id,
         reasoning_content=thinking_text,
+        search_sources=adapter.search_sources_list(),
         usage=build_usage(pt, ct + rt, reasoning_tokens=rt),
     )
 

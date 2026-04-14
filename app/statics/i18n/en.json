@@ -412,8 +412,8 @@
           "desc": "Permits the image generation endpoint to bypass NSFW content filtering."
         },
         "showSearchSources": {
-          "label": "Search Sources",
-          "desc": "Append search source links (## Sources section) at the end of responses when Grok performs web search."
+          "label": "Append Sources to Content",
+          "desc": "Search sources are always output in the search_sources field. This option controls whether to also append a ## Sources section to the response content (for backward compatibility with text-parsing clients)."
         },
         "customInstruction": {
           "label": "Global Supplemental Instruction",

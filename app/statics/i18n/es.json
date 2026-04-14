@@ -375,7 +375,7 @@
         "thinkingSummary": { "label": "Razonamiento condensado" },
         "dynamicStatsig": { "label": "Statsig dinámico" },
         "enableNsfw": { "label": "Permitir generación NSFW" },
-        "showSearchSources": { "label": "Fuentes de búsqueda" },
+        "showSearchSources": { "label": "Agregar fuentes al contenido", "desc": "Las fuentes de búsqueda siempre se incluyen en el campo search_sources. Esta opción controla si también se agrega una sección ## Sources al contenido (para compatibilidad con clientes que analizan texto)." },
         "customInstruction": { "label": "Instrucción suplementaria global" },
         "imageFormat": { "label": "Formato de salida de imagen" },
         "videoFormat": { "label": "Formato de salida de video" },

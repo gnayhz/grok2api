@@ -222,6 +222,20 @@ class StreamAdapter:
             lines.append(f"- [{title}]({item['url']})")
         return "\n".join(lines) + "\n"
 
+    # 结构化搜索信源：始终输出（不受配置开关控制），供 search_sources 字段使用
+    def search_sources_list(self) -> list[dict] | None:
+        """当有搜索信源时，返回结构化列表；无则返回 None。"""
+        if not self._web_search_results:
+            return None
+        return [
+            {
+                "url": item["url"],
+                "title": item.get("title") or item.get("url", ""),
+                "type": item.get("type", "web"),
+            }
+            for item in self._web_search_results
+        ]
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -255,7 +269,7 @@ class StreamAdapter:
                     url = item["url"]
                     if url not in self._web_search_urls_seen:
                         self._web_search_urls_seen.add(url)
-                        self._web_search_results.append(item)
+                        self._web_search_results.append({**item, "type": "web"})
 
         # ── 采集 xSearchResults（X/Twitter 帖子信源，多帧累积去重）──
         xsr = resp.get("xSearchResults")
@@ -272,7 +286,7 @@ class StreamAdapter:
                             title = f"𝕏/@{item['username']}: {raw[:50]}{'...' if len(raw) > 50 else ''}"
                         else:
                             title = f"𝕏/@{item['username']}"
-                        self._web_search_results.append({"url": url, "title": title})
+                        self._web_search_results.append({"url": url, "title": title, "type": "x_post"})
 
         token   = resp.get("token")
         think   = resp.get("isThinking")

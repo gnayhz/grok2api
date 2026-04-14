@@ -487,16 +487,21 @@ async def create(
                                 "content_index": 0,
                                 "part":          {"type": "output_text", "text": full_text, "annotations": []},
                             })
+                            # 构建 message item（流式 output_item.done + response.completed 共用）
+                            sources = adapter.search_sources_list()
+                            msg_item: dict = {
+                                "id":      message_id,
+                                "type":    "message",
+                                "role":    "assistant",
+                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                                "status":  "completed",
+                            }
+                            if sources:
+                                msg_item["search_sources"] = sources
                             yield format_sse("response.output_item.done", {
                                 "type":         "response.output_item.done",
                                 "output_index": msg_idx,
-                                "item":         {
-                                    "id":      message_id,
-                                    "type":    "message",
-                                    "role":    "assistant",
-                                    "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                                    "status":  "completed",
-                                },
+                                "item":         msg_item,
                             })
 
                         full_think = "".join(think_buf)
@@ -508,13 +513,19 @@ async def create(
                                 "summary": [{"type": "summary_text", "text": full_think}],
                                 "status":  "completed",
                             })
-                        output.append({
-                            "id":      message_id,
-                            "type":    "message",
-                            "role":    "assistant",
-                            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                            "status":  "completed",
-                        })
+                        # 复用 msg_item（message_started 时已构建）；未启动时重新构建
+                        if not message_started:
+                            msg_item = {
+                                "id":      message_id,
+                                "type":    "message",
+                                "role":    "assistant",
+                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                                "status":  "completed",
+                            }
+                            sources = adapter.search_sources_list()
+                            if sources:
+                                msg_item["search_sources"] = sources
+                        output.append(msg_item)
 
                         pt  = estimate_prompt_tokens(message)
                         ct  = estimate_tokens(full_text)
@@ -676,13 +687,17 @@ async def create(
             "summary": [{"type": "summary_text", "text": full_think}],
             "status":  "completed",
         })
-    output.append({
+    msg_item: dict = {
         "id":      message_id,
         "type":    "message",
         "role":    "assistant",
         "content": [{"type": "output_text", "text": full_text, "annotations": []}],
         "status":  "completed",
-    })
+    }
+    sources = adapter.search_sources_list()
+    if sources:
+        msg_item["search_sources"] = sources
+    output.append(msg_item)
 
     pt = estimate_prompt_tokens(message)
     ct = estimate_tokens(full_text)

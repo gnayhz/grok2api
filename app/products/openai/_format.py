@@ -98,6 +98,7 @@ def make_chat_response(
     response_id:       str | None  = None,
     usage:             dict | None = None,
     reasoning_content: str | None  = None,
+    search_sources:    list[dict] | None = None,
 ) -> dict:
     rid = response_id or make_response_id()
     pt  = estimate_prompt_tokens(prompt_content)
@@ -108,8 +109,7 @@ def make_chat_response(
     msg: dict = {"role": "assistant", "content": content}
     if reasoning_content:
         msg["reasoning_content"] = reasoning_content
-
-    return {
+    resp = {
         "id":      rid,
         "object":  "chat.completion",
         "created": int(time.time()),
@@ -121,6 +121,10 @@ def make_chat_response(
         }],
         "usage": usage or build_usage(pt, ct, reasoning_tokens=rt),
     }
+    # search_sources 放在响应根对象（避免 Vercel AI SDK 的 message strict schema 拒绝未知字段）
+    if search_sources:
+        resp["search_sources"] = search_sources
+    return resp
 
 
 # ---------------------------------------------------------------------------

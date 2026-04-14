@@ -412,8 +412,8 @@
           "desc": "允许图像生成接口绕过 NSFW 内容过滤。"
         },
         "showSearchSources": {
-          "label": "搜索信源",
-          "desc": "当 Grok 执行网络搜索时，在响应末尾追加搜索信源链接（## Sources 段落）。"
+          "label": "正文追加信源",
+          "desc": "搜索信源始终以 search_sources 字段输出。此选项控制是否同时在正文末尾追加 ## Sources 段落（兼容文本解析客户端）。"
         },
         "customInstruction": {
           "label": "全局附加指令",
