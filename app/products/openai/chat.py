@@ -52,6 +52,14 @@ from ._format import (
 from ._tool_sieve import ToolSieve
 
 
+def _to_chat_annotations(anns: list[dict]) -> list[dict]:
+    """扁平 annotations → Chat Completions 嵌套格式（内层无 type）"""
+    return [{"type": "url_citation", "url_citation": {
+        "url": a["url"], "title": a["title"],
+        "start_index": a["start_index"], "end_index": a["end_index"],
+    }} for a in anns] if anns else []
+
+
 def _log_task_exception(task: "asyncio.Task") -> None:
     """Done-callback: log exceptions from fire-and-forget tasks."""
     exc = task.exception() if not task.cancelled() else None
@@ -408,6 +416,7 @@ async def completions(
                 _retry = False
                 fail_exc: BaseException | None = None
                 adapter = StreamAdapter()
+                collected_annotations: list[dict] = []
 
                 try:
                     try:
@@ -478,6 +487,8 @@ async def completions(
                                         response_id, model, ev.content
                                     )
                                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                elif ev.kind == "annotation" and ev.annotation_data:
+                                    collected_annotations.append(ev.annotation_data)
                                 elif ev.kind == "soft_stop":
                                     ended = True
                                     break
@@ -531,8 +542,10 @@ async def completions(
                                 )
                                 yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
+                            chat_anns = _to_chat_annotations(collected_annotations)
                             final = make_stream_chunk(
-                                response_id, model, "", is_final=True
+                                response_id, model, "", is_final=True,
+                                annotations=chat_anns or None,
                             )
                             # 注入结构化搜索信源到 chunk 根对象（避免 delta strict schema 拒绝）
                             sources = adapter.search_sources_list()
@@ -728,6 +741,7 @@ async def completions(
     pt = estimate_prompt_tokens(message)
     ct = estimate_tokens(full_text)
     rt = estimate_tokens(thinking_text) if thinking_text else 0
+    chat_anns = _to_chat_annotations(adapter.annotations_list())
     return make_chat_response(
         model,
         full_text,
@@ -735,6 +749,7 @@ async def completions(
         response_id=response_id,
         reasoning_content=thinking_text,
         search_sources=adapter.search_sources_list(),
+        annotations=chat_anns or None,
         usage=build_usage(pt, ct + rt, reasoning_tokens=rt),
     )
 

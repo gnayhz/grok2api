@@ -127,6 +127,7 @@ class FrameEvent:
     - ``thinking``  — Grok main-model thinking   (content = raw token)
     - ``image``     — generated image final URL   (content = full URL, image_id = upstream UUID)
     - ``image_progress`` — generated image progress (content = percent string, image_id = upstream UUID)
+    - ``annotation`` — url citation annotation   (annotation_data = annotation dict)
     - ``soft_stop`` — stream end signal
     - ``skip``      — filtered frame, do nothing
     """
@@ -135,6 +136,7 @@ class FrameEvent:
     rollout_id: str = ""
     message_tag: str = ""
     message_step_id: int | None = None
+    annotation_data: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +178,9 @@ class StreamAdapter:
         "_citation_order",
         "_citation_map",
         "_last_citation_index",
+        "_pending_citations",
+        "_annotations",
+        "_text_offset",
         "_emitted_reasoning_keys",
         "_reasoning",
         "_summary_mode",
@@ -193,6 +198,9 @@ class StreamAdapter:
         self._citation_order: list[str] = []
         self._citation_map: dict[str, int] = {}
         self._last_citation_index: int = -1
+        self._pending_citations: list[dict] = []       # _render_replace 产出的待定位引用
+        self._annotations: list[dict] = []             # 已定位的完整 annotations（绝对位置）
+        self._text_offset: int = 0                     # 累计文本长度（仅 text 事件）
         self._emitted_reasoning_keys: set[str] = set()
         # 思维链模式：精简摘要 / 详细原始流
         self._summary_mode: bool = get_config().get_bool("features.thinking_summary", False)
@@ -221,6 +229,11 @@ class StreamAdapter:
             title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
             lines.append(f"- [{title}]({item['url']})")
         return "\n".join(lines) + "\n"
+
+    # 内联引用 annotations：生成时同步构建，含绝对位置
+    def annotations_list(self) -> list[dict]:
+        """已收集的 url_citation annotations（扁平格式，绝对位置）。无引用时返回 []。"""
+        return list(self._annotations)
 
     # 结构化搜索信源：始终输出（不受配置开关控制），供 search_sources 字段使用
     def search_sources_list(self) -> list[dict] | None:
@@ -373,10 +386,18 @@ class StreamAdapter:
         # ── final text token (needs cleaning) ─────────────────────
         if token is not None and think is not True and tag == "final":
             self._content_started = True
-            cleaned = self._clean_token(token)
+            cleaned, local_anns = self._clean_token(token)
             if cleaned:
+                # 先发 text 事件（OpenAI 顺序：text.delta 先，annotation.added 后）
                 self.text_buf.append(cleaned)
                 events.append(FrameEvent("text", cleaned))
+                # 再发 annotation 事件：局部位置 → 绝对位置
+                for ann in local_anns:
+                    ann["start_index"] = self._text_offset + ann.pop("local_start")
+                    ann["end_index"] = self._text_offset + ann.pop("local_end")
+                    self._annotations.append(ann)
+                    events.append(FrameEvent("annotation", annotation_data=ann))
+                self._text_offset += len(cleaned)
             return events
 
         # ── end signals ───────────────────────────────────────────
@@ -428,12 +449,32 @@ class StreamAdapter:
     # Token cleaning — <grok:render> → markdown
     # ------------------------------------------------------------------
 
-    def _clean_token(self, token: str) -> str:
+    # 返回 (cleaned_text, local_annotations)，annotations 含局部 start/end
+    def _clean_token(self, token: str) -> tuple[str, list[dict]]:
         if "<grok:render" not in token:
-            return token
+            return token, []
         cleaned = _GROK_RENDER_RE.sub(self._render_replace, token)
         # 去除引用标签替换后残留的独占空白行（如 "\n [[1]](...)" → " [[1]](...)"）
-        return cleaned.lstrip("\n") if cleaned.startswith("\n") and "[[" in cleaned else cleaned
+        cleaned = cleaned.lstrip("\n") if cleaned.startswith("\n") and "[[" in cleaned else cleaned
+
+        # 从 cleaned 中定位 pending citations 的局部位置（游标递进防碰撞）
+        local_annotations: list[dict] = []
+        if self._pending_citations:
+            search_start = 0
+            for cite in self._pending_citations:
+                pos = cleaned.find(cite["needle"], search_start)
+                if pos != -1:
+                    local_annotations.append({
+                        "type": "url_citation",
+                        "url": cite["url"],
+                        "title": cite["title"],
+                        "local_start": pos,
+                        "local_end": pos + len(cite["needle"]),
+                    })
+                    search_start = pos + len(cite["needle"])
+                # 找不到 → fail closed，跳过此 annotation
+            self._pending_citations.clear()
+        return cleaned, local_annotations
 
     def _render_replace(self, m: re.Match) -> str:
         card_id     = m.group(1)
@@ -467,7 +508,22 @@ class StreamAdapter:
             if index == self._last_citation_index:
                 return ""
             self._last_citation_index = index
-            return f" [[{index}]]({url})"
+            citation_text = f" [[{index}]]({url})"
+            # 解析标题：card → webSearchResults → URL fallback
+            # Grok citation card 仅含 [id, type, cardType, url]，无 title 字段
+            title = card.get("title", "")
+            if not title:
+                for item in self._web_search_results:
+                    if item.get("url") == url:
+                        title = item.get("title", "")
+                        break
+            # 记录引用元数据，位置在 _clean_token 返回后定位
+            self._pending_citations.append({
+                "url": url,
+                "title": title or url,
+                "needle": citation_text,
+            })
+            return citation_text
 
         return ""
 
