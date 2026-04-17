@@ -3,7 +3,7 @@
   const voiceSelect = document.getElementById('voiceSelect');
   const personalitySelect = document.getElementById('personalitySelect');
   const speedSelect = document.getElementById('speedSelect');
-  const instructionInput = document.getElementById('instructionInput');
+const instructionInput = document.getElementById('instructionInput');
   const instructionExpandBtn = document.getElementById('instructionExpandBtn');
 
   instructionExpandBtn?.addEventListener('click', () => {
@@ -416,7 +416,7 @@
     );
 
     try {
-      const params = new URLSearchParams({
+const params = new URLSearchParams({
         voice: voiceSelect?.value || 'ara',
         personality: personalitySelect?.value || 'assistant',
         speed: speedSelect?.value || '1.0',
