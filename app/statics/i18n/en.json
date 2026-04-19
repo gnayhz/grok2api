@@ -399,6 +399,10 @@
           "label": "Default Reasoning Output",
           "desc": "Default value applied when the request does not explicitly provide the thinking parameter. When enabled, reasoning steps are returned in reasoning_content."
         },
+        "autoChatModeFallback": {
+          "label": "AUTO Chat Mode Fallback",
+          "desc": "When an AUTO chat model has no available auto quota, automatically try the fast and expert chat quota windows."
+        },
         "thinkingSummary": {
           "label": "Condensed Reasoning",
           "desc": "When enabled, reasoning steps are condensed into a structured summary. When disabled, the full raw reasoning stream is output, with multi-agent collaboration details and tool call traces."
