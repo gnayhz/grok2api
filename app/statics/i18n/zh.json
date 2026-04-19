@@ -411,6 +411,10 @@
           "label": "允许 NSFW 生成",
           "desc": "允许图像生成接口绕过 NSFW 内容过滤。"
         },
+        "showSearchSources": {
+          "label": "正文追加信源",
+          "desc": "搜索信源始终以 search_sources 字段输出。此选项控制是否同时在正文末尾追加 ## Sources 段落（兼容文本解析客户端）。"
+        },
         "customInstruction": {
           "label": "全局附加指令",
           "desc": "为每次请求注入统一的 system 消息，用于约束模型行为或固定角色设定。"

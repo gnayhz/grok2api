@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import re
 from typing import Any, AsyncGenerator
 
 import orjson
@@ -50,6 +51,14 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
+
+
+def _to_chat_annotations(anns: list[dict]) -> list[dict]:
+    """扁平 annotations → Chat Completions 嵌套格式（内层无 type）"""
+    return [{"type": "url_citation", "url_citation": {
+        "url": a["url"], "title": a["title"],
+        "start_index": a["start_index"], "end_index": a["end_index"],
+    }} for a in anns] if anns else []
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
@@ -209,6 +218,12 @@ def _normalize_image_format(value: str | None) -> str:
     return fmt
 
 
+# 精确匹配 grok2api 注入的 Sources 段落（含标记行），用于多轮对话剥离
+_SOURCES_STRIP_RE = re.compile(
+    r"(?:^|\r?\n\r?\n)## Sources\r?\n\[grok2api-sources\]: #\r?\n[\s\S]*$"
+)
+
+
 def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
     """Flatten OpenAI messages into a single prompt string + file attachments."""
     parts: list[str] = []
@@ -241,6 +256,10 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
                 parts.append(f"[assistant]:\n{xml}")
             continue
 
+        # ── 剥离前轮 assistant 消息中 grok2api 注入的 Sources 段落 ────────────
+        if role == "assistant" and isinstance(content, str):
+            content = _SOURCES_STRIP_RE.sub("", content)
+
         # ── normal content handling ───────────────────────────────────────────
         if isinstance(content, str):
             if content.strip():
@@ -251,7 +270,11 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
                     continue
                 btype = block.get("type")
                 if btype == "text":
-                    text = (block.get("text") or "").strip()
+                    text = (block.get("text") or "")
+                    # 块列表中的 assistant text 也需剥离 Sources（先 regex 再 strip，与 str 路径对齐）
+                    if role == "assistant":
+                        text = _SOURCES_STRIP_RE.sub("", text)
+                    text = text.strip()
                     if text:
                         parts.append(f"[{role}]: {text}")
                 elif btype == "image_url":
@@ -414,6 +437,7 @@ async def completions(
                 _retry = False
                 fail_exc: BaseException | None = None
                 adapter = StreamAdapter()
+                collected_annotations: list[dict] = []
 
                 try:
                     try:
@@ -484,6 +508,8 @@ async def completions(
                                         response_id, model, ev.content
                                     )
                                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                elif ev.kind == "annotation" and ev.annotation_data:
+                                    collected_annotations.append(ev.annotation_data)
                                 elif ev.kind == "soft_stop":
                                     ended = True
                                     break
@@ -508,6 +534,10 @@ async def completions(
                                 done_chunk = make_tool_call_done_chunk(
                                     response_id, model
                                 )
+                                # 注入结构化搜索信源（tool_calls 场景）
+                                sources = adapter.search_sources_list()
+                                if sources:
+                                    done_chunk["search_sources"] = sources
                                 yield f"data: {orjson.dumps(done_chunk).decode()}\n\n"
                                 yield "data: [DONE]\n\n"
                                 tool_calls_emitted = True
@@ -533,9 +563,15 @@ async def completions(
                                 )
                                 yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
+                            chat_anns = _to_chat_annotations(collected_annotations)
                             final = make_stream_chunk(
-                                response_id, model, "", is_final=True
+                                response_id, model, "", is_final=True,
+                                annotations=chat_anns or None,
                             )
+                            # 注入结构化搜索信源到 chunk 根对象（避免 delta strict schema 拒绝）
+                            sources = adapter.search_sources_list()
+                            if sources:
+                                final["search_sources"] = sources
                             yield f"data: {orjson.dumps(final).decode()}\n\n"
                             yield "data: [DONE]\n\n"
                             success = True
@@ -700,13 +736,18 @@ async def completions(
                 len(parse_result.calls),
             )
             pt = estimate_prompt_tokens(message)
-            return make_tool_call_response(
+            resp = make_tool_call_response(
                 model,
                 parse_result.calls,
                 prompt_content=message,
                 response_id=response_id,
                 usage=build_usage(pt, estimate_tool_call_tokens(parse_result.calls)),
             )
+            # 注入结构化搜索信源（tool_calls 场景）
+            sources = adapter.search_sources_list()
+            if sources:
+                resp["search_sources"] = sources
+            return resp
 
     logger.info(
         "chat request completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
@@ -721,12 +762,15 @@ async def completions(
     pt = estimate_prompt_tokens(message)
     ct = estimate_tokens(full_text)
     rt = estimate_tokens(thinking_text) if thinking_text else 0
+    chat_anns = _to_chat_annotations(adapter.annotations_list())
     return make_chat_response(
         model,
         full_text,
         prompt_content=message,
         response_id=response_id,
         reasoning_content=thinking_text,
+        search_sources=adapter.search_sources_list(),
+        annotations=chat_anns or None,
         usage=build_usage(pt, ct + rt, reasoning_tokens=rt),
     )
 

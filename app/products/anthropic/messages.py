@@ -342,6 +342,7 @@ async def create(
             tool_calls_emitted    = False
             tool_output_tokens    = 0
             block_index           = 0  # tracks next content_block index
+            collected_annotations: list[dict] = []
 
             try:
                 try:
@@ -456,6 +457,9 @@ async def create(
                                         "delta": {"type": "text_delta", "text": text_chunk},
                                     })
 
+                            elif ev.kind == "annotation" and ev.annotation_data:
+                                collected_annotations.append(ev.annotation_data)
+
                             elif ev.kind == "soft_stop":
                                 ended = True
                                 break
@@ -503,9 +507,14 @@ async def create(
                             tool_calls_emitted = True
 
                     if tool_calls_emitted:
+                        # 构建 tool_use 的 message_delta，注入搜索信源
+                        tool_delta: dict = {"stop_reason": "tool_use", "stop_sequence": None}
+                        sources = adapter.search_sources_list()
+                        if sources:
+                            tool_delta["search_sources"] = sources
                         yield _sse("message_delta", {
                             "type":  "message_delta",
-                            "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                            "delta": tool_delta,
                             "usage": {"output_tokens": tool_output_tokens},
                         })
                         yield _sse("message_stop", {"type": "message_stop"})
@@ -557,9 +566,16 @@ async def create(
                         if full_think:
                             out_tokens += estimate_tokens(full_think)
 
+                        # 构建 message_delta，注入结构化搜索信源和 annotations
+                        msg_delta: dict = {"stop_reason": "end_turn", "stop_sequence": None}
+                        sources = adapter.search_sources_list()
+                        if sources:
+                            msg_delta["search_sources"] = sources
+                        if collected_annotations:
+                            msg_delta["annotations"] = collected_annotations
                         yield _sse("message_delta", {
                             "type":  "message_delta",
-                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                            "delta": msg_delta,
                             "usage": {"output_tokens": out_tokens},
                         })
                         yield _sse("message_stop", {"type": "message_stop"})
@@ -719,7 +735,12 @@ async def create(
                 })
             ct = estimate_tool_call_tokens(tc_result.calls)
             logger.info("messages tool_calls: model={} calls={}", model, len(tc_result.calls))
-            return _build_message_response(msg_id, model, content, "tool_use", in_tokens, ct)
+            resp = _build_message_response(msg_id, model, content, "tool_use", in_tokens, ct)
+            # 注入结构化搜索信源（tool_use 场景）
+            sources = adapter.search_sources_list()
+            if sources:
+                resp["search_sources"] = sources
+            return resp
 
     logger.info(
         "messages request completed: model={} text_len={} think_len={} images={}",
@@ -727,7 +748,14 @@ async def create(
     )
 
     content = [{"type": "text", "text": full_text}]
-    return _build_message_response(msg_id, model, content, "end_turn", in_tokens, out_tokens)
+    anns = adapter.annotations_list()
+    if anns:
+        content[0]["annotations"] = anns
+    resp = _build_message_response(msg_id, model, content, "end_turn", in_tokens, out_tokens)
+    sources = adapter.search_sources_list()
+    if sources:
+        resp["search_sources"] = sources
+    return resp
 
 
 __all__ = ["create"]
