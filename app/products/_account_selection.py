@@ -52,12 +52,11 @@ async def reserve_account(
     if lease is not None:
         return lease, selected_mode_id
 
-    if get_config("account.refresh.on_empty_retry_enabled", True):
-        refresh_svc = get_refresh_service()
-        if refresh_svc is not None:
-            await refresh_svc.refresh_on_demand()
-            lease, selected_mode_id = await _try_reserve()
-            if lease is not None:
-                return lease, selected_mode_id
+    refresh_svc = get_refresh_service()
+    if refresh_svc is not None:
+        await refresh_svc.refresh_on_demand()
+        lease, selected_mode_id = await _try_reserve()
+        if lease is not None:
+            return lease, selected_mode_id
 
     return None, original_mode_id

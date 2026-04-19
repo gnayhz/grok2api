@@ -372,6 +372,7 @@
         "memory": { "label": "Memoria de conversación" },
         "stream": { "label": "Streaming predeterminado" },
         "thinking": { "label": "Salida de razonamiento predeterminada" },
+        "autoChatModeFallback": { "label": "Reserva de modo AUTO para chat" },
         "thinkingSummary": { "label": "Razonamiento condensado" },
         "dynamicStatsig": { "label": "Statsig dinámico" },
         "enableNsfw": { "label": "Permitir generación NSFW" },
