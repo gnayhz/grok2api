@@ -197,7 +197,10 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
 @router.post("/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)])
 async def chat_completions_endpoint(req: ChatCompletionRequest):
     _validate_chat(req)
-    is_stream = req.stream is True
+    from app.platform.config.snapshot import get_config
+
+    cfg = get_config()
+    is_stream = req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
 
     spec     = model_registry.get(req.model)
     if spec is None:
@@ -331,7 +334,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         raise _ValidationError("input cannot be empty", param="input")
 
     cfg        = get_config()
-    is_stream  = req.stream is True
+    is_stream  = req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
 
     # Map reasoning param → emit_think flag.
     # reasoning=None → use config; reasoning.effort="none" → off; otherwise on.

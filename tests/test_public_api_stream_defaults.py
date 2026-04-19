@@ -23,7 +23,12 @@ class _FakeSpec:
 
 
 class _FakeConfig:
+    def __init__(self, *, stream_default: bool = True) -> None:
+        self.stream_default = stream_default
+
     def get_bool(self, key: str, default: bool) -> bool:
+        if key == "features.stream":
+            return self.stream_default
         return default
 
 
@@ -32,7 +37,7 @@ async def _fake_stream():
 
 
 class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
-    async def test_chat_endpoint_defaults_omitted_stream_to_json(self) -> None:
+    async def test_chat_endpoint_omitted_stream_uses_config_disabled(self) -> None:
         calls: list[dict] = []
 
         async def _fake_chat_completions(**kwargs):
@@ -45,14 +50,36 @@ class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("app.products.openai.router.model_registry.get", return_value=_FakeSpec()):
-            with patch("app.products.openai.router.chat_completions", new=_fake_chat_completions):
-                response = await chat_completions_endpoint(req)
+            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig(stream_default=False)):
+                with patch("app.products.openai.router.chat_completions", new=_fake_chat_completions):
+                    response = await chat_completions_endpoint(req)
 
         self.assertIsInstance(response, JSONResponse)
         self.assertEqual(orjson.loads(response.body), {"ok": True})
         self.assertEqual(calls[0]["stream"], False)
 
-    async def test_chat_endpoint_omitted_stream_propagates_json_errors(self) -> None:
+    async def test_chat_endpoint_omitted_stream_uses_config_enabled(self) -> None:
+        calls: list[dict] = []
+
+        async def _fake_chat_completions(**kwargs):
+            calls.append(kwargs)
+            return _fake_stream()
+
+        req = ChatCompletionRequest(
+            model="grok-4.20-auto",
+            messages=[MessageItem(role="user", content="hi")],
+        )
+
+        with patch("app.products.openai.router.model_registry.get", return_value=_FakeSpec()):
+            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig(stream_default=True)):
+                with patch("app.products.openai.router.chat_completions", new=_fake_chat_completions):
+                    response = await chat_completions_endpoint(req)
+
+        self.assertIsInstance(response, StreamingResponse)
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(calls[0]["stream"], True)
+
+    async def test_chat_endpoint_omitted_stream_propagates_json_errors_when_config_disabled(self) -> None:
         async def _boom(**kwargs):
             raise RuntimeError("boom")
 
@@ -62,9 +89,10 @@ class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("app.products.openai.router.model_registry.get", return_value=_FakeSpec()):
-            with patch("app.products.openai.router.chat_completions", new=_boom):
-                with self.assertRaisesRegex(RuntimeError, "boom"):
-                    await chat_completions_endpoint(req)
+            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig(stream_default=False)):
+                with patch("app.products.openai.router.chat_completions", new=_boom):
+                    with self.assertRaisesRegex(RuntimeError, "boom"):
+                        await chat_completions_endpoint(req)
 
     async def test_chat_endpoint_keeps_explicit_streaming(self) -> None:
         async def _fake_chat_completions(**kwargs):
@@ -77,13 +105,14 @@ class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("app.products.openai.router.model_registry.get", return_value=_FakeSpec()):
-            with patch("app.products.openai.router.chat_completions", new=_fake_chat_completions):
-                response = await chat_completions_endpoint(req)
+            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig(stream_default=False)):
+                with patch("app.products.openai.router.chat_completions", new=_fake_chat_completions):
+                    response = await chat_completions_endpoint(req)
 
         self.assertIsInstance(response, StreamingResponse)
         self.assertEqual(response.media_type, "text/event-stream")
 
-    async def test_responses_endpoint_defaults_omitted_stream_to_json(self) -> None:
+    async def test_responses_endpoint_omitted_stream_uses_config_disabled(self) -> None:
         calls: list[dict] = []
 
         async def _fake_responses_create(**kwargs):
@@ -96,7 +125,7 @@ class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("app.products.openai.router.model_registry.get", return_value=_FakeSpec()):
-            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig()):
+            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig(stream_default=False)):
                 with patch("app.products.openai.responses.create", new=_fake_responses_create):
                     response = await responses_endpoint(req)
 
@@ -104,7 +133,7 @@ class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orjson.loads(response.body), {"ok": True})
         self.assertEqual(calls[0]["stream"], False)
 
-    async def test_messages_endpoint_defaults_omitted_stream_to_json(self) -> None:
+    async def test_messages_endpoint_omitted_stream_uses_config_disabled(self) -> None:
         calls: list[dict] = []
 
         async def _fake_messages_create(**kwargs):
@@ -117,7 +146,7 @@ class PublicApiStreamDefaultTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("app.products.anthropic.router.model_registry.get", return_value=_FakeSpec()):
-            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig()):
+            with patch("app.platform.config.snapshot.get_config", return_value=_FakeConfig(stream_default=False)):
                 with patch("app.products.anthropic.messages.create", new=_fake_messages_create):
                     response = await messages_endpoint(req)
 
