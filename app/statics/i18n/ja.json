@@ -324,6 +324,7 @@
         "features": "機能",
         "schedule": "スケジュール",
         "proxy": "ネットワーク",
+        "cache": "キャッシュ保存",
         "image": "画像処理"
       },
       "groups": {
@@ -338,7 +339,8 @@
         "retry": "再試行ポリシー",
         "timeouts": "リクエストタイムアウト",
         "imageProtocol": "NSFW と画像ストリーミング",
-        "logging": "ログ設定"
+        "logging": "ログ設定",
+        "localMediaCache": "ローカルメディアキャッシュ"
       },
       "options": {
         "imageFormat": {
@@ -390,6 +392,8 @@
         "heavyInterval": { "label": "Heavy 周期（秒）", "desc": "Heavy プールの共通周期です。quota モードではバックグラウンド更新に、random モードでは 429 クールダウンに使われます。既定値は 7200s です。" },
         "usageConcurrency": { "label": "更新並列数", "desc": "クォータ更新中に許可する usage 呼び出しの最大並列数です。" },
         "onDemandMinInterval": { "label": "オンデマンド更新間隔（秒）", "desc": "429 処理など、リクエスト経路から発生する更新のスロットル間隔です。この間隔内の重複トリガーは 1 回の更新にまとめられます。" },
+        "imageCacheMaxMb": { "label": "画像キャッシュ上限（MB）", "desc": "0 は無制限です。ローカルプロキシで保存されたメディアにのみ適用され、上限を超えると最も古いファイルから削除し、使用量を上限の 60% まで一気に戻します。" },
+        "videoCacheMaxMb": { "label": "動画キャッシュ上限（MB）", "desc": "0 は無制限です。ローカルプロキシで保存されたメディアにのみ適用され、上限を超えると最も古いファイルから削除し、使用量を上限の 60% まで一気に戻します。" },
         "nsfwConcurrency": { "label": "NSFW 有効化の並列数" },
         "refreshConcurrency": { "label": "Usage 更新の並列数" },
         "assetUploadConcurrency": { "label": "Asset アップロード並列数" },
@@ -430,12 +434,14 @@
   "cache": {
     "pageTitle": "Grok2API - キャッシュ管理",
     "pageHeading": "キャッシュ管理",
-    "pageSubtitle": "ローカルキャッシュファイルとオンラインアセットを確認・管理します。",
+    "pageSubtitle": "ローカルキャッシュファイル、容量上限、オンラインアセットを確認・管理します。",
     "sectionOverview": "概要",
     "statImageCount": "画像キャッシュ数",
     "statImageSize": "画像キャッシュ容量",
     "statVideoCount": "動画キャッシュ数",
     "statVideoSize": "動画キャッシュ容量",
+    "usageSummaryUnlimited": "使用量 {used} · 無制限",
+    "usageSummaryLimited": "使用量 {used} / {limit} · {percent}",
     "sectionDetails": "詳細",
     "tabLocal": "ローカルキャッシュ",
     "tabLocalImage": "ローカル画像",

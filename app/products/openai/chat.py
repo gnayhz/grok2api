@@ -11,12 +11,12 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
+from app.platform.storage import save_local_image
 from app.platform.tokens import (
     estimate_prompt_tokens,
     estimate_tokens,
     estimate_tool_call_tokens,
 )
-from app.platform.storage import image_files_dir
 from app.control.account.runtime import get_refresh_service
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.model.registry import resolve as resolve_model
@@ -210,12 +210,7 @@ async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
 
 def _save_image(raw: bytes, mime: str, image_id: str) -> str:
     """Save raw bytes to ``${DATA_DIR}/files/images`` and return the file ID."""
-    img_dir = image_files_dir()
-    ext = ".png" if "png" in mime else ".jpg"
-    path = img_dir / f"{image_id}{ext}"
-    if not path.exists():
-        path.write_bytes(raw)
-    return image_id
+    return save_local_image(raw, mime, image_id)
 
 
 async def _resolve_image(token: str, url: str, image_id: str) -> str:
@@ -251,7 +246,7 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
         return f"![image](data:{mime};base64,{b64})"
 
     # local_url / local_md: save to disk and return local path
-    file_id = _save_image(raw, mime, image_id)
+    file_id = await asyncio.to_thread(_save_image, raw, mime, image_id)
     app_url = cfg.get_str("app.app_url", "").rstrip("/")
     local_url = (
         f"{app_url}/v1/files/image?id={file_id}"
