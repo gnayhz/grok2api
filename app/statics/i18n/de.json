@@ -324,6 +324,7 @@
         "features": "Funktionen",
         "schedule": "Zeitplanung",
         "proxy": "Netzwerk",
+        "cache": "Cache-Speicher",
         "image": "Bildpipeline"
       },
       "groups": {
@@ -338,7 +339,8 @@
         "retry": "Wiederholungsrichtlinie",
         "timeouts": "Zeitlimits",
         "imageProtocol": "NSFW und Bild-Streaming",
-        "logging": "Protokollierung"
+        "logging": "Protokollierung",
+        "localMediaCache": "Lokaler Medien-Cache"
       },
       "options": {
         "imageFormat": {
@@ -390,6 +392,8 @@
         "heavyInterval": { "label": "Heavy-Zyklus (s)", "desc": "Gemeinsamer Zyklus für den Heavy-Pool: wird im Quota-Modus für den Hintergrund-Refresh und im Random-Modus für die 429-Abkühlung verwendet. Standardwert: 7200s." },
         "usageConcurrency": { "label": "Aktualisierungs-Konkurrenz", "desc": "Maximale Anzahl paralleler usage-Aufrufe während der Quotenaktualisierung." },
         "onDemandMinInterval": { "label": "On-Demand-Aktualisierungsintervall (s)", "desc": "Drosselungsfenster für durch Requests ausgelöste Aktualisierungen, z. B. nach 429. Wiederholte Auslöser innerhalb des Intervalls werden zu einer Aktualisierung zusammengefasst." },
+        "imageCacheMaxMb": { "label": "Bild-Cache-Limit (MB)", "desc": "0 deaktiviert das Limit. Gilt nur für lokal per Proxy gespeicherte Mediendateien. Wird das Limit überschritten, werden zuerst die ältesten Dateien entfernt, bis die Nutzung wieder auf 60% des Limits fällt." },
+        "videoCacheMaxMb": { "label": "Video-Cache-Limit (MB)", "desc": "0 deaktiviert das Limit. Gilt nur für lokal per Proxy gespeicherte Mediendateien. Wird das Limit überschritten, werden zuerst die ältesten Dateien entfernt, bis die Nutzung wieder auf 60% des Limits fällt." },
         "nsfwConcurrency": { "label": "Konkurrenz für NSFW-Aktivierung" },
         "refreshConcurrency": { "label": "Usage-Aktualisierungskonkurrenz" },
         "assetUploadConcurrency": { "label": "Asset-Upload-Konkurrenz" },
@@ -430,12 +434,14 @@
   "cache": {
     "pageTitle": "Grok2API - Cache-Verwaltung",
     "pageHeading": "Cache-Verwaltung",
-    "pageSubtitle": "Lokale Cache-Dateien und Online-Assets der Konten anzeigen und verwalten.",
+    "pageSubtitle": "Lokale Cache-Dateien, Speichergrenzen und Online-Assets der Konten anzeigen und verwalten.",
     "sectionOverview": "Übersicht",
     "statImageCount": "Bild-Cache-Dateien",
     "statImageSize": "Bild-Cache-Größe",
     "statVideoCount": "Video-Cache-Dateien",
     "statVideoSize": "Video-Cache-Größe",
+    "usageSummaryUnlimited": "Verwendet {used} · Unbegrenzt",
+    "usageSummaryLimited": "Verwendet {used} / {limit} · {percent}",
     "sectionDetails": "Details",
     "tabLocal": "Lokaler Cache",
     "tabLocalImage": "Lokale Bilder",

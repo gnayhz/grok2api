@@ -324,6 +324,7 @@
         "features": "Funciones",
         "schedule": "Programación",
         "proxy": "Red",
+        "cache": "Almacenamiento de caché",
         "image": "Canal de imagen"
       },
       "groups": {
@@ -338,7 +339,8 @@
         "retry": "Política de reintentos",
         "timeouts": "Tiempos de espera",
         "imageProtocol": "NSFW y transmisión de imágenes",
-        "logging": "Registro"
+        "logging": "Registro",
+        "localMediaCache": "Caché multimedia local"
       },
       "options": {
         "imageFormat": {
@@ -390,6 +392,8 @@
         "heavyInterval": { "label": "Ciclo Heavy (s)", "desc": "Ciclo compartido del pool Heavy: se usa para la actualización en segundo plano en modo quota y para el enfriamiento tras 429 en modo random. Valor por defecto: 7200s." },
         "usageConcurrency": { "label": "Concurrencia de actualización", "desc": "Número máximo de llamadas usage paralelas permitidas durante la actualización de cuota." },
         "onDemandMinInterval": { "label": "Intervalo de actualización bajo demanda (s)", "desc": "Ventana de limitación para actualizaciones activadas por solicitudes, como el manejo de 429. Los disparos repetidos dentro del intervalo se agrupan en una sola actualización." },
+        "imageCacheMaxMb": { "label": "Límite de caché de imágenes (MB)", "desc": "0 desactiva el límite. Solo se aplica a los archivos multimedia guardados por el proxy local. Cuando se supera el límite, se eliminan primero los archivos más antiguos hasta volver al 60% del límite." },
+        "videoCacheMaxMb": { "label": "Límite de caché de video (MB)", "desc": "0 desactiva el límite. Solo se aplica a los archivos multimedia guardados por el proxy local. Cuando se supera el límite, se eliminan primero los archivos más antiguos hasta volver al 60% del límite." },
         "nsfwConcurrency": { "label": "Concurrencia de activación NSFW" },
         "refreshConcurrency": { "label": "Concurrencia de refresco de Usage" },
         "assetUploadConcurrency": { "label": "Concurrencia de carga de Asset" },
@@ -430,12 +434,14 @@
   "cache": {
     "pageTitle": "Grok2API - Gestión de Caché",
     "pageHeading": "Gestión de Caché",
-    "pageSubtitle": "Vea y gestione los archivos de caché local y los activos en línea de las cuentas.",
+    "pageSubtitle": "Vea y gestione los archivos de caché local, los límites de almacenamiento y los activos en línea de las cuentas.",
     "sectionOverview": "Resumen",
     "statImageCount": "Archivos de caché de imagen",
     "statImageSize": "Tamaño de caché de imagen",
     "statVideoCount": "Archivos de caché de video",
     "statVideoSize": "Tamaño de caché de video",
+    "usageSummaryUnlimited": "Usado {used} · Sin límite",
+    "usageSummaryLimited": "Usado {used} / {limit} · {percent}",
     "sectionDetails": "Detalles",
     "tabLocal": "Caché local",
     "tabLocalImage": "Imágenes locales",

@@ -30,6 +30,7 @@ from app.platform.config.snapshot import config as _config
 from app.platform.errors import AppError
 from app.platform.meta import get_project_version
 from app.platform.paths import data_path
+from app.platform.storage import reconcile_local_media_cache_async
 
 
 load_dotenv()
@@ -144,6 +145,7 @@ async def lifespan(app: FastAPI):
     )
     # Reload config in case it was just seeded/migrated into the backend.
     await _config.load()
+    await reconcile_local_media_cache_async()
 
     directory = await get_account_directory(repo)
 

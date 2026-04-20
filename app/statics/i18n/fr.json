@@ -324,6 +324,7 @@
         "features": "Fonctionnalités",
         "schedule": "Planification",
         "proxy": "Réseau",
+        "cache": "Stockage du cache",
         "image": "Pipeline d’image"
       },
       "groups": {
@@ -338,7 +339,8 @@
         "retry": "Politique de reprise",
         "timeouts": "Délais d’attente",
         "imageProtocol": "NSFW et streaming d'images",
-        "logging": "Journalisation"
+        "logging": "Journalisation",
+        "localMediaCache": "Cache multimédia local"
       },
       "options": {
         "imageFormat": {
@@ -390,6 +392,8 @@
         "heavyInterval": { "label": "Cycle Heavy (s)", "desc": "Cycle partagé du pool Heavy : utilisé pour l’actualisation en arrière-plan en mode quota et pour le refroidissement après 429 en mode random. Valeur par défaut : 7200s." },
         "usageConcurrency": { "label": "Concurrence d’actualisation", "desc": "Nombre maximal d’appels usage parallèles autorisés pendant l’actualisation du quota." },
         "onDemandMinInterval": { "label": "Intervalle d’actualisation à la demande (s)", "desc": "Fenêtre de limitation pour les actualisations déclenchées par les requêtes, par exemple après un 429. Les déclenchements répétés dans l’intervalle sont regroupés en une seule actualisation." },
+        "imageCacheMaxMb": { "label": "Limite du cache image (MB)", "desc": "0 désactive la limite. S’applique uniquement aux fichiers multimédias enregistrés via le proxy local. Lorsque la limite est dépassée, les fichiers les plus anciens sont supprimés jusqu’à revenir à 60% de la limite." },
+        "videoCacheMaxMb": { "label": "Limite du cache vidéo (MB)", "desc": "0 désactive la limite. S’applique uniquement aux fichiers multimédias enregistrés via le proxy local. Lorsque la limite est dépassée, les fichiers les plus anciens sont supprimés jusqu’à revenir à 60% de la limite." },
         "nsfwConcurrency": { "label": "Concurrence d’activation NSFW" },
         "refreshConcurrency": { "label": "Concurrence d’actualisation Usage" },
         "assetUploadConcurrency": { "label": "Concurrence d’envoi Asset" },
@@ -430,12 +434,14 @@
   "cache": {
     "pageTitle": "Grok2API - Gestion du Cache",
     "pageHeading": "Gestion du Cache",
-    "pageSubtitle": "Consultez et gérez les fichiers de cache locaux et les actifs en ligne des comptes.",
+    "pageSubtitle": "Consultez et gérez les fichiers de cache locaux, les limites de stockage et les actifs en ligne des comptes.",
     "sectionOverview": "Vue d’ensemble",
     "statImageCount": "Fichiers de cache image",
     "statImageSize": "Taille du cache image",
     "statVideoCount": "Fichiers de cache vidéo",
     "statVideoSize": "Taille du cache vidéo",
+    "usageSummaryUnlimited": "Utilisé {used} · Illimité",
+    "usageSummaryLimited": "Utilisé {used} / {limit} · {percent}",
     "sectionDetails": "Détails",
     "tabLocal": "Cache local",
     "tabLocalImage": "Images locales",

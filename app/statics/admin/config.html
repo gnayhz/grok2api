@@ -695,6 +695,33 @@ const SCHEMA_DEF = [
       },
     ]
   },
+  {
+    id: 'cache', label: '缓存存储', labelKey: 'config.schema.tabs.cache',
+    groups: [
+      {
+        title: '本地媒体缓存', titleKey: 'config.schema.groups.localMediaCache',
+        section: 'cache.local',
+        fields: [
+          {
+            key: 'image_max_mb',
+            label: '图片缓存上限（MB）',
+            labelKey: 'config.schema.fields.imageCacheMaxMb.label',
+            type: 'number',
+            desc: '0 表示不限制。仅对本地代理落盘生效；超限后按最旧文件优先清理，并一次性回落到上限的 60%。',
+            descKey: 'config.schema.fields.imageCacheMaxMb.desc',
+          },
+          {
+            key: 'video_max_mb',
+            label: '视频缓存上限（MB）',
+            labelKey: 'config.schema.fields.videoCacheMaxMb.label',
+            type: 'number',
+            desc: '0 表示不限制。仅对本地代理落盘生效；超限后按最旧文件优先清理，并一次性回落到上限的 60%。',
+            descKey: 'config.schema.fields.videoCacheMaxMb.desc',
+          },
+        ]
+      },
+    ]
+  },
 ];
 
 // ── State ──────────────────────────────────────────────────────────────────

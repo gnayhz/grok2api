@@ -325,6 +325,7 @@
         "features": "Features",
         "schedule": "Scheduling",
         "proxy": "Networking",
+        "cache": "Cache Storage",
         "image": "Image Pipeline"
       },
       "groups": {
@@ -339,7 +340,8 @@
         "retry": "Retry Policy",
         "timeouts": "Request Timeouts",
         "imageProtocol": "NSFW and Image Streaming",
-        "logging": "Logging"
+        "logging": "Logging",
+        "localMediaCache": "Local Media Cache"
       },
       "options": {
         "imageFormat": {
@@ -463,6 +465,14 @@
         "onDemandMinInterval": {
           "label": "On-Demand Refresh Interval (s)",
           "desc": "Throttle window for request-triggered refreshes such as 429 handling. Repeated triggers within the interval are coalesced into a single refresh."
+        },
+        "imageCacheMaxMb": {
+          "label": "Image Cache Limit (MB)",
+          "desc": "0 disables the limit. Applies only to locally proxied media files. When the limit is exceeded, the oldest files are removed until usage falls back to 60% of the limit."
+        },
+        "videoCacheMaxMb": {
+          "label": "Video Cache Limit (MB)",
+          "desc": "0 disables the limit. Applies only to locally proxied media files. When the limit is exceeded, the oldest files are removed until usage falls back to 60% of the limit."
         },
         "nsfwConcurrency": {
           "label": "NSFW Enablement Concurrency",
@@ -606,12 +616,14 @@
   "cache": {
     "pageTitle": "Grok2API - Cache Management",
     "pageHeading": "Cache Management",
-    "pageSubtitle": "View and manage local cache files and online account assets.",
+    "pageSubtitle": "View and manage local cache files, storage limits, and online account assets.",
     "sectionOverview": "Overview",
     "statImageCount": "Image Cache Files",
     "statImageSize": "Image Cache Size",
     "statVideoCount": "Video Cache Files",
     "statVideoSize": "Video Cache Size",
+    "usageSummaryUnlimited": "Used {used} · Unlimited",
+    "usageSummaryLimited": "Used {used} / {limit} · {percent}",
     "sectionDetails": "Details",
     "tabLocal": "Local Cache",
     "tabLocalImage": "Local Images",

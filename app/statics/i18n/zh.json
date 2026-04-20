@@ -325,6 +325,7 @@
         "features": "应用功能",
         "schedule": "任务调度",
         "proxy": "网络代理",
+        "cache": "缓存存储",
         "image": "图像能力"
       },
       "groups": {
@@ -339,7 +340,8 @@
         "retry": "重试策略",
         "timeouts": "请求超时设置",
         "imageProtocol": "NSFW 与图像协议",
-        "logging": "日志配置"
+        "logging": "日志配置",
+        "localMediaCache": "本地媒体缓存"
       },
       "options": {
         "imageFormat": {
@@ -463,6 +465,14 @@
         "onDemandMinInterval": {
           "label": "按需刷新间隔（秒）",
           "desc": "请求链路触发刷新（例如收到 429）时的节流间隔。N 秒内重复触发只执行一次，避免批量打爆配额接口。"
+        },
+        "imageCacheMaxMb": {
+          "label": "图片缓存上限（MB）",
+          "desc": "0 表示不限制。仅对本地代理落盘生效；超限后按最旧文件优先清理，并一次性回落到上限的 60%。"
+        },
+        "videoCacheMaxMb": {
+          "label": "视频缓存上限（MB）",
+          "desc": "0 表示不限制。仅对本地代理落盘生效；超限后按最旧文件优先清理，并一次性回落到上限的 60%。"
         },
         "nsfwConcurrency": {
           "label": "开启 NSFW 并发数",
@@ -606,12 +616,14 @@
   "cache": {
     "pageTitle": "Grok2API - 缓存管理",
     "pageHeading": "缓存管理",
-    "pageSubtitle": "查看并管理本地缓存文件与账户在线资产。",
+    "pageSubtitle": "查看并管理本地缓存文件、容量上限与账户在线资产。",
     "sectionOverview": "缓存概览",
     "statImageCount": "图片缓存数量",
     "statImageSize": "图片缓存大小",
     "statVideoCount": "视频缓存数量",
     "statVideoSize": "视频缓存大小",
+    "usageSummaryUnlimited": "已用 {used} · 未限制",
+    "usageSummaryLimited": "已用 {used} / {limit} · {percent}",
     "sectionDetails": "缓存明细",
     "tabLocal": "本地缓存",
     "tabLocalImage": "本地图片",

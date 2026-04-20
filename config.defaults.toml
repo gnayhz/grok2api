@@ -60,6 +60,14 @@ image_format = "grok_url"
 video_format = "grok_url"
 
 
+# ==================== 本地缓存 ====================
+[cache.local]
+# 图片缓存上限（MB），0 = 不限制；超限后按最旧文件优先清理，并回落到上限的 60%
+image_max_mb = 0
+# 视频缓存上限（MB），0 = 不限制；超限后按最旧文件优先清理，并回落到上限的 60%
+video_max_mb = 0
+
+
 # ==================== 代理配置 ====================
 [proxy.egress]
 # 出口模式：direct | single_proxy | proxy_pool

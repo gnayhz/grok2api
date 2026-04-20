@@ -17,6 +17,7 @@ from app.platform.auth.middleware import verify_admin_key
 from app.platform.config.snapshot import config
 from app.platform.errors import AppError, ErrorKind, ValidationError
 from app.platform.logging.logger import logger, reload_file_logging
+from app.platform.storage import reconcile_local_media_cache_async
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -135,6 +136,13 @@ def _ensure_runtime_patch_allowed(payload: dict[str, Any]) -> None:
                 )
 
 
+def _patch_touches_prefix(payload: dict[str, Any], prefix: str) -> bool:
+    return any(
+        path == prefix or path.startswith(f"{prefix}.")
+        for path in _iter_patch_paths(payload)
+    )
+
+
 def get_repo(request: Request) -> "AccountRepository":
     """Resolve the singleton AccountRepository from app state."""
     return request.app.state.repository
@@ -188,6 +196,7 @@ async def update_config(req: ConfigPatchRequest):
 
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
+    cache_local_changed = _patch_touches_prefix(patch, "cache.local")
     await config.update(patch)
     # config.update() only writes to the backend and invalidates the in-memory
     # snapshot (_version = None); it does not refresh the data.  load() is
@@ -197,6 +206,8 @@ async def update_config(req: ConfigPatchRequest):
         file_level=config.get_str("logging.file_level", "") or None,
         max_files=config.get_int("logging.max_files", 7),
     )
+    if cache_local_changed:
+        await reconcile_local_media_cache_async()
     strategy_name = reconcile_refresh_runtime()
     return {
         "status": "success",
