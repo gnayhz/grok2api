@@ -324,11 +324,16 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             request_overrides: dict | None = None
             if req.deepsearch:
                 request_overrides = {"deepsearchPreset": req.deepsearch}
+            # reasoning_effort=None → config default; "none" → off; otherwise → on.
+            if req.reasoning_effort is None:
+                emit_think: bool | None = None
+            else:
+                emit_think = req.reasoning_effort != "none"
             result = await chat_completions(
                 model=req.model,
                 messages=messages,
                 stream=is_stream,
-                thinking=req.thinking,
+                emit_think=emit_think,
                 tools=req.tools,
                 tool_choice=req.tool_choice,
                 temperature=req.temperature or 0.8,
