@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from curl_cffi.const import CurlOpt
 
 from app.platform.config.snapshot import get_config
+from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.profile import resolve_proxy_profile
 
@@ -67,6 +68,17 @@ def build_session_kwargs(
     return kwargs
 
 
+def _wrap_transport_error(exc: BaseException) -> UpstreamError:
+    if isinstance(exc, UpstreamError):
+        return exc
+    body = str(exc).replace("\n", "\\n")[:400]
+    return UpstreamError(
+        f"Transport request failed: {exc}",
+        status=502,
+        body=body,
+    )
+
+
 class ResettableSession:
     """AsyncSession wrapper that resets connection on configurable status codes.
 
@@ -115,7 +127,11 @@ class ResettableSession:
 
     async def _request(self, method: str, *args: Any, **kwargs: Any):
         await self._maybe_reset()
-        response = await getattr(self._session, method)(*args, **kwargs)
+        try:
+            response = await getattr(self._session, method)(*args, **kwargs)
+        except Exception as exc:
+            self._reset_pending = True
+            raise _wrap_transport_error(exc) from exc
         if self._reset_on and response.status_code in self._reset_on:
             self._reset_pending = True
         return response
@@ -146,4 +162,8 @@ class ResettableSession:
         return getattr(self._session, name)
 
 
-__all__ = ["ResettableSession", "build_session_kwargs", "normalize_proxy_url"]
+__all__ = [
+    "ResettableSession",
+    "build_session_kwargs",
+    "normalize_proxy_url",
+]
