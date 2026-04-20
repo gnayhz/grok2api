@@ -3,39 +3,7 @@
   const voiceSelect = document.getElementById('voiceSelect');
   const personalitySelect = document.getElementById('personalitySelect');
   const speedSelect = document.getElementById('speedSelect');
-const instructionInput = document.getElementById('instructionInput');
-  const instructionExpandBtn = document.getElementById('instructionExpandBtn');
-
-  instructionExpandBtn?.addEventListener('click', () => {
-    const overlay = document.createElement('div');
-    overlay.className = 'webui-chatkit-modal-overlay';
-    const dialog = document.createElement('div');
-    dialog.className = 'webui-chatkit-modal-dialog';
-    const textarea = document.createElement('textarea');
-    textarea.className = 'webui-chatkit-modal-textarea';
-    textarea.value = instructionInput?.value || '';
-    textarea.placeholder = '输入自定义指令，Grokm Voice 会直接使用这段文字作为系统提示词';
-    const actions = document.createElement('div');
-    actions.className = 'webui-chatkit-modal-actions';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'btn webui-chatkit-modal-btn-cancel';
-    cancelBtn.textContent = '取消';
-    const confirmBtn = document.createElement('button');
-    confirmBtn.className = 'btn btn-primary webui-chatkit-modal-btn-confirm';
-    confirmBtn.textContent = '确定';
-    actions.append(cancelBtn, confirmBtn);
-    dialog.append(textarea, actions);
-    overlay.append(dialog);
-    document.body.append(overlay);
-    textarea.focus();
-    const close = () => overlay.remove();
-    cancelBtn.addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-    confirmBtn.addEventListener('click', () => {
-      if (instructionInput) instructionInput.value = textarea.value;
-      close();
-    });
-  });
+  const instructionInput = document.getElementById('instructionInput');
   const startVoiceBtn = document.getElementById('startVoiceBtn');
   const muteVoiceBtn = document.getElementById('muteVoiceBtn');
   const newSessionBtn = document.getElementById('newSessionBtn');
@@ -416,15 +384,18 @@ const instructionInput = document.getElementById('instructionInput');
     );
 
     try {
-const params = new URLSearchParams({
-        voice: voiceSelect?.value || 'ara',
-        personality: personalitySelect?.value || 'assistant',
-        speed: speedSelect?.value || '1.0',
-        instruction: instructionInput?.value?.trim() || '',
-      });
-      const res = await fetch(`${VOICE_ENDPOINT}?${params.toString()}`, {
-        headers: await getAuthHeaders(),
+      const headers = await getAuthHeaders();
+      headers['Content-Type'] = 'application/json';
+      const res = await fetch(VOICE_ENDPOINT, {
+        method: 'POST',
+        headers,
         cache: 'no-store',
+        body: JSON.stringify({
+          voice: voiceSelect?.value || 'ara',
+          personality: personalitySelect?.value || 'assistant',
+          speed: Number(speedSelect?.value || 1),
+          instruction: instructionInput?.value?.trim() || '',
+        }),
       });
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
