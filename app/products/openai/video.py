@@ -135,14 +135,8 @@ _VIDEO_JOBS: dict[str, _VideoJob] = {}
 _VIDEO_JOBS_LOCK = asyncio.Lock()
 
 
-def _build_message(
-    prompt: str, preset: str, *, reference_content_urls: list[str] | None = None
-) -> str:
-    message = f"{prompt} {_PRESET_FLAGS.get(preset, '--mode=custom')}".strip()
-    if reference_content_urls:
-        prefix = " ".join(reference_content_urls)
-        return f"{prefix}  {message}"
-    return message
+def _build_message(prompt: str, preset: str) -> str:
+    return f"{prompt} {_PRESET_FLAGS.get(preset, '--mode=custom')}".strip()
 
 
 def _progress_reason(progress: int) -> str:
@@ -220,34 +214,33 @@ def _video_create_payload(
     resolution_name: str,
     video_length: int,
     preset: str,
-    reference_content_urls: list[str] | None = None,
-    file_attachments: list[str] | None = None,
+    image_references: list[str] | None = None,
 ) -> dict[str, Any]:
-    payload = {
+    video_gen_config: dict[str, Any] = {
+        "parentPostId": parent_post_id,
+        "aspectRatio": aspect_ratio,
+        "videoLength": video_length,
+        "resolutionName": resolution_name,
+    }
+    if image_references:
+        video_gen_config["isVideoEdit"] = False
+        video_gen_config["isReferenceToVideo"] = True
+        video_gen_config["imageReferences"] = image_references
+    return {
         "temporary": True,
         "modelName": _VIDEO_MODEL_NAME,
-        "message": _build_message(
-            prompt, preset, reference_content_urls=reference_content_urls
-        ),
+        "message": _build_message(prompt, preset),
         "toolOverrides": {"videoGen": True},
         "enableSideBySide": True,
         "responseMetadata": {
             "experiments": [],
             "modelConfigOverride": {
                 "modelMap": {
-                    "videoGenModelConfig": {
-                        "parentPostId": parent_post_id,
-                        "aspectRatio": aspect_ratio,
-                        "videoLength": video_length,
-                        "resolutionName": resolution_name,
-                    }
+                    "videoGenModelConfig": video_gen_config,
                 }
             },
         },
     }
-    if file_attachments:
-        payload["fileAttachments"] = file_attachments
-    return payload
 
 
 def _video_extend_start_time(seconds: int) -> float:
@@ -641,10 +634,7 @@ async def _generate_video_with_token(
                 resolution_name=resolution_name,
                 video_length=segment_length,
                 preset=preset,
-                reference_content_urls=[r.content_url for r in references]
-                if references
-                else None,
-                file_attachments=[r.post_id for r in references]
+                image_references=[r.content_url for r in references]
                 if references
                 else None,
             )
