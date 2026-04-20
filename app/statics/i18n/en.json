@@ -91,6 +91,7 @@
       "pageTitle": "Grok2API - ChatKit",
       "voiceLabel": "Voice",
       "personalityLabel": "Personality",
+      "instructionLabel": "Prompt",
       "speedLabel": "Speed",
       "start": "Start",
       "pause": "Pause",

@@ -13,19 +13,31 @@ permissions:
 
 jobs:
   gitleaks:
+    name: Gitleaks Secret Scanner
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+          fetch-depth: 0 # 必须：获取完整历史记录，供 Gitleaks 扫描增量
+          
+      # 核心修复：针对 PR 显式拉取 base 分支，解决 unknown revision 报错
+      - name: Fetch base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch origin ${{ github.base_ref }}
+        
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   pip-audit:
+    name: Python Dependency Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-      - run: uv export --frozen --no-dev --format requirements-txt -o /tmp/req.txt
-      - run: uvx pip-audit -r /tmp/req.txt --progress-spinner off
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Export requirements
+        run: uv export --frozen --no-dev --format requirements-txt -o /tmp/req.txt
+      - name: Run pip-audit
+        run: uvx pip-audit -r /tmp/req.txt --progress-spinner off
