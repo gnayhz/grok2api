@@ -206,6 +206,7 @@ async def get_storage_mode():
 @router.get("/status", tags=[_TAG_ADMIN_SYSTEM])
 async def runtime_status():
     from app.dataplane.account import _directory
+    from app.dataplane.account.selector import current_strategy
 
     if _directory is None:
         raise AppError(
@@ -220,6 +221,7 @@ async def runtime_status():
                 "status": "ok",
                 "size": _directory.size,
                 "revision": _directory.revision,
+                "selection_strategy": current_strategy(),
             }
         ),
         media_type="application/json",

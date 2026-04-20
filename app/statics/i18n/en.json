@@ -331,6 +331,8 @@
         "features": "Core Features",
         "mediaFormat": "Media Output",
         "refreshSchedule": "Quota Refresh",
+        "randomCooling": "Auto-Retry Cooldown",
+        "selection": "Selection Concurrency",
         "batchConcurrency": "Batch Concurrency",
         "egressProxy": "Egress Proxy",
         "clearance": "Cloudflare Clearance",
@@ -432,6 +434,27 @@
         "videoFormat": {
           "label": "Video Output Format",
           "desc": "local_* modes download video assets to the server and deliver them through the local proxy. Configure the APP Base URL first and account for outbound bandwidth usage."
+        },
+        "refreshEnabled": {
+          "label": "Enable Quota Refresh",
+          "desc": "Enables quota probing and scored selection. Recommended off for >10k accounts.",
+          "help": "On: quota refresh mode. The scheduler periodically syncs real quota, and selection uses scoring.\nOff: auto-retry mode. No upstream probing, uniform random selection, and auto-swap on errors for up to 5 retries.\nRecommendation: turn this off for >10k accounts to avoid self-triggering upstream 429s."
+        },
+        "coolingBasicHours": {
+          "label": "Basic Cooldown (hours)",
+          "desc": "Cooldown duration after a 429 on basic-pool accounts, default 20h (matches upstream 20h window). Only effective in auto-retry mode."
+        },
+        "coolingSuperHours": {
+          "label": "Super Cooldown (hours)",
+          "desc": "Cooldown duration after a 429 on super-pool accounts, default 2h (matches upstream 2h window). Only effective in auto-retry mode."
+        },
+        "coolingHeavyHours": {
+          "label": "Heavy Cooldown (hours)",
+          "desc": "Cooldown duration after a 429 on heavy-pool accounts, default 2h (matches upstream 2h window). Only effective in auto-retry mode."
+        },
+        "maxInflight": {
+          "label": "Max Inflight per Account",
+          "desc": "Maximum concurrent in-flight requests per account. Accounts at this limit are skipped by the selector (shared by both modes)."
         },
         "basicInterval": {
           "label": "Basic Refresh Interval (s)",

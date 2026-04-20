@@ -54,7 +54,7 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
-from app.products._account_selection import reserve_account
+from app.products._account_selection import reserve_account, selection_max_retries
 
 
 def _to_chat_annotations(anns: list[dict]) -> list[dict]:
@@ -470,7 +470,7 @@ async def completions(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = cfg.get_int("retry.max_retries", 1)
+    max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
     timeout_s = cfg.get_float("chat.timeout", 120.0)

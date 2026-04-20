@@ -782,7 +782,7 @@
       </div>
       <div class="stat-num" id="s-calls" style="color:#111">0</div>
     </div>
-    <div class="stat-cell">
+    <div class="stat-cell" data-quota-only>
       <div class="stat-top">
         <div class="stat-label" data-i18n="account.statAuto">Auto 余额</div>
         <span class="stat-icon" style="color:#2563eb">
@@ -791,7 +791,7 @@
       </div>
       <div class="stat-num" id="s-qa" style="color:#2563eb">0</div>
     </div>
-    <div class="stat-cell">
+    <div class="stat-cell" data-quota-only>
       <div class="stat-top">
         <div class="stat-label" data-i18n="account.statFast">Fast 余额</div>
         <span class="stat-icon" style="color:#16a34a">
@@ -800,7 +800,7 @@
       </div>
       <div class="stat-num" id="s-qf" style="color:#16a34a">0</div>
     </div>
-    <div class="stat-cell">
+    <div class="stat-cell" data-quota-only>
       <div class="stat-top">
         <div class="stat-label" data-i18n="account.statExpert">Expert 余额</div>
         <span class="stat-icon" style="color:#7c3aed">
@@ -809,7 +809,7 @@
       </div>
       <div class="stat-num" id="s-qe" style="color:#7c3aed">0</div>
     </div>
-    <div class="stat-cell">
+    <div class="stat-cell" data-quota-only>
       <div class="stat-top">
         <div class="stat-label" data-i18n="account.statHeavy">Heavy 余额</div>
         <span class="stat-icon" style="color:#b0632a">
@@ -934,7 +934,7 @@
           <th style="width:200px" data-i18n="account.colToken">Token</th>
           <th class="table-center" style="width:70px" data-i18n="account.colType">类型</th>
           <th class="table-center" style="width:70px" data-i18n="account.colStatus">状态</th>
-          <th>
+          <th data-quota-only>
             <span data-i18n="account.colQuota">额度</span>
             <span style="margin-left:6px;display:inline-flex;align-items:center;gap:3px;vertical-align:middle">
               <span class="q-pill q-a">A</span>
@@ -1134,17 +1134,36 @@ async function _api(method, path, body) {
   return r.json();
 }
 
+// Selection strategy reported by /status — "quota" | "random".
+// Controls whether quota columns / stats are rendered (hidden in random mode).
+let selectionStrategy = 'quota';
+
 // ── Load ───────────────────────────────────────────────────────────────────
 async function load() {
   try {
-    const data = await _api('GET', '/tokens');
+    const [data, status] = await Promise.all([
+      _api('GET', '/tokens'),
+      _api('GET', '/status').catch(() => null),
+    ]);
+    if (status && typeof status.selection_strategy === 'string') {
+      selectionStrategy = status.selection_strategy;
+    }
     allTokens = Array.isArray(data.tokens)
       ? data.tokens
       : Object.entries(data.tokens || {}).flatMap(([pool, items]) =>
           Array.isArray(items) ? items.map(t => ({ ...t, pool: t.pool || pool })) : []);
+    applyStrategyUI();
     invalidateTokenView();
     render();
   } catch (e) { showToast(`${tr('account.loadFailed', null, '加载失败')}: ${e.message}`, 'error'); }
+}
+
+function applyStrategyUI() {
+  // Random strategy: hide quota-related stat cells and the table column.
+  const isRandom = selectionStrategy === 'random';
+  document.querySelectorAll('[data-quota-only]').forEach(el => {
+    el.style.display = isRandom ? 'none' : '';
+  });
 }
 
 // ── Render ─────────────────────────────────────────────────────────────────
@@ -1153,6 +1172,7 @@ function render() {
   renderStats(view);
   renderFilters(view);
   renderTable(view);
+  applyStrategyUI();
 }
 
 function getTokenView() {
@@ -1409,7 +1429,7 @@ function rowHtml(t) {
       </div></td>
     <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
-    <td><div class="quota-cell">${qpills(q)}</div></td>
+    <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#8f8f8f">${success}</td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#9a9a9a">${fail}</td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#9a9a9a">${fmtRate(success, fail)}</td>

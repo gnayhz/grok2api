@@ -331,6 +331,8 @@
         "features": "基本功能设置",
         "mediaFormat": "媒体返回格式",
         "refreshSchedule": "配额刷新调度",
+        "randomCooling": "自动重试冷却",
+        "selection": "选号并发限制",
         "batchConcurrency": "批量操作并发",
         "egressProxy": "出站代理设置",
         "clearance": "Cloudflare Clearance",
@@ -432,6 +434,27 @@
         "videoFormat": {
           "label": "视频返回格式",
           "desc": "local_* 模式会先将视频下载至服务端，再通过本地 URL 代理分发；请确保已配置 APP 访问地址，并评估出站带宽消耗。"
+        },
+        "refreshEnabled": {
+          "label": "启用配额刷新",
+          "desc": "开启配额探测和评分选号；万级以上账号建议关闭。",
+          "help": "开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，出错自动换号重试最多 5 次。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。"
+        },
+        "coolingBasicHours": {
+          "label": "Basic 冷却（小时）",
+          "desc": "basic 号收到 429 后的冷却时长，默认 20 h（对齐 upstream 20 h 限流窗口）。仅在自动重试模式下生效。"
+        },
+        "coolingSuperHours": {
+          "label": "Super 冷却（小时）",
+          "desc": "super 号收到 429 后的冷却时长，默认 2 h（对齐 upstream 2 h 限流窗口）。仅在自动重试模式下生效。"
+        },
+        "coolingHeavyHours": {
+          "label": "Heavy 冷却（小时）",
+          "desc": "heavy 号收到 429 后的冷却时长，默认 2 h（对齐 upstream 2 h 限流窗口）。仅在自动重试模式下生效。"
+        },
+        "maxInflight": {
+          "label": "单号并发上限",
+          "desc": "单个账号同时在执行的请求上限，超过则选号路径跳过该号（两种模式共用）。"
         },
         "basicInterval": {
           "label": "Basic 刷新周期（秒）",

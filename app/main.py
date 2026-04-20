@@ -182,7 +182,16 @@ async def lifespan(app: FastAPI):
     # 4. Account refresh scheduler — only the leader worker.
     #    Uses an advisory file lock so exactly one process runs the heavy
     #    upstream quota-fetch loop regardless of worker count.
+    #
+    #    ``account.refresh.enabled`` selects between two independent runtime
+    #    strategies:
+    #      - true  → "quota" selector + scheduler running (default).
+    #      - false → "random" selector + scheduler idle (no upstream probing).
     from app.control.account.refresh import AccountRefreshService
+    from app.dataplane.account.selector import set_strategy as _set_selection_strategy
+
+    refresh_enabled = _config.get_bool("account.refresh.enabled", False)
+    _set_selection_strategy("quota" if refresh_enabled else "random")
 
     refresh_svc = AccountRefreshService(repo)
     set_refresh_service(refresh_svc)
@@ -190,18 +199,28 @@ async def lifespan(app: FastAPI):
 
     is_leader = _try_acquire_scheduler_lock()
     scheduler = get_account_refresh_scheduler(refresh_svc)
-    if is_leader:
+    strategy_name = "quota" if refresh_enabled else "random"
+    if is_leader and refresh_enabled:
         scheduler.start()
         logger.info(
-            "scheduler leader: pid={} active_sync_s={} idle_sync_s={}",
+            "scheduler leader: pid={} strategy=quota active_sync_s={} idle_sync_s={}",
+            os.getpid(),
+            _SYNC_ACTIVE_INTERVAL,
+            _SYNC_IDLE_INTERVAL,
+        )
+    elif is_leader:
+        logger.info(
+            "scheduler leader: pid={} strategy=random (scheduler idle) "
+            "active_sync_s={} idle_sync_s={}",
             os.getpid(),
             _SYNC_ACTIVE_INTERVAL,
             _SYNC_IDLE_INTERVAL,
         )
     else:
         logger.info(
-            "scheduler follower: pid={} active_sync_s={} idle_sync_s={}",
+            "scheduler follower: pid={} strategy={} active_sync_s={} idle_sync_s={}",
             os.getpid(),
+            strategy_name,
             _SYNC_ACTIVE_INTERVAL,
             _SYNC_IDLE_INTERVAL,
         )
