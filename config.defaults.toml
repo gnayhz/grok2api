@@ -105,18 +105,11 @@ on_codes = "429,401,503"
 [account.refresh]
 # 总开关：true=配额刷新模式（主动探测，选号评分）；false=自动重试模式（随机选号，零探测）
 enabled = true
-basic_interval_sec = 36000   # basic 号池刷新周期（秒），默认 10 h
-super_interval_sec = 7200    # super 号池刷新周期（秒），默认 2 h
-heavy_interval_sec = 7200    # heavy 号池刷新周期（秒），默认 2 h
+basic_interval_sec = 36000   # basic 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 36000s
+super_interval_sec = 7200    # super 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 7200s
+heavy_interval_sec = 7200    # heavy 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 7200s
 usage_concurrency = 50
 on_demand_min_interval_sec = 300
-
-
-[account.random]
-# 仅 account.refresh.enabled=false 时生效
-# 429 后按 pool 冷却的小时数（对齐 upstream 限流窗口）
-cooling_basic_hours = 20
-cooling_heavy_hours = 2
 
 
 [account.selection]

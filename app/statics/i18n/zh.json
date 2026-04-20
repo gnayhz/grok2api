@@ -161,6 +161,7 @@
     "statInvalid": "异常账户",
     "statDisabled": "禁用账户",
     "statCalls": "调用总数",
+    "statSuccessTotal": "成功总数",
     "statAuto": "Auto 余额",
     "statFast": "Fast 余额",
     "statExpert": "Expert 余额",
@@ -331,7 +332,6 @@
         "features": "基本功能设置",
         "mediaFormat": "媒体返回格式",
         "refreshSchedule": "配额刷新调度",
-        "randomCooling": "自动重试冷却",
         "selection": "选号并发限制",
         "batchConcurrency": "批量操作并发",
         "egressProxy": "出站代理设置",
@@ -437,43 +437,31 @@
         },
         "refreshEnabled": {
           "label": "启用配额刷新",
-          "desc": "开启配额探测和评分选号；万级以上账号建议关闭。",
+          "desc": "开启后自动进入配额刷新模式，关闭后自动进入自动重试模式。",
           "help": "开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，出错自动换号重试最多 5 次。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。"
-        },
-        "coolingBasicHours": {
-          "label": "Basic 冷却（小时）",
-          "desc": "basic 号收到 429 后的冷却时长，默认 20 h（对齐 upstream 20 h 限流窗口）。仅在自动重试模式下生效。"
-        },
-        "coolingSuperHours": {
-          "label": "Super 冷却（小时）",
-          "desc": "super 号收到 429 后的冷却时长，默认 2 h（对齐 upstream 2 h 限流窗口）。仅在自动重试模式下生效。"
-        },
-        "coolingHeavyHours": {
-          "label": "Heavy 冷却（小时）",
-          "desc": "heavy 号收到 429 后的冷却时长，默认 2 h（对齐 upstream 2 h 限流窗口）。仅在自动重试模式下生效。"
         },
         "maxInflight": {
           "label": "单号并发上限",
           "desc": "单个账号同时在执行的请求上限，超过则选号路径跳过该号（两种模式共用）。"
         },
         "basicInterval": {
-          "label": "Basic 刷新周期（秒）",
-          "desc": "basic 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 36000 s / 10 h）。"
+          "label": "Basic 周期（秒）",
+          "desc": "basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 36000s。"
         },
         "superInterval": {
-          "label": "Super 刷新周期（秒）",
-          "desc": "super 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 7200 s / 2 h）。"
+          "label": "Super 周期（秒）",
+          "desc": "super 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。"
         },
         "heavyInterval": {
-          "label": "Heavy 刷新周期（秒）",
-          "desc": "heavy 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 7200 s / 2 h）。"
+          "label": "Heavy 周期（秒）",
+          "desc": "heavy 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。"
         },
         "usageConcurrency": {
           "label": "刷新并发数",
           "desc": "并发调用 usage 接口刷新额度时允许的最大并行数。"
         },
         "onDemandMinInterval": {
-          "label": "按需刷新最小间隔（秒）",
+          "label": "按需刷新间隔（秒）",
           "desc": "请求链路触发刷新（例如收到 429）时的节流间隔。N 秒内重复触发只执行一次，避免批量打爆配额接口。"
         },
         "nsfwConcurrency": {

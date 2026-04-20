@@ -495,21 +495,12 @@ const SCHEMA_DEF = [
         title: '配额刷新调度', titleKey: 'config.schema.groups.refreshSchedule',
         section: 'account.refresh',
         fields: [
-          { key: 'enabled', label: '启用配额刷新', labelKey: 'config.schema.fields.refreshEnabled.label', type: 'bool', desc: '开启配额探测和评分选号；万级以上账号建议关闭。', descKey: 'config.schema.fields.refreshEnabled.desc', help: '开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，出错自动换号重试最多 5 次。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。', helpKey: 'config.schema.fields.refreshEnabled.help' },
-          { key: 'basic_interval_sec', label: 'Basic 刷新周期（秒）', labelKey: 'config.schema.fields.basicInterval.label', type: 'number', desc: 'basic 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 36000 s / 10 h）。', descKey: 'config.schema.fields.basicInterval.desc' },
-          { key: 'super_interval_sec', label: 'Super 刷新周期（秒）', labelKey: 'config.schema.fields.superInterval.label', type: 'number', desc: 'super 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 7200 s / 2 h）。', descKey: 'config.schema.fields.superInterval.desc' },
-          { key: 'heavy_interval_sec', label: 'Heavy 刷新周期（秒）', labelKey: 'config.schema.fields.heavyInterval.label', type: 'number', desc: 'heavy 号池额度的定时刷新间隔，建议与配额窗口对齐（默认 7200 s / 2 h）。', descKey: 'config.schema.fields.heavyInterval.desc' },
-          { key: 'on_demand_min_interval_sec', label: '按需刷新最小间隔（秒）', labelKey: 'config.schema.fields.onDemandMinInterval.label', type: 'number', desc: '请求链路触发刷新（例如收到 429）时的节流间隔。N 秒内重复触发只执行一次，避免批量打爆配额接口。', descKey: 'config.schema.fields.onDemandMinInterval.desc' },
+          { key: 'enabled', label: '启用配额刷新', labelKey: 'config.schema.fields.refreshEnabled.label', type: 'bool', desc: '开启后自动进入配额刷新模式，关闭后自动进入自动重试模式。', descKey: 'config.schema.fields.refreshEnabled.desc', help: '开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，出错自动换号重试最多 5 次。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。', helpKey: 'config.schema.fields.refreshEnabled.help' },
+          { key: 'basic_interval_sec', label: 'Basic 周期（秒）', labelKey: 'config.schema.fields.basicInterval.label', type: 'number', desc: 'basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 36000s。', descKey: 'config.schema.fields.basicInterval.desc' },
+          { key: 'super_interval_sec', label: 'Super 周期（秒）', labelKey: 'config.schema.fields.superInterval.label', type: 'number', desc: 'super 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。', descKey: 'config.schema.fields.superInterval.desc' },
+          { key: 'heavy_interval_sec', label: 'Heavy 周期（秒）', labelKey: 'config.schema.fields.heavyInterval.label', type: 'number', desc: 'heavy 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。', descKey: 'config.schema.fields.heavyInterval.desc' },
+          { key: 'on_demand_min_interval_sec', label: '按需刷新间隔（秒）', labelKey: 'config.schema.fields.onDemandMinInterval.label', type: 'number', desc: '请求链路触发刷新（例如收到 429）时的节流间隔。N 秒内重复触发只执行一次，避免批量打爆配额接口。', descKey: 'config.schema.fields.onDemandMinInterval.desc' },
           { key: 'usage_concurrency', label: '刷新并发数', labelKey: 'config.schema.fields.usageConcurrency.label', type: 'number', desc: '并发调用 usage 接口刷新额度时允许的最大并行数。', descKey: 'config.schema.fields.usageConcurrency.desc' },
-        ]
-      },
-      {
-        title: '自动重试冷却', titleKey: 'config.schema.groups.randomCooling',
-        section: 'account.random',
-        fields: [
-          { key: 'cooling_basic_hours', label: 'Basic 冷却（小时）', labelKey: 'config.schema.fields.coolingBasicHours.label', type: 'number', desc: 'basic 号收到 429 后的冷却时长，默认 20 h（对齐 upstream 20 h 限流窗口）。仅在自动重试模式下生效。', descKey: 'config.schema.fields.coolingBasicHours.desc' },
-          { key: 'cooling_super_hours', label: 'Super 冷却（小时）', labelKey: 'config.schema.fields.coolingSuperHours.label', type: 'number', desc: 'super 号收到 429 后的冷却时长，默认 2 h（对齐 upstream 2 h 限流窗口）。仅在自动重试模式下生效。', descKey: 'config.schema.fields.coolingSuperHours.desc' },
-          { key: 'cooling_heavy_hours', label: 'Heavy 冷却（小时）', labelKey: 'config.schema.fields.coolingHeavyHours.label', type: 'number', desc: 'heavy 号收到 429 后的冷却时长，默认 2 h（对齐 upstream 2 h 限流窗口）。仅在自动重试模式下生效。', descKey: 'config.schema.fields.coolingHeavyHours.desc' },
         ]
       },
       {

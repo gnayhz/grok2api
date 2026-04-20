@@ -306,19 +306,20 @@ class AccountDirectory:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_COOLING_HOURS: dict[str, int] = {
-    "basic": 20,
-    "super": 2,
-    "heavy": 2,
+_POOL_INTERVAL_CONFIG: dict[str, tuple[str, int]] = {
+    "basic": ("account.refresh.basic_interval_sec", 36_000),
+    "super": ("account.refresh.super_interval_sec", 7_200),
+    "heavy": ("account.refresh.heavy_interval_sec", 7_200),
 }
 
 
 def _pool_cooling_sec(pool_id: int) -> int:
     """Cooling seconds for a 429 on a given pool (random strategy only)."""
     pool_str = POOL_ID_TO_STR.get(pool_id, "basic")
-    default_hours = _DEFAULT_COOLING_HOURS.get(pool_str, 2)
-    hours = int(get_config(f"account.random.cooling_{pool_str}_hours", default_hours))
-    return max(0, hours) * 3600
+    interval_key, default_interval = _POOL_INTERVAL_CONFIG.get(
+        pool_str, _POOL_INTERVAL_CONFIG["basic"]
+    )
+    return max(0, int(get_config(interval_key, default_interval)))
 
 
 # ---------------------------------------------------------------------------
