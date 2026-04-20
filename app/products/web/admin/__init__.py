@@ -184,6 +184,8 @@ async def get_config_endpoint():
 
 @router.post("/config", tags=[_TAG_ADMIN_SYSTEM])
 async def update_config(req: ConfigPatchRequest):
+    from app.control.account.runtime import reconcile_refresh_runtime
+
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
     await config.update(patch)
@@ -195,7 +197,12 @@ async def update_config(req: ConfigPatchRequest):
         file_level=config.get_str("logging.file_level", "") or None,
         max_files=config.get_int("logging.max_files", 7),
     )
-    return {"status": "success", "message": "配置已更新"}
+    strategy_name = reconcile_refresh_runtime()
+    return {
+        "status": "success",
+        "message": "配置已更新",
+        "selection_strategy": strategy_name,
+    }
 
 
 @router.get("/storage", tags=[_TAG_ADMIN_SYSTEM])
@@ -205,6 +212,7 @@ async def get_storage_mode():
 
 @router.get("/status", tags=[_TAG_ADMIN_SYSTEM])
 async def runtime_status():
+    from app.control.account.runtime import reconcile_refresh_runtime
     from app.dataplane.account import _directory
 
     if _directory is None:
@@ -214,12 +222,14 @@ async def runtime_status():
             code="directory_not_initialised",
             status=503,
         )
+    strategy_name = reconcile_refresh_runtime()
     return Response(
         content=orjson.dumps(
             {
                 "status": "ok",
                 "size": _directory.size,
                 "revision": _directory.revision,
+                "selection_strategy": strategy_name,
             }
         ),
         media_type="application/json",

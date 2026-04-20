@@ -161,6 +161,7 @@
     "statInvalid": "Abnormal",
     "statDisabled": "Disabled",
     "statCalls": "Total Calls",
+    "statSuccessTotal": "Successful Calls",
     "statAuto": "Auto Balance",
     "statFast": "Fast Balance",
     "statExpert": "Expert Balance",
@@ -331,6 +332,7 @@
         "features": "Core Features",
         "mediaFormat": "Media Output",
         "refreshSchedule": "Quota Refresh",
+        "selection": "Selection Concurrency",
         "batchConcurrency": "Batch Concurrency",
         "egressProxy": "Egress Proxy",
         "clearance": "Cloudflare Clearance",
@@ -433,24 +435,33 @@
           "label": "Video Output Format",
           "desc": "local_* modes download video assets to the server and deliver them through the local proxy. Configure the APP Base URL first and account for outbound bandwidth usage."
         },
+        "refreshEnabled": {
+          "label": "Enable Quota Refresh",
+          "desc": "When enabled, the system automatically switches to quota refresh mode. When disabled, it automatically switches to auto-retry mode.",
+          "help": "On: quota refresh mode. The scheduler periodically syncs real quota, and selection uses scoring.\nOff: auto-retry mode. No upstream probing, uniform random selection, and auto-swap on errors for up to 5 retries.\nRecommendation: turn this off for >10k accounts to avoid self-triggering upstream 429s."
+        },
+        "maxInflight": {
+          "label": "Max Inflight per Account",
+          "desc": "Maximum concurrent in-flight requests per account. Accounts at this limit are skipped by the selector (shared by both modes)."
+        },
         "basicInterval": {
-          "label": "Basic Refresh Interval (s)",
-          "desc": "Scheduled quota refresh interval for the basic pool. Align this with the quota window when possible (default 36000 s / 10 h)."
+          "label": "Basic Cycle (s)",
+          "desc": "Shared cycle for the basic pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 36000s."
         },
         "superInterval": {
-          "label": "Super Refresh Interval (s)",
-          "desc": "Scheduled quota refresh interval for the super pool. Align this with the quota window when possible (default 7200 s / 2 h)."
+          "label": "Super Cycle (s)",
+          "desc": "Shared cycle for the super pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 7200s."
         },
         "heavyInterval": {
-          "label": "Heavy Refresh Interval (s)",
-          "desc": "Scheduled quota refresh interval for the heavy pool. Align this with the quota window when possible (default 7200 s / 2 h)."
+          "label": "Heavy Cycle (s)",
+          "desc": "Shared cycle for the heavy pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 7200s."
         },
         "usageConcurrency": {
           "label": "Refresh Concurrency",
           "desc": "Maximum number of parallel usage calls allowed during quota refresh."
         },
         "onDemandMinInterval": {
-          "label": "Minimum On-Demand Refresh Interval (s)",
+          "label": "On-Demand Refresh Interval (s)",
           "desc": "Throttle window for request-triggered refreshes such as 429 handling. Repeated triggers within the interval are coalesced into a single refresh."
         },
         "nsfwConcurrency": {

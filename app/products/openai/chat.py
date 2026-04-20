@@ -22,6 +22,7 @@ from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.account.enums import FeedbackKind
+from app.dataplane.account.selector import current_strategy
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.session import (
@@ -54,7 +55,7 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
-from app.products._account_selection import reserve_account
+from app.products._account_selection import reserve_account, selection_max_retries
 
 
 def _to_chat_annotations(anns: list[dict]) -> list[dict]:
@@ -106,6 +107,8 @@ def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamEr
 async def _quota_sync(token: str, mode_id: int) -> None:
     """Fire-and-forget: fetch real quota after a successful call."""
     try:
+        if current_strategy() != "quota":
+            return
         svc = get_refresh_service()
         if svc:
             await svc.refresh_call_async(token, mode_id)
@@ -121,12 +124,20 @@ async def _quota_sync(token: str, mode_id: int) -> None:
 async def _fail_sync(
     token: str, mode_id: int, exc: BaseException | None = None
 ) -> None:
-    """Fire-and-forget: persist failure counter after a failed call."""
+    """Fire-and-forget: persist failure metadata after a failed call.
+
+    In random mode this helper must not trigger upstream quota probes. It still
+    records failures so 401 invalidation and local failure accounting continue
+    to work unchanged.
+    """
     try:
         svc = get_refresh_service()
         if svc:
             await svc.record_failure_async(token, mode_id, exc)
-            if getattr(exc, "status", None) == 429:
+            if (
+                current_strategy() == "quota"
+                and getattr(exc, "status", None) == 429
+            ):
                 result = await svc.refresh_on_demand()
                 logger.info(
                     "account on-demand refresh triggered: token={}... mode_id={} refreshed={} failed={} rate_limited={}",
@@ -470,7 +481,7 @@ async def completions(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = cfg.get_int("retry.max_retries", 1)
+    max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
     timeout_s = cfg.get_float("chat.timeout", 120.0)
