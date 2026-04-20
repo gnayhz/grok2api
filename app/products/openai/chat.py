@@ -59,10 +59,22 @@ from app.products._account_selection import reserve_account
 
 def _to_chat_annotations(anns: list[dict]) -> list[dict]:
     """扁平 annotations → Chat Completions 嵌套格式（内层无 type）"""
-    return [{"type": "url_citation", "url_citation": {
-        "url": a["url"], "title": a["title"],
-        "start_index": a["start_index"], "end_index": a["end_index"],
-    }} for a in anns] if anns else []
+    return (
+        [
+            {
+                "type": "url_citation",
+                "url_citation": {
+                    "url": a["url"],
+                    "title": a["title"],
+                    "start_index": a["start_index"],
+                    "end_index": a["end_index"],
+                },
+            }
+            for a in anns
+        ]
+        if anns
+        else []
+    )
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
@@ -251,10 +263,22 @@ def _normalize_image_format(value: str | None) -> str:
     return fmt
 
 
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>")
+_INLINE_BASE64_IMG_RE = re.compile(r"!\[image\]\(data:[^)]*?base64,[^)]*?\)")
 # 精确匹配 grok2api 注入的 Sources 段落（含标记行），用于多轮对话剥离
 _SOURCES_STRIP_RE = re.compile(
     r"(?:^|\r?\n\r?\n)## Sources\r?\n\[grok2api-sources\]: #\r?\n[\s\S]*$"
 )
+
+
+def _strip_generated_artifacts(text: str, *, strip_sources: bool = False) -> str:
+    """Remove generated assistant artifacts before reusing conversation history."""
+    if not text or not isinstance(text, str):
+        return text
+    if strip_sources:
+        text = _SOURCES_STRIP_RE.sub("", text)
+    text = _THINK_TAG_RE.sub("", text).strip()
+    return _INLINE_BASE64_IMG_RE.sub("[图片]", text)
 
 
 def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
@@ -291,23 +315,24 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
 
         # ── 剥离前轮 assistant 消息中 grok2api 注入的 Sources 段落 ────────────
         if role == "assistant" and isinstance(content, str):
-            content = _SOURCES_STRIP_RE.sub("", content)
+            content = _strip_generated_artifacts(content, strip_sources=True)
 
         # ── normal content handling ───────────────────────────────────────────
         if isinstance(content, str):
-            if content.strip():
-                parts.append(f"[{role}]: {content.strip()}")
+            cleaned = _strip_generated_artifacts(content.strip())
+            if cleaned:
+                parts.append(f"[{role}]: {cleaned}")
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
                 if btype == "text":
-                    text = (block.get("text") or "")
-                    # 块列表中的 assistant text 也需剥离 Sources（先 regex 再 strip，与 str 路径对齐）
-                    if role == "assistant":
-                        text = _SOURCES_STRIP_RE.sub("", text)
-                    text = text.strip()
+                    text = block.get("text") or ""
+                    text = _strip_generated_artifacts(
+                        text.strip(),
+                        strip_sources=(role == "assistant"),
+                    )
                     if text:
                         parts.append(f"[{role}]: {text}")
                 elif btype == "image_url":
@@ -380,7 +405,9 @@ async def _stream_chat(
                 stream=True,
             )
         except Exception as exc:
-            raise _transport_upstream_error(exc, context="Chat transport failed") from exc
+            raise _transport_upstream_error(
+                exc, context="Chat transport failed"
+            ) from exc
 
         if response.status_code != 200:
             try:
@@ -397,7 +424,9 @@ async def _stream_chat(
             async for line in response.aiter_lines():
                 yield line
         except Exception as exc:
-            raise _transport_upstream_error(exc, context="Chat stream read failed") from exc
+            raise _transport_upstream_error(
+                exc, context="Chat stream read failed"
+            ) from exc
 
 
 async def completions(
@@ -420,7 +449,6 @@ async def completions(
     """
     cfg = get_config()
     spec = resolve_model(model)
-    mode_id = int(spec.mode_id)  # cast once, reuse everywhere
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", True)
     emit_think = (
         thinking if thinking is not None else cfg.get_bool("features.thinking", True)
@@ -604,7 +632,10 @@ async def completions(
 
                             chat_anns = _to_chat_annotations(collected_annotations)
                             final = make_stream_chunk(
-                                response_id, model, "", is_final=True,
+                                response_id,
+                                model,
+                                "",
+                                is_final=True,
                                 annotations=chat_anns or None,
                             )
                             # 注入结构化搜索信源到 chunk 根对象（避免 delta strict schema 拒绝）
@@ -624,7 +655,10 @@ async def completions(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
                                 "chat stream retry scheduled: attempt={}/{} status={} token={}...",
@@ -653,7 +687,9 @@ async def completions(
                         if fail_exc
                         else FeedbackKind.SERVER_ERROR
                     )
-                    await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
+                    await directory.feedback(
+                        token, kind, selected_mode_id, now_s_val=now_s()
+                    )
                     if success:
                         asyncio.create_task(
                             _quota_sync(token, selected_mode_id)
@@ -747,9 +783,9 @@ async def completions(
             )
             await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
             if success:
-                asyncio.create_task(_quota_sync(token, selected_mode_id)).add_done_callback(
-                    _log_task_exception
-                )
+                asyncio.create_task(
+                    _quota_sync(token, selected_mode_id)
+                ).add_done_callback(_log_task_exception)
             else:
                 asyncio.create_task(
                     _fail_sync(token, selected_mode_id, fail_exc)

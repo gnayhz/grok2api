@@ -9,15 +9,7 @@ from curl_cffi.const import CurlOpt
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
-
-
-def _resolve_browser(lease: ProxyLease | None) -> str:
-    if lease is not None and lease.user_agent:
-        from urllib.parse import urlparse
-        import re
-        m = re.search(r"Chrome/(\d+)", lease.user_agent)
-        return f"chrome{m.group(1)}" if m else "chrome120"
-    return get_config().get_str("proxy.clearance.browser", "chrome120")
+from app.dataplane.proxy.adapters.profile import resolve_proxy_profile
 
 
 def _skip_proxy_ssl(proxy_url: str) -> bool:
@@ -33,26 +25,26 @@ def normalize_proxy_url(url: str) -> str:
         return url
     scheme = urlparse(url).scheme.lower()
     if scheme == "socks":
-        return "socks5h://" + url[len("socks://"):]
+        return "socks5h://" + url[len("socks://") :]
     if scheme == "socks5":
-        return "socks5h://" + url[len("socks5://"):]
+        return "socks5h://" + url[len("socks5://") :]
     if scheme == "socks4":
-        return "socks4a://" + url[len("socks4://"):]
+        return "socks4a://" + url[len("socks4://") :]
     return url
 
 
 def build_session_kwargs(
     *,
-    lease:            ProxyLease | None = None,
-    browser_override: str | None       = None,
-    extra:            dict[str, Any] | None = None,
+    lease: ProxyLease | None = None,
+    browser_override: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build kwargs suitable for ``curl_cffi.requests.AsyncSession``."""
     kwargs: dict[str, Any] = dict(extra or {})
 
     # Browser impersonation.
     if not kwargs.get("impersonate"):
-        browser = browser_override or _resolve_browser(lease)
+        browser = browser_override or resolve_proxy_profile(lease).browser
         if browser:
             kwargs["impersonate"] = browser
 
@@ -97,26 +89,27 @@ class ResettableSession:
     def __init__(
         self,
         *,
-        lease:           ProxyLease | None = None,
-        browser_override: str | None       = None,
-        reset_on_status: set[int] | None   = None,
+        lease: ProxyLease | None = None,
+        browser_override: str | None = None,
+        reset_on_status: set[int] | None = None,
         **session_kwargs: Any,
     ) -> None:
         self._kwargs = build_session_kwargs(
-            lease            = lease,
-            browser_override = browser_override,
-            extra            = session_kwargs or None,
+            lease=lease,
+            browser_override=browser_override,
+            extra=session_kwargs or None,
         )
         if reset_on_status is None:
             codes = get_config().get_list("retry.reset_session_status_codes", [403])
             reset_on_status = {int(c) for c in codes}
         self._reset_on = reset_on_status
         self._reset_pending = False
-        self._lock   = asyncio.Lock()
+        self._lock = asyncio.Lock()
         self._session = self._create()
 
     def _create(self):
         from curl_cffi.requests import AsyncSession
+
         return AsyncSession(**self._kwargs)
 
     async def _maybe_reset(self) -> None:
