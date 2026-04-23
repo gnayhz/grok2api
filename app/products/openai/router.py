@@ -1,6 +1,5 @@
 """OpenAI-compatible API router (/v1/*)."""
 
-import asyncio
 import base64
 import binascii
 import mimetypes
@@ -128,36 +127,7 @@ async def _safe_sse(stream: AsyncIterable[str]) -> AsyncGenerator[str, None]:
         yield "data: [DONE]\n\n"
 
 
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
-
-_HEARTBEAT_INTERVAL_S = 30
-
-
-async def _sse_with_heartbeat(
-    stream: AsyncIterable[str], interval: int = _HEARTBEAT_INTERVAL_S
-) -> AsyncGenerator[str, None]:
-    """Keep SSE connections alive through reverse proxies / CDNs.
-
-    - Initial 2KB padding forces intermediate buffers (nginx, Cloudflare) to flush.
-    - `: ping` comments sent every `interval` seconds of silence.
-    """
-    yield ": heartbeat stream connected\n" + " " * 2048 + "\n\n"
-
-    aiter = stream.__aiter__()
-    while True:
-        try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=interval)
-            yield chunk
-        except asyncio.TimeoutError:
-            yield ": ping\n\n"
-        except StopAsyncIteration:
-            break
-        except asyncio.CancelledError:
-            break
+_SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive"}
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +291,6 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             )
 
         else:
-            request_overrides: dict | None = None
-            if req.deepsearch:
-                request_overrides = {"deepsearchPreset": req.deepsearch}
             # reasoning_effort=None → config default; "none" → off; otherwise → on.
             if req.reasoning_effort is None:
                 emit_think: bool | None = None
@@ -338,7 +305,6 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 tool_choice=req.tool_choice,
                 temperature=req.temperature or 0.8,
                 top_p=req.top_p or 0.95,
-                request_overrides=request_overrides,
             )
 
     except AppError:
@@ -350,11 +316,6 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             is_stream,
             exc,
         )
-        # Video failures must surface their real HTTP status code so downstream
-        # billing gateways (e.g. New API) don't misread an SSE-wrapped error as a
-        # successful 200 response.
-        if spec.is_video():
-            raise
         if is_stream:
             _err_msg = str(
                 exc
@@ -375,9 +336,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
     if isinstance(result, dict):
         return JSONResponse(result)
     return StreamingResponse(
-        _sse_with_heartbeat(_safe_sse(result)),
-        media_type="text/event-stream",
-        headers=_SSE_HEADERS,
+        _safe_sse(result), media_type="text/event-stream", headers=_SSE_HEADERS
     )
 
 
@@ -456,9 +415,9 @@ async def responses_endpoint(req: ResponsesCreateRequest):
     if isinstance(result, dict):
         return JSONResponse(result)
     return StreamingResponse(
-        _sse_with_heartbeat(_safe_sse_responses(result)),
-        media_type="text/event-stream",
-        headers=_SSE_HEADERS,
+        _safe_sse_responses(result),
+        media_type = "text/event-stream",
+        headers    = _SSE_HEADERS,
     )
 
 

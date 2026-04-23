@@ -269,8 +269,6 @@ def _normalize_image_format(value: str | None) -> str:
     return fmt
 
 
-_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>")
-_INLINE_BASE64_IMG_RE = re.compile(r"!\[image\]\(data:[^)]*?base64,[^)]*?\)")
 # 精确匹配 grok2api 注入的 Sources 段落（含标记行），用于多轮对话剥离
 _SOURCES_STRIP_RE = re.compile(
     r"(?:^|\r?\n\r?\n)## Sources\r?\n\[grok2api-sources\]: #\r?\n[\s\S]*$"
@@ -283,8 +281,7 @@ def _strip_generated_artifacts(text: str, *, strip_sources: bool = False) -> str
         return text
     if strip_sources:
         text = _SOURCES_STRIP_RE.sub("", text)
-    text = _THINK_TAG_RE.sub("", text).strip()
-    return _INLINE_BASE64_IMG_RE.sub("[图片]", text)
+    return text.strip()
 
 
 def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:

@@ -325,7 +325,6 @@ curl http://localhost:8000/v1/chat/completions \
     "model": "grok-4.20-auto",
     "stream": true,
     "reasoning_effort": "high",
-    "deepsearch": "default",
     "messages": [
       {"role":"user","content":"你好"}
     ]
@@ -382,7 +381,6 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | 支持文本与多模态内容块 |
 | `stream` | 是否流式输出；不传时使用 `features.stream` 默认值 |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`；`none` 会关闭思考输出 |
-| `deepsearch` | 深度搜索预设：`default`, `deeper` |
 | `temperature` / `top_p` | 采样参数，默认 `0.8` / `0.95` |
 | `tools` | OpenAI function tools 结构 |
 | `tool_choice` | `auto`, `required` 或指定函数工具 |

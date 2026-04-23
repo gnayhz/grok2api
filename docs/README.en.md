@@ -324,7 +324,6 @@ curl http://localhost:8000/v1/chat/completions \
     "model": "grok-4.20-auto",
     "stream": true,
     "reasoning_effort": "high",
-    "deepsearch": "default",
     "messages": [
       {"role":"user","content":"Hello"}
     ]
@@ -381,7 +380,6 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | Supports text and multimodal content blocks |
 | `stream` | Whether to stream output; falls back to `features.stream` when omitted |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; `none` disables reasoning output |
-| `deepsearch` | Deep search preset: `default`, `deeper` |
 | `temperature` / `top_p` | Sampling parameters, default `0.8` / `0.95` |
 | `tools` | OpenAI function tools structure |
 | `tool_choice` | `auto`, `required`, or a specific function tool |
