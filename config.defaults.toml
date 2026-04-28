@@ -51,6 +51,8 @@ custom_instruction = ""
 #   local_md  — Markdown 内嵌本地代理 URL
 #   base64    — Markdown 内嵌 Base64 Data URI
 image_format = "grok_url"
+# Imagine WebSocket 返回的 imagine-public 图片默认直返；开启后下载到本地并返回本地代理 URL
+imagine_public_image_proxy = false
 
 # 视频返回格式
 #   grok_url  — 直接返回 Grok CDN URL

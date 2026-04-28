@@ -197,7 +197,7 @@ docker compose up -d
 | :-- | :-- |
 | `app` | `app_key`, `app_url`, `api_key`, `webui_enabled`, `webui_key` |
 | `logging` | `file_level`, `max_files` |
-| `features` | `temporary`, `memory`, `stream`, `thinking`, `auto_chat_mode_fallback`, `thinking_summary`, `dynamic_statsig`, `enable_nsfw`, `show_search_sources`, `custom_instruction`, `image_format`, `video_format` |
+| `features` | `temporary`, `memory`, `stream`, `thinking`, `auto_chat_mode_fallback`, `thinking_summary`, `dynamic_statsig`, `enable_nsfw`, `show_search_sources`, `custom_instruction`, `image_format`, `imagine_public_image_proxy`, `video_format` |
 | `proxy.egress` | `mode`, `proxy_url`, `proxy_pool`, `resource_proxy_url`, `resource_proxy_pool`, `skip_ssl_verify` |
 | `proxy.clearance` | `mode`, `cf_cookies`, `user_agent`, `browser`, `flaresolverr_url`, `timeout_sec`, `refresh_interval` |
 | `retry` | `reset_session_status_codes`, `max_retries`, `on_codes` |
@@ -216,6 +216,7 @@ docker compose up -d
 | 配置项 | 可选值 |
 | :-- | :-- |
 | `features.image_format` | `grok_url`, `local_url`, `grok_md`, `local_md`, `base64` |
+| `features.imagine_public_image_proxy` | `true`, `false` |
 | `features.video_format` | `grok_url`, `local_url`, `grok_html`, `local_html` |
 
 <br>

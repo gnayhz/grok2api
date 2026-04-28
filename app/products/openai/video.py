@@ -56,7 +56,7 @@ from .chat import _fail_sync, _quota_sync, _feedback_kind
 
 _IMAGE_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
 _VIDEO_MEDIA_TYPE = "MEDIA_POST_TYPE_VIDEO"
-_VIDEO_MODEL_NAME = "grok-3"
+_VIDEO_MODEL_NAME = "imagine-video-gen"
 _VIDEO_QUALITY = "standard"
 _VIDEO_OBJECT = "video"
 _VIDEO_JOB_TTL_S = 3600
@@ -141,6 +141,10 @@ def _build_message(prompt: str, preset: str) -> str:
 
 def _progress_reason(progress: int) -> str:
     return f"视频正在生成 {max(0, min(100, int(progress)))}%"
+
+
+def _progress_reason_delta(progress: int) -> str:
+    return _progress_reason(progress) + "\n"
 
 
 def _coerce_seconds(value: str | int | None) -> int:
@@ -230,7 +234,6 @@ def _video_create_payload(
         "temporary": True,
         "modelName": _VIDEO_MODEL_NAME,
         "message": _build_message(prompt, preset),
-        "toolOverrides": {"videoGen": True},
         "enableSideBySide": True,
         "responseMetadata": {
             "experiments": [],
@@ -262,7 +265,6 @@ def _video_extend_payload(
         "temporary": True,
         "modelName": _VIDEO_MODEL_NAME,
         "message": _build_message(prompt, preset),
-        "toolOverrides": {"videoGen": True},
         "enableSideBySide": True,
         "responseMetadata": {
             "experiments": [],
@@ -458,6 +460,7 @@ async def _collect_video_segment(
     final_asset_id = ""
     final_thumbnail = ""
     video_post_id = ""
+    stream_data_items: list[str] = []
 
     async for line in _stream_video_request(
         token,
@@ -470,6 +473,7 @@ async def _collect_video_segment(
             break
         if event_type != "data" or not data:
             continue
+        stream_data_items.append(data)
         try:
             obj = orjson.loads(data)
         except Exception:
@@ -512,10 +516,14 @@ async def _collect_video_segment(
 
     if not final_url and final_asset_id:
         raise UpstreamError(
-            "Video segment returned only assetId without a resolvable URL"
+            "Video segment returned only assetId without a resolvable URL",
+            body="\n".join(stream_data_items),
         )
     if not final_url:
-        raise UpstreamError("Video generation returned no final video URL")
+        raise UpstreamError(
+            "Video generation returned no final video URL",
+            body="\n".join(stream_data_items),
+        )
 
     return _VideoArtifact(
         video_url=final_url,
@@ -535,7 +543,12 @@ async def _download_video_bytes(token: str, url: str) -> tuple[bytes, str]:
         raise
     except Exception as exc:
         raise UpstreamError(f"Video download failed: {exc}") from exc
-    return b"".join(chunks), (content_type or "video/mp4")
+    raw = b"".join(chunks)
+    if not raw:
+        raise UpstreamError("Video download returned empty content", status=502)
+    if raw.lstrip()[:1] in {b"<", b"{"}:
+        raise UpstreamError("Video download returned non-video content", status=502)
+    return raw, (content_type or "video/mp4")
 
 
 def _save_video_bytes(raw: bytes, file_id: str) -> Path:
@@ -579,7 +592,7 @@ async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
         raw, _mime = await _download_video_bytes(token, url)
         await asyncio.to_thread(_save_video_bytes, raw, file_id)
     except Exception as exc:
-        logger.warning("video download failed: fallback_to=upstream_url error={}", exc)
+        logger.debug("video download fallback_to=upstream_url error={}", exc)
         return url if fmt == "local_url" else _render_video_html(url)
 
     local_url = _local_video_url(file_id)
@@ -1062,7 +1075,7 @@ async def completions(
                 if progress > last_progress:
                     last_progress = progress
                     chunk = make_thinking_chunk(
-                        response_id, model, _progress_reason(progress)
+                        response_id, model, _progress_reason_delta(progress)
                     )
                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
