@@ -436,16 +436,45 @@ async def _prepare_video_references(
     input_references: list[dict[str, Any]],
 ) -> list[_VideoReference]:
     """Upload multiple video references concurrently and preserve order."""
-    results: list[_VideoReference | None] = [None] * len(input_references)
+    tasks = [
+        _prepare_video_reference(token, ref)
+        for ref in input_references
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    failures: list[tuple[int, BaseException]] = [
+        (index, result)
+        for index, result in enumerate(results)
+        if isinstance(result, BaseException)
+    ]
+    if failures:
+        index, exc = failures[0]
+        message = f"Video input reference {index + 1} failed: {_exception_message(exc)}"
+        if len(failures) > 1:
+            message += f" ({len(failures)} references failed)"
+        if isinstance(exc, ValidationError):
+            raise ValidationError(message, param=exc.param) from exc
+        if isinstance(exc, UpstreamError):
+            raise UpstreamError(
+                message,
+                status=exc.status,
+                body=exc.details.get("body", ""),
+            ) from exc
+        raise UpstreamError(message) from exc
 
-    async def _runner(index: int, ref: dict[str, Any]) -> None:
-        results[index] = await _prepare_video_reference(token, ref)
+    return [r for r in results if isinstance(r, _VideoReference)]
 
-    async with asyncio.TaskGroup() as tg:
-        for index, ref in enumerate(input_references):
-            tg.create_task(_runner(index, ref), name=f"video-ref-{index}")
 
-    return [r for r in results if r is not None]
+def _exception_message(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        messages = [
+            _exception_message(child)
+            for child in exc.exceptions
+            if not isinstance(child, asyncio.CancelledError)
+        ]
+        return "; ".join(message for message in messages if message) or str(exc)
+    if isinstance(exc, AppError):
+        return exc.message
+    return str(exc)
 
 
 async def _collect_video_segment(
@@ -881,7 +910,7 @@ async def _run_video_job(
         logger.exception("video job failed: job_id={} error={}", job.id, exc)
         async with _VIDEO_JOBS_LOCK:
             job.status = "failed"
-            job.error = _job_error_payload(str(exc))
+            job.error = _job_error_payload(_exception_message(exc))
 
 
 async def create_video(
