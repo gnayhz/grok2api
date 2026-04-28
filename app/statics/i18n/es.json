@@ -64,6 +64,8 @@
         "imageRequired": "La edición de imagen requiere al menos una imagen de referencia",
         "imageOnly": "La edición de imagen solo admite cargas de imágenes",
         "videoImageOnly": "La generación de vídeo solo admite imágenes como referencia",
+        "imageProxyRequired": "No se pudo cargar la imagen. Configure la URL base de APP y cambie el formato de salida de imagen a local_url, local_md o base64.",
+        "videoProxyRequired": "La carga del vídeo devolvió 403. Vaya a la página de administración, configure la URL base de APP y cambie el formato de salida de vídeo al modo de proxy local (local_url o local_html). Después, inténtelo de nuevo.",
         "requestFailed": "La solicitud falló",
         "initFailed": "La inicialización de la página de chat falló"
       }
@@ -393,7 +395,8 @@
         "enableNsfw": { "label": "Permitir generación NSFW" },
         "showSearchSources": { "label": "Agregar fuentes al contenido", "desc": "Las fuentes de búsqueda siempre se incluyen en el campo search_sources. Esta opción controla si también se agrega una sección ## Sources al contenido (para compatibilidad con clientes que analizan texto)." },
         "customInstruction": { "label": "Instrucción suplementaria global" },
-        "imageFormat": { "label": "Formato de salida de imagen" },
+        "imageFormat": { "label": "Formato de salida de imagen", "desc": "grok_url y grok_md devuelven directamente la dirección nativa del CDN de Grok de forma predeterminada. Los modos local_* descargan primero los recursos en el servidor y los vuelven a exponer mediante el proxy local. base64 devuelve un Data URI integrado. Cuando el proxy de imágenes Imagine Public está activado, las imágenes imagine-public devueltas por WebSocket también se sirven mediante el proxy local." },
+        "imaginePublicImageProxy": { "label": "Proxy de imágenes Imagine Public", "desc": "Cuando está activado, las imágenes imagine-public devueltas por WebSocket se descargan en el servidor y se entregan mediante el proxy local. Cuando está desactivado, las imágenes públicas se devuelven directamente." },
         "videoFormat": { "label": "Formato de salida de video" },
         "refreshEnabled": { "label": "Activar actualización de cuota", "desc": "Al activarlo, el sistema cambia automáticamente al modo de actualización de cuota. Al desactivarlo, cambia automáticamente al modo de reintento automático.", "help": "Activado: modo de actualización de cuota. El scheduler sincroniza periódicamente la cuota real y la selección usa puntuación.\nDesactivado: modo de reintento automático. No comprueba upstream activamente, usa selección aleatoria y cambia de cuenta al fallar hasta 5 reintentos.\nRecomendación: desactívalo con más de 10.000 cuentas para evitar provocar 429 de upstream con comprobaciones activas." },
         "maxInflight": { "label": "Máximo en curso por cuenta", "desc": "Máximo de solicitudes simultáneas en curso por cuenta. Las cuentas en ese límite se omiten en la selección (compartido por ambos modos)." },

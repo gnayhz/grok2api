@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable
+from urllib.parse import urlparse
 
 import orjson
 
@@ -25,6 +26,7 @@ from app.dataplane.reverse.protocol.xai_chat import (
     StreamAdapter,
     build_chat_payload,
     classify_line,
+    raise_for_stream_error,
 )
 from app.dataplane.reverse.protocol.xai_assets import infer_content_type, resolve_asset_reference, resolve_download_url
 from app.dataplane.reverse.protocol.xai_image_edit import (
@@ -106,6 +108,21 @@ def _progress_reason(label: str, progress: int, *, completed: int | None = None,
     return reason
 
 
+def _progress_reason_delta(
+    label: str,
+    progress: int,
+    *,
+    completed: int | None = None,
+    total: int | None = None,
+) -> str:
+    return _progress_reason(
+        label,
+        progress,
+        completed=completed,
+        total=total,
+    ) + "\n"
+
+
 def _append_reason_update(
     updates: list[str],
     label: str,
@@ -171,6 +188,14 @@ def _extract_image_file_id(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:32]
 
 
+def _is_imagine_public_url(url: str) -> bool:
+    try:
+        host = urlparse(url or "").hostname or ""
+    except Exception:
+        return False
+    return host.startswith("imagine-public")
+
+
 def _save_image(raw: bytes, mime: str, file_id: str) -> str:
     return save_local_image(raw, mime, file_id)
 
@@ -196,6 +221,13 @@ async def _resolve_image_output(
     blob_b64: str | None = None,
 ) -> _ImageOutput:
     fmt = _normalize_response_format(response_format)
+    cfg = get_config()
+    if (
+        fmt == "url"
+        and _is_imagine_public_url(url)
+        and not cfg.get_bool("features.imagine_public_image_proxy", False)
+    ):
+        return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
     if fmt == "url" and not _app_url():
         return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
 
@@ -323,7 +355,7 @@ async def generate(
                                 completed=len(completed_ids),
                                 total=n,
                             )
-                            chunk = make_thinking_chunk(response_id, model, reason)
+                            chunk = make_thinking_chunk(response_id, model, reason + "\n")
                             yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                         continue
                     if not ev.get("is_final"):
@@ -335,7 +367,7 @@ async def generate(
                     if chat_format and aggregate > last_progress:
                         last_progress = aggregate
                         reason = _progress_reason("图片", aggregate, completed=len(completed_ids), total=n)
-                        chunk = make_thinking_chunk(response_id, model, reason)
+                        chunk = make_thinking_chunk(response_id, model, reason + "\n")
                         yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                     image = await _resolve_image_output(
                         token=token,
@@ -505,7 +537,12 @@ async def _generate_lite(
                     chunk = make_thinking_chunk(
                         response_id,
                         spec.model_name,
-                        _progress_reason("图片", aggregate, completed=completed, total=n),
+                        _progress_reason_delta(
+                            "图片",
+                            aggregate,
+                            completed=completed,
+                            total=n,
+                        ),
                     )
                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
@@ -567,10 +604,17 @@ async def _generate_lite(
 # Image editing
 # ---------------------------------------------------------------------------
 
-_EDIT_MAX_REFERENCES = 5
+_EDIT_MAX_REFERENCES = 7
 _EDIT_DEFAULT_SIZE = "1024x1024"
 _EDIT_MAX_N = 2
 _EDIT_MAX_ATTEMPTS = 2
+_EDIT_IMAGE_PLACEHOLDER_RE = re.compile(r"@IMAGE(\d+)\b", re.IGNORECASE)
+
+
+@dataclass(slots=True)
+class _EditReference:
+    file_id: str
+    content_url: str
 
 
 def _normalize_edit_inputs(image_inputs: list[str]) -> list[str]:
@@ -592,11 +636,16 @@ def _normalize_edit_size(size: str) -> str:
     return _EDIT_DEFAULT_SIZE
 
 
-async def _prepare_edit_reference(token: str, image_input: str, index: int) -> str:
+async def _prepare_edit_reference(
+    token: str, image_input: str, index: int
+) -> _EditReference:
     """Upload one edit reference and resolve it to the upstream content URL."""
     try:
         file_id, file_uri = await upload_from_input(token, image_input)
-        return resolve_uploaded_asset_reference(token, file_id, file_uri)
+        return _EditReference(
+            file_id=file_id,
+            content_url=resolve_uploaded_asset_reference(token, file_id, file_uri),
+        )
     except ValidationError as exc:
         raise ValidationError(exc.message, param=f"image.{index}") from exc
     except UpstreamError as exc:
@@ -609,9 +658,11 @@ async def _prepare_edit_reference(token: str, image_input: str, index: int) -> s
         raise UpstreamError(f"Image edit reference {index + 1} upload failed: {exc}") from exc
 
 
-async def _prepare_edit_references(token: str, image_inputs: list[str]) -> list[str]:
+async def _prepare_edit_references(
+    token: str, image_inputs: list[str]
+) -> list[_EditReference]:
     """Upload edit references concurrently and preserve caller order."""
-    results: list[str | None] = [None] * len(image_inputs)
+    results: list[_EditReference | None] = [None] * len(image_inputs)
 
     async def _runner(index: int, image_input: str) -> None:
         results[index] = await _prepare_edit_reference(token, image_input, index)
@@ -621,6 +672,20 @@ async def _prepare_edit_references(token: str, image_inputs: list[str]) -> list[
             tg.create_task(_runner(index, image_input), name=f"image-edit-ref-{index}")
 
     return [result for result in results if result is not None]
+
+
+def _replace_edit_image_placeholders(
+    prompt: str, references: list[_EditReference]
+) -> str:
+    """Replace @IMAGE1-style placeholders with uploaded asset IDs."""
+
+    def _replace(match: re.Match[str]) -> str:
+        image_number = int(match.group(1))
+        if image_number < 1 or image_number > len(references):
+            return match.group(0)
+        return f"@{references[image_number - 1].file_id}"
+
+    return _EDIT_IMAGE_PLACEHOLDER_RE.sub(_replace, prompt)
 
 
 def _extract_edit_prompt_and_inputs(messages: list[dict]) -> tuple[str, list[str]]:
@@ -755,6 +820,7 @@ async def _collect_edit_final_urls(
             obj = orjson.loads(data)
         except Exception:
             continue
+        raise_for_stream_error(obj)
         stream = extract_streaming_response(obj)
         if stream and progress_cb is not None:
             index = _parse_image_index(stream.get("imageIndex"))
@@ -1070,16 +1136,19 @@ async def edit(
 
     token       = acct.token
     response_id = make_response_id()
+    edit_prompt = prompt
 
     try:
-        image_references = await _prepare_edit_references(token, image_inputs)
-        if not image_references:
+        edit_references = await _prepare_edit_references(token, image_inputs)
+        if not edit_references:
             raise UpstreamError("All image uploads failed; cannot proceed with image edit")
+        edit_prompt = _replace_edit_image_placeholders(prompt, edit_references)
+        image_references = [ref.content_url for ref in edit_references]
 
         post = await create_media_post(
             token,
             media_type=IMAGE_POST_MEDIA_TYPE,
-            prompt=prompt,
+            prompt=edit_prompt,
         )
         post_data = post.get("post")
         if not isinstance(post_data, dict):
@@ -1087,6 +1156,9 @@ async def edit(
         parent_post_id = str(post_data.get("id") or "").strip()
         if not parent_post_id:
             raise UpstreamError("Image edit create-post returned no post id")
+        post_prompt = post_data.get("originalPrompt") or post_data.get("prompt")
+        if isinstance(post_prompt, str) and post_prompt.strip():
+            edit_prompt = post_prompt.strip()
     except Exception:
         await _acct_dir.release(acct)
         raise
@@ -1109,7 +1181,7 @@ async def edit(
                 task = asyncio.create_task(
                     _collect_edit_images(
                         token=token,
-                        prompt=prompt,
+                        prompt=edit_prompt,
                         image_references=image_references,
                         parent_post_id=parent_post_id,
                         requested_n=n,
@@ -1128,7 +1200,12 @@ async def edit(
                         chunk = make_thinking_chunk(
                             response_id,
                             model,
-                            _progress_reason("图片", aggregate, completed=completed, total=n),
+                            _progress_reason_delta(
+                                "图片",
+                                aggregate,
+                                completed=completed,
+                                total=n,
+                            ),
                         )
                         yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                 images = await task
@@ -1173,7 +1250,7 @@ async def edit(
 
         images = await _collect_edit_images(
             token=token,
-            prompt=prompt,
+            prompt=edit_prompt,
             image_references=image_references,
             parent_post_id=parent_post_id,
             requested_n=n,

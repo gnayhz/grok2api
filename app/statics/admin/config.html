@@ -467,8 +467,16 @@ const SCHEMA_DEF = [
               { value: 'local_md', label: 'Markdown（本地代理）', labelKey: 'config.schema.options.imageFormat.localMarkdown', disabledWhen: 'no_app_url', disabledTip: '请先填写 APP 访问地址', disabledTipKey: 'config.disabledTip.appUrlRequired' },
               { value: 'base64', label: 'Base64（内嵌）', labelKey: 'config.schema.options.imageFormat.base64' },
             ],
-            desc: 'grok_url / grok_md 直接返回 Grok CDN 地址，客户端需具备 CDN 访问能力；local_* 模式会先下载到服务端，再通过本地 URL 代理分发；base64 会以内嵌 Data URI 返回。',
+            desc: 'grok_url / grok_md 默认直接返回 Grok CDN 地址；local_* 模式会先下载到服务端，再通过本地 URL 代理分发；base64 会以内嵌 Data URI 返回。开启 Imagine Public 图片代理后，WebSocket 返回的 imagine-public 图片也会本地代理。',
             descKey: 'config.schema.fields.imageFormat.desc',
+          },
+          {
+            key: 'imagine_public_image_proxy',
+            label: 'Imagine Public 图片代理',
+            labelKey: 'config.schema.fields.imaginePublicImageProxy.label',
+            type: 'bool',
+            desc: '开启后将 WebSocket 返回的 imagine-public 图片下载到服务端，再通过本地 URL 代理分发；关闭时保持公开图片直返。',
+            descKey: 'config.schema.fields.imaginePublicImageProxy.desc',
           },
           {
             key: 'video_format',
