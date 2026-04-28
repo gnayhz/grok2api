@@ -227,8 +227,8 @@ Runtime config can also be overridden with `GROK_`-prefixed environment variable
 | Model | mode | tier |
 | :-- | :-- | :-- |
 | `grok-4.20-0309-non-reasoning` | `fast` | `basic` |
-| `grok-4.20-0309` | `auto` | `basic` |
-| `grok-4.20-0309-reasoning` | `expert` | `basic` |
+| `grok-4.20-0309` | `auto` | `super` |
+| `grok-4.20-0309-reasoning` | `expert` | `super` |
 | `grok-4.20-0309-non-reasoning-super` | `fast` | `super` |
 | `grok-4.20-0309-super` | `auto` | `super` |
 | `grok-4.20-0309-reasoning-super` | `expert` | `super` |
@@ -237,8 +237,8 @@ Runtime config can also be overridden with `GROK_`-prefixed environment variable
 | `grok-4.20-0309-reasoning-heavy` | `expert` | `heavy` |
 | `grok-4.20-multi-agent-0309` | `heavy` | `heavy` |
 | `grok-4.20-fast` | `fast` | `basic`, prefers higher-tier pools |
-| `grok-4.20-auto` | `auto` | `basic`, prefers higher-tier pools |
-| `grok-4.20-expert` | `expert` | `basic`, prefers higher-tier pools |
+| `grok-4.20-auto` | `auto` | `super`, prefers higher-tier pools |
+| `grok-4.20-expert` | `expert` | `super`, prefers higher-tier pools |
 | `grok-4.20-heavy` | `heavy` | `heavy` |
 | `grok-4.3-beta` | `grok-420-computer-use-sa` | `super` |
 

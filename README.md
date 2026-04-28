@@ -228,8 +228,8 @@ docker compose up -d
 | 模型名 | mode | tier |
 | :-- | :-- | :-- |
 | `grok-4.20-0309-non-reasoning` | `fast` | `basic` |
-| `grok-4.20-0309` | `auto` | `basic` |
-| `grok-4.20-0309-reasoning` | `expert` | `basic` |
+| `grok-4.20-0309` | `auto` | `super` |
+| `grok-4.20-0309-reasoning` | `expert` | `super` |
 | `grok-4.20-0309-non-reasoning-super` | `fast` | `super` |
 | `grok-4.20-0309-super` | `auto` | `super` |
 | `grok-4.20-0309-reasoning-super` | `expert` | `super` |
@@ -238,8 +238,8 @@ docker compose up -d
 | `grok-4.20-0309-reasoning-heavy` | `expert` | `heavy` |
 | `grok-4.20-multi-agent-0309` | `heavy` | `heavy` |
 | `grok-4.20-fast` | `fast` | `basic`，优先使用高等级账号池 |
-| `grok-4.20-auto` | `auto` | `basic`，优先使用高等级账号池 |
-| `grok-4.20-expert` | `expert` | `basic`，优先使用高等级账号池 |
+| `grok-4.20-auto` | `auto` | `super`，优先使用高等级账号池 |
+| `grok-4.20-expert` | `expert` | `super`，优先使用高等级账号池 |
 | `grok-4.20-heavy` | `heavy` | `heavy` |
 | `grok-4.3-beta` | `grok-420-computer-use-sa` | `super` |
 
