@@ -38,7 +38,7 @@ from app.dataplane.reverse.protocol.xai_assets import (
     resolve_asset_reference,
     resolve_download_url,
 )
-from app.dataplane.reverse.protocol.xai_chat import classify_line
+from app.dataplane.reverse.protocol.xai_chat import classify_line, raise_for_stream_error
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import (
     resolve_uploaded_asset_reference,
@@ -474,6 +474,7 @@ async def _collect_video_segment(
             obj = orjson.loads(data)
         except Exception:
             continue
+        raise_for_stream_error(obj)
 
         stream = _extract_streaming_video_response(obj)
         if stream:

@@ -50,7 +50,15 @@ from ._format import (
     make_stream_chunk,
     make_thinking_chunk,
 )
-from .chat import _quota_sync, _fail_sync, _feedback_kind
+from .chat import (
+    _configured_retry_codes,
+    _fail_sync,
+    _feedback_kind,
+    _log_task_exception,
+    _quota_sync,
+    _should_retry_upstream,
+)
+from app.products._account_selection import selection_max_retries
 
 _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
 
@@ -242,7 +250,7 @@ async def generate(
     """Generate images.
 
     Routes to the appropriate backend based on model:
-      grok-imagine-image-lite  → chat endpoint (no aspect-ratio control, all pools)
+      grok-imagine-image-lite  → chat endpoint (fast quota, no aspect-ratio control)
       grok-imagine-image       → WebSocket speed mode (super+)
       grok-imagine-image-pro   → WebSocket quality mode (super+)
 
@@ -456,8 +464,7 @@ async def _generate_lite(
 ) -> dict | AsyncGenerator[str, None]:
     """Generate images via the chat endpoint (Aurora model path).
 
-    Does not support aspect ratio or quality control.  All account pools
-    can serve this model.
+    Does not support aspect ratio or quality control.  It uses fast quota.
     """
     response_id = make_response_id()
     cfg         = get_config()
@@ -910,59 +917,96 @@ async def _run_lite_request(
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
-    acct = await _acct_dir.reserve(
-        pool_candidates = spec.pool_candidates(),
-        mode_id         = int(spec.mode_id),
-        now_s_override  = now_s(),
-    )
-    if acct is None:
-        raise RateLimitError("No available accounts for image generation")
+    max_retries = selection_max_retries()
+    retry_codes = _configured_retry_codes(get_config())
+    excluded: list[str] = []
 
-    token   = acct.token
-    adapter = StreamAdapter()
-    success = False
-    fail_exc: BaseException | None = None
-    try:
-        async for line in _stream_lite_generate(
-            token,
-            prompt,
-            spec.mode_id,
-            timeout_s=timeout_s,
-        ):
-            ev_type, data = classify_line(line)
-            if ev_type == "done":
-                break
-            if ev_type != "data" or not data:
-                continue
-            for ev in adapter.feed(data):
-                if ev.kind == "image_progress":
-                    if progress_cb is not None:
-                        try:
-                            await progress_cb(_clamp_progress(int(ev.content or "0")))
-                        except ValueError:
-                            pass
-                if ev.kind == "image" and ev.content:
-                    if progress_cb is not None:
-                        await progress_cb(100)
-                    image = await _resolve_image_output(
-                        token=token,
-                        url=ev.content,
-                        response_format=response_format,
-                    )
-                    success = True
-                    return image
-        raise UpstreamError("Image generation returned no images")
-    except BaseException as exc:
-        fail_exc = exc
-        raise
-    finally:
-        await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-        await _acct_dir.feedback(token, kind, int(spec.mode_id))
-        if success:
-            asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
-        else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+    for attempt in range(max_retries + 1):
+        acct = await _acct_dir.reserve(
+            pool_candidates=spec.pool_candidates(),
+            mode_id=int(spec.mode_id),
+            now_s_override=now_s(),
+            exclude_tokens=excluded or None,
+        )
+        if acct is None:
+            raise RateLimitError("No available accounts for image generation")
+
+        token = acct.token
+        adapter = StreamAdapter()
+        success = False
+        retry = False
+        fail_exc: BaseException | None = None
+
+        try:
+            async for line in _stream_lite_generate(
+                token,
+                prompt,
+                spec.mode_id,
+                timeout_s=timeout_s,
+            ):
+                ev_type, data = classify_line(line)
+                if ev_type == "done":
+                    break
+                if ev_type != "data" or not data:
+                    continue
+                for ev in adapter.feed(data):
+                    if ev.kind == "image_progress":
+                        if progress_cb is not None:
+                            try:
+                                await progress_cb(_clamp_progress(int(ev.content or "0")))
+                            except ValueError:
+                                pass
+                    if ev.kind == "image" and ev.content:
+                        if progress_cb is not None:
+                            await progress_cb(100)
+                        image = await _resolve_image_output(
+                            token=token,
+                            url=ev.content,
+                            response_format=response_format,
+                        )
+                        success = True
+                        return image
+            raise UpstreamError("Image generation returned no images")
+        except UpstreamError as exc:
+            fail_exc = exc
+            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                retry = True
+                logger.warning(
+                    "lite image retry scheduled: attempt={}/{} status={} token={}...",
+                    attempt + 1,
+                    max_retries,
+                    exc.status,
+                    token[:8],
+                )
+            else:
+                raise
+        except BaseException as exc:
+            fail_exc = exc
+            raise
+        finally:
+            await _acct_dir.release(acct)
+            kind = (
+                FeedbackKind.SUCCESS
+                if success
+                else _feedback_kind(fail_exc)
+                if fail_exc
+                else FeedbackKind.SERVER_ERROR
+            )
+            await _acct_dir.feedback(token, kind, int(spec.mode_id))
+            if success:
+                asyncio.create_task(
+                    _quota_sync(token, int(spec.mode_id))
+                ).add_done_callback(_log_task_exception)
+            else:
+                asyncio.create_task(
+                    _fail_sync(token, int(spec.mode_id), fail_exc)
+                ).add_done_callback(_log_task_exception)
+
+        if retry:
+            excluded.append(token)
+            continue
+
+    raise RateLimitError("No available accounts for image generation")
 
 
 async def _run_lite_batch(

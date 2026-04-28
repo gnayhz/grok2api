@@ -448,7 +448,7 @@
         },
         "basicInterval": {
           "label": "Basic Cycle (s)",
-          "desc": "Shared cycle for the basic pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 36000s."
+          "desc": "Shared cycle for the basic pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 86400s."
         },
         "superInterval": {
           "label": "Super Cycle (s)",

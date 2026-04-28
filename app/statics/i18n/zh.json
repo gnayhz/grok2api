@@ -448,7 +448,7 @@
         },
         "basicInterval": {
           "label": "Basic 周期（秒）",
-          "desc": "basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 36000s。"
+          "desc": "basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 86400s。"
         },
         "superInterval": {
           "label": "Super 周期（秒）",
