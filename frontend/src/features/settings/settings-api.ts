@@ -95,9 +95,18 @@ export type EgressSourceInput = {
   proxyURL?: string; clearProxyURL?: boolean;
   refreshIntervalSeconds: number; defaultAccountCapacity: number;
 };
+export type EgressTrafficClass = "inference" | "credential" | "billing" | "model_sync" | "video";
+export type EgressRouteRuleTargetMode = "fixed" | "direct";
+export type EgressRouteRuleDTO = {
+  scope: EgressScope; class: EgressTrafficClass; targetMode: EgressRouteRuleTargetMode; targetNodeId?: string; enabled: boolean;
+};
 export type EgressOperationsConfigDTO = {
   probeProvider: "ipinfo" | "cloudflare"; probeIntervalSeconds: number; autoAssignEnabled: boolean; autoBalanceEnabled: boolean;
-  assignmentIntervalSeconds: number; fallbacks: Record<EgressScope, EgressFallbackConfigDTO>; updatedAt: string;
+  assignmentIntervalSeconds: number; fallbacks: Record<EgressScope, EgressFallbackConfigDTO>; routeRules: EgressRouteRuleDTO[]; updatedAt: string;
+};
+export type EgressRouteRuleStatDTO = {
+  scope: EgressScope; class: EgressTrafficClass;
+  hit: number; skippedBinding: number; nodeUnavailable: number; directUnavailable: number; lastSeen?: string;
 };
 export type EgressImportResultDTO = { imported: number; skipped: number };
 export type EgressIPProbeDTO = { status: "unknown" | "healthy" | "unhealthy"; testedAt?: string; latencyMs: number; exitIp?: string; error?: string };
@@ -208,8 +217,9 @@ const egressIPProbeValidator = hasShape({
 });
 type EgressNodeWireDTO = Omit<EgressNodeDTO, "ipv4Probe" | "ipv6Probe"> & { ipv4Probe?: EgressIPProbeDTO; ipv6Probe?: EgressIPProbeDTO };
 type EgressSourceWireDTO = Omit<EgressSourceDTO, "proxyConfigured"> & { proxyConfigured?: boolean };
-type EgressOperationsConfigWireDTO = Omit<EgressOperationsConfigDTO, "probeProvider"> & {
+type EgressOperationsConfigWireDTO = Omit<EgressOperationsConfigDTO, "probeProvider" | "routeRules"> & {
   probeProvider?: "ipinfo" | "cloudflare";
+  routeRules?: EgressRouteRuleDTO[];
 };
 type EgressProbeResultWireDTO = Omit<EgressProbeResultDTO, "ipv4" | "ipv6"> & { ipv4?: EgressIPProbeDTO; ipv6?: EgressIPProbeDTO };
 const unknownEgressIPProbe = (): EgressIPProbeDTO => ({ status: "unknown", latencyMs: 0 });
@@ -311,14 +321,29 @@ const decodeEgressImportResult = createObjectDecoder<EgressImportResultDTO>("egr
 const decodeEgressProbeBatchResult = createObjectDecoder<EgressProbeBatchResultDTO>("egress probe result", { requested: isNumber, healthy: isNumber, unhealthy: isNumber });
 const decodeEgressRebalanceResult = createObjectDecoder<EgressRebalanceResultDTO>("egress rebalance result", { assigned: isNumber, rebalanced: isNumber, unplaced: isNumber });
 const egressFallbackConfigValidator = hasShape({ mode: isOneOf("none", "direct", "fixed"), nodeId: isOptional(isString) });
+const egressRouteRuleValidator = hasShape({
+  scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"),
+  class: isOneOf("inference", "credential", "billing", "model_sync", "video"),
+  targetMode: isOneOf("fixed", "direct"),
+  targetNodeId: isOptional(isString),
+  enabled: isBoolean,
+});
 const decodeEgressOperationsConfigRaw = createObjectDecoder<EgressOperationsConfigWireDTO>("egress operations config", {
   probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")), probeIntervalSeconds: isNumber, autoAssignEnabled: isBoolean, autoBalanceEnabled: isBoolean, assignmentIntervalSeconds: isNumber,
-  fallbacks: isRecordOf(egressFallbackConfigValidator), updatedAt: isString,
+  fallbacks: isRecordOf(egressFallbackConfigValidator), routeRules: isOptional(isArrayOf(egressRouteRuleValidator)), updatedAt: isString,
 });
 const decodeEgressOperationsConfig = (value: unknown): EgressOperationsConfigDTO => {
   const decoded = decodeEgressOperationsConfigRaw(value);
-  return { ...decoded, probeProvider: decoded.probeProvider ?? "cloudflare" };
+  return { ...decoded, probeProvider: decoded.probeProvider ?? "cloudflare", routeRules: decoded.routeRules ?? [] };
 };
+const decodeEgressRouteRuleStats = createObjectDecoder<{ items: EgressRouteRuleStatDTO[] }>("egress route rule stats", {
+  items: isArrayOf(hasShape({
+    scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"),
+    class: isOneOf("inference", "credential", "billing", "model_sync", "video"),
+    hit: isNumber, skippedBinding: isNumber, nodeUnavailable: isNumber, directUnavailable: isNumber,
+    lastSeen: isOptional(isString),
+  })),
+});
 const decodeEgressProbeResultRaw = createObjectDecoder<EgressProbeResultWireDTO>("egress probe", {
   status: isOneOf("unknown", "healthy", "unhealthy"), testedAt: isString, latencyMs: isNumber, exitIp: isOptional(isString), error: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4: isOptional(egressIPProbeValidator), ipv6: isOptional(egressIPProbeValidator),
@@ -487,6 +512,9 @@ export function getEgressOperationsConfig(): Promise<EgressOperationsConfigDTO> 
 
 export function updateEgressOperationsConfig(input: Omit<EgressOperationsConfigDTO, "updatedAt">): Promise<EgressOperationsConfigDTO> {
   return apiRequest("/api/admin/v1/egress-operations", { method: "PUT", body: input }, decodeEgressOperationsConfig);
+}
+export function getEgressRouteRuleStats(): Promise<{ items: EgressRouteRuleStatDTO[] }> {
+  return apiRequest("/api/admin/v1/egress-operations/route-rule-stats", {}, decodeEgressRouteRuleStats);
 }
 
 export function rebalanceEgressAccounts(): Promise<EgressRebalanceResultDTO> {
