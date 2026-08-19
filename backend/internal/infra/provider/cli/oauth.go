@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
@@ -95,6 +97,7 @@ type tokenPayload struct {
 }
 
 func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRefresh string, deviceFlow bool) (tokenPayload, error) {
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassCredential)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return tokenPayload{}, err
@@ -304,6 +307,7 @@ func parseOAuthRetryAfter(value string) time.Duration {
 }
 
 func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Values, output any, deviceFlow bool) error {
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassCredential)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
