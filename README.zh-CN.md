@@ -139,7 +139,7 @@ flowchart LR
 | 路由 | 模型发现、Provider 限定、会话粘滞、额度/并发门禁和有界切换 |
 | 会话 | stored response、compact、Prompt Cache 亲和与可选 reasoning replay |
 | 媒体 | 图片生成与编辑、视频任务、本地归档及 URL/Base64/SSE 输出 |
-| 出口 | HTTP/SOCKS/Resin 与 Trojan/VLESS/Shadowsocks/VMess 隧道、订阅、探测、代理池、调配、回退与 FlareSolverr |
+| 出口 | HTTP/SOCKS/Resin 与 Trojan/VLESS/Shadowsocks/VMess 隧道、订阅、探测、代理池、调配、回退、Grok Build 流量类别路由与 FlareSolverr |
 | 运维 | Dashboard、模型路由、客户端密钥、审计、运行设置和媒体库 |
 
 ### Provider 边界
@@ -347,6 +347,7 @@ curl http://127.0.0.1:8000/v1/responses \
 - 订阅和文本/Base64 导入
 - 批量探测、筛选、删除、分配与均衡
 - 按作用域配置无回退、直连或固定节点
+- Grok Build 流量类别路由：将推理、OAuth、账单、模型同步或视频调用固定到专属节点或直连。推理与视频尊重账号绑定；辅助调用即使账号已绑定也按规则分流，目标不可用时回退节点池
 - 代理池模式，单次连接失败不会触发全局冷却
 - 固定代理传输失败后立即复测；同节点复测自动合并，后续绑定请求限时等待并在恢复后快速重试
 - 可选的[出口质量守护程序](./tools/egress-quality-guard/README.zh-CN.md)，支持逐节点模型探测、防误杀隔离和自动恢复；通过内置的 `quality-guard` Compose profile 按需启用

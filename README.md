@@ -138,7 +138,7 @@ The Gateway routes requests through the Provider Registry. Account Sync refreshe
 | Routing | Model discovery, Provider pinning, sticky sessions, quota/concurrency guards, and bounded failover |
 | Sessions | Stored responses, compact, prompt-cache affinity, and optional reasoning replay |
 | Media | Image generation/editing, video jobs, local archiving, and URL/Base64/SSE output |
-| Egress | HTTP/SOCKS/Resin and Trojan/VLESS/Shadowsocks/VMess tunnels, subscriptions, probes, proxy pools, allocation, fallback, and FlareSolverr |
+| Egress | HTTP/SOCKS/Resin and Trojan/VLESS/Shadowsocks/VMess tunnels, subscriptions, probes, proxy pools, allocation, fallback, per-traffic-class egress routing for Grok Build, and FlareSolverr |
 | Operations | Dashboard, model routes, client keys, audits, runtime settings, and media libraries |
 
 ### Provider boundaries
@@ -349,6 +349,7 @@ Egress nodes are scoped to Build, Web, Console, or Web assets. The admin console
 - Subscription and text/Base64 import
 - Batch probes, filtering, deletion, assignment, and balancing
 - Fallback per scope: none, direct, or a fixed node
+- Per-traffic-class egress routing for Grok Build: pin inference, OAuth, billing, model sync, or video calls to a dedicated node or direct connection. Inference and video honor account bindings; auxiliary calls follow the rule even for bound accounts, and unavailable targets fall back to the scope pool
 - Proxy-pool mode without global cooldown after one connection failure
 - Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
 - Optional [Egress Quality Guard](./tools/egress-quality-guard/README.md) for active per-node model probes, guarded quarantine, and recovery; enable it with the built-in `quality-guard` Compose profile
