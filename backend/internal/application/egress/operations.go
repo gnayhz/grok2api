@@ -93,11 +93,32 @@ type OperationsConfigInput struct {
 	AutoBalanceEnabled        bool
 	AssignmentIntervalSeconds int
 	Fallbacks                 map[domain.Scope]FallbackConfigInput
+	// RouteRules carries per-traffic-class egress rules. A nil slice keeps the
+	// stored rules unchanged, mirroring sparse fallback update semantics.
+	RouteRules []RouteRuleInput
 }
 
 type FallbackConfigInput struct {
 	Mode   domain.FallbackMode
 	NodeID uint64
+}
+
+type RouteRuleInput struct {
+	Scope        domain.Scope
+	Class        domain.TrafficClass
+	TargetMode   domain.RouteRuleTargetMode
+	TargetNodeID uint64
+	Enabled      bool
+}
+
+func (input RouteRuleInput) toDomain() domain.RouteRule {
+	return domain.RouteRule{
+		Scope:        input.Scope,
+		Class:        input.Class,
+		TargetMode:   input.TargetMode,
+		TargetNodeID: input.TargetNodeID,
+		Enabled:      input.Enabled,
+	}
 }
 
 func (s *Service) operationsRepository() (OperationsRepository, error) {
@@ -410,18 +431,66 @@ func (s *Service) UpdateOperationsConfig(ctx context.Context, input OperationsCo
 			return domain.OperationsConfig{}, err
 		}
 	}
+	routeRules := current.RouteRules
+	if input.RouteRules != nil {
+		routeRules = make([]domain.RouteRule, 0, len(input.RouteRules))
+		for _, rule := range input.RouteRules {
+			routeRules = append(routeRules, rule.toDomain())
+		}
+		if err := domain.ValidateRouteRules(routeRules); err != nil {
+			return domain.OperationsConfig{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		if err := s.validateRouteRuleTargets(ctx, routeRules); err != nil {
+			return domain.OperationsConfig{}, err
+		}
+	}
 	saved, err := operations.SaveEgressOperationsConfig(ctx, domain.OperationsConfig{
 		ProbeProvider: probeProvider, ProbeIntervalSeconds: input.ProbeIntervalSeconds, AutoAssignEnabled: input.AutoAssignEnabled,
 		AutoBalanceEnabled: input.AutoBalanceEnabled, AssignmentIntervalSeconds: input.AssignmentIntervalSeconds,
-		Fallbacks: fallbacks, UpdatedAt: time.Now().UTC(),
+		Fallbacks: fallbacks, RouteRules: routeRules, UpdatedAt: time.Now().UTC(),
 	})
 	if errors.Is(err, repository.ErrEgressFallbackInUse) {
 		return domain.OperationsConfig{}, fmt.Errorf("%w: 固定回退节点必须保持启用且可用", ErrInvalidInput)
+	}
+	if errors.Is(err, repository.ErrEgressRouteRuleNodeInUse) {
+		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由规则的目标节点必须存在、启用且兼容对应作用域", ErrInvalidInput)
+	}
+	if errors.Is(err, repository.ErrInvalidRecord) {
+		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由规则无效", ErrInvalidInput)
 	}
 	if err == nil {
 		s.invalidateOperationsConfig()
 	}
 	return saved, err
+}
+
+// validateRouteRuleTargets rejects fixed route rules that point at sticky
+// per-account proxy templates. Such nodes rotate their exit with the caller
+// identity, which contradicts the "fixed target" contract the same way they
+// contradict fixed fallbacks.
+func (s *Service) validateRouteRuleTargets(ctx context.Context, rules []domain.RouteRule) error {
+	seen := make(map[uint64]struct{}, len(rules))
+	for _, rule := range rules {
+		if !rule.Enabled || rule.TargetMode.Normalized() != domain.RouteRuleTargetFixed {
+			continue
+		}
+		if _, checked := seen[rule.TargetNodeID]; checked {
+			continue
+		}
+		seen[rule.TargetNodeID] = struct{}{}
+		node, err := s.repository.GetEgressNode(ctx, rule.TargetNodeID)
+		if err != nil {
+			return fmt.Errorf("%w: 读取出口路由规则目标节点失败", ErrInvalidInput)
+		}
+		proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL)
+		if err != nil {
+			return fmt.Errorf("%w: 出口路由规则目标节点的代理配置无效", ErrInvalidInput)
+		}
+		if strings.Contains(proxyURL, ProxyAccountPlaceholder) {
+			return fmt.Errorf("%w: 出口路由规则的目标节点 %q 是账号代理模板，不能作为固定出口", ErrInvalidInput, node.Name)
+		}
+	}
+	return nil
 }
 
 func (s *Service) validateFallbacks(ctx context.Context, current domain.OperationsConfig, input map[domain.Scope]FallbackConfigInput) (map[domain.Scope]domain.FallbackConfig, error) {

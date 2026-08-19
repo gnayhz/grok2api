@@ -638,6 +638,29 @@ func (s *Service) validateFallbackNodeUpdateWithConfig(node domain.Node, config 
 			return fmt.Errorf("节点已配置为 %s 固定回退，无法应用当前修改: %w", scope, err)
 		}
 	}
+	return s.validateRouteRuleNodeUpdateWithConfig(node, config)
+}
+
+// validateRouteRuleNodeUpdateWithConfig keeps a node serving as a fixed
+// route-rule target schedulable for that role after an edit. Disabling it,
+// switching its scope, or clearing its proxy would otherwise silently degrade
+// the rule to scope-pool fallback with no administrator-visible error.
+// Proxy-pool mode stays allowed: rules allocate traffic to a proxy resource,
+// not to a stable IP.
+func (s *Service) validateRouteRuleNodeUpdateWithConfig(node domain.Node, config domain.OperationsConfig) error {
+	for _, rule := range config.RouteRules {
+		if !rule.Enabled || rule.TargetMode.Normalized() != domain.RouteRuleTargetFixed || rule.TargetNodeID != node.ID {
+			continue
+		}
+		if !domain.CanNodeServeFixedRouteTarget(node, rule.Scope) {
+			return fmt.Errorf("节点已是 %s/%s 固定路由规则的目标，无法应用当前修改: %w", rule.Scope, rule.Class, ErrInvalidInput)
+		}
+		// Editing a target into a sticky per-account template would rotate the
+		// "fixed" exit per caller identity, bypassing the save-time rejection.
+		if proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL); err == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder) {
+			return fmt.Errorf("节点已是 %s/%s 固定路由规则的目标，不能改为账号代理模板: %w", rule.Scope, rule.Class, ErrInvalidInput)
+		}
+	}
 	return nil
 }
 
@@ -689,6 +712,9 @@ func (s *Service) UpdateManyEnabled(ctx context.Context, nodeIDs []uint64, enabl
 		updated, err := batch.UpdateEgressNodesEnabled(ctx, ids, enabled)
 		if errors.Is(err, repository.ErrEgressFallbackInUse) {
 			return 0, fmt.Errorf("%w: 固定回退节点不能被批量禁用", ErrInvalidInput)
+		}
+		if errors.Is(err, repository.ErrEgressRouteRuleNodeInUse) {
+			return 0, fmt.Errorf("%w: 出口路由规则的目标节点不能被禁用", ErrInvalidInput)
 		}
 		if err != nil {
 			return 0, err

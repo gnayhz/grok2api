@@ -12,6 +12,7 @@ var (
 	ErrInvalidRecord              = errors.New("repository: invalid record")
 	ErrAccountPoolMismatch        = errors.New("repository: account pool mismatch")
 	ErrEgressFallbackInUse        = errors.New("repository: egress fallback node in use")
+	ErrEgressRouteRuleNodeInUse   = errors.New("repository: egress route rule node in use")
 	ErrEgressProxyProfileNotFound = errors.New("repository: egress proxy profile not found")
 	ErrEgressProxyProfileInUse    = errors.New("repository: egress proxy profile in use")
 )

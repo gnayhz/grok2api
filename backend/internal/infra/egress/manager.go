@@ -159,6 +159,8 @@ type Manager struct {
 	operationsConfig       cachedOperationsConfig
 	operationsConfigLoad   singleflight.Group
 	operationsConfigVer    uint64
+	routeRuleNodeMu        sync.Mutex
+	routeRuleNodeCache     map[uint64]cachedRouteRuleNode
 	failureProbeMu         sync.Mutex
 	failureProber          FailureProber
 	failureProbes          map[uint64]failureProbeState
@@ -229,8 +231,9 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 		clients: make(map[clientCacheKey]cachedClient),
 		nodes:   make(map[domain.Scope]cachedNodeSnapshot), healthyNodes: make(map[uint64]time.Time),
 		nodeVersions: make(map[domain.Scope]uint64), clientVersions: make(map[uint64]uint64), clearances: make(map[string]clearanceState),
-		failureProbes:  make(map[uint64]failureProbeState),
-		newBuildClient: newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
+		routeRuleNodeCache: make(map[uint64]cachedRouteRuleNode),
+		failureProbes:      make(map[uint64]failureProbeState),
+		newBuildClient:     newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
 		solver:          flaresolverrSolver{},
 		clearanceConfig: ClearanceConfig{Mode: "manual", TargetURL: "https://grok.com", Timeout: time.Minute, RefreshInterval: 10 * time.Minute},
 	}
@@ -1292,6 +1295,12 @@ func (m *Manager) invalidateNodes(scope domain.Scope) {
 		delete(m.healthyNodes, node.ID)
 	}
 	m.nodeMu.Unlock()
+	// Route-rule target caching lives outside the per-scope snapshots; drop it
+	// whenever node state changes so a disabled or deleted target stops
+	// serving immediately.
+	m.routeRuleNodeMu.Lock()
+	m.routeRuleNodeCache = make(map[uint64]cachedRouteRuleNode)
+	m.routeRuleNodeMu.Unlock()
 }
 
 func (m *Manager) replaceNodeSnapshotLocked(scope domain.Scope, values []domain.Node, expiresAt time.Time) {

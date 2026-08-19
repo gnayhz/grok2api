@@ -30,6 +30,29 @@ type traceContextKey struct{}
 type accountContextKey struct{}
 type egressNodeContextKey struct{}
 type qualityProbeContextKey struct{}
+type trafficClassContextKey struct{}
+
+// WithTrafficClass labels one upstream call with its operational purpose so
+// egress route rules can select a dedicated exit without matching URLs. Calls
+// that carry no class default to inference semantics (account binding wins).
+func WithTrafficClass(ctx context.Context, class domain.TrafficClass) context.Context {
+	if ctx == nil || !class.IsValid() {
+		return ctx
+	}
+	return context.WithValue(ctx, trafficClassContextKey{}, class)
+}
+
+// TrafficClassFromContext returns the call's traffic class, defaulting to
+// inference for unannotated requests.
+func TrafficClassFromContext(ctx context.Context) domain.TrafficClass {
+	if ctx == nil {
+		return domain.TrafficClassInference
+	}
+	if class, ok := ctx.Value(trafficClassContextKey{}).(domain.TrafficClass); ok && class.IsValid() {
+		return class
+	}
+	return domain.TrafficClassInference
+}
 
 // WithAccount passes a stable Provider account identity to the egress layer. It is used only to render
 // authentication usernames for sticky proxies such as Resin and is never written to upstream headers or audit.
