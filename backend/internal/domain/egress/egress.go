@@ -1,6 +1,9 @@
 package egress
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type Mode string
 
@@ -248,7 +251,170 @@ type OperationsConfig struct {
 	AutoBalanceEnabled        bool
 	AssignmentIntervalSeconds int
 	Fallbacks                 map[Scope]FallbackConfig
-	UpdatedAt                 time.Time
+	// RouteRules routes provider traffic classes to dedicated egress targets.
+	// An empty list keeps the historical scope-pool behavior unchanged.
+	RouteRules []RouteRule
+	UpdatedAt  time.Time
+}
+
+// TrafficClass names the operational purpose of one upstream call. Classes are
+// declared by provider code at the call site; configuration only maps them to
+// egress targets, so upstream host or path changes never invalidate rules.
+type TrafficClass string
+
+const (
+	// TrafficClassInference covers account-facing generation requests such as
+	// responses, chat, messages, compaction, and reasoning recovery. It is the
+	// default for unannotated calls and always respects account node bindings.
+	TrafficClassInference TrafficClass = "inference"
+	// TrafficClassCredential covers OAuth token refresh and device
+	// authorization exchanges.
+	TrafficClassCredential TrafficClass = "credential"
+	// TrafficClassBilling covers quota, billing, and subscription lookups.
+	TrafficClassBilling TrafficClass = "billing"
+	// TrafficClassModelSync covers account model catalog discovery.
+	TrafficClassModelSync TrafficClass = "model_sync"
+	// TrafficClassVideo covers video job submission, polling, and asset
+	// downloads. Like inference it is account-tied generation traffic.
+	TrafficClassVideo TrafficClass = "video"
+)
+
+// IsValid reports whether the value is a known traffic class.
+func (value TrafficClass) IsValid() bool {
+	switch value {
+	case TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo:
+		return true
+	default:
+		return false
+	}
+}
+
+// RespectsAccountBinding reports whether an explicitly bound egress node wins
+// over a configured route rule. Inference-style generation traffic keeps the
+// account's stable exit IP; auxiliary background calls may follow the rule
+// even for bound accounts, which is exactly where cheaper egress saves cost.
+func (value TrafficClass) RespectsAccountBinding() bool {
+	switch value {
+	case TrafficClassInference, TrafficClassVideo:
+		return true
+	default:
+		return false
+	}
+}
+
+// RouteRuleTargetMode selects what a traffic class routes through.
+type RouteRuleTargetMode string
+
+const (
+	RouteRuleTargetFixed  RouteRuleTargetMode = "fixed"
+	RouteRuleTargetDirect RouteRuleTargetMode = "direct"
+)
+
+// IsValid reports whether the value is a known route rule target mode.
+func (value RouteRuleTargetMode) IsValid() bool {
+	return value == RouteRuleTargetFixed || value == RouteRuleTargetDirect
+}
+
+// Normalized maps the zero value left by pre-rule database rows to fixed so a
+// stray rule with an empty mode cannot degrade into undefined behavior.
+func (value RouteRuleTargetMode) Normalized() RouteRuleTargetMode {
+	if value == "" {
+		return RouteRuleTargetFixed
+	}
+	return value
+}
+
+// RouteRule pins one provider traffic class to a dedicated egress target:
+// either a fixed egress node or a direct (no proxy) connection.
+type RouteRule struct {
+	Scope        Scope
+	Class        TrafficClass
+	TargetMode   RouteRuleTargetMode
+	TargetNodeID uint64
+	Enabled      bool
+}
+
+// RouteRuleFor returns the enabled rule for one scope and traffic class. At
+// most one rule per (scope, class) is expected; when duplicates survive in
+// stored data the first enabled match wins deterministically.
+func (value OperationsConfig) RouteRuleFor(scope Scope, class TrafficClass) (RouteRule, bool) {
+	for _, rule := range value.RouteRules {
+		if !rule.Enabled || rule.Scope != scope || rule.Class != class {
+			continue
+		}
+		// Normalize before comparing: the persistence layer normalizes both
+		// ends, but a hand-edited row could still carry an empty mode. This
+		// keeps the zero-node-id skip working for that defensive case too.
+		if rule.TargetMode.Normalized() == RouteRuleTargetFixed && rule.TargetNodeID == 0 {
+			continue
+		}
+		return rule, true
+	}
+	return RouteRule{}, false
+}
+
+// RouteRuleClasses lists traffic classes that may carry rules for the given
+// scope. Only Grok Build consumes classes today; other scopes are rejected so
+// configuration cannot silently point at unwired providers.
+func RouteRuleClasses(scope Scope) []TrafficClass {
+	if scope != ScopeBuild {
+		return nil
+	}
+	return []TrafficClass{TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo}
+}
+
+// CanNodeServeFixedRouteTarget reports whether a node is schedulable as a
+// fixed route-rule target for the supplied scope. This is the single
+// authoritative predicate for the runtime, save-time, edit-guard, and
+// subscription-hygiene paths; all of them must agree or a rule accepted by
+// one path silently degrades at another. Sticky per-account templates are
+// rejected separately at the application layer (they need decryption).
+func CanNodeServeFixedRouteTarget(node Node, scope Scope) bool {
+	return node.Enabled && node.EncryptedProxyURL != "" && SupportsScope(node.Scope, scope)
+}
+
+// ValidateRouteRules checks that the rule list is internally consistent:
+// unique (scope, class) keys, valid enums, populated fixed targets, and only
+// scopes whose providers actually consume classes.
+// MaxRouteRules caps the persisted rule list. The (scope, class) uniqueness
+// check below already bounds valid lists to five entries; the explicit cap is
+// defense in depth so a degenerate payload fails fast before any per-rule
+// node lookups run.
+const MaxRouteRules = 16
+
+func ValidateRouteRules(rules []RouteRule) error {
+	if len(rules) > MaxRouteRules {
+		return fmt.Errorf("出口路由规则最多 %d 条，收到 %d 条", MaxRouteRules, len(rules))
+	}
+	seen := make(map[Scope]map[TrafficClass]struct{}, len(rules))
+	for _, rule := range rules {
+		if rule.Scope != ScopeBuild {
+			return fmt.Errorf("出口路由规则仅支持 %s 作用域，收到 %s", ScopeBuild, rule.Scope)
+		}
+		if !rule.Class.IsValid() {
+			return fmt.Errorf("出口路由规则的流量类别无效: %q", rule.Class)
+		}
+		switch rule.TargetMode.Normalized() {
+		case RouteRuleTargetFixed:
+			if rule.TargetNodeID == 0 {
+				return fmt.Errorf("出口路由规则 %s/%s 的固定出口节点不能为空", rule.Scope, rule.Class)
+			}
+		case RouteRuleTargetDirect:
+			if rule.TargetNodeID != 0 {
+				return fmt.Errorf("出口路由规则 %s/%s 的直连目标不能携带节点", rule.Scope, rule.Class)
+			}
+		default:
+			return fmt.Errorf("出口路由规则 %s/%s 的目标类型无效: %q", rule.Scope, rule.Class, rule.TargetMode)
+		}
+		if _, exists := seen[rule.Scope]; !exists {
+			seen[rule.Scope] = make(map[TrafficClass]struct{}, len(rules))
+		}
+		if _, duplicate := seen[rule.Scope][rule.Class]; duplicate {
+			return fmt.Errorf("出口路由规则 %s/%s 重复", rule.Scope, rule.Class)
+		}
+		seen[rule.Scope][rule.Class] = struct{}{}
+	}
+	return nil
 }
 
 func DefaultOperationsConfig() OperationsConfig {

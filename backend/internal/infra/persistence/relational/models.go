@@ -568,6 +568,7 @@ type egressOperationsConfigModel struct {
 	WebAssetFallbackNodeID              uint64    `gorm:"not null;default:0"`
 	ConsoleAssetFallbackMode            string    `gorm:"size:16;not null;default:none"`
 	ConsoleAssetFallbackNodeID          uint64    `gorm:"not null;default:0"`
+	RouteRules                          string    `gorm:"type:text;not null;default:''"`
 	UpdatedAt                           time.Time `gorm:"not null"`
 }
 

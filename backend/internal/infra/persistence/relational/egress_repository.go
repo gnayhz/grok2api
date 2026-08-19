@@ -2,7 +2,10 @@ package relational
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -215,6 +218,9 @@ func (r *EgressRepository) UpdateEgressNodesEnabled(ctx context.Context, ids []u
 		}
 		if configReferencesAnyFallbackNode(config, lockedIDs) {
 			return repository.ErrEgressFallbackInUse
+		}
+		if configReferencesAnyRouteRuleNode(config.RouteRules, lockedIDs) {
+			return repository.ErrEgressRouteRuleNodeInUse
 		}
 		result := tx.Model(&egressNodeModel{}).
 			Where("id IN ? AND enabled <> ?", lockedIDs, false).
@@ -494,9 +500,55 @@ func (r *EgressRepository) UpsertEgressNodesFromSource(ctx context.Context, sour
 		if err := clearInvalidEgressFallbackNodeReferences(tx); err != nil {
 			return err
 		}
+		if err := clearInvalidEgressRouteRuleReferences(tx); err != nil {
+			return err
+		}
 		return nil
 	})
 	return returned, err
+}
+
+// clearInvalidEgressRouteRuleReferences drops enabled fixed route rules whose
+// target node no longer satisfies the schedulable contract, mirroring the
+// fallback reference hygiene after subscription node replacement.
+func clearInvalidEgressRouteRuleReferences(tx *gorm.DB) error {
+	var config egressOperationsConfigModel
+	// Lock the row like the delete path does: an unlocked read could interleave
+	// with a concurrent Save and lose freshly written rules (lost update).
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&config, 1).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	rules, err := unmarshalEgressRouteRules(config.RouteRules)
+	if err != nil || len(rules) == 0 {
+		return nil
+	}
+	kept := make([]egress.RouteRule, 0, len(rules))
+	changed := false
+	for _, rule := range rules {
+		if !rule.Enabled || rule.TargetMode.Normalized() != egress.RouteRuleTargetFixed {
+			kept = append(kept, rule)
+			continue
+		}
+		var node egressNodeModel
+		err := tx.First(&node, rule.TargetNodeID).Error
+		// Proxy-pool nodes stay valid targets here, matching the save-time
+		// validation: a rule allocates traffic to a proxy resource, and the
+		// pool flag does not change that contract.
+		valid := err == nil && egress.CanNodeServeFixedRouteTarget(egress.Node{ID: node.ID, Scope: egress.Scope(node.Scope), Enabled: node.Enabled, EncryptedProxyURL: node.EncryptedProxyURL}, rule.Scope)
+		if valid {
+			kept = append(kept, rule)
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return tx.Model(&egressOperationsConfigModel{}).Where("id = ?", 1).
+		Updates(map[string]any{"route_rules": marshalEgressRouteRules(kept), "updated_at": time.Now().UTC()}).Error
 }
 
 func (r *EgressRepository) GetEgressOperationsConfig(ctx context.Context) (egress.OperationsConfig, error) {
@@ -507,7 +559,11 @@ func (r *EgressRepository) GetEgressOperationsConfig(ctx context.Context) (egres
 		}
 		return egress.OperationsConfig{}, mapError(err)
 	}
-	return toEgressOperationsConfigDomain(row), nil
+	config, err := toEgressOperationsConfigDomain(row)
+	if err != nil {
+		return egress.OperationsConfig{}, err
+	}
+	return config, nil
 }
 
 func (r *EgressRepository) SaveEgressOperationsConfig(ctx context.Context, value egress.OperationsConfig) (egress.OperationsConfig, error) {
@@ -526,12 +582,19 @@ func (r *EgressRepository) SaveEgressOperationsConfig(ctx context.Context, value
 		if err := validateLockedEgressFallbackNodes(tx, row); err != nil {
 			return err
 		}
+		if err := validateLockedEgressRouteRules(tx, row); err != nil {
+			return err
+		}
 		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
 	})
 	if err != nil {
 		return egress.OperationsConfig{}, mapError(err)
 	}
-	return toEgressOperationsConfigDomain(row), nil
+	config, err := toEgressOperationsConfigDomain(row)
+	if err != nil {
+		return egress.OperationsConfig{}, mapError(err)
+	}
+	return config, nil
 }
 
 func lockEgressOperationsConfig(tx *gorm.DB) (egressOperationsConfigModel, error) {
@@ -614,6 +677,50 @@ func validateLockedEgressFallbackNodes(tx *gorm.DB, config egressOperationsConfi
 	return nil
 }
 
+// validateLockedEgressRouteRules verifies that every enabled fixed route rule
+// points at a schedulable node. It mirrors the fallback validation contract so
+// administrators get the same rejection semantics for both mechanisms.
+func validateLockedEgressRouteRules(tx *gorm.DB, config egressOperationsConfigModel) error {
+	rules, err := unmarshalEgressRouteRules(config.RouteRules)
+	if err != nil {
+		return repository.ErrInvalidRecord
+	}
+	if err := egress.ValidateRouteRules(rules); err != nil {
+		return repository.ErrInvalidRecord
+	}
+	ids := make([]uint64, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Enabled && rule.TargetMode.Normalized() == egress.RouteRuleTargetFixed {
+			ids = append(ids, rule.TargetNodeID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var rows []egressNodeModel
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", ids).Order("id ASC").Find(&rows).Error; err != nil {
+		return err
+	}
+	byID := make(map[uint64]egressNodeModel, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	for _, rule := range rules {
+		if !rule.Enabled || rule.TargetMode.Normalized() != egress.RouteRuleTargetFixed {
+			continue
+		}
+		node, exists := byID[rule.TargetNodeID]
+		// Proxy-pool nodes ARE valid route targets: a rule allocates traffic to
+		// a proxy resource (cost split), not to a stable IP. Sticky per-account
+		// templates stay excluded at the service layer because they render a
+		// different exit per caller identity.
+		if !exists || !egress.CanNodeServeFixedRouteTarget(egress.Node{ID: node.ID, Scope: egress.Scope(node.Scope), Enabled: node.Enabled, EncryptedProxyURL: node.EncryptedProxyURL}, rule.Scope) {
+			return repository.ErrEgressRouteRuleNodeInUse
+		}
+	}
+	return nil
+}
+
 func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) error {
 	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&accountModel{}).Where("egress_node_id = ?", id).Updates(map[string]any{
@@ -623,6 +730,9 @@ func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) erro
 			return result.Error
 		}
 		if err := clearEgressFallbackNodeReferences(tx, []uint64{id}); err != nil {
+			return err
+		}
+		if err := clearEgressRouteRuleNodeReferences(tx, []uint64{id}); err != nil {
 			return err
 		}
 		result = tx.Delete(&egressNodeModel{}, id)
@@ -703,6 +813,9 @@ func deleteEgressNodeIDs(tx *gorm.DB, ids []uint64) (int64, error) {
 		if err := clearEgressFallbackNodeReferences(tx, batch); err != nil {
 			return deleted, err
 		}
+		if err := clearEgressRouteRuleNodeReferences(tx, batch); err != nil {
+			return deleted, err
+		}
 		result := tx.Where("id IN ?", batch).Delete(&egressNodeModel{})
 		if result.Error != nil {
 			return deleted, result.Error
@@ -710,6 +823,68 @@ func deleteEgressNodeIDs(tx *gorm.DB, ids []uint64) (int64, error) {
 		deleted += result.RowsAffected
 	}
 	return deleted, nil
+}
+
+// configReferencesAnyRouteRuleNode reports whether any enabled fixed route
+// rule targets one of the supplied node ids.
+func configReferencesAnyRouteRuleNode(encoded string, ids []uint64) bool {
+	if len(ids) == 0 || strings.TrimSpace(encoded) == "" {
+		return false
+	}
+	rules, err := unmarshalEgressRouteRules(encoded)
+	if err != nil {
+		return false
+	}
+	selected := make(map[uint64]struct{}, len(ids))
+	for _, id := range ids {
+		selected[id] = struct{}{}
+	}
+	for _, rule := range rules {
+		if rule.Enabled && rule.TargetMode.Normalized() == egress.RouteRuleTargetFixed {
+			if _, exists := selected[rule.TargetNodeID]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// clearEgressRouteRuleNodeReferences removes enabled fixed route rules that
+// target any of the supplied node ids, keeping the persisted rule list
+// consistent after node deletion.
+func clearEgressRouteRuleNodeReferences(tx *gorm.DB, ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	var config egressOperationsConfigModel
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&config, 1).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	rules, err := unmarshalEgressRouteRules(config.RouteRules)
+	if err != nil || len(rules) == 0 {
+		return nil
+	}
+	selected := make(map[uint64]struct{}, len(ids))
+	for _, id := range ids {
+		selected[id] = struct{}{}
+	}
+	kept := rules[:0]
+	for _, rule := range rules {
+		if rule.Enabled && rule.TargetMode.Normalized() == egress.RouteRuleTargetFixed {
+			if _, exists := selected[rule.TargetNodeID]; exists {
+				continue
+			}
+		}
+		kept = append(kept, rule)
+	}
+	if len(kept) == len(rules) {
+		return nil
+	}
+	return tx.Model(&egressOperationsConfigModel{}).Where("id = ?", 1).
+		Updates(map[string]any{"route_rules": marshalEgressRouteRules(kept), "updated_at": time.Now().UTC()}).Error
 }
 
 func clearEgressFallbackNodeReferences(tx *gorm.DB, ids []uint64) error {
@@ -925,7 +1100,16 @@ func fromEgressSubscriptionSourceDomain(value egress.SubscriptionSource) egressS
 	}
 }
 
-func toEgressOperationsConfigDomain(row egressOperationsConfigModel) egress.OperationsConfig {
+func toEgressOperationsConfigDomain(row egressOperationsConfigModel) (egress.OperationsConfig, error) {
+	// Route rules are an additive layer over the probe/fallback configuration.
+	// A corrupted rules payload (for example a manual SQL edit) must degrade to
+	// "no rules" so fallback, probing, and administrator repair keep working;
+	// failing the whole read would lock the operations config permanently.
+	routeRules, err := unmarshalEgressRouteRules(row.RouteRules)
+	if err != nil {
+		slog.Warn("egress route rules payload is corrupt; falling back to no rules", "error", err)
+		routeRules = nil
+	}
 	return egress.OperationsConfig{
 		ProbeProvider:        egress.ProbeProvider(row.ProbeProvider).Normalized(),
 		ProbeIntervalSeconds: row.ProbeIntervalSeconds, AutoAssignEnabled: row.AutoAssignEnabled, AutoBalanceEnabled: row.AutoBalanceEnabled,
@@ -937,8 +1121,9 @@ func toEgressOperationsConfigDomain(row egressOperationsConfigModel) egress.Oper
 			egress.ScopeWebAsset:     {Mode: egress.FallbackMode(row.WebAssetFallbackMode).Normalized(), NodeID: row.WebAssetFallbackNodeID},
 			egress.ScopeConsoleAsset: {Mode: egress.FallbackMode(row.ConsoleAssetFallbackMode).Normalized(), NodeID: row.ConsoleAssetFallbackNodeID},
 		},
-		UpdatedAt: row.UpdatedAt,
-	}
+		RouteRules: routeRules,
+		UpdatedAt:  row.UpdatedAt,
+	}, nil
 }
 
 func fromEgressOperationsConfigDomain(value egress.OperationsConfig) egressOperationsConfigModel {
@@ -955,6 +1140,62 @@ func fromEgressOperationsConfigDomain(value egress.OperationsConfig) egressOpera
 		ConsoleFallbackMode: string(consoleFallback.Mode), ConsoleFallbackNodeID: consoleFallback.NodeID,
 		WebAssetFallbackMode: string(webAssetFallback.Mode), WebAssetFallbackNodeID: webAssetFallback.NodeID,
 		ConsoleAssetFallbackMode: string(consoleAssetFallback.Mode), ConsoleAssetFallbackNodeID: consoleAssetFallback.NodeID,
-		UpdatedAt: value.UpdatedAt,
+		RouteRules: marshalEgressRouteRules(value.RouteRules),
+		UpdatedAt:  value.UpdatedAt,
 	}
+}
+
+// egressRouteRuleRow is the JSON representation of one persisted route rule.
+type egressRouteRuleRow struct {
+	Scope        string `json:"scope"`
+	Class        string `json:"class"`
+	TargetMode   string `json:"targetMode"`
+	TargetNodeID uint64 `json:"targetNodeId,omitempty"`
+	Enabled      bool   `json:"enabled"`
+}
+
+func marshalEgressRouteRules(rules []egress.RouteRule) string {
+	if len(rules) == 0 {
+		return ""
+	}
+	rows := make([]egressRouteRuleRow, 0, len(rules))
+	for _, rule := range rules {
+		rows = append(rows, egressRouteRuleRow{
+			Scope:        string(rule.Scope),
+			Class:        string(rule.Class),
+			TargetMode:   string(rule.TargetMode.Normalized()),
+			TargetNodeID: rule.TargetNodeID,
+			Enabled:      rule.Enabled,
+		})
+	}
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func unmarshalEgressRouteRules(encoded string) ([]egress.RouteRule, error) {
+	if strings.TrimSpace(encoded) == "" {
+		return nil, nil
+	}
+	var rows []egressRouteRuleRow
+	if err := json.Unmarshal([]byte(encoded), &rows); err != nil {
+		return nil, fmt.Errorf("解析出口路由规则: %w", err)
+	}
+	rules := make([]egress.RouteRule, 0, len(rows))
+	for _, row := range rows {
+		rule := egress.RouteRule{
+			Scope:        egress.Scope(row.Scope),
+			Class:        egress.TrafficClass(row.Class),
+			TargetMode:   egress.RouteRuleTargetMode(row.TargetMode).Normalized(),
+			TargetNodeID: row.TargetNodeID,
+			Enabled:      row.Enabled,
+		}
+		if !rule.Class.IsValid() || !rule.TargetMode.IsValid() {
+			return nil, fmt.Errorf("出口路由规则包含无效条目: scope=%s class=%s targetMode=%s", row.Scope, row.Class, row.TargetMode)
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
 }
