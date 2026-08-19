@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
@@ -714,7 +715,7 @@ func (e buildModelCatalogEntry) modelIdentifier() string {
 }
 
 func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credential, accessToken, base string) ([]string, int, error) {
-	requestCtx := infraegress.WithCredential(ctx, credential)
+	requestCtx := infraegress.WithTrafficClass(infraegress.WithCredential(ctx, credential), domainegress.TrafficClassModelSync)
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, a.urlWithBase(base, "/models"), nil)
 	if err != nil {
 		return nil, 0, err
@@ -1033,7 +1034,7 @@ func (a *Adapter) getBilling(ctx context.Context, credential account.Credential,
 	if query != "" {
 		endpoint += "?" + query
 	}
-	requestCtx := infraegress.WithCredential(ctx, credential)
+	requestCtx := infraegress.WithTrafficClass(infraegress.WithCredential(ctx, credential), domainegress.TrafficClassBilling)
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return account.Billing{}, err
@@ -1061,7 +1062,7 @@ func (a *Adapter) getBilling(ctx context.Context, credential account.Credential,
 
 func (a *Adapter) getSubscriptionTier(ctx context.Context, credential account.Credential, accessToken string) (string, error) {
 	endpoint := a.url("/user") + "?include=subscription"
-	requestCtx, cancel := context.WithTimeout(infraegress.WithCredential(ctx, credential), subscriptionTierTimeout)
+	requestCtx, cancel := context.WithTimeout(infraegress.WithTrafficClass(infraegress.WithCredential(ctx, credential), domainegress.TrafficClassBilling), subscriptionTierTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
@@ -249,7 +250,7 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !trustedBuildVideoAssetHost(parsed.Hostname()) {
 		return nil, "", 0, fmt.Errorf("视频内容 URL 不受信任")
 	}
-	requestCtx := infraegress.WithCredential(ctx, credential)
+	requestCtx := infraegress.WithTrafficClass(infraegress.WithCredential(ctx, credential), domainegress.TrafficClassVideo)
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, "", 0, err
@@ -394,7 +395,7 @@ func (a *Adapter) doVideoJSON(ctx context.Context, credential account.Credential
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
 	}
-	requestCtx := infraegress.WithCredential(ctx, credential)
+	requestCtx := infraegress.WithTrafficClass(infraegress.WithCredential(ctx, credential), domainegress.TrafficClassVideo)
 	req, err := http.NewRequestWithContext(requestCtx, method, a.urlWithBase(base, path), bodyReader)
 	if err != nil {
 		return nil, err

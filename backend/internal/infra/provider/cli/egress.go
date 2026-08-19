@@ -22,6 +22,9 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	if affinity == "" {
 		affinity = "bootstrap"
 	}
+	if lease, routed := t.acquireRouteRuleLease(request.Context(), domainegress.ScopeBuild, affinity); routed {
+		return t.roundTripWithLease(request, lease)
+	}
 	lease, configured, err := t.manager.AcquireIfConfigured(request.Context(), domainegress.ScopeBuild, affinity)
 	if err != nil {
 		return nil, err
@@ -46,24 +49,75 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 			return response, requestErr
 		}
 	}
+	return t.roundTripWithLease(request, lease)
+}
+
+// acquireRouteRuleLease resolves a traffic-class route rule for one Build
+// upstream call. The bool result reports that the rule supplied a usable
+// lease; when the configured target is unavailable the call falls back to the
+// ordinary scope-pool selection instead of failing.
+func (t *egressTransport) acquireRouteRuleLease(ctx context.Context, scope domainegress.Scope, affinity string) (*infraegress.Lease, bool) {
+	class := infraegress.TrafficClassFromContext(ctx)
+	decision := t.manager.RouteRuleFor(ctx, scope, class)
+	if !decision.Applied {
+		return nil, false
+	}
+	switch decision.Rule.TargetMode.Normalized() {
+	case domainegress.RouteRuleTargetDirect:
+		lease, err := t.manager.AcquireRoutedDirect(ctx, scope, affinity)
+		if err != nil {
+			infraegress.RecordRouteRuleOutcome(scope, class, infraegress.RouteRuleOutcomeDirectUnavailable)
+			return nil, false
+		}
+		infraegress.RecordRouteRuleOutcome(scope, class, infraegress.RouteRuleOutcomeHit)
+		return lease, true
+	default:
+		lease, err := t.manager.AcquireRouted(ctx, scope, affinity, decision.Rule.TargetNodeID)
+		if err != nil {
+			infraegress.RecordRouteRuleOutcome(scope, class, infraegress.RouteRuleOutcomeNodeUnavailable)
+			return nil, false
+		}
+		infraegress.RecordRouteRuleOutcome(scope, class, infraegress.RouteRuleOutcomeHit)
+		return lease, true
+	}
+}
+
+// roundTripWithLease executes one upstream request through an acquired egress
+// lease with the shared User-Agent, feedback, stream-idle, and release
+// behavior used by every Build transport path.
+func (t *egressTransport) roundTripWithLease(request *http.Request, lease *infraegress.Lease) (*http.Response, error) {
 	if lease.UserAgent != "" {
 		request.Header.Set("User-Agent", lease.UserAgent)
 	}
+	// A panic inside lease.Do or the wrapping helpers must not leak the
+	// inflight slot: Release is idempotent (sync.Once), so a deferred guard
+	// composes safely with the explicit releases below and the body wrapper.
+	released := false
+	defer func() {
+		if !released {
+			lease.Release()
+		}
+	}()
 	idleRequest := t.withStreamIdleContext(request)
 	response, err := lease.Do(idleRequest)
 	if err != nil {
 		if shouldReportEgressFailure(request.Context(), err) {
 			t.manager.FeedbackForScope(context.WithoutCancel(request.Context()), domainegress.ScopeBuild, lease.NodeID, 0, err)
 		}
+		released = true
 		lease.Release()
 		return nil, err
 	}
 	t.manager.FeedbackForScope(context.WithoutCancel(request.Context()), domainegress.ScopeBuild, lease.NodeID, response.StatusCode, nil)
 	if response.Body == nil {
+		released = true
 		lease.Release()
 		return response, nil
 	}
 	response.Body = &egressResponseBody{ReadCloser: t.wrapStreamIdleBody(response.Body, idleRequest.Context()), release: lease.Release}
+	// Ownership transfers to the body wrapper; the deferred guard must not
+	// release again after a successful handoff.
+	released = true
 	return response, nil
 }
 
