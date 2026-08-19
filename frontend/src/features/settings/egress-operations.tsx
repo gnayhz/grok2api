@@ -34,6 +34,8 @@ import {
   type EgressSourceDTO,
   type EgressSourceInput,
 } from "@/features/settings/settings-api";
+import { EgressRouteRulesPanel } from "@/features/settings/egress-route-rules";
+import { routeRuleNodeCandidates } from "@/features/settings/settings-model";
 import { validSubscriptionProxyURL } from "@/features/settings/settings-model";
 import { formatDateTime } from "@/shared/lib/format";
 import { ErrorState, LoadingState, TableLoadingRow } from "@/shared/components/data-state";
@@ -67,7 +69,7 @@ function defaultFallbacks(): Record<EgressScope, EgressFallbackConfigDTO> {
 }
 
 const defaultOperationsForm: Omit<EgressOperationsConfigDTO, "updatedAt"> = {
-  probeProvider: "cloudflare", probeIntervalSeconds: 900, autoAssignEnabled: false, autoBalanceEnabled: false, assignmentIntervalSeconds: 300, fallbacks: defaultFallbacks(),
+  probeProvider: "cloudflare", probeIntervalSeconds: 900, autoAssignEnabled: false, autoBalanceEnabled: false, assignmentIntervalSeconds: 300, fallbacks: defaultFallbacks(), routeRules: [],
 };
 
 function operationsFormFrom(value?: EgressOperationsConfigDTO): Omit<EgressOperationsConfigDTO, "updatedAt"> {
@@ -87,6 +89,7 @@ function operationsFormFrom(value?: EgressOperationsConfigDTO): Omit<EgressOpera
       grok_web_asset: { ...defaults.grok_web_asset, ...value.fallbacks.grok_web_asset },
       grok_console_asset: { ...defaults.grok_console_asset, ...value.fallbacks.grok_console_asset },
     },
+    routeRules: value.routeRules ?? [],
   };
 }
 
@@ -158,6 +161,8 @@ export function EgressAutomation({ scopeLabel }: { scopeLabel: (scope: EgressSco
       nodeId: mode === "fixed" ? (currentCandidate?.id ?? candidates[0]?.id) : undefined,
     });
   }
+
+  const buildCandidates = routeRuleNodeCandidates(nodesQuery.data?.items ?? []);
 
   return (
     <section className="space-y-8">
@@ -234,6 +239,11 @@ export function EgressAutomation({ scopeLabel }: { scopeLabel: (scope: EgressSco
                 })}
               </div>
             </div>
+            <EgressRouteRulesPanel
+              rules={operationsForm.routeRules}
+              candidates={buildCandidates}
+              onChange={(routeRules) => setOperationsDraft({ ...operationsForm, routeRules })}
+            />
           </div>
         )}
       </div>

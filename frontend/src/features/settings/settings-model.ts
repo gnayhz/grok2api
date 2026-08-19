@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { SettingsConfigDTO } from "@/features/settings/settings-api";
+import type { EgressNodeDTO, SettingsConfigDTO } from "@/features/settings/settings-api";
 
 export type DurationUnit = "s" | "m" | "h" | "d";
 export type DurationValue = { value: number; unit: DurationUnit };
@@ -9,6 +9,16 @@ export type ByteSizeValue = { value: number; unit: ByteSizeUnit };
 
 export const MAX_ROUTING_ATTEMPTS = 65535;
 export const UNLIMITED_ROUTING_ATTEMPTS = -1;
+
+/**
+ * Route-rule targets select a proxy resource for cost splitting, not a stable
+ * IP, so proxy-pool gateways (rotating residential proxies) are valid
+ * choices — unlike fixed-fallback candidates. Sticky per-account templates
+ * stay excluded because they render a different exit per caller identity.
+ */
+export function routeRuleNodeCandidates(nodes: EgressNodeDTO[]): EgressNodeDTO[] {
+  return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.accountBoundProxy && node.scope === "grok_build");
+}
 
 const durationSchema = z.object({ value: z.number().positive(), unit: z.enum(["s", "m", "h", "d"]) });
 const positiveInteger = z.number().int().positive();

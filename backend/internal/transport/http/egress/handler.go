@@ -17,6 +17,7 @@ import (
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
@@ -87,6 +88,13 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-operations", h.operationsConfig)
 	router.PUT("/egress-operations", h.updateOperationsConfig)
 	router.POST("/egress-operations/rebalance", h.rebalance)
+	router.GET("/egress-operations/route-rule-stats", h.routeRuleStats)
+}
+
+// routeRuleStats reports process-local route-rule outcome counters for the
+// admin UI. Counts reset on restart and are read-only.
+func (h *Handler) routeRuleStats(c *gin.Context) {
+	response.Success(c, http.StatusOK, gin.H{"items": infraegress.RouteRuleStatsSnapshot()})
 }
 
 // RegisterQualityGuard exposes the minimum egress surface required by the
@@ -1005,11 +1013,28 @@ type operationsConfigRequest struct {
 	AutoBalanceEnabled        bool                                 `json:"autoBalanceEnabled"`
 	AssignmentIntervalSeconds int                                  `json:"assignmentIntervalSeconds"`
 	Fallbacks                 map[string]operationsFallbackRequest `json:"fallbacks"`
+	RouteRules                []operationsRouteRuleRequest         `json:"routeRules"`
 }
 
 type operationsFallbackRequest struct {
 	Mode   string `json:"mode"`
 	NodeID string `json:"nodeId"`
+}
+
+type operationsRouteRuleRequest struct {
+	Scope        string `json:"scope"`
+	Class        string `json:"class"`
+	TargetMode   string `json:"targetMode"`
+	TargetNodeID string `json:"targetNodeId"`
+	Enabled      bool   `json:"enabled"`
+}
+
+type operationsRouteRuleResponse struct {
+	Scope        string `json:"scope"`
+	Class        string `json:"class"`
+	TargetMode   string `json:"targetMode"`
+	TargetNodeID string `json:"targetNodeId,omitempty"`
+	Enabled      bool   `json:"enabled"`
 }
 
 type operationsConfigResponse struct {
@@ -1019,6 +1044,7 @@ type operationsConfigResponse struct {
 	AutoBalanceEnabled        bool                                  `json:"autoBalanceEnabled"`
 	AssignmentIntervalSeconds int                                   `json:"assignmentIntervalSeconds"`
 	Fallbacks                 map[string]operationsFallbackResponse `json:"fallbacks"`
+	RouteRules                []operationsRouteRuleResponse         `json:"routeRules"`
 	UpdatedAt                 time.Time                             `json:"updatedAt"`
 }
 
@@ -1032,21 +1058,40 @@ func (value operationsConfigRequest) input() (egressapp.OperationsConfigInput, e
 		ProbeProvider: egressdomain.ProbeProvider(strings.TrimSpace(value.ProbeProvider)), ProbeIntervalSeconds: value.ProbeIntervalSeconds, AutoAssignEnabled: value.AutoAssignEnabled,
 		AutoBalanceEnabled: value.AutoBalanceEnabled, AssignmentIntervalSeconds: value.AssignmentIntervalSeconds,
 	}
-	if value.Fallbacks == nil {
-		return result, nil
-	}
-	result.Fallbacks = make(map[egressdomain.Scope]egressapp.FallbackConfigInput, len(value.Fallbacks))
-	for rawScope, fallback := range value.Fallbacks {
-		nodeID := uint64(0)
-		if strings.TrimSpace(fallback.NodeID) != "" {
-			parsed, err := strconv.ParseUint(fallback.NodeID, 10, 64)
-			if err != nil || parsed == 0 {
-				return egressapp.OperationsConfigInput{}, fmt.Errorf("%w: 固定回退节点 ID 无效", egressapp.ErrInvalidInput)
+	if value.Fallbacks != nil {
+		result.Fallbacks = make(map[egressdomain.Scope]egressapp.FallbackConfigInput, len(value.Fallbacks))
+		for rawScope, fallback := range value.Fallbacks {
+			nodeID := uint64(0)
+			if strings.TrimSpace(fallback.NodeID) != "" {
+				parsed, err := strconv.ParseUint(fallback.NodeID, 10, 64)
+				if err != nil || parsed == 0 {
+					return egressapp.OperationsConfigInput{}, fmt.Errorf("%w: 固定回退节点 ID 无效", egressapp.ErrInvalidInput)
+				}
+				nodeID = parsed
 			}
-			nodeID = parsed
+			result.Fallbacks[egressdomain.Scope(rawScope)] = egressapp.FallbackConfigInput{
+				Mode: egressdomain.FallbackMode(strings.TrimSpace(fallback.Mode)), NodeID: nodeID,
+			}
 		}
-		result.Fallbacks[egressdomain.Scope(rawScope)] = egressapp.FallbackConfigInput{
-			Mode: egressdomain.FallbackMode(strings.TrimSpace(fallback.Mode)), NodeID: nodeID,
+	}
+	if value.RouteRules != nil {
+		result.RouteRules = make([]egressapp.RouteRuleInput, 0, len(value.RouteRules))
+		for _, rule := range value.RouteRules {
+			nodeID := uint64(0)
+			if strings.TrimSpace(rule.TargetNodeID) != "" {
+				parsed, err := strconv.ParseUint(rule.TargetNodeID, 10, 64)
+				if err != nil || parsed == 0 {
+					return egressapp.OperationsConfigInput{}, fmt.Errorf("%w: 出口路由规则目标节点 ID 无效", egressapp.ErrInvalidInput)
+				}
+				nodeID = parsed
+			}
+			result.RouteRules = append(result.RouteRules, egressapp.RouteRuleInput{
+				Scope:        egressdomain.Scope(strings.TrimSpace(rule.Scope)),
+				Class:        egressdomain.TrafficClass(strings.TrimSpace(rule.Class)),
+				TargetMode:   egressdomain.RouteRuleTargetMode(strings.TrimSpace(rule.TargetMode)),
+				TargetNodeID: nodeID,
+				Enabled:      rule.Enabled,
+			})
 		}
 	}
 	return result, nil
@@ -1079,10 +1124,20 @@ func newOperationsConfigResponse(value egressdomain.OperationsConfig) operations
 		}
 		fallbacks[string(scope)] = item
 	}
+	routeRules := make([]operationsRouteRuleResponse, 0, len(value.RouteRules))
+	for _, rule := range value.RouteRules {
+		item := operationsRouteRuleResponse{
+			Scope: string(rule.Scope), Class: string(rule.Class), TargetMode: string(rule.TargetMode.Normalized()), Enabled: rule.Enabled,
+		}
+		if rule.TargetNodeID != 0 {
+			item.TargetNodeID = strconv.FormatUint(rule.TargetNodeID, 10)
+		}
+		routeRules = append(routeRules, item)
+	}
 	return operationsConfigResponse{
 		ProbeProvider: string(value.ProbeProvider.Normalized()), ProbeIntervalSeconds: value.ProbeIntervalSeconds, AutoAssignEnabled: value.AutoAssignEnabled,
 		AutoBalanceEnabled: value.AutoBalanceEnabled, AssignmentIntervalSeconds: value.AssignmentIntervalSeconds,
-		Fallbacks: fallbacks, UpdatedAt: value.UpdatedAt,
+		Fallbacks: fallbacks, RouteRules: routeRules, UpdatedAt: value.UpdatedAt,
 	}
 }
 
