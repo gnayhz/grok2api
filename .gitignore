@@ -50,3 +50,8 @@ __pycache__/
 /.tmp/
 /tmp/
 /Dockerfile.local
+
+# GitNexus
+.claude
+AGENTS.md
+CLAUDE.md
