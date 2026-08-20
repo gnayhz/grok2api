@@ -356,7 +356,9 @@ func (a *Adapter) doDPoPRequestWithContentType(
 func publicDPoPJWK(key *ecdsa.PublicKey) dpopJWK {
 	return dpopJWK{
 		Kty: "EC", Crv: "P-256",
+		//lint:ignore SA1019 crypto/ecdh 迁移暂缓：只读坐标编码，无密钥篡改风险
 		X: base64.RawURLEncoding.EncodeToString(key.X.FillBytes(make([]byte, 32))),
+		//lint:ignore SA1019 crypto/ecdh 迁移暂缓：只读坐标编码，无密钥篡改风险
 		Y: base64.RawURLEncoding.EncodeToString(key.Y.FillBytes(make([]byte, 32))),
 	}
 }

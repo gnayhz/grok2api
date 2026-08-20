@@ -11,6 +11,12 @@ type Resources struct {
 	TotalModels      int64
 	ActiveClientKeys int64
 	TotalClientKeys  int64
+	// CooldownAccounts: accounts currently cooling (guard markers + upstream failures).
+	CooldownAccounts int64
+	// RiskAccounts: accounts carrying the long-term risk flag (rsc_denied).
+	RiskAccounts int64
+	// QualityDegradedRequests: quality_degraded audit records inside the period.
+	QualityDegradedRequests int64
 }
 
 // Usage 表示指定时间窗口内的请求聚合。

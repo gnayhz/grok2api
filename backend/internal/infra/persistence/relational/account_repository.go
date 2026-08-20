@@ -53,7 +53,7 @@ const (
 	accountRecoveryPredicate                  = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
 	providerQuotaExhaustedPredicate           = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console' AND quota.remaining > 0)))`
 	accountTypeSortExpression                 = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountBuildSuperPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
-	accountStatusSortExpression               = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	accountStatusSortExpression               = `CASE WHEN provider_accounts.risk_status <> '' THEN 6 WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
 	accountUnclassifiedRefreshReauthPredicate = `NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.refresh_permanent = FALSE AND credential.refresh_unclassified_auth_failures > 0)`
 	missingConsoleAccountPredicate            = `NOT EXISTS (SELECT 1 FROM provider_accounts AS console_account WHERE console_account.provider = ? AND console_account.source_key = ('console-' || provider_accounts.source_key))`
 )
@@ -107,9 +107,9 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	}
 	switch input.Filter.Risk {
 	case "flagged":
-		query = query.Where("EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2))")
+		query = query.Where("(EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2)) OR provider_accounts.risk_status <> '')")
 	case "normal":
-		query = query.Where("NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2))")
+		query = query.Where("NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2)) AND provider_accounts.risk_status = ''")
 	}
 	query = applyWebAgreementFilter(query, input.Filter.Agreement)
 	query = applyAssociationFilter(query, input.Filter.Provider, input.Filter.Association)
@@ -311,12 +311,13 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 	selectFields := `
 		provider,
 		COUNT(*) AS total,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) AS available,
+		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND risk_status = '' AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) AS available,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND cooldown_until > ? THEN 1 ELSE 0 END) AS cooldown,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + `) THEN 1 ELSE 0 END) AS waiting_reset,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 1 ELSE 0 END) AS probing,
 		SUM(CASE WHEN enabled = ? THEN 1 ELSE 0 END) AS disabled,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
+		SUM(CASE WHEN enabled = ? AND auth_status = ? THEN 1 ELSE 0 END) AS reauth_required,
+		SUM(CASE WHEN risk_status <> '' AND NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2)) THEN 1 ELSE 0 END) AS risk_flagged`
 	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select(
 		selectFields,
 		true, account.AuthStatusActive, now,
@@ -824,6 +825,43 @@ func (r *AccountRepository) ListEnabledCredentialRefreshAccountIDs(ctx context.C
 	return ids, err
 }
 
+// LinkedWebAccountID returns the Web SSO identity linked to a Build account.
+func (r *AccountRepository) LinkedWebAccountID(ctx context.Context, buildAccountID uint64) (uint64, bool, error) {
+	if buildAccountID == 0 {
+		return 0, false, nil
+	}
+	var webID uint64
+	err := r.db.db.WithContext(ctx).Model(&accountProviderLinkModel{}).
+		Where("build_account_id = ?", buildAccountID).Limit(1).Pluck("web_account_id", &webID).Error
+	if err != nil {
+		return 0, false, err
+	}
+	return webID, webID != 0, nil
+}
+
+// LinkedBuildAccountIDs returns every Build account sharing a Web identity.
+func (r *AccountRepository) LinkedBuildAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
+	if webAccountID == 0 {
+		return nil, nil
+	}
+	var ids []uint64
+	err := r.db.db.WithContext(ctx).Model(&accountProviderLinkModel{}).
+		Where("web_account_id = ?", webAccountID).Pluck("build_account_id", &ids).Error
+	return ids, err
+}
+
+// LinkedConsoleAccountIDs returns every Console account sharing a Web identity.
+// RSC denial flags the whole identity group; Console accounts are part of it.
+func (r *AccountRepository) LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
+	if webAccountID == 0 {
+		return nil, nil
+	}
+	var ids []uint64
+	err := r.db.db.WithContext(ctx).Model(&webConsoleAccountLinkModel{}).
+		Where("web_account_id = ?", webAccountID).Pluck("console_account_id", &ids).Error
+	return ids, err
+}
+
 func (r *AccountRepository) FilterMissingBuildConversionIDs(ctx context.Context, ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return []uint64{}, nil
@@ -1311,6 +1349,9 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 		row.ID = existing.ID
 		row.CreatedAt = existing.CreatedAt
 		row.Enabled = existing.Enabled
+		// risk_status 是长期风控标记：重新导入/令牌同步等 upsert 路径不得
+		// 用传入的新实体（无标记）清空它（外部复核发现）。
+		row.RiskStatus = existing.RiskStatus
 		row.Priority = existing.Priority
 		row.MaxConcurrent = existing.MaxConcurrent
 		row.MinimumRemaining = existing.MinimumRemaining
@@ -1850,7 +1891,9 @@ func rejectAccountsWithMediaJobs(db *gorm.DB, ids []uint64) error {
 func applyAccountStatusFilter(query *gorm.DB, status string, now time.Time) *gorm.DB {
 	switch status {
 	case "active":
-		return query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, now)
+		return query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND risk_status = '' AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, now)
+	case "risk":
+		return query.Where("risk_status <> ''")
 	case "disabled":
 		return query.Where("enabled = ?", false)
 	case "reauthRequired":
@@ -2125,6 +2168,73 @@ func (r *AccountRepository) UpdateHealth(ctx context.Context, id uint64, provide
 	return nil
 }
 
+// UpdateQualityIdleCooldown writes ONLY the idle cooldown columns (marker +
+// until). It never touches failure_count: snapshotting the count from the
+// caller's credential races concurrent markFailure increments (lost update).
+func (r *AccountRepository) UpdateQualityIdleCooldown(ctx context.Context, id uint64, provider account.Provider, until time.Time) error {
+	if id == 0 || !provider.IsValid() {
+		return repository.ErrNotFound
+	}
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id = ? AND provider = ?", id, provider).
+		Updates(map[string]any{"cooldown_until": until, "last_error": account.LastErrorQualityIdle})
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	r.notifyInvalidation(ctx, repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
+		CooldownUntil: &until, HealthMarker: account.LastErrorQualityIdle,
+	})
+	return nil
+}
+
+// UpdateRiskStatus 只写 risk_status 列：归因路径由请求事件自动触发，必须
+// 避免 Get→全量 Save（会静默回滚并发的健康写/令牌刷新/启停写）。
+func (r *AccountRepository) UpdateRiskStatus(ctx context.Context, id uint64, status string) error {
+	if id == 0 {
+		return repository.ErrNotFound
+	}
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Update("risk_status", status)
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	var providerRow struct{ Provider string }
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("provider").Where("id = ?", id).Take(&providerRow).Error; err != nil {
+		return mapError(err)
+	}
+	// 方言差异：MySQL 对同值更新可能报 RowsAffected==0。以存在性为准：
+	// 账号在即视为幂等成功（启动对账重放同值写入必须零错误）。
+	r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: account.Provider(providerRow.Provider), AccountID: id})
+	return nil
+}
+
+// ClearMissingThinkingCooldown 用 last_error 标记限定清除范围：clean 判定只
+// 证明本次降智与账号无关，空流等其他来源的冷却不应被连带清除（否则可形成
+// 永不冷却的循环）。无匹配行时是幂等 no-op。
+func (r *AccountRepository) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
+	if id == 0 {
+		return repository.ErrNotFound
+	}
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id = ? AND last_error IN ?", id, []string{account.LastErrorMissingThinking, account.LastErrorMissingThinkingDisabled, account.LastErrorQualityIdle}).
+		Updates(map[string]any{"cooldown_until": nil, "failure_count": 0, "last_error": ""})
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	var providerRow struct{ Provider string }
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("provider").Where("id = ?", id).Take(&providerRow).Error; err != nil {
+		return mapError(err)
+	}
+	r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountHealthChanged, Provider: account.Provider(providerRow.Provider), AccountID: id})
+	return nil
+}
+
 func (r *AccountRepository) TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error {
 	if id == 0 || usedAt.IsZero() {
 		return repository.ErrNotFound
@@ -2291,13 +2401,28 @@ func (r *AccountRepository) ResetQuotaState(ctx context.Context, provider accoun
 		if err := tx.Where("account_id IN ?", accountIDs).Delete(&quotaRecoveryModel{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("account_id IN ? AND reason = ?", accountIDs, "model_quota_depleted").Delete(&accountModelQuotaBlockModel{}).Error
+		if err := tx.Where("account_id IN ? AND reason = ?", accountIDs, "model_quota_depleted").Delete(&accountModelQuotaBlockModel{}).Error; err != nil {
+			return err
+		}
+		// 重置额度同时解除惩罚冷却：误判的空流/缺推理冷却只能干等过期，
+		// 管理端需要一条立即恢复账号可用性的路径（与 markSuccess 恢复语义一致）。
+		return clearAccountPenalty(tx, accountIDs)
 	})
 	if err == nil {
+		// 惩罚冷却随恢复事件一起生效：AccountRecoveryChanged 是 layer=Base 的
+		// provider 级失效，会清空选择器候选缓存并按最新 DB 状态（冷却已解除）重建。
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountRecoveryChanged, Provider: provider})
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountModelQuotaChanged, Provider: provider})
 	}
 	return err
+}
+
+// clearAccountPenalty 将账号的惩罚状态恢复到健康基线（冷却清空、失败计数归零、
+// 最后错误清空），语义等价于一次成功请求后的 markSuccess 写入。
+func clearAccountPenalty(tx *gorm.DB, accountIDs any) error {
+	return tx.Model(&accountModel{}).
+		Where("id IN (?) AND (cooldown_until IS NOT NULL OR failure_count > 0 OR last_error != '')", accountIDs).
+		Updates(map[string]any{"cooldown_until": nil, "failure_count": 0, "last_error": ""}).Error
 }
 
 func (r *AccountRepository) ResetProviderQuotaState(ctx context.Context, provider account.Provider, activeOnly bool) (int64, error) {
@@ -2316,7 +2441,10 @@ func (r *AccountRepository) ResetProviderQuotaState(ctx context.Context, provide
 		if err := tx.Where("account_id IN (?)", accountQuery().Select("id")).Delete(&quotaRecoveryModel{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("account_id IN (?) AND reason = ?", accountQuery().Select("id"), "model_quota_depleted").Delete(&accountModelQuotaBlockModel{}).Error
+		if err := tx.Where("account_id IN (?) AND reason = ?", accountQuery().Select("id"), "model_quota_depleted").Delete(&accountModelQuotaBlockModel{}).Error; err != nil {
+			return err
+		}
+		return clearAccountPenalty(tx, accountQuery().Select("id"))
 	})
 	if err == nil && accountCount > 0 {
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountRecoveryChanged, Provider: provider})

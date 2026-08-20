@@ -3806,6 +3806,11 @@ type scriptedBuildResponse struct {
 	status int
 	body   string
 	header http.Header
+	// bodyReader 覆盖 body 字符串：用于注入可控制时序的流（如静默挂起）。
+	bodyReader io.Reader
+	// headerDelay 在返回响应头前阻塞：模拟上游头迟滞（降智路径特征）。
+	// 可被 context 取消打断，用于响应头预算早断测试。
+	headerDelay time.Duration
 }
 
 type barePermissionEgressAdapter struct {
@@ -3845,7 +3850,7 @@ func (a *scriptedBuildAdapter) Definition() provider.Definition {
 	definition.Conversation.Compact = true
 	return definition
 }
-func (a *scriptedBuildAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+func (a *scriptedBuildAdapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.attempts = append(a.attempts, request.Credential.ID)
@@ -3855,6 +3860,13 @@ func (a *scriptedBuildAdapter) ForwardResponse(_ context.Context, request provid
 	}
 	next := queue[0]
 	a.responses[request.Credential.ID] = queue[1:]
+	if next.headerDelay > 0 {
+		select {
+		case <-time.After(next.headerDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	header := next.header.Clone()
 	if header == nil {
 		header = make(http.Header)
@@ -3864,9 +3876,13 @@ func (a *scriptedBuildAdapter) ForwardResponse(_ context.Context, request provid
 		rateLimit = provider.ParseRateLimitMetadata([]byte(next.body))
 		a.lastRateLimit = rateLimit
 	}
+	responseBody := io.Reader(strings.NewReader(next.body))
+	if next.bodyReader != nil {
+		responseBody = next.bodyReader
+	}
 	return &provider.Response{
 		StatusCode: next.status, Status: http.StatusText(next.status), Header: header,
-		Body: io.NopCloser(strings.NewReader(next.body)), RateLimit: rateLimit,
+		Body: io.NopCloser(responseBody), RateLimit: rateLimit,
 	}, nil
 }
 func (a *scriptedBuildAdapter) RefreshCredential(context.Context, account.Credential) (provider.RefreshedCredential, error) {

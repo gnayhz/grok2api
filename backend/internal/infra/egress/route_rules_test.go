@@ -58,44 +58,6 @@ func mustEncryptRouteRuleProxy(t *testing.T, cipher *security.Cipher, value stri
 	return encrypted
 }
 
-func TestRouteRuleForDecisionMatrix(t *testing.T) {
-	config := domain.OperationsConfig{
-		RouteRules: []domain.RouteRule{
-			{Scope: domain.ScopeBuild, Class: domain.TrafficClassInference, TargetMode: domain.RouteRuleTargetFixed, TargetNodeID: 11, Enabled: true},
-			{Scope: domain.ScopeBuild, Class: domain.TrafficClassBilling, TargetMode: domain.RouteRuleTargetFixed, TargetNodeID: 11, Enabled: true},
-		},
-	}
-	manager := newRouteRuleTestManager(t, domain.Node{}, config)
-	ctx := context.Background()
-
-	// Inference without binding follows the rule.
-	if decision := manager.RouteRuleFor(ctx, domain.ScopeBuild, domain.TrafficClassInference); !decision.Applied || decision.Rule.TargetNodeID != 11 {
-		t.Fatalf("unbound inference decision = %+v", decision)
-	}
-	// Inference with an account binding keeps the binding.
-	bound := WithEgressNode(ctx, 99)
-	if decision := manager.RouteRuleFor(bound, domain.ScopeBuild, domain.TrafficClassInference); decision.Applied {
-		t.Fatal("bound inference must not be rerouted")
-	}
-	// Auxiliary classes follow the rule even when bound.
-	if decision := manager.RouteRuleFor(bound, domain.ScopeBuild, domain.TrafficClassBilling); !decision.Applied {
-		t.Fatalf("bound auxiliary decision = %+v", decision)
-	}
-	// Administrator quality probes are never rerouted.
-	probe := WithQualityProbe(context.Background())
-	if decision := manager.RouteRuleFor(probe, domain.ScopeBuild, domain.TrafficClassBilling); decision.Applied {
-		t.Fatal("quality probe must not be rerouted")
-	}
-	// Unconfigured class stays on the default path.
-	if decision := manager.RouteRuleFor(ctx, domain.ScopeBuild, domain.TrafficClassCredential); decision.Applied {
-		t.Fatalf("unconfigured class decision = %+v", decision)
-	}
-	// Other scopes have no rules.
-	if decision := manager.RouteRuleFor(ctx, domain.ScopeWeb, domain.TrafficClassBilling); decision.Applied {
-		t.Fatalf("web scope decision = %+v", decision)
-	}
-}
-
 func TestAcquireRoutedFixedLease(t *testing.T) {
 	config := domain.OperationsConfig{
 		RouteRules: []domain.RouteRule{

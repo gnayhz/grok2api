@@ -177,13 +177,27 @@ func buildRealityClientHello(connection net.Conn, serverName string, alpn []stri
 		config.NextProtos = append([]string(nil), alpn...)
 		secure.HandshakeState.Hello.AlpnProtocols = append([]string(nil), alpn...)
 	}
-	privateKey := secure.HandshakeState.State13.EcdheKey
-	if privateKey == nil || privateKey.Curve() != ecdh.X25519() {
+	// utls >=1.8 moves TLS 1.3 keys into State13.KeyShareKeys (EcdheKey is
+	// deprecated and no longer populated by fingerprint builds); check both.
+	privateKey := realityX25519Key(secure.HandshakeState.State13)
+	if privateKey == nil {
 		return nil, fmt.Errorf("Reality 客户端指纹 %q 未提供 X25519 TLS 1.3 key share", helloID.Client)
 	}
 	return secure, nil
 }
 
+// realityX25519Key returns the X25519 private key available for the
+// ClientHello: prefer the new KeyShareKeys API, fall back to the legacy
+// EcdheKey field (populated by fingerprint builds on utls <1.8).
+func realityX25519Key(state13 utls.TLS13OnlyState) *ecdh.PrivateKey {
+	if ks := state13.KeyShareKeys; ks != nil && ks.Ecdhe != nil && ks.Ecdhe.Curve() == ecdh.X25519() {
+		return ks.Ecdhe
+	}
+	if key := state13.EcdheKey; key != nil && key.Curve() == ecdh.X25519() {
+		return key
+	}
+	return nil
+}
 func realityPrefersAESGCM(cipherSuites []uint16) bool {
 	for _, cipherSuite := range cipherSuites {
 		switch cipherSuite {

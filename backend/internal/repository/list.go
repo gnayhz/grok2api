@@ -107,6 +107,9 @@ type AccountSummary struct {
 	Probing        int64
 	Disabled       int64
 	ReauthRequired int64
+	// RiskFlagged 统计携带长期风险标记（risk_status <> ''，如 RSC 注册风控）
+	// 的账号数，与凭据级 bot flag 数在服务层汇总为 Risk。
+	RiskFlagged int64
 }
 
 type ModelListFilter struct {
@@ -139,6 +142,8 @@ type AuditListFilter struct {
 	Mode    string
 	Key     string
 	Account string
+	// ErrorCode 精确过滤 error_code 列（如 quality_degraded）。
+	ErrorCode string
 }
 
 type AuditCursorQuery struct {

@@ -28,6 +28,7 @@ var schemaModels = []any{
 	&egressProxyProfileModel{},
 	&egressNodeModel{},
 	&egressOperationsConfigModel{},
+	&accountRiskVerdictModel{},
 	&accountModel{},
 	&accountCredentialModel{},
 	&accountProviderLinkModel{},
@@ -93,6 +94,8 @@ var schemaIndexes = []string{
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_audits_event_id ON request_audits(event_id) WHERE event_id <> ''",
 	"CREATE INDEX IF NOT EXISTS idx_audits_account_created_id ON request_audits(account_id, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_status_created_id ON request_audits(status_code, created_at DESC, id DESC)",
+	// errorCode filter (audit quality_degraded preset + dashboard degrade count) hits matching rows directly and serves cursor ordering.
+	"CREATE INDEX IF NOT EXISTS idx_audits_error_code_created_id ON request_audits(error_code, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_streaming_created_id ON request_audits(streaming, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_provider_streaming_created_id ON request_audits(provider, streaming, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audit_attempts_audit_number ON request_audit_attempts(audit_id, number)",

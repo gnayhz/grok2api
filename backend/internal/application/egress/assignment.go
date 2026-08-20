@@ -188,7 +188,7 @@ func (s *Service) rebalanceProvider(ctx context.Context, provider accountdomain.
 	return result, nil
 }
 
-// capAutomaticAssignmentShare optionally prevents a cascading node quarantine
+// capAutomaticAssignmentShare optionally prevents a cascading node evacuation
 // from concentrating the whole active provider pool on the last healthy node.
 // Zero or invalid shares leave configured node capacities unchanged.
 func capAutomaticAssignmentShare(nodes []domain.Node, accounts []accountdomain.Credential, share float64) []domain.Node {

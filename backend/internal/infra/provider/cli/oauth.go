@@ -195,7 +195,11 @@ func parseOAuthErrorResponse(body []byte, status int) oauthErrorDetails {
 	}
 	seen := make(map[string]struct{}, len(messages))
 	for _, message := range messages {
-		message = normalizeOAuthErrorMessage(message, 512)
+		// Structured upstream fields can echo submitted secrets (e.g.
+		// error_description="refresh_token=..."); redact before persisting the
+		// message into LastRefreshErrorMessage and returning it to the admin API
+		// (security audit P1: only normalize ran here before).
+		message = normalizeOAuthErrorMessage(redactOAuthDiagnosticText(message), 512)
 		if message == "" {
 			continue
 		}
@@ -265,6 +269,16 @@ func isSensitiveOAuthDiagnosticKey(key string) bool {
 	return false
 }
 
+// isASCIITokenMaterial reports whether the value is pure ASCII — CJK prose
+// is kept out of the generic long-field redaction.
+func isASCIITokenMaterial(value string) bool {
+	for _, r := range value {
+		if r > 0x7f {
+			return false
+		}
+	}
+	return true
+}
 func redactOAuthDiagnosticText(value string) string {
 	value = oauthBearerPattern.ReplaceAllString(value, "Bearer [REDACTED]")
 	value = oauthJWTPattern.ReplaceAllString(value, "[REDACTED]")
@@ -272,7 +286,10 @@ func redactOAuthDiagnosticText(value string) string {
 	fields := strings.Fields(value)
 	for index := range fields {
 		trimmed := strings.Trim(fields[index], `"'(),;`)
-		if len(trimmed) >= 80 && !strings.ContainsAny(trimmed, "{}[]<>") {
+		// Long-field redaction targets ASCII token material only: CJK prose has no
+		// whitespace, so a legitimate Chinese description becomes ONE field and
+		// would be wiped whole at >=80 bytes (~27 runes). Keep natural language.
+		if len(trimmed) >= 80 && isASCIITokenMaterial(trimmed) && !strings.ContainsAny(trimmed, "{}[]<>") {
 			fields[index] = strings.Replace(fields[index], trimmed, "[REDACTED]", 1)
 		}
 	}

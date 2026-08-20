@@ -34,17 +34,33 @@ const (
 var (
 	errQualityDegraded    = errors.New("上游响应缺少推理")
 	errQualityEmptyStream = errors.New("上游流式响应为空")
+	// errQualityHeaderBudget 标记响应头预算早断。它刻意不链 context.Canceled：
+	// 取消的是本次调用的子 context，父请求仍在进行，误判成客户端取消会
+	// 错误地中断整个重试循环。
+	errQualityHeaderBudget = errors.New("上游响应头迟滞（降智路径特征）")
 )
 
 // QualityRetryRuntime is the isolated request-path withhold/retry policy.
 // Zero Enabled leaves production behavior unchanged.
 type QualityRetryRuntime struct {
-	Enabled         bool
-	MaxAttempts     int
-	HoldTimeout     time.Duration
-	MinOutputTokens int64
-	OnExhausted     string
-	AccountCooldown time.Duration
+	Enabled     bool
+	MaxAttempts int
+	HoldTimeout time.Duration
+	// EarlyHeaderAbort 是“响应头预算”实验性早断：实测健康推理路径的头恒定
+	// 在秒级返回（与生成长度无关），而降智路径连头都要等整个生成完成
+	// （复杂问题可达 30s+）。quality hold 激活时，头超过该预算未返回即中止
+	// 本次上游调用并换路径重试，把“降智判定”从首字节提前到头阶段。每请求
+	// 至多触发一次（触发后即解除），避免对系统性慢路径误杀。0 表示关闭。
+	EarlyHeaderAbort time.Duration
+	MinOutputTokens  int64
+	OnExhausted      string
+	AccountCooldown  time.Duration
+	// SameAccountRetry retries the withholding account once before switching.
+	// Tunnel-pool egress rotates the exit IP per request, so one same-account
+	// retry distinguishes transient exit-IP pollution (retry delivers) from a
+	// degraded account (retry still withholds, then the account is penalized
+	// and the next attempt switches). The retry consumes the attempt budget.
+	SameAccountRetry bool
 }
 
 // QualityStreamSignals is the hold classifier input. Tests drive this
@@ -56,6 +72,9 @@ type QualityStreamSignals struct {
 	OutputTokens    int64
 	Terminal        bool
 	HoldExpired     bool
+	// OversizedLine 表示扫描器遇到无法解析的超长行：内容证据不可靠，分类
+	// 器 fail-open 放行（与 4MiB 缓冲上限同语义）。
+	OversizedLine bool
 }
 
 // QualityVerdict is the hold decision for one upstream stream.
@@ -94,6 +113,27 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
 	return cfg
 }
 
+// Attributor is the risk-attribution surface the gateway consumes; the
+// concrete risk.Service satisfies it.
+type Attributor interface {
+	OnDegraded(ctx context.Context, credential accountdomain.Credential)
+}
+
+// UpdateAccountRisk installs the attribution hook; nil keeps it unset.
+func (s *Service) UpdateAccountRisk(attributor Attributor) {
+	if attributor == nil {
+		return
+	}
+	s.accountRisk.Store(attributor)
+}
+
+func (s *Service) accountRiskAttributor() Attributor {
+	if value, ok := s.accountRisk.Load().(Attributor); ok {
+		return value
+	}
+	return nil
+}
+
 func (s *Service) UpdateQualityRetry(cfg QualityRetryRuntime) {
 	normalized := normalizeQualityRetry(cfg)
 	s.qualityRetry.Store(&normalized)
@@ -110,40 +150,36 @@ func (s *Service) qualityRetryConfig() QualityRetryRuntime {
 }
 
 // ClassifyQualityHold decides whether a held stream may be forwarded.
-// Thinking (or reasoning tokens) always delivers. A finished or expired
-// sample with enough visible output and no reasoning is 降智 and withheld.
-// Short replies below minOutput are delivered so "ok"/"yes" is not retried.
-// A hold timeout with no visible output is not fail-open: keep waiting for
-// more bytes or a stream abort so an empty hang is not flushed as HTTP 200.
+// Thinking deltas always deliver. Reasoning models think on EVERY answer,
+// however short: a healthy stream emits reasoning before any content, so any
+// observed content without thinking is degraded regardless of length — a
+// short "ok" from a degraded account must be withheld exactly like a long
+// one. minOutput only bounds how early a mid-stream burst is withheld before
+// the stream finishes. A sample with no output at all keeps waiting (also
+// after hold expiry): an empty hang must not fail-open as HTTP 200.
 func ClassifyQualityHold(sig QualityStreamSignals, minOutput int64) QualityVerdict {
 	if minOutput <= 0 {
 		minOutput = defaultQualityMinOutput
 	}
-	if sig.HasThinking || sig.ReasoningTokens > 0 {
+	// ReasoningTokens is audit metadata that may come from the upstream
+	// usage claim; degraded streams report large counts while never emitting
+	// reasoning events, so only observed events (HasThinking) deliver.
+	if sig.HasThinking {
+		return QualityDeliver
+	}
+	if sig.OversizedLine {
+		// 无法可靠解析的流不猜测质量：与缓冲上限一致 fail-open。
 		return QualityDeliver
 	}
 	output := sig.OutputTokens
 	if output < sig.VisibleTokens {
 		output = sig.VisibleTokens
 	}
-	enough := output >= minOutput
-	if sig.Terminal {
-		if output <= 0 {
-			return QualityWait
-		}
-		if enough {
-			return QualityWithhold
-		}
-		return QualityDeliver
+	if output <= 0 {
+		return QualityWait
 	}
-	if enough {
+	if sig.Terminal || sig.HoldExpired || output >= minOutput {
 		return QualityWithhold
-	}
-	if sig.HoldExpired {
-		if output <= 0 {
-			return QualityWait
-		}
-		return QualityDeliver
 	}
 	return QualityWait
 }
@@ -253,7 +289,7 @@ func CommitQualityHold(verdict QualityVerdict, qualityAttempt, maxAttempts int, 
 }
 
 func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) bool {
-	if !cfg.Enabled || !input.Streaming || input.ForcedEgressNodeID != 0 || ownership != nil || input.skipQualityHold {
+	if !cfg.Enabled || !input.Streaming || ownership != nil || input.skipQualityHold {
 		return false
 	}
 	switch operation {
@@ -331,6 +367,27 @@ func nonEmptyJSONCollection(raw json.RawMessage) bool {
 func jsonStringEquals(raw json.RawMessage, want string) bool {
 	var value string
 	return json.Unmarshal(raw, &value) == nil && strings.EqualFold(strings.TrimSpace(value), want)
+}
+
+// qualityHeaderBudget returns the active response-header budget for this
+// attempt: only while the quality hold is engaged, configured, and the
+// per-request single-fire arm is still on.
+func qualityHeaderBudget(cfg QualityRetryRuntime, holdEnabled, armed bool) time.Duration {
+	if !holdEnabled || !armed || cfg.EarlyHeaderAbort <= 0 {
+		return 0
+	}
+	return cfg.EarlyHeaderAbort
+}
+
+// commitableSameAccountRetry reports whether the withhold path may retry the
+// same account once: enabled, unused for this request, and a selection
+// session exists to re-queue the account (pinned/forced-egress requests skip
+// the hold entirely, so a nil session here is defensive only). Quota-probe
+// leases are excluded: RetryAccount only re-queues normal candidates, so a
+// probe lease would silently switch accounts while the log still claims a
+// same-account retry.
+func commitableSameAccountRetry(cfg QualityRetryRuntime, used bool, quotaProbe bool, selection *selectionSession) bool {
+	return cfg.SameAccountRetry && !used && !quotaProbe && selection != nil
 }
 
 func (s *Service) applyMissingThinkingPenalty(ctx context.Context, requestID string, credential accountdomain.Credential, cooldown time.Duration) {

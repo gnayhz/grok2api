@@ -350,37 +350,62 @@ curl http://127.0.0.1:8000/v1/responses \
 - Grok Build 流量类别路由：将推理、OAuth、账单、模型同步或视频调用固定到专属节点或直连。推理与视频尊重账号绑定；辅助调用即使账号已绑定也按规则分流，目标不可用时回退节点池
 - 代理池模式，单次连接失败不会触发全局冷却
 - 固定代理传输失败后立即复测；同节点复测自动合并，后续绑定请求限时等待并在恢复后快速重试
-- 可选的[出口质量守护程序](./tools/egress-quality-guard/README.zh-CN.md)，支持逐节点模型探测、防误杀隔离和自动恢复；通过内置的 `quality-guard` Compose profile 按需启用
-- 固定 sticky 会话应各自建成独立节点（`proxyPool=false`）。不要把多条 sticky 合成一个节点，否则质量守护只能整组摘流，无法定位坏会话
+- 固定 sticky 会话应各自建成独立节点（`proxyPool=false`）。不要把多条 sticky 合成一个节点，否则异常时只能整组摘流，无法定位坏会话
 
 Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址，因此自动刷新 Clearance 暂不能直接使用隧道分享链接。
 
-首次启用时只需在 `config.yaml` 中增加 `qualityGuard` 并启动 profile。主程序会自动创建并稳定复用不可导出的系统探测身份：
+实时路由守卫（`requestRetry`）在 `config.yaml` 顶层配置，默认关闭：
 
 ```yaml
-qualityGuard:
+requestRetry:
   enabled: true
-  model: "grok-4.5"
-  # 可选：思考模型缺 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
-  requestRetry:
-    enabled: false
-    maxAttempts: 6
-    holdTimeout: 3s
-    minOutputTokens: 32
-    onExhausted: fail_closed # fail_open | fail_closed
+  maxAttempts: 6
+  holdTimeout: 3s
+  minOutputTokens: 32
+  onExhausted: fail_closed # fail_open | fail_closed
 ```
 
-`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。默认关闭。开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，排除该账号再试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具、stored response 钉账号和 ForcedEgress 探针。
+开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具、stored response 钉账号和 ForcedEgress 探针。该段修改随配置热加载生效。
 
-```bash
-docker compose --profile quality-guard up -d --build
-```
+### 账号风险归因（RSC）
 
-曾使用预览版 `clientKeyID` 配置的现有部署可以直接升级：该字段会被兼容读取但不再使用，可安全删除；原来手工创建的探测 Key 不会被程序擅自删除。
+扣留一条流并不等于账号本身降智——出口 IP 同样可能是元凶。启用 `accountRisk.rscCheck` 后，
+每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查：
 
-后续修改该配置时，执行 `docker compose --profile quality-guard restart grok2api egress-quality-guard` 使基础配置重新加载；管理页面中的策略调整仍支持热加载。
+- **denied/flagged**：结论永久缓存；`onDenied`（默认 flag，可选 disable / markOnly）会标记
+  整个身份组（Web、Build、Console 账号）为 `rsc_denied`。被标记账号保持启用，但永久
+  不参与调度，直到管理员在后台手动解除。
+- **clean**：本次降智与账号无关（出口 IP 嫌疑）；missing-thinking 与空流冷却会被解除，
+  账号恢复可调度。泛型 5xx 故障永不因 clean 结论被清除。
+- 巡检循环按 `patrol.bucketDays` 周期复查 clean/error 结论；风险结论永不自动恢复。
+  本段修改需重启进程生效。
 
-普通的 `docker compose up -d` 不会启动守护程序，也不会产生主动探测流量。sidecar 只从主程序获得权限受限的内部凭据，不保存或使用管理员密码。启用自动隔离前请先阅读上面的详细说明。
+### 验证矩阵
+
+后端内置一键验证脚本，固化加固过程中建立的审查闸门：
+
+- **fast**（`make verify`）：构建、vet、staticcheck、race 全量测试。
+- **full**（`make verify-full`）：追加 fuzz 种子回归、govulncheck 漏洞扫描、
+  守卫/风控包 count=3 稳定性探针。
+- **fuzz**（`make fuzz`）：每个解析目标 30 秒变异引擎
+  （SSE 质量扫描器、RSC 载荷解析器）。
+
+第三方工具缺失时降级为 SKIP 并附安装提示。
+完整加固记录（检测规则、归因流程、冷却分类、安全修复与生产实测）见 [HARDENING.md](./HARDENING.md)。
+
+### 冷却分类
+
+管理后台可见三族相互独立的冷却：
+
+- **实时路由守卫冷却**（`requestRetry.accountCooldown`）：`missing_thinking`（首次打击进入冷却，
+  冷却过期后再打击则停用）、`missing_thinking_disabled`、`quality_idle_timeout`（空流/静默
+  超时，与失败计数分离）。clean RSC 结论可解除这三类。
+- **路由冷却**（`routing.cooldownBase`/`cooldownMax`）：泛型上游失败的指数退避；
+  风险归因永不清除。
+- **出口节点冷却**：固定节点传输失败的指数退避与健康复测；与账号状态无关。
+
+请求审计页支持按错误码（`quality_degraded`）过滤，账号行的冷却原因悬停可见，
+降智扣留事件可以端到端诊断。
 
 Resin 用户名支持 `{account}`：
 
@@ -467,7 +492,7 @@ docker network inspect grok2api_default \
 - `audit.ledgerMode`：`observe` 仅报告账本故障；`enforce` 可暂停新推理以保护计费准确性。
 - `routing.accountIsolatedConnections`：为外部 L4 或按连接哈希的负载均衡器按账号拆分出站 TCP/HTTP 连接池。默认关闭，因为会增加连接数、TLS 握手、内存和文件描述符占用。
 - `routing.segmentedSelectorEnabled`：默认对至少 3000 个可用账号的大号池启用，限制动态并发读取规模，同时保留额度/等级优先级、会话粘性、完整选号回退与原子门禁。
-- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`：可选的大号池保护。`0`（默认）保持历史行为：不健康节点上的 auto 账号会一次性迁走，容量/再均衡仍最多 200 次。仅在隔离一个节点会把大量账号压到最后几个健康出口时，才设为 `0.05`–`1`。环境变量 `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` 与 `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` 可覆盖 YAML。
+- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`：可选的大号池保护。`0`（默认）保持历史行为：不健康节点上的 auto 账号会一次性迁走，容量/再均衡仍最多 200 次。仅在一个节点下线会把大量账号压到最后几个健康出口时，才设为 `0.05`–`1`。环境变量 `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` 与 `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` 可覆盖 YAML。
 - Build 响应头超时和精确匹配的 403 失效规则支持热加载。
 - “同步最新版本”可应用已验证的 Grok Build 客户端版本和 User-Agent。
 

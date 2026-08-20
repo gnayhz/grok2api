@@ -117,9 +117,10 @@ type responsesRequest struct {
 }
 
 type chatCompletionRequest struct {
-	Model          string `json:"model"`
-	Stream         bool   `json:"stream"`
-	PromptCacheKey string `json:"prompt_cache_key"`
+	Model          string          `json:"model"`
+	Messages       json.RawMessage `json:"messages"`
+	Stream         bool            `json:"stream"`
+	PromptCacheKey string          `json:"prompt_cache_key"`
 }
 
 type messagesRequest struct {
@@ -309,6 +310,11 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	var request chatCompletionRequest
 	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.Model) == "" {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Chat Completions 请求缺少有效 model")
+		return
+	}
+	// 空 messages 属客户端错误：不发往上游（否则返回误导性的 upstream_server_error）
+	if len(request.Messages) == 0 || string(bytes.TrimSpace(request.Messages)) == "[]" || string(bytes.TrimSpace(request.Messages)) == "null" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Chat Completions 请求缺少有效消息")
 		return
 	}
 	clientValue, exists := c.Get(middleware.ClientKey)

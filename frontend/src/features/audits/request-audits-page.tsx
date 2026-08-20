@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowUp, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, Globe2, Info, Minimize2, RefreshCw, Search, WholeWord, type LucideIcon } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, Globe2, Info, Minimize2, RefreshCw, Search, WholeWord, type LucideIcon, ShieldCheck } from "lucide-react";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -13,6 +13,7 @@ import { listClientKeys } from "@/features/client-keys/client-keys-api";
 import { listAccounts } from "@/features/accounts/accounts-api";
 import { RequestAuditDetailDialog } from "@/features/audits/request-audit-detail-dialog";
 import { buildAuditUsageView } from "@/features/audits/audit-usage";
+import { getDashboard } from "@/features/dashboard/dashboard-api";
 import { getRequestAudits, getRequestAuditSummary, type AuditBillingBreakdownDTO, type AuditBillingComponentDTO, type AuditDTO, type AuditPeriod } from "@/features/audits/request-audits-api";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
@@ -44,6 +45,7 @@ export function RequestAuditsPage() {
   const [modelFilter, setModelFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [modeFilter, setModeFilter] = useState("");
+  const [errorCodeFilter, setErrorCodeFilter] = useState("");
   const [keyFilter, setKeyFilter] = useState("");
   const [accountFilter, setAccountFilter] = useState("");
   const [periodDays, setPeriodDays] = useState<PeriodDays>(1);
@@ -56,9 +58,9 @@ export function RequestAuditsPage() {
   const debouncedAccountFilter = useDebouncedValue(accountFilter);
   const period: AuditPeriod = toPeriodValue(periodDays);
   const cursorScope = useMemo(() => JSON.stringify([
-    pageSize, debouncedSearch, modelFilter, statusFilter, modeFilter,
+    pageSize, debouncedSearch, modelFilter, statusFilter, errorCodeFilter, modeFilter,
     debouncedKeyFilter, debouncedAccountFilter, period, sort.field, sort.order,
-  ]), [pageSize, debouncedSearch, modelFilter, statusFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period, sort.field, sort.order]);
+  ]), [pageSize, debouncedSearch, modelFilter, statusFilter, errorCodeFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period, sort.field, sort.order]);
   const [cursorState, setCursorState] = useState<AuditCursorState>(() => ({ scope: cursorScope, values: [""] }));
   if (cursorState.scope !== cursorScope) {
     setCursorState({ scope: cursorScope, values: [""] });
@@ -75,14 +77,19 @@ export function RequestAuditsPage() {
 
   const auditsQuery = useQuery({
     queryKey: ["request-audits", "cursor", cursorScope, cursor],
-    queryFn: ({ signal }) => getRequestAudits({ cursor, pageSize, search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period, sortBy: sort.field, sortOrder: sort.order }, signal),
+    queryFn: ({ signal }) => getRequestAudits({ cursor, pageSize, search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, errorCode: errorCodeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period, sortBy: sort.field, sortOrder: sort.order }, signal),
     placeholderData: (previous, previousQuery) => previousQuery?.queryKey[2] === cursorScope ? previous : undefined,
     gcTime: AUDIT_PAGE_CACHE_TIME_MS,
     structuralSharing: false,
   });
-  const summaryQuery = useQuery({
-    queryKey: ["request-audits", "summary", debouncedSearch, modelFilter, statusFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period],
-    queryFn: ({ signal }) => getRequestAuditSummary({ search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period }, forceSummaryRefresh.current, signal),
+    const degradedQuery = useQuery({
+    queryKey: ["audit-degraded-withholds", period],
+    queryFn: () => getDashboard(period, i18n.language),
+    refetchInterval: 30_000,
+  });
+const summaryQuery = useQuery({
+    queryKey: ["request-audits", "summary", debouncedSearch, modelFilter, statusFilter, modeFilter, errorCodeFilter, debouncedKeyFilter, debouncedAccountFilter, period],
+    queryFn: ({ signal }) => getRequestAuditSummary({ search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, errorCode: errorCodeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period }, forceSummaryRefresh.current, signal),
     placeholderData: (previous) => previous,
     gcTime: AUDIT_SUMMARY_CACHE_TIME_MS,
   });
@@ -192,10 +199,11 @@ export function RequestAuditsPage() {
       />
 
       <section className="space-y-2" aria-label={t("audits.usageSummary")}>
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
           <AuditMetric icon={Activity} loading={summaryLoading} label={t("audits.totalRequests")} value={formatNumber(summary?.usage.requests ?? 0, i18n.language, 0)} detail={t("audits.requestBreakdown", { success: formatNumber(summary?.usage.successfulRequests ?? 0, i18n.language, 0), failed: formatNumber(summary?.usage.failedRequests ?? 0, i18n.language, 0) })} />
           <AuditMetric icon={WholeWord} loading={summaryLoading} label={t("audits.totalTokens")} value={formatNumber(summary?.usage.totalTokens ?? 0, i18n.language, 0)} detail={t("audits.tokenEfficiency", { cacheRate: formatNumber(cacheRate, i18n.language, 1) })} />
           <AuditMetric icon={CircleCheck} loading={summaryLoading} label={t("audits.successRate")} value={`${formatNumber(summary?.usage.successRate ?? 0, i18n.language, 1)}%`} detail={t("audits.averageDuration", { duration: formatDuration(summary?.usage.averageDurationMs ?? 0) })} />
+          <AuditMetric icon={ShieldCheck} loading={degradedQuery.isPending} label={t("audits.degradedWithholds")} value={formatNumber(degradedQuery.data?.resources.qualityDegradedRequests ?? 0, i18n.language, 0)} detail={t("audits.degradedWithholdsDetail")} />
           <AuditMetric
             icon={CircleDollarSign}
             loading={summaryLoading}
@@ -234,6 +242,13 @@ export function RequestAuditsPage() {
                   { value: "stream", label: t("audits.stream") },
                   { value: "nonStream", label: t("audits.nonStream") },
                 ] },
+
+    // errorCode filter: the quality_degraded preset isolates degraded-withhold
+    // records in one click (per-attempt 503s and the request-level terminal
+    // record share the same error_code; see recordQualityDegraded).
+    { id: "errorCode", label: t("audits.errorCodeFilter"), value: errorCodeFilter, onChange: setErrorCodeFilter, options: [
+     { value: "quality_degraded", label: t("audits.errorCodeQualityDegraded") },
+    ] },
                 {
                   id: "key", label: t("audits.key"), value: keyFilter,
                   onChange: setKeyFilter, options: [

@@ -189,46 +189,15 @@ bootstrapAdmin:
 	}
 }
 
-func TestLoadQualityGuardFromYAML(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte(`secrets:
-  jwtSecret: "12345678901234567890123456789012"
-  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-bootstrapAdmin:
-  password: "password123"
-qualityGuard:
-  enabled: true
-  clientKeyID: 999
-  model: "grok-4.5"
-  nodeIDs: [2, 9]
-  minimumHealthyNodes: 1
-  activeInterval: 45m
-`)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	value, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !value.QualityGuard.Enabled || value.QualityGuard.DeprecatedClientKeyID != 999 || value.QualityGuard.ActiveInterval.Value() != 45*time.Minute {
-		t.Fatalf("qualityGuard = %#v", value.QualityGuard)
-	}
-	retry := value.QualityGuard.RequestRetry
-	if retry.Enabled || retry.MaxAttempts != 6 || retry.HoldTimeout.Value() != 3*time.Second || retry.MinOutputTokens != 32 || retry.OnExhausted != "fail_closed" || retry.AccountCooldown.Value() != 24*time.Hour {
-		t.Fatalf("loaded requestRetry defaults = %#v", retry)
-	}
-}
-
-func TestDefaultQualityGuardRequestRetryContract(t *testing.T) {
+func TestDefaultRequestRetryContract(t *testing.T) {
 	t.Parallel()
-	got := defaultConfig().QualityGuard.RequestRetry
+	got := defaultConfig().RequestRetry
 	if got.Enabled || got.MaxAttempts != 6 || got.HoldTimeout.Value() != 3*time.Second || got.MinOutputTokens != 32 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour {
 		t.Fatalf("requestRetry defaults = %#v", got)
 	}
 }
 
-func TestQualityGuardRequestRetryAccountCooldownBounds(t *testing.T) {
+func TestRequestRetryAccountCooldownBounds(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name    string
@@ -242,24 +211,13 @@ func TestQualityGuardRequestRetryAccountCooldownBounds(t *testing.T) {
 		{name: "above maximum", value: 168*time.Hour + time.Millisecond, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateQualityGuardRequestRetry(QualityGuardRequestRetryConfig{
+			err := validateRequestRetry(RequestRetryConfig{
 				Enabled: true, AccountCooldown: Duration(test.value),
 			})
 			if (err != nil) != test.wantErr {
 				t.Fatalf("validate cooldown %s: err=%v, wantErr=%t", test.value, err, test.wantErr)
 			}
 		})
-	}
-}
-
-func TestEnabledQualityGuardUsesManagedIdentity(t *testing.T) {
-	value := defaultConfig()
-	value.Secrets.JWTSecret = "12345678901234567890123456789012"
-	value.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	value.BootstrapAdmin.Password = "password123"
-	value.QualityGuard.Enabled = true
-	if err := value.Validate(); err != nil {
-		t.Fatalf("enabled quality guard should not require a client key ID: %v", err)
 	}
 }
 

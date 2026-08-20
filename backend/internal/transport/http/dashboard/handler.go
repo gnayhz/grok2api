@@ -35,15 +35,18 @@ type rangeDTO struct {
 }
 
 type resourcesDTO struct {
-	ActiveAccounts   int64 `json:"activeAccounts"`
-	TotalAccounts    int64 `json:"totalAccounts"`
-	BuildAccounts    int64 `json:"buildAccounts"`
-	WebAccounts      int64 `json:"webAccounts"`
-	ConsoleAccounts  int64 `json:"consoleAccounts"`
-	EnabledModels    int64 `json:"enabledModels"`
-	TotalModels      int64 `json:"totalModels"`
-	ActiveClientKeys int64 `json:"activeClientKeys"`
-	TotalClientKeys  int64 `json:"totalClientKeys"`
+	ActiveAccounts          int64 `json:"activeAccounts"`
+	TotalAccounts           int64 `json:"totalAccounts"`
+	BuildAccounts           int64 `json:"buildAccounts"`
+	WebAccounts             int64 `json:"webAccounts"`
+	ConsoleAccounts         int64 `json:"consoleAccounts"`
+	EnabledModels           int64 `json:"enabledModels"`
+	TotalModels             int64 `json:"totalModels"`
+	ActiveClientKeys        int64 `json:"activeClientKeys"`
+	TotalClientKeys         int64 `json:"totalClientKeys"`
+	CooldownAccounts        int64 `json:"cooldownAccounts"`
+	RiskAccounts            int64 `json:"riskAccounts"`
+	QualityDegradedRequests int64 `json:"qualityDegradedRequests"`
 }
 
 type usageDTO struct {
@@ -137,15 +140,18 @@ func (h *Handler) get(c *gin.Context) {
 		GeneratedAt: result.GeneratedAt,
 		Range:       rangeDTO{Start: result.Range.Start, End: result.Range.End},
 		Resources: resourcesDTO{
-			ActiveAccounts:   result.Resources.ActiveAccounts,
-			TotalAccounts:    result.Resources.TotalAccounts,
-			BuildAccounts:    result.Resources.BuildAccounts,
-			WebAccounts:      result.Resources.WebAccounts,
-			ConsoleAccounts:  result.Resources.ConsoleAccounts,
-			EnabledModels:    result.Resources.EnabledModels,
-			TotalModels:      result.Resources.TotalModels,
-			ActiveClientKeys: result.Resources.ActiveClientKeys,
-			TotalClientKeys:  result.Resources.TotalClientKeys,
+			ActiveAccounts:          result.Resources.ActiveAccounts,
+			TotalAccounts:           result.Resources.TotalAccounts,
+			BuildAccounts:           result.Resources.BuildAccounts,
+			WebAccounts:             result.Resources.WebAccounts,
+			ConsoleAccounts:         result.Resources.ConsoleAccounts,
+			EnabledModels:           result.Resources.EnabledModels,
+			TotalModels:             result.Resources.TotalModels,
+			ActiveClientKeys:        result.Resources.ActiveClientKeys,
+			TotalClientKeys:         result.Resources.TotalClientKeys,
+			CooldownAccounts:        result.Resources.CooldownAccounts,
+			RiskAccounts:            result.Resources.RiskAccounts,
+			QualityDegradedRequests: result.Resources.QualityDegradedRequests,
 		},
 		Usage:     toUsageDTO(result.Usage),
 		Series:    series,

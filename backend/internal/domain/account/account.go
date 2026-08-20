@@ -116,12 +116,15 @@ const (
 const (
 	LastErrorMissingThinking         = "missing_thinking"
 	LastErrorMissingThinkingDisabled = "missing_thinking_disabled"
+	// LastErrorQualityIdle 标记质量窥探阶段的空流/空闲超时冷却：与 missing_thinking
+	// 同属“出口性降智”家族，clean RSC 结论应一并解除。
+	LastErrorQualityIdle = "quality_idle_timeout"
 )
 
 // NormalizeHealthMarker admits only durable non-sensitive health markers.
 func NormalizeHealthMarker(value string) string {
 	switch value {
-	case LastErrorMissingThinking, LastErrorMissingThinkingDisabled:
+	case LastErrorMissingThinking, LastErrorMissingThinkingDisabled, LastErrorQualityIdle:
 		return value
 	default:
 		return ""
@@ -140,6 +143,9 @@ const (
 func (value EgressAssignmentMode) IsValid() bool {
 	return value == EgressAssignmentManual || value == EgressAssignmentAuto
 }
+
+// RiskStatusRSCDenied 标记 RSC 判定注册风控的账号：保持启用但调度永久跳过。
+const RiskStatusRSCDenied = "rsc_denied"
 
 // Credential 表示持久化的上游 OAuth 账号。
 type Credential struct {
@@ -177,11 +183,14 @@ type Credential struct {
 	FailureCount     int
 	CooldownUntil    *time.Time
 	LastError        string
-	LastUsedAt       *time.Time
-	ObservedModel    string
-	ObservedModelAt  *time.Time
-	WebTier          WebTier
-	WebTierSyncedAt  *time.Time
+	// RiskStatus 为空表示无长期风险标记；rsc_denied 表示 RSC 判定注册风控，
+	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态）。
+	RiskStatus      string
+	LastUsedAt      *time.Time
+	ObservedModel   string
+	ObservedModelAt *time.Time
+	WebTier         WebTier
+	WebTierSyncedAt *time.Time
 	// EgressIdentity 是不含凭据和个人信息的稳定出口身份。
 	// 关联到同一 Web 账号的 Build/Console 只共享该值，不共享任何运行状态。
 	EgressIdentity string

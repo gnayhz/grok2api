@@ -54,12 +54,9 @@ type RouteRuleDecision struct {
 
 // RouteRuleFor evaluates the configured rules for one scope and traffic
 // class. A rule applies unless the class respects account bindings and the
-// caller already carries an explicit binding, or the request is an
-// administrator quality probe (forced nodes must never be rerouted).
+// caller already carries an explicit node binding (bound nodes must never
+// be rerouted).
 func (m *Manager) RouteRuleFor(ctx context.Context, scope domain.Scope, class domain.TrafficClass) RouteRuleDecision {
-	if qualityProbeFromContext(ctx) {
-		return RouteRuleDecision{}
-	}
 	config, supported, err := m.loadOperationsConfig(ctx, time.Now().UTC())
 	if err != nil || !supported {
 		return RouteRuleDecision{}

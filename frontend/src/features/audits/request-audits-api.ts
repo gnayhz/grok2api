@@ -189,6 +189,7 @@ type AuditQuery = {
   model?: string;
   status?: string;
   mode?: string;
+  errorCode?: string;
   key?: string;
   account?: string;
   period: AuditPeriod;
@@ -203,6 +204,7 @@ export function getRequestAudits(input: AuditQuery, signal?: AbortSignal): Promi
   if (input.model) query.set("model", input.model);
   if (input.status) query.set("status", input.status);
   if (input.mode) query.set("mode", input.mode);
+  if (input.errorCode) query.set("errorCode", input.errorCode);
   if (input.key) query.set("key", input.key);
   if (input.account) query.set("account", input.account);
   if (input.sortBy && input.sortOrder) {
@@ -218,6 +220,7 @@ export function getRequestAuditSummary(input: Omit<AuditQuery, "cursor" | "pageS
   if (input.model) query.set("model", input.model);
   if (input.status) query.set("status", input.status);
   if (input.mode) query.set("mode", input.mode);
+  if (input.errorCode) query.set("errorCode", input.errorCode);
   if (input.key) query.set("key", input.key);
   if (input.account) query.set("account", input.account);
   if (refresh) query.set("refresh", "1");

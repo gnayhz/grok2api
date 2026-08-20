@@ -7,13 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	"github.com/chenyme/grok2api/backend/internal/application/account/risk"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
@@ -29,6 +28,7 @@ import (
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
@@ -37,7 +37,7 @@ import (
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
-	infraqualityguard "github.com/chenyme/grok2api/backend/internal/infra/qualityguard"
+	"github.com/chenyme/grok2api/backend/internal/infra/rsc"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -60,42 +60,37 @@ const (
 
 // Application 管理后端进程生命周期和本地后台任务。
 type Application struct {
-	logger          *slog.Logger
-	database        *relational.Database
-	server          *http.Server
-	audits          *auditapp.Service
-	responses       repository.ResponseRepository
-	cleanupLock     repository.DistributedLock
-	runtime         io.Closer
-	settingsBus     repository.SettingsChangeBus
-	invalidationBus repository.InvalidationBus
-	settings        *settingsapp.Service
-	gateway         *gateway.Service
-	media           *mediaapp.Service
-	quotaRecovery   *quotarecoveryapp.Service
-	accounts        *accountapp.Service
-	models          *modelapp.Service
-	clientKeys      *clientkeyapp.Service
-	updates         *updatecheckapp.Service
-	invalidations   *invalidationapp.Service
-	accountRepo     repository.AccountRepository
-	modelRepo       repository.ModelRepository
-	providers       *provider.Registry
-	web             *webprovider.Adapter
-	egress          *infraegress.Manager
-	egressOps       *egressapp.Service
-	startup         *startupState
+	logger            *slog.Logger
+	database          *relational.Database
+	server            *http.Server
+	audits            *auditapp.Service
+	responses         repository.ResponseRepository
+	cleanupLock       repository.DistributedLock
+	runtime           io.Closer
+	settingsBus       repository.SettingsChangeBus
+	invalidationBus   repository.InvalidationBus
+	settings          *settingsapp.Service
+	gateway           *gateway.Service
+	media             *mediaapp.Service
+	quotaRecovery     *quotarecoveryapp.Service
+	accounts          *accountapp.Service
+	models            *modelapp.Service
+	clientKeys        *clientkeyapp.Service
+	updates           *updatecheckapp.Service
+	invalidations     *invalidationapp.Service
+	accountRepo       repository.AccountRepository
+	modelRepo         repository.ModelRepository
+	providers         *provider.Registry
+	web               *webprovider.Adapter
+	egress            *infraegress.Manager
+	egressOps         *egressapp.Service
+	accountRisk       *risk.Service
+	accountRiskPatrol bool
+	startup           *startupState
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Application, error) {
-	qualityGuardDirectory := strings.TrimSpace(os.Getenv("GROK2API_QUALITY_GUARD_DIR"))
-	qualityGuardPath := func(name string) string {
-		if qualityGuardDirectory == "" {
-			return ""
-		}
-		return filepath.Join(qualityGuardDirectory, name)
-	}
 	var database *relational.Database
 	var err error
 	switch cfg.Database.Driver {
@@ -315,22 +310,6 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressService.SetOperationsConfigInvalidator(egressManager)
 	egressManager.SetFailureProber(egressService.TestNode)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
-	qualityGuardIdentity, err := clientKeyService.EnsureQualityGuardIdentity(ctx, cfg.QualityGuard.Enabled)
-	if err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
-		return nil, err
-	}
-	qualityGuardToken, err := infraqualityguard.Prepare(qualityGuardPath("bootstrap.json"), cfg.QualityGuard, cfg.Secrets.JWTSecret)
-	if err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
-		return nil, err
-	}
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
 	auditService.UpdateWriterConfig(cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value(), cfg.Audit.CommitDelay.Value())
 	auditService.UpdateLedgerConfig(auditLedgerConfig(cfg.Audit))
@@ -351,12 +330,20 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountRepo.SetInvalidationObserver(invalidationService.Notify)
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
+	var (
+		riskService *risk.Service
+		riskPatrol  bool
+	)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
-	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.QualityGuard.RequestRetry))
+	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.RequestRetry))
+	if service := newAccountRiskService(cfg, database, accountService, logger); service != nil {
+		gatewayService.UpdateAccountRisk(service)
+		// reconcile 与 patrol 交给 Run() 的 background WaitGroup 托管：进程关闭时
+		riskService, riskPatrol = service, cfg.AccountRisk.RSCCheck.Patrol.Enabled
+	}
 	gatewayService.UpdateVideoMaxAttempts(cfg.Routing.VideoMaxAttempts)
 	gatewayService.UpdateMarkBuildChatDeniedAsReauth(cfg.Routing.MarkBuildChatDeniedAsReauth)
 	gatewayService.SetLogger(logger)
-	egressService.SetQualityProber(gatewayService)
 	gatewayService.UpdateBuildForbiddenReauthPolicy(cfg.Accounts.MarkBuildForbiddenReauth, cfg.Accounts.BuildForbiddenReauthCodes)
 	gatewayService.UpdateRequestTimeout(cfg.Server.RequestTimeout.Value())
 	gatewayService.ConfigureMedia(mediaJobRepo, cfg.Provider.Web.MediaConcurrency)
@@ -409,7 +396,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
-		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.QualityGuard.RequestRetry))
+		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.RequestRetry))
 		gatewayService.UpdateVideoMaxAttempts(next.Routing.VideoMaxAttempts)
 		gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
 		gatewayService.UpdateBuildForbiddenReauthPolicy(next.Accounts.MarkBuildForbiddenReauth, next.Accounts.BuildForbiddenReauthCodes)
@@ -424,21 +411,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
-	qualityGuardProbe := egressapp.QualityProbeInput{}
-	if cfg.QualityGuard.Enabled {
-		qualityGuardProbe = egressapp.QualityProbeInput{
-			ClientKeyID: qualityGuardIdentity.ID, Model: cfg.QualityGuard.Model,
-			Prompt: infraqualityguard.ProbePrompt, Expected: infraqualityguard.ProbeExpected,
-			MaxOutputTokens: cfg.QualityGuard.MaxOutputTokens,
-		}
-	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, QualityGuardStatePath: qualityGuardPath("state.json"), QualityGuardConfigPath: qualityGuardPath("runtime-config.json"), QualityGuardToken: qualityGuardToken, QualityGuardProbe: qualityGuardProbe, Updates: updateService})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup, accountRisk: riskService, accountRiskPatrol: riskPatrol,
 	}, nil
 }
 
@@ -447,6 +426,56 @@ func invalidationSourceInstance(cfg config.Config) string {
 		return value
 	}
 	return fmt.Sprintf("process-%d", time.Now().UnixNano())
+}
+
+// newAccountRiskService builds the RSC attribution service when enabled in
+// config; nil means attribution stays off and the gateway relies on its
+// escalating behavioral penalties alone.
+func newAccountRiskService(cfg config.Config, database *relational.Database, accounts *accountapp.Service, logger *slog.Logger) *risk.Service {
+	rscCfg := cfg.AccountRisk.RSCCheck
+	if !rscCfg.Enabled {
+		return nil
+	}
+	store := riskRelationalStore{Repo: relational.NewRiskRepository(database)}
+	return risk.New(risk.Config{
+		Enabled:        true,
+		Concurrency:    rscCfg.Concurrency,
+		Timeout:        rscCfg.Timeout.Value(),
+		OnDenied:       rscCfg.OnDenied,
+		PatrolInterval: time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
+		ErrorRetry:     time.Hour,
+	}, accounts, store, rscCheckerAdapter{Checker: rsc.NewChecker(rscCfg.Timeout.Value())}, logger)
+}
+
+// runAccountRiskPatrol runs the bucketed clean-verdict re-check loop. Each
+// tick re-checks a bounded batch; at the default cadence a 30-day patrol
+// interval covers tens of thousands of accounts without bursts. Owned by
+// Run's background WaitGroup so shutdown joins it before the DB closes.
+func (a *Application) runAccountRiskPatrol(ctx context.Context) {
+	interval := 15 * time.Minute
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	query := relational.NewRiskRepository(a.database)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		patrolDue, errorRetryDue := a.accountRisk.PatrolCutoffs()
+		due, err := query.ListPatrolDue(patrolCtx, accountdomain.ProviderWeb, patrolDue, errorRetryDue, 50)
+		if err != nil {
+			a.logger.Warn("account_risk_patrol_query_failed", "error", err.Error())
+			cancel()
+			continue
+		}
+		if len(due) > 0 {
+			a.logger.Info("account_risk_patrol_batch", "due", len(due))
+			a.accountRisk.PatrolTick(patrolCtx, due)
+		}
+		cancel()
+	}
 }
 
 func maxBatchConcurrency(value config.BatchConfig) int {
@@ -489,14 +518,16 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 	}
 }
 
-func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.QualityRetryRuntime {
+func qualityRetryRuntime(value config.RequestRetryConfig) gateway.QualityRetryRuntime {
 	return gateway.QualityRetryRuntime{
-		Enabled:         value.Enabled,
-		MaxAttempts:     value.MaxAttempts,
-		HoldTimeout:     value.HoldTimeout.Value(),
-		MinOutputTokens: int64(value.MinOutputTokens),
-		OnExhausted:     value.OnExhausted,
-		AccountCooldown: value.AccountCooldown.Value(),
+		Enabled:          value.Enabled,
+		MaxAttempts:      value.MaxAttempts,
+		HoldTimeout:      value.HoldTimeout.Value(),
+		MinOutputTokens:  int64(value.MinOutputTokens),
+		OnExhausted:      value.OnExhausted,
+		AccountCooldown:  value.AccountCooldown.Value(),
+		SameAccountRetry: value.SameAccountRetry,
+		EarlyHeaderAbort: value.EarlyHeaderAbort.Value(),
 	}
 }
 
@@ -611,6 +642,22 @@ func (a *Application) Run(ctx context.Context) error {
 		a.runStatsigWarmup(taskCtx)
 		return nil
 	})
+	if a.accountRisk != nil {
+		startBackground("account_risk_reconcile", func(taskCtx context.Context) error {
+			reconcileCtx, cancel := context.WithTimeout(taskCtx, 2*time.Minute)
+			a.accountRisk.ReconcileRiskyVerdicts(reconcileCtx)
+			cancel()
+			// runSupervisedTask restarts any task that returns: park until shutdown.
+			<-taskCtx.Done()
+			return nil
+		})
+		if a.accountRiskPatrol {
+			startBackground("account_risk_patrol", func(taskCtx context.Context) error {
+				a.runAccountRiskPatrol(taskCtx)
+				return nil
+			})
+		}
+	}
 	startBackground("web_quota_startup_catchup", func(taskCtx context.Context) error {
 		a.runWebQuotaCatchup(taskCtx)
 		return nil

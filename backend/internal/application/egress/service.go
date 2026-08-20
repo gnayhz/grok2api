@@ -11,7 +11,6 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -23,55 +22,11 @@ var (
 	ErrInvalidSort             = errors.New("代理节点排序条件无效")
 	ErrNotFound                = errors.New("代理节点不存在")
 	ErrProbeStale              = errors.New("代理配置在探测期间已更新，请重新测试")
-	ErrQualityProbeUnavailable = errors.New("出口质量探测不可用")
-	ErrQualityProbeNoAccount   = errors.New("质量检测暂无可调度账号")
 	ErrClearanceUnavailable    = errors.New("Clearance 刷新不可用")
 	ErrProxyProfileUnavailable = errors.New("共享代理配置功能不可用")
 	ErrProxyProfileInUse       = errors.New("共享代理配置仍被节点使用")
 	ErrProxyProfileNotFound    = errors.New("共享代理配置不存在")
 )
-
-const (
-	DefaultQualityProbePrompt          = "Reply with exactly QUALITY_OK."
-	DefaultQualityProbeExpected        = "QUALITY_OK"
-	DefaultQualityProbeMaxOutputTokens = 64
-	MaxQualityProbePromptBytes         = 4096
-	MaxQualityProbeExpectedBytes       = 512
-	MaxQualityProbeOutputTokens        = 2048
-)
-
-type QualityProbeInput struct {
-	ClientKeyID     uint64
-	Model           string
-	Prompt          string
-	Expected        string
-	MatchMode       string
-	RequireThinking bool
-	MaxOutputTokens int
-}
-
-type QualityProbeResult struct {
-	RequestID             string
-	NodeID                uint64
-	Model                 string
-	StatusCode            int
-	FirstTokenMS          int64
-	DurationMS            int64
-	GenerationMS          int64
-	ChunkCount            int
-	OutputTokens          int64
-	ReasoningTokens       int64
-	VisibleTokens         int64
-	VisibleCharacters     int
-	OutputTokensPerSecond float64
-	ExpectedMatched       bool
-	ThinkingRequired      bool
-	ResponseSHA256        string
-}
-
-type QualityProber interface {
-	ProbeEgressQuality(context.Context, uint64, QualityProbeInput) (QualityProbeResult, error)
-}
 
 const (
 	maxProxyURLBytes         = 8192
@@ -113,83 +68,22 @@ type ServiceRepository interface {
 }
 
 type Service struct {
-	repository                  ServiceRepository
-	proxyProfiles               repository.EgressProxyProfileRepository
-	accounts                    AccountBindingRepository
-	operations                  OperationsRepository
-	cipher                      *security.Cipher
-	mu                          sync.RWMutex
-	browserUA                   string
-	clearance                   ClearanceManager
-	prober                      NodeProber
-	operationsCache             OperationsConfigInvalidator
-	qualityProber               QualityProber
+	repository      ServiceRepository
+	proxyProfiles   repository.EgressProxyProfileRepository
+	accounts        AccountBindingRepository
+	operations      OperationsRepository
+	cipher          *security.Cipher
+	mu              sync.RWMutex
+	browserUA       string
+	clearance       ClearanceManager
+	prober          NodeProber
+	operationsCache OperationsConfigInvalidator
+
 	assignmentMu                sync.Mutex
 	lastAssignmentRun           time.Time
 	assignmentRunning           bool
 	autoAssignMaxNodeShare      float64
 	autoAssignMaxMigrationShare float64
-}
-
-func (s *Service) SetQualityProber(value QualityProber) {
-	s.mu.Lock()
-	s.qualityProber = value
-	s.mu.Unlock()
-}
-
-func (s *Service) ProbeQuality(ctx context.Context, nodeID uint64, input QualityProbeInput) (QualityProbeResult, error) {
-	if nodeID == 0 || input.ClientKeyID == 0 {
-		return QualityProbeResult{}, fmt.Errorf("%w: nodeId 和 clientKeyId 必填", ErrInvalidInput)
-	}
-	input.Model = strings.TrimSpace(input.Model)
-	input.Prompt = strings.TrimSpace(input.Prompt)
-	input.Expected = strings.TrimSpace(input.Expected)
-	rawMatchMode := strings.TrimSpace(input.MatchMode)
-	input.MatchMode = NormalizeMatchMode(input.MatchMode)
-	if input.Model == "" {
-		return QualityProbeResult{}, fmt.Errorf("%w: model 必填", ErrInvalidInput)
-	}
-	if input.Prompt == "" {
-		input.Prompt = DefaultQualityProbePrompt
-	}
-	if input.Expected == "" && rawMatchMode == "" {
-		input.Expected = DefaultQualityProbeExpected
-	}
-	if len(input.Prompt) > MaxQualityProbePromptBytes || len(input.Expected) > MaxQualityProbeExpectedBytes {
-		return QualityProbeResult{}, fmt.Errorf("%w: 探测文本过长", ErrInvalidInput)
-	}
-	if input.MaxOutputTokens == 0 {
-		input.MaxOutputTokens = DefaultQualityProbeMaxOutputTokens
-	}
-	if input.MaxOutputTokens < 1 || input.MaxOutputTokens > MaxQualityProbeOutputTokens {
-		return QualityProbeResult{}, fmt.Errorf("%w: maxOutputTokens 必须在 1 到 %d 之间", ErrInvalidInput, MaxQualityProbeOutputTokens)
-	}
-	node, err := s.repository.GetEgressNode(ctx, nodeID)
-	if errors.Is(err, repository.ErrNotFound) {
-		return QualityProbeResult{}, ErrNotFound
-	}
-	if err != nil {
-		return QualityProbeResult{}, err
-	}
-	if node.Scope != domain.ScopeBuild || strings.TrimSpace(node.EncryptedProxyURL) == "" {
-		return QualityProbeResult{}, fmt.Errorf("%w: 质量探测仅支持已配置代理的 grok_build 节点", ErrInvalidInput)
-	}
-	s.mu.RLock()
-	prober := s.qualityProber
-	s.mu.RUnlock()
-	if prober == nil {
-		return QualityProbeResult{}, ErrQualityProbeUnavailable
-	}
-	// A profile may request the thinking guard, but only a known reasoning-capable
-	// Build model can make zero reasoning tokens meaningful. Unknown/custom and
-	// non-reasoning models stay observable without being falsely quarantined.
-	input.RequireThinking = input.RequireThinking && modeldomain.SupportsReasoningForProvider(accountdomain.ProviderBuild, input.Model)
-	result, err := prober.ProbeEgressQuality(ctx, nodeID, input)
-	if err != nil {
-		return QualityProbeResult{}, err
-	}
-	result.ThinkingRequired = input.RequireThinking
-	return result, nil
 }
 
 // AccountBindingRepository is intentionally narrow so existing account

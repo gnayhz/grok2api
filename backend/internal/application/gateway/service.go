@@ -113,9 +113,6 @@ type Input struct {
 	auditOperation audit.Operation
 	// skipQualityHold is set only by trusted gateway-side request classifiers.
 	skipQualityHold bool
-	// ForcedEgressNodeID is an internal-only administrator probe constraint.
-	// Public inference handlers never populate it.
-	ForcedEgressNodeID uint64
 }
 
 type Usage struct {
@@ -215,6 +212,8 @@ type Service struct {
 	modelSyncing                map[uint64]struct{}
 	markBuildChatDeniedAsReauth atomic.Bool
 	qualityRetry                atomic.Pointer[QualityRetryRuntime]
+	// accountRisk receives withhold events for RSC attribution; nil disables.
+	accountRisk atomic.Value // risk.Attributor
 }
 
 type teamModelRateLimit struct {
@@ -878,8 +877,8 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	var preselectedSession *selectionSession
 	// Skip targets whose account pool is already known to be unavailable. This
 	// gives same-name targets failover before any physical upstream request while
-	// preserving pinned Responses and forced administrator probes.
-	if routeErr == nil && ownership == nil && input.ForcedEgressNodeID == 0 {
+	// preserving pinned Responses.
+	if routeErr == nil && ownership == nil {
 		for _, candidate := range orderedRoutes {
 			affinityKey := ""
 			if candidate.Provider == accountdomain.ProviderBuild {
@@ -1020,9 +1019,22 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	authRecoveryAttempted := make(map[uint64]bool)
 	holdCfg := s.qualityRetryConfig()
 	qualityHoldEnabled := shouldHoldQualityStream(input, ownership, route, operation, holdCfg)
+	// Real-time guard observability. Gate lines are emitted only when the hold
+	// is engaged: a per-request INFO line while the feature is off would be pure
+	// log amplification proportional to traffic.
+	if qualityHoldEnabled {
+		s.logger.Info("quality_hold_gate", "request_id", input.RequestID, "cfg_enabled", holdCfg.Enabled, "provider", route.Provider, "public_model", input.PublicModel, "upstream_model", route.UpstreamModel, "operation", operation)
+	}
 	// Count accounts that actually reached the upstream. Credential-only skips
 	// do not consume the quality retry budget; refreshes stay on the same account.
 	qualityAccountAttempts := 0
+	// sameAccountRetried marks that the quality withhold path already used its
+	// single same-account retry for this request (see QualityRetryRuntime).
+	sameAccountRetried := false
+	// headerBudgetArmed 保证响应头预算早断每请求至多触发一次：第一次触发
+	// 后即解除，后续 attempt 不再受预算约束，避免对系统性慢（但健康）的
+	// 上游路径反复误杀导致 fail-closed。
+	headerBudgetArmed := true
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	quotaProbeAttempted := false
 	selection := preselectedSession
@@ -1035,7 +1047,63 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		started := time.Now()
 		responseStartedAt = started
 		lease.markSelectorUpstreamStarted()
-		response, err := adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{Credential: credential, ForcedEgressNodeID: input.ForcedEgressNodeID, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata})
+		request := provider.ResponseResourceRequest{Credential: credential, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata}
+		var response *provider.Response
+		var err error
+		if budget := qualityHeaderBudget(holdCfg, qualityHoldEnabled, headerBudgetArmed); budget > 0 {
+			// 响应头预算早断：健康推理路径的头恒定秒级返回，降智路径要等
+			// 整个生成完成。预算内头未到即中止换路径，把降智判定从首字节
+			// 提前到头阶段（复杂问题可省数十秒）。
+			callCtx, cancel := context.WithCancel(physicalCallCtx)
+			fired := &atomic.Bool{}
+			timerDone := make(chan struct{})
+			timer := time.AfterFunc(budget, func() {
+				// defer close 保证 channel 关闭时 fired 已置位且 cancel 已
+				// 执行——主线程读到的是最终态。
+				defer close(timerDone)
+				fired.Store(true)
+				cancel()
+			})
+			response, err = adapter.ForwardResponse(callCtx, request)
+			if !timer.Stop() {
+				// Stop()=false 仅表示回调已触发，不代表已完成：回调可能停在
+				// fired.Store 之前。等回调结束再判定，消除“成功交付一个随后
+				// 才被取消的 body”窗口。回调无阻塞操作，等待必返回。
+				<-timerDone
+			}
+			if err != nil {
+				// Go 惯例 err!=nil 时 response 仍可能非 nil：未关闭会泄漏连接。
+				if response != nil && response.Body != nil {
+					_ = response.Body.Close()
+				}
+				cancel()
+				if fired.Load() {
+					headerBudgetArmed = false
+					s.logger.Warn("quality_degraded_header_budget_abort", "request_id", input.RequestID, "account_id", credential.ID, "budget", budget.String(), "elapsed", time.Since(started).String())
+					// 哨兵错误刻意不链底层 context.Canceled：父请求仍在进行。
+					err = errQualityHeaderBudget
+				}
+			} else if fired.Load() {
+				// 成功与超时竞态：头恰在预算边缘返回，但 timer 已 cancel 了
+				// callCtx，body 读取必然立即失败且不会重试。统一按预算中止
+				// 处理——关闭竞态体，转哨兵错误走换路径重试。
+				cancel()
+				if response != nil && response.Body != nil {
+					_ = response.Body.Close()
+				}
+				response = nil
+				headerBudgetArmed = false
+				s.logger.Warn("quality_degraded_header_budget_abort", "request_id", input.RequestID, "account_id", credential.ID, "budget", budget.String(), "elapsed", time.Since(started).String(), "race", true)
+				err = errQualityHeaderBudget
+			} else {
+				// 头在预算内正常返回且未触发：body 生命周期必须长于 callCtx
+				// （peek/客户端读取发生在 forwardResponse 返回之后）。这里不
+				// cancel，泄漏的 context 由父 physicalCallCtx 释放兜底——
+				// WithCancel 子 ctx 会随父 ctx 取消而释放，无真实泄漏。
+			}
+		} else {
+			response, err = adapter.ForwardResponse(physicalCallCtx, request)
+		}
 		auditBase.ReasoningEffort = normalizedMetadata.ReasoningEffort
 		err = failureAttempts.captureResponse(credential, started, response, err)
 		timing.markUpstream(time.Since(started))
@@ -1199,8 +1267,6 @@ attemptLoop:
 		selectionStarted := time.Now()
 		if ownership != nil {
 			lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, ownership.AccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
-		} else if input.ForcedEgressNodeID != 0 {
-			lease, err = s.selector.AcquireForKeyOnEgressNode(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, affinityKey, excluded, !quotaProbeAttempted, accountScope, input.ForcedEgressNodeID)
 		} else {
 			if selection == nil {
 				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, affinityKey, excluded, !quotaProbeAttempted, accountScope)
@@ -1388,6 +1454,18 @@ attemptLoop:
 		}
 		if isTerminalRequestForbidden(credential.Provider, lastFailure) {
 			// already prepared as a terminal 403 response for the client
+		} else if response.StatusCode >= 400 && lastFailure == nil && !isRetryable(response.StatusCode) {
+			// Non-retryable upstream 4xx without an existing failure classification:
+			// headers would otherwise be forwarded verbatim to the client, leaking
+			// upstream internals. Convert to a controlled UpstreamFailure that
+			// preserves the status and upstream error code for diagnostics while
+			// serving the client the sanitized protocol envelope.
+			body, _ := readRetryableBody(response.Body)
+			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			_ = response.Body.Close()
+			lease.completeSelectorObservation(false)
+			lease.Release()
+			break attemptLoop
 		} else if isRetryableResponse(response, route.Provider) && !finalEgressForbidden {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, _ := readRetryableBody(response.Body)
@@ -1516,7 +1594,10 @@ attemptLoop:
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
 			if qualityHoldEnabled {
-				replay, verdict, peekUsage, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolForOperation(operation), holdCfg)
+				proto := qualityProtocolForOperation(operation)
+				replay, verdict, peekUsage, _, peekErr := peekQualityStream(ctx, response.Body, proto, holdCfg)
+				// Real-time guard observability: per-attempt withhold decision.
+				s.logger.Info("quality_hold_verdict", "request_id", input.RequestID, "account_id", credential.ID, "protocol", proto, "verdict", string(verdict), "usage_output", peekUsage.OutputTokens, "usage_reasoning", peekUsage.ReasoningTokens, "peek_err", peekErr)
 				if peekErr != nil {
 					if replay != nil {
 						_ = replay.Close()
@@ -1536,12 +1617,18 @@ attemptLoop:
 							logPrefix = "quality_peek_empty"
 						}
 						writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-						if markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, http.StatusGatewayTimeout, qualityIdleAccountCooldown); markErr != nil {
+						if markErr := s.selector.MarkQualityIdleFailure(writeCtx, credential, qualityIdleAccountCooldown); markErr != nil {
 							s.logger.Warn(logPrefix+"_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
 						} else {
 							s.logger.Warn(logPrefix+"_retry", "request_id", input.RequestID, "account_id", credential.ID, "cooldown", qualityIdleAccountCooldown)
 						}
 						writeCancel()
+						// 空流/空闲超时通常与出口 IP 相关而非账号本身。走与扣留路径相同的 RSC 归因：clean
+						// 结论自动解除上面的冷却（IP 嫌疑），denied 结论打风控标记。没有这一步，无辜账号
+						// 只能干等 24h，且同号重试恰好转为空流时会丢失归因。
+						if attributor := s.accountRiskAttributor(); attributor != nil {
+							attributor.OnDegraded(ctx, credential)
+						}
 					}
 					if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
 						break
@@ -1551,9 +1638,30 @@ attemptLoop:
 				response.Body = replay
 				hasNextAccount := attemptPolicy.hasNext(attempt) && selection.hasAvailableCandidate(excluded, !quotaProbeAttempted)
 				hasNextAccount = hasNextAccount && qualityAccountAttempts < holdCfg.MaxAttempts
+				// 路由 attempt 预算已尽时不得承诺同号重试：承诺会强置 hasNext 并
+				// 跳过惩罚与归因，但循环退出后重试根本不会发生（D 审查）。
+				// quota-probe 来源用会话原始分类判断：转正会翻转 lease 标志，
+				// 但该账号仍在 probeCandidates 队列，RetryAccount 找不到它
+				// （外部复核 2：转正后排除失效会静默换号+虚假日志）。
+				probeOrigin := lease.QuotaProbe || selection.wasQuotaProbeCandidate(credential.ID)
+				sameAccountEligible := verdict == QualityWithhold && attemptPolicy.hasNext(attempt) && commitableSameAccountRetry(holdCfg, sameAccountRetried, probeOrigin, selection)
+				if sameAccountEligible {
+					// The un-excluded account itself becomes the next candidate.
+					hasNextAccount = true
+				}
 				commit := CommitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
 				if verdict == QualityWithhold {
-					s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
+					if sameAccountEligible && commit.Action == QualityActionRetry {
+						sameAccountRetried = true
+						delete(excluded, credential.ID)
+						selection.RetryAccount(credential.ID)
+						s.logger.Info("quality_degraded_same_account_retry", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
+					} else {
+						s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
+						if attributor := s.accountRiskAttributor(); attributor != nil {
+							attributor.OnDegraded(ctx, credential)
+						}
+					}
 				}
 				deferFailOpenAudit := commit.Action == QualityActionRetry && holdCfg.OnExhausted == qualityRetryFailOpen
 				if commit.Audit && !deferFailOpenAudit {
@@ -1912,6 +2020,14 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 		}
 	} else if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
 		_ = s.responses.Delete(ctx, input.ResponseID, input.ClientKey.ID)
+	} else if response.StatusCode >= 400 {
+		// Non-2xx stored-response fetches (400/422...) must not hand the raw
+		// upstream body and headers to the client (same leak class as the
+		// chat-path fix); surface a controlled failure instead.
+		body, _ := readRetryableBody(response.Body)
+		_ = response.Body.Close()
+		lease.Release()
+		return nil, newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 	}
 	var once sync.Once
 	release := func() { once.Do(lease.Release) }

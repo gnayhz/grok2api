@@ -180,6 +180,8 @@ type updateRequest struct {
 	ClearCloudflareCookies bool                          `json:"clearCloudflareCookies"`
 	BuildSuperEntitled     *bool                         `json:"buildSuperEntitled"`
 	BuildRouteMode         *accountdomain.BuildRouteMode `json:"buildRouteMode"`
+	// RiskStatus 设置/清除长期风控标记；仅允许 "" 与 "rsc_denied"。
+	RiskStatus *string `json:"riskStatus"`
 }
 
 type batchUpdateRequest struct {
@@ -320,12 +322,14 @@ type accountResponse struct {
 	BuildRouteMode             string                  `json:"buildRouteMode"`
 	BuildBotFlagged            bool                    `json:"buildBotFlagged"`
 	BuildBotFlagSource         int                     `json:"buildBotFlagSource,omitempty"`
-	EgressNodeID               uint64                  `json:"egressNodeId,omitempty,string"`
-	EgressAssignmentMode       string                  `json:"egressAssignmentMode,omitempty"`
-	ModelSyncFailed            bool                    `json:"modelSyncFailed,omitempty"`
-	Billing                    *billingResponse        `json:"billing,omitempty"`
-	Quota                      quotaResponse           `json:"quota"`
-	QuotaWindows               []quotaWindowResponse   `json:"quotaWindows,omitempty"`
+	// RiskStatus 非空表示长期风控标记（当前 rsc_denied = RSC 注册风控）。
+	RiskStatus           string                `json:"riskStatus,omitempty"`
+	EgressNodeID         uint64                `json:"egressNodeId,omitempty,string"`
+	EgressAssignmentMode string                `json:"egressAssignmentMode,omitempty"`
+	ModelSyncFailed      bool                  `json:"modelSyncFailed,omitempty"`
+	Billing              *billingResponse      `json:"billing,omitempty"`
+	Quota                quotaResponse         `json:"quota"`
+	QuotaWindows         []quotaWindowResponse `json:"quotaWindows,omitempty"`
 }
 
 type linkedAccountResponse struct {
@@ -1249,6 +1253,7 @@ func (h *Handler) update(c *gin.Context) {
 		MaxConcurrent: request.MaxConcurrent, MinimumRemaining: request.MinimumRemaining,
 		CloudflareCookies: request.CloudflareCookies, ClearCloudflareCookies: request.ClearCloudflareCookies,
 		BuildSuperEntitled: request.BuildSuperEntitled, BuildRouteMode: request.BuildRouteMode,
+		RiskStatus: request.RiskStatus,
 	})
 	if err != nil {
 		h.writeServiceError(c, "accountUpdateFailed", err, http.StatusInternalServerError, "更新账号失败")
@@ -1497,6 +1502,7 @@ func newAccountResponse(value accountapp.View) accountResponse {
 		BuildRouteMode:             string(buildRouteMode),
 		BuildBotFlagged:            value.BuildBotFlagged && c.Provider == accountdomain.ProviderBuild,
 		BuildBotFlagSource:         buildBotFlagSourceResponse(c.Provider, value.BuildBotFlagged, value.BuildBotFlagSource),
+		RiskStatus:                 c.RiskStatus,
 		EgressNodeID:               c.EgressNodeID,
 		EgressAssignmentMode:       string(c.EgressAssignmentMode),
 		Quota:                      newQuotaResponse(value.Quota), QuotaWindows: make([]quotaWindowResponse, 0, len(value.QuotaWindows)),

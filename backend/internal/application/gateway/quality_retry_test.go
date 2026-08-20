@@ -32,14 +32,16 @@ func TestClassifyQualityHold(t *testing.T) {
 		want QualityVerdict
 	}{
 		{name: "thinking delivers", sig: QualityStreamSignals{HasThinking: true, VisibleTokens: 10}, want: QualityDeliver},
-		{name: "reasoning tokens deliver", sig: QualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityDeliver},
+		// ReasoningTokens without HasThinking is a usage claim, not stream
+		// evidence: degraded streams report large counts and must withhold.
+		{name: "usage reasoning claim still withholds", sig: QualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityWithhold},
 		{name: "visible 32 no think withhold", sig: QualityStreamSignals{VisibleTokens: 32, Terminal: true}, want: QualityWithhold},
 		{name: "output 40 no think withhold", sig: QualityStreamSignals{OutputTokens: 40, Terminal: true}, want: QualityWithhold},
-		{name: "short no think delivers", sig: QualityStreamSignals{VisibleTokens: 10, Terminal: true}, want: QualityDeliver},
+		{name: "short no think withholds (reasoning models always think)", sig: QualityStreamSignals{VisibleTokens: 10, Terminal: true}, want: QualityWithhold},
 		{name: "empty terminal waits for transport handling", sig: QualityStreamSignals{Terminal: true}, want: QualityWait},
 		{name: "midstream enough content withhold", sig: QualityStreamSignals{VisibleTokens: 64}, want: QualityWithhold},
 		{name: "wait for more", sig: QualityStreamSignals{VisibleTokens: 8}, want: QualityWait},
-		{name: "hold expired short delivers", sig: QualityStreamSignals{VisibleTokens: 8, HoldExpired: true}, want: QualityDeliver},
+		{name: "hold expired short withholds", sig: QualityStreamSignals{VisibleTokens: 8, HoldExpired: true}, want: QualityWithhold},
 		{name: "hold expired empty waits", sig: QualityStreamSignals{HoldExpired: true}, want: QualityWait},
 		{name: "hold expired zero tokens waits", sig: QualityStreamSignals{VisibleTokens: 0, OutputTokens: 0, HoldExpired: true}, want: QualityWait},
 	}
@@ -252,27 +254,45 @@ func TestObserveQualityChunkNoThinkEnoughChat(t *testing.T) {
 
 func TestObserveQualityChunkShortNoThink(t *testing.T) {
 	t.Parallel()
+	// Even a 1-token answer normally carries reasoning: no thinking at
+	// terminal is degraded regardless of length and must withhold.
 	state := qualityScanState{protocol: qualityProtocolChat}
 	ObserveQualityChunk(&state, []byte(sse(
 		`data: {"choices":[{"delta":{"content":"ok"}}]}`,
 		"data: [DONE]",
 	)))
 	sig := state.signals()
-	if ClassifyQualityHold(sig, 32) != QualityDeliver {
-		t.Fatalf("short no-think should deliver, got %s (%#v)", ClassifyQualityHold(sig, 32), sig)
+	if ClassifyQualityHold(sig, 32) != QualityWithhold {
+		t.Fatalf("short no-think should withhold, got %s (%#v)", ClassifyQualityHold(sig, 32), sig)
 	}
 }
 
 func TestObserveQualityChunkResponsesReasoningItem(t *testing.T) {
 	t.Parallel()
+	// A reasoning item header without any reasoning text delta is the
+	// responses-protocol B-form: withhold despite the usage claim.
 	state := qualityScanState{protocol: qualityProtocolResponses}
 	ObserveQualityChunk(&state, []byte(sse(
 		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
 		`data: {"type":"response.output_text.delta","delta":"hello"}`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":90,"output_tokens_details":{"reasoning_tokens":60}}}}`,
 	)))
+	if ClassifyQualityHold(state.signals(), 32) != QualityWithhold {
+		t.Fatalf("responses reasoning item header alone must withhold: %#v", state.signals())
+	}
+}
+
+func TestObserveQualityChunkResponsesReasoningDeltaDelivers(t *testing.T) {
+	t.Parallel()
+	state := qualityScanState{protocol: qualityProtocolResponses}
+	ObserveQualityChunk(&state, []byte(sse(
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
+		`data: {"type":"response.reasoning_text.delta","delta":"consider the options"}`,
+		`data: {"type":"response.output_text.delta","delta":"hello"}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":90,"output_tokens_details":{"reasoning_tokens":60}}}}`,
+	)))
 	if ClassifyQualityHold(state.signals(), 32) != QualityDeliver {
-		t.Fatalf("responses reasoning item should deliver: %#v", state.signals())
+		t.Fatalf("responses reasoning text delta should deliver: %#v", state.signals())
 	}
 }
 
@@ -299,8 +319,7 @@ func TestPeekQualityStreamThinkingDeliversRemainder(t *testing.T) {
 
 func TestPeekQualityStreamWithholdsNoThinkEnough(t *testing.T) {
 	t.Parallel()
-	content := strings.Repeat("abcd", 16) // 64 runes → 16 tokens... need 32 tokens = 128 runes
-	content = strings.Repeat("abcd", 40)  // 160 runes → 40 tokens
+	content := strings.Repeat("abcd", 40) // 160 runes → 40 tokens
 	body := io.NopCloser(strings.NewReader(sse(
 		`data: {"choices":[{"delta":{"content":"`+content+`"}}]}`,
 		`data: {"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":0}}}`,
@@ -360,7 +379,7 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	}
 }
 
-func TestPeekQualityStreamShortDelivers(t *testing.T) {
+func TestPeekQualityStreamShortNoThinkWithholds(t *testing.T) {
 	t.Parallel()
 	body := io.NopCloser(strings.NewReader(sse(
 		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
@@ -371,8 +390,8 @@ func TestPeekQualityStreamShortDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer replay.Close()
-	if verdict != QualityDeliver {
-		t.Fatalf("short verdict=%s", verdict)
+	if verdict != QualityWithhold {
+		t.Fatalf("short no-think verdict=%s, want withhold", verdict)
 	}
 }
 
@@ -412,8 +431,8 @@ func TestPeekQualityStreamHoldTimeoutInterruptsBlockedReadAndPreservesRemainder(
 	if elapsed := time.Since(started); elapsed < 20*time.Millisecond || elapsed > 200*time.Millisecond {
 		t.Fatalf("peek returned after %s, want the 30ms hold timeout", elapsed)
 	}
-	if verdict != QualityDeliver {
-		t.Fatalf("short timed-out response verdict = %s", verdict)
+	if verdict != QualityWithhold {
+		t.Fatalf("short timed-out no-think response verdict = %s, want withhold", verdict)
 	}
 	body, err := io.ReadAll(replay)
 	if err != nil {
@@ -491,8 +510,10 @@ func TestPeekQualityStreamProcessesUnterminatedFinalEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer replay.Close()
-	if verdict != QualityDeliver {
-		t.Fatalf("verdict = %s, want deliver for a real short response", verdict)
+	// Unterminated or not, a finished stream without thinking is degraded:
+	// reasoning models think even on one-token answers.
+	if verdict != QualityWithhold {
+		t.Fatalf("verdict = %s, want withhold for a real short no-think response", verdict)
 	}
 }
 
@@ -526,11 +547,6 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 	off.Enabled = false
 	if shouldHoldQualityStream(input, nil, route, audit.OperationChat, off) {
 		t.Fatal("disabled must not hold")
-	}
-	forced := input
-	forced.ForcedEgressNodeID = 9
-	if shouldHoldQualityStream(forced, nil, route, audit.OperationChat, cfg) {
-		t.Fatal("forced egress must not hold")
 	}
 	owned := inferencedomain.ResponseOwnership{ResponseID: "r1", AccountID: 1}
 	if shouldHoldQualityStream(input, &owned, route, audit.OperationChat, cfg) {
@@ -673,8 +689,11 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if emptyAccount.FailureCount != 1 || emptyAccount.CooldownUntil == nil {
+	if emptyAccount.FailureCount != 0 || emptyAccount.CooldownUntil == nil {
 		t.Fatalf("empty stream account was not cooled: %#v", emptyAccount)
+	}
+	if emptyAccount.LastError != accountdomain.LastErrorQualityIdle {
+		t.Fatalf("empty stream cooldown marker = %q, want quality_idle_timeout", emptyAccount.LastError)
 	}
 	if remaining := time.Until(*emptyAccount.CooldownUntil); remaining < 23*time.Hour || remaining > 24*time.Hour+time.Minute {
 		t.Fatalf("empty stream cooldown = %s, want about 24h", remaining)
