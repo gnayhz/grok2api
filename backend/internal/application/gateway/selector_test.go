@@ -12,7 +12,6 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -100,131 +99,6 @@ func TestSelectorPrioritizesDueQuotaProbeOnce(t *testing.T) {
 	if _, err := accounts.GetQuotaRecovery(ctx, probe.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("quota recovery should be cleared, err = %v", err)
 	}
-}
-
-func TestSelectorQualityProbePinsAccountToRequestedEgressNode(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-egress.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	egressNodes := relational.NewEgressRepository(database)
-	firstNode, err := egressNodes.CreateEgressNode(ctx, egressdomain.Node{Name: "first", Scope: egressdomain.ScopeBuild, Enabled: true, EncryptedProxyURL: "first"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondNode, err := egressNodes.CreateEgressNode(ctx, egressdomain.Node{Name: "second", Scope: egressdomain.ScopeBuild, Enabled: true, EncryptedProxyURL: "second"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts := relational.NewAccountRepository(database)
-	first, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "first", SourceKey: "first", EncryptedAccessToken: "encrypted",
-		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1, EgressNodeID: firstNode.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "second", SourceKey: "second", EncryptedAccessToken: "encrypted",
-		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1, EgressNodeID: secondNode.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	lease, err := selector.AcquireForKeyOnEgressNode(ctx, account.ProviderBuild, 0, "grok-test", "", "", nil, false, clientkeydomain.AccountScope{}, secondNode.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lease.Release()
-	if lease.Credential.ID != second.ID || lease.Credential.ID == first.ID {
-		t.Fatalf("selected account=%d, want=%d on node=%d", lease.Credential.ID, second.ID, secondNode.ID)
-	}
-}
-
-func TestSelectorQualityProbeBorrowsHealthyAccountForUnavailableNode(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-egress-fallback.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	egressNodes := relational.NewEgressRepository(database)
-	targetNode, err := egressNodes.CreateEgressNode(ctx, egressdomain.Node{Name: "target", Scope: egressdomain.ScopeBuild, Enabled: false, EncryptedProxyURL: "target"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	healthyNode, err := egressNodes.CreateEgressNode(ctx, egressdomain.Node{Name: "healthy", Scope: egressdomain.ScopeBuild, Enabled: true, EncryptedProxyURL: "healthy"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts := relational.NewAccountRepository(database)
-	_, _, err = accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "target-reauth", SourceKey: "target-reauth", EncryptedAccessToken: "encrypted",
-		Enabled: true, AuthStatus: account.AuthStatusReauthRequired, MaxConcurrent: 1, EgressNodeID: targetNode.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	healthy, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "healthy", SourceKey: "healthy", EncryptedAccessToken: "encrypted",
-		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1, EgressNodeID: healthyNode.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	lease, err := selector.AcquireForKeyOnEgressNode(ctx, account.ProviderBuild, 0, "grok-test", "", "ordinary-affinity", nil, false, clientkeydomain.AccountScope{}, targetNode.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lease.Release()
-	if lease.Credential.ID != healthy.ID {
-		t.Fatalf("selected account=%d, want borrowed healthy account=%d", lease.Credential.ID, healthy.ID)
-	}
-}
-
-func BenchmarkSelectorCandidatePlanning(b *testing.B) {
-	ctx := context.Background()
-	limiter := memory.NewConcurrencyLimiter()
-	selector := NewSelector(nil, limiter, nil, nil, time.Hour, time.Second, time.Minute)
-	now := time.Now().UTC()
-	candidates := make([]account.RoutingCandidate, 3000)
-	for index := range candidates {
-		id := uint64(index + 1)
-		billing := account.Billing{
-			AccountID: id, MonthlyLimit: 1_000_000, Used: float64(index % 1000), SyncedAt: now.Add(-time.Duration(index%60) * time.Minute),
-		}
-		candidates[index] = account.RoutingCandidate{
-			Credential: account.Credential{
-				ID: id, Provider: account.ProviderBuild, AuthStatus: account.AuthStatusActive,
-				Priority: index % 10, MaxConcurrent: account.DefaultMaxConcurrent,
-			},
-			Billing: &billing, ModelCapabilityKnown: true, SupportsModel: true,
-		}
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	b.RunParallel(func(parallel *testing.PB) {
-		for parallel.Next() {
-			plan, err := selector.planCandidates(ctx, candidates, now, nil)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if _, ok := plan.Next(); !ok {
-				b.Fatal("候选计划为空")
-			}
-		}
-	})
 }
 
 func TestSelectorSkipsQuotaProbeBeforeDue(t *testing.T) {

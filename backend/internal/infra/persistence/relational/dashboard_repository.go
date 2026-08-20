@@ -50,14 +50,16 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 	result := dashboarddomain.Aggregate{}
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var accounts struct {
-			Total           int64
-			Active          int64
-			BuildAccounts   int64
-			WebAccounts     int64
-			ConsoleAccounts int64
+			Total            int64
+			Active           int64
+			BuildAccounts    int64
+			WebAccounts      int64
+			ConsoleAccounts  int64
+			CooldownAccounts int64
+			RiskAccounts     int64
 		}
 		if err := tx.Model(&accountModel{}).
-			Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN enabled = ? AND auth_status = ? AND (cooldown_until IS NULL OR cooldown_until <= ?) AND NOT EXISTS (SELECT 1 FROM account_quota_recovery WHERE account_quota_recovery.account_id = provider_accounts.id AND account_quota_recovery.status IN ?) THEN 1 ELSE 0 END), 0) AS active, COALESCE(SUM(CASE WHEN provider = 'grok_build' THEN 1 ELSE 0 END), 0) AS build_accounts, COALESCE(SUM(CASE WHEN provider = 'grok_web' THEN 1 ELSE 0 END), 0) AS web_accounts, COALESCE(SUM(CASE WHEN provider = 'grok_console' THEN 1 ELSE 0 END), 0) AS console_accounts", true, "active", snapshotAt, []string{"exhausted", "probing"}).
+			Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN enabled = ? AND auth_status = ? AND risk_status = '' AND (cooldown_until IS NULL OR cooldown_until <= ?) AND NOT EXISTS (SELECT 1 FROM account_quota_recovery WHERE account_quota_recovery.account_id = provider_accounts.id AND account_quota_recovery.status IN ?) THEN 1 ELSE 0 END), 0) AS active, COALESCE(SUM(CASE WHEN provider = 'grok_build' THEN 1 ELSE 0 END), 0) AS build_accounts, COALESCE(SUM(CASE WHEN provider = 'grok_web' THEN 1 ELSE 0 END), 0) AS web_accounts, COALESCE(SUM(CASE WHEN provider = 'grok_console' THEN 1 ELSE 0 END), 0) AS console_accounts, COALESCE(SUM(CASE WHEN cooldown_until IS NOT NULL AND cooldown_until > ? THEN 1 ELSE 0 END), 0) AS cooldown_accounts, COALESCE(SUM(CASE WHEN risk_status IS NOT NULL AND risk_status <> '' THEN 1 ELSE 0 END), 0) AS risk_accounts", true, "active", snapshotAt, []string{"exhausted", "probing"}, snapshotAt).
 			Scan(&accounts).Error; err != nil {
 			return err
 		}
@@ -91,6 +93,8 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 		result.Resources.TotalModels = models.Total
 		result.Resources.ActiveClientKeys = clientKeys.Active
 		result.Resources.TotalClientKeys = clientKeys.Total
+		result.Resources.CooldownAccounts = accounts.CooldownAccounts
+		result.Resources.RiskAccounts = accounts.RiskAccounts
 
 		if err := tx.Model(&requestAuditModel{}).
 			Select(dashboardUsageAggregateSelect).
@@ -99,6 +103,14 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 			return err
 		}
 		result.Usage.FailedRequests = result.Usage.Requests - result.Usage.SuccessfulRequests
+		var degraded struct{ QualityDegradedRequests int64 }
+		if err := tx.Model(&requestAuditModel{}).
+			Select("COUNT(*) AS quality_degraded_requests").
+			Where("created_at >= ? AND created_at < ? AND error_code = ?", start, end, "quality_degraded").
+			Scan(&degraded).Error; err != nil {
+			return err
+		}
+		result.Resources.QualityDegradedRequests = degraded.QualityDegradedRequests
 		var buckets []struct {
 			BucketIndex        int `gorm:"column:bucket_index"`
 			Requests           int64

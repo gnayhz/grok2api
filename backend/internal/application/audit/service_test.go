@@ -141,6 +141,25 @@ func TestSummaryCachesRepeatedAggregate(t *testing.T) {
 	}
 }
 
+// TestSummaryCacheKeyIncludesErrorCode locks the cache-key contract: two
+// summaries in the same period differing only by ErrorCode must not share
+// a cache entry (adversarial review found the key ignored ErrorCode, so a
+// filtered list could sit next to stale unfiltered metric cards).
+func TestSummaryCacheKeyIncludesErrorCode(t *testing.T) {
+	repo := &summaryAuditRepository{}
+	service := NewService(repo, slog.Default(), 8, 4, time.Second)
+	service.now = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
+
+	if _, err := service.Summary(context.Background(), "", "24h", ListFilter{ErrorCode: "quality_degraded"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Summary(context.Background(), "", "24h", ListFilter{ErrorCode: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if repo.calls != 2 {
+		t.Fatalf("distinct error codes must not share a cache entry: calls = %d", repo.calls)
+	}
+}
 func TestSummaryFreshBypassesAggregateCache(t *testing.T) {
 	repo := &summaryAuditRepository{}
 	service := NewService(repo, slog.Default(), 8, 4, time.Second)

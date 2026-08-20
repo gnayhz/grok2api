@@ -52,12 +52,10 @@ ENV TZ=Asia/Shanghai \
 RUN apk add --no-cache ca-certificates su-exec tzdata && \
     addgroup -S -g 10001 grok2api && \
     adduser -S -D -H -u 10001 -G grok2api grok2api && \
-    mkdir -p /app/data /run/grok2api /var/lib/grok2api-quality-guard && \
+    mkdir -p /app/data /run/grok2api && \
     chown -R grok2api:grok2api \
       /app/data \
-      /run/grok2api \
-      /var/lib/grok2api-quality-guard && \
-    chmod 0700 /var/lib/grok2api-quality-guard
+      /run/grok2api
 
 WORKDIR /app
 

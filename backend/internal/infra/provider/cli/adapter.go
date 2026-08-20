@@ -351,7 +351,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				if fallbackErr == nil && isHTTPSuccess(fallbackResp.StatusCode) {
 					recoveredPrimaryFailure = bufferedFailureDiagnostic(primaryResp, primaryBody, primaryTruncated)
 					a.activateBuildAPIFallback(ctx, &request.Credential)
-					resp, reqURL, base, body, replayKey = fallbackResp, fallbackURL, fallbackBase, fallbackBody, fallbackReplayKey
+					// base/body 赋值死存（后续统一从 resp.Body 重读），staticcheck SA4006；仅保留被消费的槽位。
+					resp, reqURL, replayKey = fallbackResp, fallbackURL, fallbackReplayKey
 					reasoningRecovery = reasoningRecovery.merge(fallbackRecovery)
 				} else {
 					if fallbackErr == nil {
@@ -521,9 +522,6 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		bodyReader = bytes.NewReader(body)
 	}
 	requestCtx := infraegress.WithCredential(ctx, request.Credential)
-	if request.ForcedEgressNodeID != 0 {
-		requestCtx = infraegress.WithEgressNode(requestCtx, request.ForcedEgressNodeID)
-	}
 	plane := "build"
 	if fallback := a.fallbackBaseURL(); fallback != "" && strings.EqualFold(strings.TrimRight(base, "/"), fallback) {
 		plane = "xai"

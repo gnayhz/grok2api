@@ -84,6 +84,8 @@ export type AccountDTO = {
   buildSuperEntitled: boolean;
   buildRouteMode: BuildRouteMode;
   buildBotFlagged: boolean;
+  /** Long-term risk flag on the account itself (e.g. rsc_denied = RSC registration risk). */
+  riskStatus?: string;
   /** Numeric bot_flag_source/bfs claim when risk-flagged: 1 or 2. */
   buildBotFlagSource?: number;
   egressNodeId?: string;
@@ -102,6 +104,9 @@ export type AccountDTO = {
   failureCount: number;
   cooldownUntil?: string;
   lastError?: string;
+		/** Last observed upstream model (capability sync). */
+		observedModel?: string;
+		observedModelAt?: string;
   lastUsedAt?: string;
   linkedAccountId?: string;
   linkedAccountName?: string;
@@ -131,6 +136,8 @@ export type AccountUpdateInput = {
   clearCloudflareCookies?: boolean;
   buildSuperEntitled?: boolean;
   buildRouteMode?: BuildRouteMode;
+  /** Set to "" to clear the long-term risk flag, "rsc_denied" to flag. */
+  riskStatus?: string;
 };
 
 export type AccountSummaryDTO = {
@@ -189,10 +196,10 @@ const accountValidator = hasShape({
   id: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), authType: isOneOf("oauth", "sso"), webTier: isOptional(isOneOf("auto", "basic", "super", "heavy")),
   webTierSyncedAt: isOptional(isString), nsfwEnabledAt: isOptional(isString), termsAcceptedAt: isOptional(isString), name: isString, email: isOptional(isString), userId: isOptional(isString), teamId: isOptional(isString),
   enabled: isBoolean, authStatus: isOneOf("active", "reauthRequired"), expiresAt: isOptional(isString), refreshable: isBoolean, cloudflareCookieConfigured: isBoolean,
-  buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
+  buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
   egressNodeId: isOptional(isString), egressAssignmentMode: isOptional(isOneOf("manual", "auto")),
   lastRefreshErrorStatus: isOptional(isNumber), lastRefreshErrorCode: isOptional(isString), lastRefreshErrorMessage: isOptional(isString), lastRefreshErrorResponse: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
-  failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), lastUsedAt: isOptional(isString),
+  failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), lastUsedAt: isOptional(isString),
   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")), linkedAccounts: isOptional(isArrayOf(linkedAccountValidator)),
   createdAt: isString, billing: isOptional(billingValidator), quota: quotaValidator, quotaWindows: isOptional(isArrayOf(quotaWindowValidator)),
 });

@@ -1572,36 +1572,6 @@ func TestFixedProxyTransportFailureStillCreatesCooldown(t *testing.T) {
 	}
 }
 
-func TestQualityProbeCanUseDisabledCoolingBoundNode(t *testing.T) {
-	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encryptedProxy, err := cipher.Encrypt("http://127.0.0.1:18888")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cooldown := time.Now().UTC().Add(time.Hour)
-	repository := &synchronizedEgressRepository{node: domain.Node{
-		ID: 1, Name: "quarantined", Scope: domain.ScopeBuild, Enabled: false,
-		Health: 0, CooldownUntil: &cooldown, EncryptedProxyURL: encryptedProxy,
-	}}
-	manager := NewManager(repository, cipher)
-	ordinary := WithEgressNode(context.Background(), 1)
-	if lease, _, err := manager.AcquireIfConfigured(ordinary, domain.ScopeBuild, "ordinary"); err == nil {
-		if lease != nil {
-			lease.Release()
-		}
-		t.Fatal("ordinary request acquired a disabled node")
-	}
-	probe := WithQualityProbe(WithEgressNode(context.Background(), 1))
-	lease, configured, err := manager.AcquireIfConfigured(probe, domain.ScopeBuild, "probe")
-	if err != nil || !configured || lease == nil {
-		t.Fatalf("quality probe acquire: configured=%v lease=%#v err=%v", configured, lease, err)
-	}
-	lease.Release()
-}
-
 func TestFixedProxyTransportFailureCoalescesRunningProbe(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {

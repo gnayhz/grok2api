@@ -200,6 +200,9 @@ type UpdateInput struct {
 	BuildSuperEntitled *bool
 	// BuildRouteMode 仅 grok_build 可设置；nil 表示不修改。
 	BuildRouteMode *accountdomain.BuildRouteMode
+	// RiskStatus 设置长期风险标记：仅允许 "" 与 "rsc_denied"。标记后账号
+	// 保持 enabled，但调度永久跳过，直到人工清空。
+	RiskStatus *string
 }
 
 type CleanupStatus string
@@ -343,6 +346,7 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 	for _, providerValue := range accountdomain.Providers() {
 		result.Providers[string(providerValue)] = ProviderSummary{}
 	}
+	riskFlagged := int64(0)
 	for _, row := range rows {
 		result.Total += row.Total
 		result.Available += row.Available
@@ -351,6 +355,7 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 		result.Recovery.Probing += row.Probing
 		result.Issues.Disabled += row.Disabled
 		result.Issues.ReauthRequired += row.ReauthRequired
+		riskFlagged += row.RiskFlagged
 		result.Providers[row.Provider] = ProviderSummary{Total: row.Total, Available: row.Available}
 	}
 	result.Recovering = result.Recovery.Cooldown + result.Recovery.WaitingReset + result.Recovery.Probing
@@ -363,6 +368,8 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 		flaggedIDs, err = s.buildBotFlaggedAccountIDs(ctx)
 		result.Risk = int64(len(flaggedIDs))
 	}
+	// 长期风险标记（rsc_denied）与凭据级 bot flag 同为“风控”口径。
+	result.Risk += riskFlagged
 	if err != nil {
 		return Summary{}, err
 	}
@@ -537,11 +544,10 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 	egressMode, egressNodeID, egressSourceID, egressValid := parseEgressFilter(filter.Egress)
 	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) ||
 		!oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") ||
-		!oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") ||
+		!oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing", "risk") ||
 		!egressValid ||
 		!oneOf(filter.Renewal, "", "refreshable", "unrefreshable") ||
 		!oneOf(filter.Risk, "", "flagged", "normal") ||
-		(filter.Risk != "" && filter.Provider != string(accountdomain.ProviderBuild)) ||
 		!oneOf(filter.Agreement, "", "nsfwEnabled", "nsfwDisabled", "termsAccepted", "termsNotAccepted", "allAccepted", "allNotAccepted") ||
 		(filter.Agreement != "" && filter.Provider != string(accountdomain.ProviderWeb)) ||
 		!validAssociationFilter(filter.Provider, filter.Association) ||
@@ -2231,6 +2237,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		}
 		value.MinimumRemaining = *input.MinimumRemaining
 	}
+	if input.RiskStatus != nil {
+		status := strings.TrimSpace(*input.RiskStatus)
+		if status != "" && status != accountdomain.RiskStatusRSCDenied {
+			return View{}, invalidInput("riskStatus 仅支持空值或 rsc_denied")
+		}
+		value.RiskStatus = status
+	}
 	if input.ClearCloudflareCookies {
 		value.EncryptedCloudflareCookie = ""
 	} else if input.CloudflareCookies != nil {
@@ -2270,6 +2283,15 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	updated, err := s.accounts.Update(ctx, value)
 	if err != nil {
 		return View{}, mapRepositoryError(err)
+	}
+	if input.RiskStatus != nil {
+		// 全部字段校验与实体保存成功后才做风控列定向写：组合请求中其他
+		// 字段校验失败（400）时风险状态保持不变（外部复核 9 的原子性）。
+		// 实体 Save 已带同值，此处定向写幂等——但保持独立列写以避免未来
+		// Save 语义变化时覆盖并发定向写。
+		if err := s.accounts.UpdateRiskStatus(ctx, updated.ID, strings.TrimSpace(*input.RiskStatus)); err != nil {
+			return View{}, mapRepositoryError(err)
+		}
 	}
 	if !updated.Enabled && s.sticky != nil {
 		_ = s.sticky.DeleteByAccount(ctx, updated.ID)
@@ -4322,7 +4344,9 @@ func drainDetectBody(body io.ReadCloser) {
 }
 
 // BatchResetQuotaState clears local Build quota recovery state without changing
-// upstream billing snapshots or historical audit usage.
+// upstream billing snapshots or historical audit usage. Penalty cooldowns
+// (cooldown/failure-count/last-error) are lifted as well, mirroring the healthy
+// baseline a successful request would restore.
 func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, error) {
 	values, err := normalizeIDs(ids, maxQuotaResetAccounts)
 	if err != nil {
@@ -4353,7 +4377,8 @@ func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, 
 }
 
 // ResetAllBuildQuotaState clears local quota state for every enabled Build
-// account without materializing the complete account ID set in memory.
+// account without materializing the complete account ID set in memory. Penalty
+// cooldowns are lifted too (see BatchResetQuotaState).
 func (s *Service) ResetAllBuildQuotaState(ctx context.Context) (int64, error) {
 	return s.accounts.ResetProviderQuotaState(ctx, accountdomain.ProviderBuild, true)
 }
@@ -4534,4 +4559,103 @@ func mapRepositoryError(err error) error {
 		return fmt.Errorf("%w: %s", ErrConflict, strings.TrimPrefix(err.Error(), repository.ErrConflict.Error()+": "))
 	}
 	return err
+}
+
+// DecryptedAccessToken exposes one account's primary token for internal
+// risk checks (RSC). Callers must never log or persist the returned value.
+func (s *Service) DecryptedAccessToken(ctx context.Context, id uint64) (string, error) {
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		return "", mapRepositoryError(err)
+	}
+	if value.EncryptedAccessToken == "" {
+		return "", ErrInvalidInput
+	}
+	return s.cipher.Decrypt(value.EncryptedAccessToken)
+}
+
+// LinkedWebAccountID resolves the Web SSO identity behind a Build account.
+func (s *Service) LinkedWebAccountID(ctx context.Context, buildAccountID uint64) (uint64, bool, error) {
+	linked, ok := s.accounts.(interface {
+		LinkedWebAccountID(context.Context, uint64) (uint64, bool, error)
+	})
+	if !ok {
+		return 0, false, nil
+	}
+	return linked.LinkedWebAccountID(ctx, buildAccountID)
+}
+
+// LinkedBuildAccountIDs lists Build accounts sharing one Web identity.
+func (s *Service) LinkedBuildAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
+	linked, ok := s.accounts.(interface {
+		LinkedBuildAccountIDs(context.Context, uint64) ([]uint64, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	return linked.LinkedBuildAccountIDs(ctx, webAccountID)
+}
+
+// LinkedConsoleAccountIDs lists Console accounts sharing one Web identity.
+// RSC attribution flags the whole identity group, Console included.
+func (s *Service) LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
+	linked, ok := s.accounts.(interface {
+		LinkedConsoleAccountIDs(context.Context, uint64) ([]uint64, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	return linked.LinkedConsoleAccountIDs(ctx, webAccountID)
+}
+
+// SetAccountEnabled changes one account's scheduling state with a recorded
+// reason used as the admin-visible last-error marker.
+func (s *Service) SetAccountEnabled(ctx context.Context, id uint64, enabled bool, reason string) error {
+	// 单次读改写：先写 LastError 再单独写 Enabled 的两段式会在中途失败时
+	// 留下“已写错误标记但未停用”的中间态，也放大并发丢更新窗口。
+	if !enabled && reason != "" {
+		value, err := s.accounts.Get(ctx, id)
+		if err != nil {
+			return mapRepositoryError(err)
+		}
+		value.LastError = reason
+		value.Enabled = enabled
+		if _, err := s.accounts.Update(ctx, value); err != nil {
+			return mapRepositoryError(err)
+		}
+		return nil
+	}
+	if _, err := s.Update(ctx, id, UpdateInput{Enabled: &enabled}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SetAccountRiskStatus flags or unflags one account's long-term risk state
+// (see Credential.RiskStatus). Flipping the flag keeps Enabled untouched and
+// writes only the risk_status column: this path is triggered automatically by
+// risk attribution, so a full-entity save could silently roll back concurrent
+// health writes or token refreshes.
+func (s *Service) SetAccountRiskStatus(ctx context.Context, id uint64, flagged bool) error {
+	status := ""
+	if flagged {
+		status = accountdomain.RiskStatusRSCDenied
+	}
+	if err := s.accounts.UpdateRiskStatus(ctx, id, status); err != nil {
+		return mapRepositoryError(err)
+	}
+	return nil
+}
+
+// ClearMissingThinkingCooldown lifts a missing-thinking cooldown when a risk
+// verdict proves the account innocent (clean RSC: the degrade was exit-IP
+// scoped, and tunnel pools rotate the IP on the next request anyway). Only
+// penalties marked as missing-thinking are lifted: a clean verdict says
+// nothing about empty-stream or rate-limit cooldowns, and clearing those
+// would let a persistently failing account never cool down.
+func (s *Service) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
+	if err := s.accounts.ClearMissingThinkingCooldown(ctx, id); err != nil {
+		return mapRepositoryError(err)
+	}
+	return nil
 }

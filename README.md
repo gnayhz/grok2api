@@ -352,44 +352,70 @@ Egress nodes are scoped to Build, Web, Console, or Web assets. The admin console
 - Per-traffic-class egress routing for Grok Build: pin inference, OAuth, billing, model sync, or video calls to a dedicated node or direct connection. Inference and video honor account bindings; auxiliary calls follow the rule even for bound accounts, and unavailable targets fall back to the scope pool
 - Proxy-pool mode without global cooldown after one connection failure
 - Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
-- Optional [Egress Quality Guard](./tools/egress-quality-guard/README.md) for active per-node model probes, guarded quarantine, and recovery; enable it with the built-in `quality-guard` Compose profile
-- Give each sticky session its own fixed node (`proxyPool=false`). Do not merge several stickies into one node, or the guard can only quarantine the whole group
+- Give each sticky session its own fixed node (`proxyPool=false`). Do not merge several stickies into one node, or a failing session can only be found by taking down the whole group
 
 Hysteria and TUIC are not supported yet. FlareSolverr accepts only HTTP/SOCKS proxy URLs, so automatic clearance refresh cannot use a tunnel share URL directly.
 
-To enable the guard, add a `qualityGuard` section to `config.yaml`, then start
-the profile. The main service creates and reuses a non-exportable system probe
-identity automatically:
+The real-time routing guard (`requestRetry`) is a top-level `config.yaml` section and is off by default:
 
 ```yaml
-qualityGuard:
+requestRetry:
   enabled: true
-  model: "grok-4.5"
-  # Optional: withhold thinking-model streams that have no reasoning.
-  requestRetry:
-    enabled: false
-    maxAttempts: 6
-    holdTimeout: 3s
-    minOutputTokens: 32
-    onExhausted: fail_closed # fail_open | fail_closed
+  maxAttempts: 6
+  holdTimeout: 3s
+  minOutputTokens: 32
+  onExhausted: fail_closed # fail_open | fail_closed
 ```
 
-`requestRetry` runs on the gateway request path and is independent of the sidecar. It is off by default. When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, stored-response, and ForcedEgress probe requests are unchanged.
+When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, stored-response, and ForcedEgress probe requests are unchanged. Changes to this section hot-reload with the config file.
 
-```bash
-docker compose --profile quality-guard up -d --build
-```
+### Account risk attribution (RSC)
 
-Existing preview deployments that still contain `clientKeyID` can upgrade
-directly. The field is accepted for compatibility but ignored and can be
-removed; any manually created probe key is intentionally left untouched.
+A withheld stream does not by itself prove the account is degraded - the exit
+IP may be the culprit. When `accountRisk.rscCheck` is enabled, a withhold triggers
+an async registration-risk check against grok.com through the linked Web SSO
+identity:
 
-After changing this configuration, run `docker compose --profile quality-guard restart grok2api egress-quality-guard` to reload the base settings; policy edits made in the admin page still hot-reload.
+- **denied/flagged**: the verdict is cached permanently; `onDenied` (flag by default,
+  or disable / markOnly) marks the whole identity group - Web, Build, and Console
+  accounts - with `rsc_denied`. Flagged accounts stay enabled but are permanently
+  excluded from scheduling until an operator clears the flag in the admin UI.
+- **clean**: the degrade was exit-IP scoped; quality cooldowns (missing-thinking,
+  empty-stream idle) are lifted so the account stays schedulable. Generic 5xx
+  failures are never cleared by a clean verdict.
+- A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`; risky
+  verdicts never recover automatically. Changes to this section require a restart.
 
-The normal `docker compose up -d` command does not start the guard or generate
-probe traffic. The sidecar receives a narrowly scoped internal credential from
-the main service and never stores or uses the administrator password. See the
-linked guide before enabling automatic quarantine.
+### Verification matrix
+
+The backend ships a one-shot verification script consolidating the review
+gates established during hardening:
+
+- **fast** (`make verify`): build, vet, staticcheck, race-enabled test suite.
+- **full** (`make verify-full`): + fuzz seed regressions, govulncheck,
+  and a count=3 flaky probe over the guard/risk packages.
+- **fuzz** (`make fuzz`): 30s of the mutation engines per parse target
+  (SSE quality scanner, RSC payload parser).
+
+Third-party tools degrade to SKIP with install hints when absent.
+See [HARDENING.md](./HARDENING.md) for the complete hardening log: detection rules, attribution flow, cooldown taxonomy, security fixes, and production measurements.
+
+### Cooldown taxonomy
+
+Three independent cooldown families are visible in the admin UI:
+
+- **Routing guard** (`requestRetry.accountCooldown`): `missing_thinking` (first
+  strike cools; a later strike after expiry disables the account),
+  `missing_thinking_disabled`, and `quality_idle_timeout` (empty/silent stream,
+  kept separate from the failure counter). A clean RSC verdict lifts these.
+- **Routing cooldown** (`routing.cooldownBase`/`cooldownMax`): generic upstream
+  failures with exponential backoff; never cleared by risk attribution.
+- **Egress-node cooldown**: exponential backoff and health re-probes for fixed-node
+  transport failures; independent of account state.
+
+The request-audits page filters by error code (`quality_degraded`) and account
+rows show the cooldown reason on hover, so degraded-withhold events can be
+diagnosed end to end.
 
 Resin usernames can contain `{account}`:
 
@@ -476,7 +502,7 @@ Important optional settings:
 - `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
 - `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
 - `routing.segmentedSelectorEnabled`: enabled by default for pools with at least 3,000 eligible accounts; bounds dynamic concurrency reads while retaining quota/tier priorities, sticky sessions, full-planner fallback, and atomic guards.
-- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`: optional large-pool guards. `0` (default) keeps the historical unbounded first-pass evacuation and the existing 200-move ceiling for capacity/rebalance repair. Set `0.05`–`1` only when a quarantined node would otherwise dump thousands of auto accounts onto the last healthy exits. `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` and `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` override the YAML when set.
+- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`: optional large-pool guards. `0` (default) keeps the historical unbounded first-pass evacuation and the existing 200-move ceiling for capacity/rebalance repair. Set `0.05`–`1` only when taking a failed node out of service would otherwise dump thousands of auto accounts onto the last healthy exits. `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` and `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` override the YAML when set.
 - Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
 - **Sync latest version** applies the validated Grok Build client version and User-Agent.
 

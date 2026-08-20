@@ -149,6 +149,15 @@ type AccountRepository interface {
 	UpdateCredentialRefreshFailure(ctx context.Context, id uint64, failure CredentialRefreshFailure) error
 	UpdateObservedModel(ctx context.Context, id uint64, model string, observedAt time.Time) error
 	UpdateHealth(ctx context.Context, id uint64, provider account.Provider, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error
+	// UpdateRiskStatus 定向写入长期风控标记列（不走全量 Save，避免覆盖并发
+	// 健康写/令牌刷新/启停写）。
+	UpdateRiskStatus(ctx context.Context, id uint64, status string) error
+	// UpdateQualityIdleCooldown 仅写 idle 冷却两列（marker+until），不动
+	// failure_count——避免快照回写覆盖并发计数。
+	UpdateQualityIdleCooldown(ctx context.Context, id uint64, provider account.Provider, until time.Time) error
+	// ClearMissingThinkingCooldown 仅解除 missing-thinking 打击产生的惩罚；
+	// 其他来源（空流/429/5xx）的冷却保持原样。
+	ClearMissingThinkingCooldown(ctx context.Context, id uint64) error
 	// TouchLastUsed persists request activity without changing routing health or
 	// invalidating candidate snapshots.
 	TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error

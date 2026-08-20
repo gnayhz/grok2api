@@ -35,6 +35,9 @@ export type DashboardDTO = {
     totalModels: number;
 	activeClientKeys: number;
 	totalClientKeys: number;
+	cooldownAccounts: number;
+	riskAccounts: number;
+	qualityDegradedRequests: number;
   };
   usage: DashboardUsageDTO;
   series: Array<{ start: string; end: string; requests: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; tokens: number; billedCostUsdTicks: number }>;
@@ -63,7 +66,7 @@ const decodeDashboard = createObjectDecoder<DashboardDTO>("dashboard", {
   range: hasShape({ start: isString, end: isString }),
   resources: hasShape({
     activeAccounts: isNumber, totalAccounts: isNumber, buildAccounts: isNumber, webAccounts: isNumber, consoleAccounts: isNumber, enabledModels: isNumber, totalModels: isNumber,
-		activeClientKeys: isNumber, totalClientKeys: isNumber,
+		activeClientKeys: isNumber, totalClientKeys: isNumber, cooldownAccounts: isNumber, riskAccounts: isNumber, qualityDegradedRequests: isNumber,
   }),
   usage: dashboardUsage,
   series: isArrayOf(dashboardSeriesItem),

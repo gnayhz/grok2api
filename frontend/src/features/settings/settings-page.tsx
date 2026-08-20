@@ -410,6 +410,15 @@ export function SettingsPage() {
               </div>
             </SettingsSection>
 
+            <SettingsSection title={t("settings.accounts.guardConfigTitle")}>
+              <p className="text-xs leading-5 text-muted-foreground">{t("settings.accounts.guardConfigHelp")}</p>
+              <ul className="list-disc space-y-1 pl-4 text-xs leading-5 text-muted-foreground">
+                <li>{t("settings.accounts.guardConfigRequestRetry")}</li>
+                <li>{t("settings.accounts.guardConfigRscCheck")}</li>
+                <li>{t("settings.accounts.guardConfigRestart")}</li>
+              </ul>
+            </SettingsSection>
+
             <SettingsSection title={t("settings.accounts.cleanupTitle")}>
               <div className="space-y-0">
                 <SettingsField controlId="accounts-auto-clean-reauth-enabled" label={t("settings.accounts.autoCleanReauthEnabled")} description={t("settings.accounts.autoCleanReauthEnabledHelp")}>

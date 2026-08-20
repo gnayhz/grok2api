@@ -1,4 +1,4 @@
-import { Bot, Compass, Handshake, SquareTerminal, VenusAndMars, Webhook, type LucideIcon } from "lucide-react";
+import { Bot, Compass, Handshake, ShieldAlert, SquareTerminal, VenusAndMars, Webhook, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -117,6 +117,23 @@ export function AccountNameCell({ account }: { account: AccountDTO }) {
                 </Tooltip>
               ) : null}
             </span>
+          </>
+        ) : null}
+        {account.riskStatus ? (
+          <>
+            <span className="mx-2 h-3 w-px shrink-0 bg-border" aria-hidden="true" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  tabIndex={0}
+                  aria-label={t("accounts.rscRisk")}
+                  className="inline-flex cursor-help text-rose-500 focus-visible:outline-none dark:text-rose-400"
+                >
+                  <ShieldAlert className="size-3.5" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{t("accounts.rscRiskTooltip")}</TooltipContent>
+            </Tooltip>
           </>
         ) : null}
         {account.buildBotFlagged ? (

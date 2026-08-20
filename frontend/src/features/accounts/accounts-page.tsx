@@ -216,19 +216,21 @@ export function AccountsPage() {
     clearCloudflareCookies: z.boolean(),
     buildSuperEntitled: z.boolean(),
     buildRouteMode: z.enum(["auto", "build", "xai"]),
+    riskFlagged: z.boolean(),
   });
   type AccountForm = z.infer<typeof accountSchema>;
   const form = useForm<AccountForm>({
     resolver: zodResolver(accountSchema),
     defaultValues: {
       name: "", enabled: true, priority: 1, maxConcurrent: 8, minimumRemaining: 0,
-      cloudflareCookies: "", clearCloudflareCookies: false, buildSuperEntitled: false, buildRouteMode: "auto",
+      cloudflareCookies: "", clearCloudflareCookies: false, buildSuperEntitled: false, buildRouteMode: "auto", riskFlagged: false,
     },
   });
   const accountEnabled = useWatch({ control: form.control, name: "enabled" });
   const clearCloudflareCookies = useWatch({ control: form.control, name: "clearCloudflareCookies" });
   const buildSuperEntitled = useWatch({ control: form.control, name: "buildSuperEntitled" });
   const buildRouteMode = useWatch({ control: form.control, name: "buildRouteMode" });
+  const riskFlagged = useWatch({ control: form.control, name: "riskFlagged" });
   const selected = selection.provider === provider ? selection.ids : new Set<string>();
   const selectedIdsKey = Array.from(selected).sort().join(",");
 
@@ -237,7 +239,7 @@ export function AccountsPage() {
     queryFn: () => listAccounts({
       provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter, egress: egressFilter,
       renewal: provider === "grok_build" ? renewalFilter : undefined,
-      risk: provider === "grok_build" ? riskFilter : undefined,
+      risk: riskFilter || undefined,
       agreement: provider === "grok_web" ? agreementFilter : undefined,
       association: associationFilter || undefined,
       sortBy: sort.field, sortOrder: sort.order,
@@ -336,6 +338,7 @@ export function AccountsPage() {
         input.buildRouteMode = values.buildRouteMode;
         if (values.buildSuperEntitled !== editing.buildSuperEntitled) input.buildSuperEntitled = values.buildSuperEntitled;
       }
+      if (values.riskFlagged !== (editing.riskStatus === "rsc_denied")) input.riskStatus = values.riskFlagged ? "rsc_denied" : "";
       return updateAccount(editing.id, input);
     },
     onSuccess: (account, values) => {
@@ -1099,6 +1102,7 @@ export function AccountsPage() {
       clearCloudflareCookies: false,
       buildSuperEntitled: account.buildSuperEntitled,
       buildRouteMode: account.buildRouteMode,
+      riskFlagged: account.riskStatus === "rsc_denied",
     });
   }
 
@@ -1381,10 +1385,10 @@ export function AccountsPage() {
                   { value: "refreshable", label: t("accountCredential.autoRefresh") },
                   { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
                 ] }] : []),
-                ...(provider === "grok_build" ? [{ id: "risk", label: t("accounts.riskFilter"), value: riskFilter, onChange: (value: string) => { setRiskFilter(value); setPage(1); }, options: [
+                { id: "risk", label: t("accounts.riskFilter"), value: riskFilter, onChange: (value: string) => { setRiskFilter(value); setPage(1); }, options: [
                   { value: "flagged", label: t("accounts.botRisk") },
                   { value: "normal", label: t("accounts.riskNormal") },
-                ] }] : []),
+                ] },
                 ...(provider === "grok_web" ? [{ id: "agreement", label: t("accounts.agreementFilter"), value: agreementFilter, onChange: (value: string) => { setAgreementFilter(value); setPage(1); }, options: [
                   { value: "nsfwEnabled", label: t("accounts.agreementNsfwEnabled") },
                   { value: "nsfwDisabled", label: t("accounts.agreementNsfwDisabled") },
@@ -1822,6 +1826,13 @@ export function AccountsPage() {
               <div className="space-y-2"><Label htmlFor="account-concurrency">{t("accounts.maxConcurrent")}</Label><Input id="account-concurrency" type="number" min="1" max="256" {...form.register("maxConcurrent", { valueAsNumber: true })} /></div>
             </div>
             <div className="space-y-2"><Label htmlFor="account-minimum">{t("accounts.minimumRemaining")}</Label><Input id="account-minimum" type="number" min="0" step="0.01" {...form.register("minimumRemaining", { valueAsNumber: true })} /></div>
+            <div className="flex items-start justify-between gap-4 rounded-md border border-rose-200 bg-rose-50/60 p-3 dark:border-rose-900 dark:bg-rose-950/30">
+              <div className="space-y-1">
+                <Label htmlFor="account-risk-flagged">{t("accounts.rscRiskFlag.label")}</Label>
+                <p className="text-xs text-muted-foreground">{t("accounts.rscRiskFlag.description")}</p>
+              </div>
+              <Switch id="account-risk-flagged" checked={riskFlagged} onCheckedChange={(checked) => form.setValue("riskFlagged", checked, { shouldDirty: true })} />
+            </div>
             {editing?.provider === "grok_build" ? (
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-4 rounded-md bg-muted/50 p-3">
@@ -2380,8 +2391,19 @@ function AccountStatus({ account }: { account: AccountDTO }) {
     );
   }
   if (account.cooldownUntil && new Date(account.cooldownUntil) > new Date()) {
-    return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.statusCooldown")}</Badge>;
-  }
+			// Cooldown reason taxonomy: routing-guard markers (missing_thinking family /
+			// empty-stream idle) vs generic upstream failures - tells the operator
+			// whether the cooldown is attributable/clearable by a clean RSC verdict.
+			const cooldownReasons = ["missing_thinking", "missing_thinking_disabled", "quality_idle_timeout"] as const;
+			const reasonKey: (typeof cooldownReasons)[number] | "generic" = cooldownReasons.includes(account.lastError as (typeof cooldownReasons)[number])
+				? (account.lastError as (typeof cooldownReasons)[number])
+				: "generic";
+			return (
+				<StatusTooltip content={`${t("accounts.cooldownReasons." + reasonKey)} · ${formatDateTime(account.cooldownUntil, i18n.language)}`}>
+					<Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.statusCooldown")}</Badge>
+				</StatusTooltip>
+			);
+				  }
   return <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("accounts.statusActive")}</Badge>;
 }
 
@@ -2417,7 +2439,7 @@ function StatusTooltip({ children, content }: { children: ReactNode; content: Re
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span tabIndex={0} className="inline-flex cursor-help">{children}</span>
+        <div tabIndex={0} className="inline-flex cursor-help">{children}</div>
       </TooltipTrigger>
       <TooltipContent className="w-max max-w-sm">{content}</TooltipContent>
     </Tooltip>

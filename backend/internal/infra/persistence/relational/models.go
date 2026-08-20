@@ -43,9 +43,12 @@ type accountModel struct {
 	FailureCount     int     `gorm:"not null;check:chk_accounts_failure_count,failure_count >= 0"`
 	CooldownUntil    *time.Time
 	LastError        string `gorm:"size:512;check:chk_accounts_last_error,length(last_error) <= 512"`
-	LastUsedAt       *time.Time
-	ObservedModel    string `gorm:"size:255;check:chk_accounts_observed_model,length(observed_model) <= 255"`
-	ObservedModelAt  *time.Time
+	// RiskStatus 标记注册风控等长期风险态（当前仅 rsc_denied）。与 enabled
+	// 解耦：账号本身可用，但调度必须跳过，直到人工解除。
+	RiskStatus      string `gorm:"size:32;not null;default:''"`
+	LastUsedAt      *time.Time
+	ObservedModel   string `gorm:"size:255;check:chk_accounts_observed_model,length(observed_model) <= 255"`
+	ObservedModelAt *time.Time
 	// BuildAPIFallback 仅对 grok_build 有意义：XAI 推理回退标记；其他 Provider 保持 false。
 	BuildAPIFallback bool `gorm:"not null;default:false"`
 	// BuildRouteMode 仅控制 grok_build 推理地址；其它 Provider 固定 auto。
@@ -573,3 +576,20 @@ type egressOperationsConfigModel struct {
 }
 
 func (egressOperationsConfigModel) TableName() string { return "egress_operations_config" }
+
+// accountRiskVerdictModel persists one RSC risk verdict for a Web SSO
+// identity. denied/flagged verdicts never expire (risk does not recover);
+// clean verdicts are re-checked on the patrol cadence.
+type accountRiskVerdictModel struct {
+	AccountID  uint64    `gorm:"primaryKey"`
+	Verdict    string    `gorm:"size:16;not null;check:chk_account_risk_verdicts_verdict,verdict IN ('clean','denied','flagged','error')"`
+	BotFlagSrc int       `gorm:"not null;default:0"`
+	BotFlagDtl string    `gorm:"size:512;not null;default:''"`
+	RiskScore  float64   `gorm:"not null;default:0"`
+	HTTPStatus int       `gorm:"not null;default:0"`
+	Error      string    `gorm:"size:512;not null;default:''"`
+	Source     string    `gorm:"size:32;not null;default:''"`
+	CheckedAt  time.Time `gorm:"not null"`
+}
+
+func (accountRiskVerdictModel) TableName() string { return "account_risk_verdicts" }

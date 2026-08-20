@@ -420,34 +420,14 @@ func (s *Selector) applyBuildBotFlaggedFilter(_ context.Context, provider accoun
 }
 
 func (s *Selector) Acquire(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
-	return s.acquire(ctx, provider, modelRouteID, upstreamModel, quotaMode, affinityKey, excluded, allowQuotaProbe, clientkeydomain.AccountScope{}, 0)
+	return s.acquire(ctx, provider, modelRouteID, upstreamModel, quotaMode, affinityKey, excluded, allowQuotaProbe, clientkeydomain.AccountScope{})
 }
 
 func (s *Selector) AcquireForKey(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool, scope clientkeydomain.AccountScope) (*accountLease, error) {
-	return s.acquire(ctx, provider, modelRouteID, upstreamModel, quotaMode, affinityKey, excluded, allowQuotaProbe, scope, 0)
+	return s.acquire(ctx, provider, modelRouteID, upstreamModel, quotaMode, affinityKey, excluded, allowQuotaProbe, scope)
 }
 
-// AcquireForKeyOnEgressNode is reserved for administrator probes. It prefers a
-// credential bound to the requested node, then borrows any schedulable
-// credential when the node's own accounts are unavailable. The request layer
-// still forces the physical call through nodeID.
-func (s *Selector) AcquireForKeyOnEgressNode(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool, scope clientkeydomain.AccountScope, nodeID uint64) (*accountLease, error) {
-	if nodeID == 0 {
-		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: scope}
-	}
-	lease, err := s.acquire(ctx, provider, modelRouteID, upstreamModel, quotaMode, affinityKey, excluded, allowQuotaProbe, scope, nodeID)
-	if err == nil {
-		return lease, nil
-	}
-	var unavailable *SelectionUnavailableError
-	if !errors.As(err, &unavailable) {
-		return nil, err
-	}
-	// Probe borrowing must not create or reuse ordinary sticky affinity.
-	return s.acquire(ctx, provider, modelRouteID, upstreamModel, quotaMode, "", excluded, allowQuotaProbe, scope, 0)
-}
-
-func (s *Selector) acquire(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool, requestedScope clientkeydomain.AccountScope, forcedEgressNodeID uint64) (lease *accountLease, err error) {
+func (s *Selector) acquire(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool, requestedScope clientkeydomain.AccountScope) (lease *accountLease, err error) {
 	accountScope, scopeValid := clientkeydomain.NormalizeAccountScope(requestedScope)
 	defer annotateSelectionAccountScope(&err, accountScope)
 	if !scopeValid || !accountScope.AllowsProvider(provider) {
@@ -472,13 +452,15 @@ func (s *Selector) acquire(ctx context.Context, provider account.Provider, model
 	var earliestRetry time.Time
 	for index, candidate := range values {
 		value := applyHealthSnapshot(candidate.Credential, healthOverrides)
-		if forcedEgressNodeID != 0 && value.EgressNodeID != forcedEgressNodeID {
-			continue
-		}
 		if !accountScopeAllowsCandidate(provider, accountScope, candidate) {
 			continue
 		}
 		if excluded[value.ID] || value.AuthStatus != account.AuthStatusActive {
+			continue
+		}
+		// 长期风险标记（如 RSC 注册风控）永不参与调度；与冷却不同，它不随
+		// 时间恢复，只有人工解除标记。
+		if value.RiskStatus != "" {
 			continue
 		}
 		consideredCandidates++
@@ -781,6 +763,9 @@ func (s *Selector) acquirePinned(ctx context.Context, provider account.Provider,
 			return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
 		}
 		if !value.Enabled || value.AuthStatus != account.AuthStatusActive {
+			return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
+		}
+		if value.RiskStatus != "" {
 			return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
 		}
 		if inference {
@@ -1165,6 +1150,28 @@ func (s *Selector) markMissingThinking(ctx context.Context, credential account.C
 
 func (s *Selector) MarkFailure(ctx context.Context, credential account.Credential, status int, retryAfter time.Duration) {
 	_ = s.markFailure(ctx, credential, credential.FailureCount, credential.FailureCount+1, status, retryAfter)
+}
+
+// MarkQualityIdleFailure records the peek-phase idle/empty cooldown with the
+// dedicated quality_idle_timeout marker so a clean RSC verdict can lift it
+// (the generic markFailure path writes "upstream status 504", indistinguishable
+// from real 5xx cooldowns that a clean verdict must NOT clear).
+func (s *Selector) MarkQualityIdleFailure(ctx context.Context, credential account.Credential, cooldown time.Duration) error {
+	if cooldown <= 0 {
+		cooldown = defaultMissingThinkingCooldown
+	}
+	until := time.Now().UTC().Add(cooldown)
+	// 定向写 cooldown+marker：不回写 failure_count 快照——快照与并发
+	// markFailure 之间存在丢更新窗口（外部复核 6）。
+	if err := s.accounts.UpdateQualityIdleCooldown(ctx, credential.ID, credential.Provider, until); err != nil {
+		return err
+	}
+	s.ApplyInvalidation(repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: credential.Provider, AccountID: credential.ID,
+		FailureCount: credential.FailureCount, CooldownUntil: &until, HealthMarker: account.LastErrorQualityIdle,
+	})
+	s.evictCandidate(credential.Provider, credential.ID)
+	return nil
 }
 
 // MarkFailureAfterSuccess records a stream failure from a fresh health baseline.
@@ -1712,7 +1719,7 @@ func canUseStaleRoutingSnapshot(ctx context.Context, err error) bool {
 		return true
 	}
 	var networkError net.Error
-	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+	if errors.As(err, &networkError) && networkError.Timeout() {
 		return true
 	}
 	var temporary interface{ Temporary() bool }

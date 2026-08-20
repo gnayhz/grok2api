@@ -67,7 +67,8 @@ type Config struct {
 	Media             MediaConfig             `yaml:"media"`
 	Routing           RoutingConfig           `yaml:"routing"`
 	Audit             AuditConfig             `yaml:"audit"`
-	QualityGuard      QualityGuardConfig      `yaml:"qualityGuard"`
+	RequestRetry      RequestRetryConfig      `yaml:"requestRetry"`
+	AccountRisk       AccountRiskConfig       `yaml:"accountRisk"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
 	Accounts          AccountsConfig          `yaml:"-"`
 }
@@ -254,46 +255,25 @@ type AuditConfig struct {
 	LedgerQueueHighWatermarkPct int      `yaml:"ledgerQueueHighWatermarkPercent"`
 }
 
-// QualityGuardConfig defines the optional egress-quality sidecar policy.
-// Docker Compose controls whether the sidecar process is started; Enabled is a
-// separate server-side authorization gate for its internal API.
-type QualityGuardConfig struct {
-	Enabled bool `yaml:"enabled"`
-	// DeprecatedClientKeyID is accepted only so configurations created by the
-	// short-lived manual-ID preview continue to load. It is ignored.
-	DeprecatedClientKeyID   uint64   `yaml:"clientKeyID"`
-	Model                   string   `yaml:"model"`
-	NodeIDs                 []uint64 `yaml:"nodeIDs"`
-	Mode                    string   `yaml:"mode"`
-	ActiveInterval          Duration `yaml:"activeInterval"`
-	PassivePollInterval     Duration `yaml:"passivePollInterval"`
-	SoftTPS                 float64  `yaml:"softTPS"`
-	HardTPS                 float64  `yaml:"hardTPS"`
-	ConsecutiveSoft         int      `yaml:"consecutiveSoft"`
-	ConsecutiveErrors       int      `yaml:"consecutiveErrors"`
-	QuarantineDuration      Duration `yaml:"quarantineDuration"`
-	NoAccountBackoff        Duration `yaml:"noAccountBackoff"`
-	MinimumHealthyNodes     int      `yaml:"minimumHealthyNodes"`
-	MaxOutputTokens         int      `yaml:"maxOutputTokens"`
-	FailClosed              bool     `yaml:"failClosed"`
-	MinimumGenerationWindow Duration `yaml:"minimumGenerationWindow"`
-	RotationURL             string   `yaml:"rotationURL"`
-	RotationToken           string   `yaml:"rotationToken"`
-	RotationTimeout         Duration `yaml:"rotationTimeout"`
-	RotatableNodeIDs        []uint64 `yaml:"rotatableNodeIDs"`
-	// RequestRetry withholds a thinking-model stream that already has enough
-	// visible output and no reasoning, then retries on another account.
-	RequestRetry QualityGuardRequestRetryConfig `yaml:"requestRetry"`
-}
-
-// QualityGuardRequestRetryConfig holds the in-process missing-thinking withhold policy.
-type QualityGuardRequestRetryConfig struct {
+// RequestRetryConfig holds the real-time routing guard policy（实时路由守卫）：
+// withholds a thinking-model stream that already has enough visible output and
+// no reasoning, then retries on the same account once and on other accounts.
+type RequestRetryConfig struct {
 	Enabled         bool     `yaml:"enabled"`
 	MaxAttempts     int      `yaml:"maxAttempts"`
 	HoldTimeout     Duration `yaml:"holdTimeout"`
 	MinOutputTokens int      `yaml:"minOutputTokens"`
 	OnExhausted     string   `yaml:"onExhausted"`
 	AccountCooldown Duration `yaml:"accountCooldown"`
+	// EarlyHeaderAbort 是实验性的响应头预算早断（0=关闭）：quality hold 激活
+	// 的流式请求若超过该预算仍未收到上游响应头，视为降智路径特征立即中止
+	// 换路径重试。健康推理路径的头恒定秒级返回；降智路径要等生成完成。
+	EarlyHeaderAbort Duration `yaml:"earlyHeaderAbort"`
+	// SameAccountRetry retries the withholding account once before switching:
+	// tunnel-pool egress rotates the exit IP per request, so this retry
+	// separates transient exit-IP pollution from a degraded account.
+	// 默认开启（生产实测有效区分瞬时 IP 污染与降智账号）；显式置 false 关闭。
+	SameAccountRetry bool `yaml:"sameAccountRetry"`
 }
 
 type ClientKeyDefaultsConfig struct {
@@ -697,7 +677,10 @@ func (c Config) Validate() error {
 	if c.Audit.LedgerQueueHighWatermarkPct < 50 || c.Audit.LedgerQueueHighWatermarkPct > 100 {
 		return errors.New("audit.ledgerQueueHighWatermarkPercent 必须在 50 到 100 之间")
 	}
-	if err := validateQualityGuardConfig(c.QualityGuard); err != nil {
+	if err := validateRequestRetry(c.RequestRetry); err != nil {
+		return err
+	}
+	if err := c.AccountRisk.Validate(); err != nil {
 		return err
 	}
 	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
@@ -723,81 +706,29 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func validateQualityGuardConfig(value QualityGuardConfig) error {
-	if err := validateQualityGuardRequestRetry(value.RequestRetry); err != nil {
-		return err
-	}
-	if !value.Enabled {
-		return nil
-	}
-	if !validUniquePositiveIDs(value.NodeIDs) || !validUniquePositiveIDs(value.RotatableNodeIDs) {
-		return errors.New("qualityGuard.nodeIDs 和 rotatableNodeIDs 必须是唯一的正整数")
-	}
-	if strings.TrimSpace(value.Model) == "" {
-		return errors.New("qualityGuard.model 不能为空")
-	}
-	if value.Mode != "active" && value.Mode != "passive" && value.Mode != "hybrid" {
-		return errors.New("qualityGuard.mode 必须是 active、passive 或 hybrid")
-	}
-	if value.ActiveInterval.Value() < time.Minute || value.ActiveInterval.Value() > 24*time.Hour {
-		return errors.New("qualityGuard.activeInterval 必须在 1 分钟到 24 小时之间")
-	}
-	if value.PassivePollInterval.Value() < time.Second || value.PassivePollInterval.Value() > 5*time.Minute {
-		return errors.New("qualityGuard.passivePollInterval 必须在 1 秒到 5 分钟之间")
-	}
-	if value.SoftTPS < 1 || value.HardTPS <= value.SoftTPS || value.HardTPS > 10000 {
-		return errors.New("qualityGuard TPS 阈值无效")
-	}
-	if value.ConsecutiveSoft < 1 || value.ConsecutiveSoft > 20 || value.ConsecutiveErrors < 1 || value.ConsecutiveErrors > 20 {
-		return errors.New("qualityGuard 连续异常次数必须在 1 到 20 之间")
-	}
-	if value.QuarantineDuration.Value() < 30*time.Second || value.QuarantineDuration.Value() > 24*time.Hour || value.NoAccountBackoff.Value() < 30*time.Second || value.NoAccountBackoff.Value() > 24*time.Hour {
-		return errors.New("qualityGuard 隔离和无账号退避时间必须在 30 秒到 24 小时之间")
-	}
-	if value.MinimumHealthyNodes < 1 || (len(value.NodeIDs) > 0 && value.MinimumHealthyNodes > len(value.NodeIDs)) {
-		return errors.New("qualityGuard.minimumHealthyNodes 与受管节点数量不匹配")
-	}
-	if value.MaxOutputTokens < 32 || value.MaxOutputTokens > 4096 {
-		return errors.New("qualityGuard.maxOutputTokens 必须在 32 到 4096 之间")
-	}
-	if value.MinimumGenerationWindow.Value() < time.Millisecond || value.MinimumGenerationWindow.Value() > 2*time.Minute {
-		return errors.New("qualityGuard.minimumGenerationWindow 必须在 1 毫秒到 2 分钟之间")
-	}
-	if value.RotationTimeout.Value() < 5*time.Second || value.RotationTimeout.Value() > 5*time.Minute {
-		return errors.New("qualityGuard.rotationTimeout 必须在 5 秒到 5 分钟之间")
-	}
-	if len(value.RotatableNodeIDs) > 0 && strings.TrimSpace(value.RotationURL) == "" {
-		return errors.New("qualityGuard.rotatableNodeIDs 非空时必须配置 rotationURL")
-	}
-	if raw := strings.TrimSpace(value.RotationURL); raw != "" {
-		parsed, err := url.ParseRequestURI(raw)
-		if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return errors.New("qualityGuard.rotationURL 必须是无凭据的 HTTP(S) URL")
-		}
-	}
-	return nil
-}
-
-func validateQualityGuardRequestRetry(value QualityGuardRequestRetryConfig) error {
+func validateRequestRetry(value RequestRetryConfig) error {
 	if !value.Enabled {
 		return nil
 	}
 	if value.MaxAttempts != 0 && (value.MaxAttempts < 1 || value.MaxAttempts > 6) {
-		return errors.New("qualityGuard.requestRetry.maxAttempts 必须在 1 到 6 之间")
+		return errors.New("requestRetry.maxAttempts 必须在 1 到 6 之间")
 	}
 	if d := value.HoldTimeout.Value(); d != 0 && (d < 200*time.Millisecond || d > 30*time.Second) {
-		return errors.New("qualityGuard.requestRetry.holdTimeout 必须在 200ms 到 30s 之间")
+		return errors.New("requestRetry.holdTimeout 必须在 200ms 到 30s 之间")
 	}
 	if value.MinOutputTokens != 0 && (value.MinOutputTokens < 8 || value.MinOutputTokens > 256) {
-		return errors.New("qualityGuard.requestRetry.minOutputTokens 必须在 8 到 256 之间")
+		return errors.New("requestRetry.minOutputTokens 必须在 8 到 256 之间")
+	}
+	if d := value.EarlyHeaderAbort.Value(); d != 0 && (d < 3*time.Second || d > 60*time.Second) {
+		return errors.New("requestRetry.earlyHeaderAbort 必须在 3s 到 60s 之间（0 表示关闭）")
 	}
 	switch strings.TrimSpace(value.OnExhausted) {
 	case "", "fail_open", "fail_closed":
 	default:
-		return errors.New("qualityGuard.requestRetry.onExhausted 必须是 fail_open 或 fail_closed")
+		return errors.New("requestRetry.onExhausted 必须是 fail_open 或 fail_closed")
 	}
 	if d := value.AccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
-		return errors.New("qualityGuard.requestRetry.accountCooldown 必须在 1m 到 168h 之间")
+		return errors.New("requestRetry.accountCooldown 必须在 1m 到 168h 之间")
 	}
 	return nil
 }
@@ -923,17 +854,10 @@ func defaultConfig() Config {
 			LedgerMode: "enforce", LedgerFailureThreshold: 1,
 			LedgerUnhealthyGrace: Duration(10 * time.Second), LedgerQueueHighWatermarkPct: 90,
 		},
-		QualityGuard: QualityGuardConfig{
-			Model: "grok-4.5", Mode: "hybrid",
-			ActiveInterval: Duration(30 * time.Minute), PassivePollInterval: Duration(5 * time.Second),
-			SoftTPS: 500, HardTPS: 1000, ConsecutiveSoft: 2, ConsecutiveErrors: 2,
-			QuarantineDuration: Duration(5 * time.Minute), NoAccountBackoff: Duration(5 * time.Minute),
-			MinimumHealthyNodes: 3, MaxOutputTokens: 384,
-			MinimumGenerationWindow: Duration(time.Second), RotationTimeout: Duration(45 * time.Second),
-			RequestRetry: QualityGuardRequestRetryConfig{
-				MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed",
-				AccountCooldown: Duration(24 * time.Hour),
-			},
+		AccountRisk: DefaultAccountRiskConfig(),
+		RequestRetry: RequestRetryConfig{
+			MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed", SameAccountRetry: true,
+			AccountCooldown: Duration(24 * time.Hour),
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{

@@ -74,6 +74,11 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 		if excluded[value.ID] || value.AuthStatus != account.AuthStatusActive {
 			continue
 		}
+		// 长期风险标记（如 RSC 注册风控）永不参与调度；与冷却不同，它不随
+		// 时间恢复，只有人工解除标记。
+		if value.RiskStatus != "" {
+			continue
+		}
 		consideredCandidates++
 		if !s.candidateSupportsModel(provider, upstreamModel, quotaMode, candidate) {
 			continue
@@ -161,7 +166,8 @@ func (session *selectionSession) Acquire(ctx context.Context, excluded map[uint6
 }
 
 // RetryAccount 将一个已被本请求取出的普通账号放回下一次选号的最前面。
-// 仅用于出口重建后的无账号归因重试，不能用于账号级失败。
+// 仅用于无账号归因的重试：出口重建，或质量扣留后的同账号复测（隧道池
+// 出口按请求轮换，同号重试即隐式换 IP；第一次扣留尚不构成账号归因）。
 func (session *selectionSession) RetryAccount(accountID uint64) {
 	if accountID == 0 {
 		return
@@ -172,6 +178,23 @@ func (session *selectionSession) RetryAccount(accountID uint64) {
 			return
 		}
 	}
+}
+
+// wasQuotaProbeCandidate reports whether the account entered this session via
+// the quota-probe lane. The lease flag flips to false on paid-probe promotion,
+// but same-account retry must keep excluding probe-origin accounts: RetryAccount
+// only re-queues normal candidates, so a promoted probe would silently switch
+// accounts while logging a same-account retry (external review).
+func (session *selectionSession) wasQuotaProbeCandidate(accountID uint64) bool {
+	if session == nil {
+		return false
+	}
+	for _, index := range session.probeCandidates {
+		if session.values[index].Credential.ID == accountID {
+			return true
+		}
+	}
+	return false
 }
 
 func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded map[uint64]bool) (*accountLease, error) {
