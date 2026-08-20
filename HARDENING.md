@@ -87,4 +87,14 @@
 - **二轮复查补漏（round 25）**：① docker/entrypoint.sh 与 Dockerfile 的 sidecar 状态目录 `/var/lib/grok2api-quality-guard` 创建逻辑（每次启动空跑，已删）；② ForcedEgressNodeID 死链——管理员质量测试端点删除后全链无生产 setter 的尸体（provider 字段、adapter 消费分支、gateway Input 字段与传递、selector.AcquireForKeyOnEgressNode 方法与 forcedEgressNodeID 参数过滤、守卫永假排除条件、3 个死测试），出生提交 137589c3（sidecar 链首个提交）；账号绑定的 WithEgressNode/EgressNodeFromContext 基础设施无关，保留。
 - dashboard 质量健康卡移除；「拦截」指标卡迁至请求审计页。
 - 品牌清理：settings 卡片、README 双语、示例配置不再出现「质量守卫 / qualityGuard」；出口节点冷却措辞回归传输失败语义。
+
+## 十一、五提交全量对抗审查（round 27，909bb810 之后全部提交）
+
+三审查员并行（流量分类路由 / sidecar 移除正确性 / 加固与前端），协调者逐条验证后修复：
+- **P0（已修）**：4xx 消毒被换号绕过——service.go 消毒分支要求 lastFailure == nil，首跳 429（设置 lastFailure）换号后次跳 400 跳过消毒原文透传（TestNonRetryable4xxAfterAccountSwitchStaysSanitized 锁定）。
+- **P1（已修）**：订阅卫生漏 sticky 模板——repo 层卫生无 cipher 解不了密，订阅刷新可把规则固定目标改成 {account} 模板绕过节点编辑守卫；syncSource 尾部补应用层 enforceRouteRuleHygieneAfterSync（TestSyncHygiene* 锁定）。
+- **P1（已修）**：审计页「拦截」卡把 i18n 语言码当 IANA 时区传 dashboard API → 后端 400 → 恒显 0；改用 Intl resolvedOptions 时区 + error 态显示 -。
+- **P2（已修）**：README 双语 ForcedEgress 尸句删除；requestRetry 示例补 earlyHeaderAbort/sameAccountRetry/accountCooldown 并标注默认关闭；clientkey 空 const () 清理。
+- 已查干净：流量分类绑定优先级、节点管理 CRUD 与基线一致、守卫 ForcedEgress 永假条件删除无副作用、requestRetry 热加载、i18n 双不变量、NaN/Inf 守卫、scratch 清零、CJK 脱敏。
+- 遗留清单（未修，低风险）：stored-response 404/410 原文 body 直出（P1，建议下轮）；OAuth 脱敏嵌套 JSON/URL 编码绕过面（P1）；RSC 日志未 redact（P1）；审计 sanitizer camelCase/URL 编码缺口（P2）；决策表测试缺口（A-P1-3）；verify.sh STATES 未定义+缺工具仍记 ok（P2）；400 信封 5xx 措辞（P2）。
 - **三轮复查补漏（round 26，六新维度：git 提交级权威清单 / API 路由面 / swagger / i18n 孤儿键 / DB schema / 构建配置）**：① .dockerignore 4 条 sidecar 死白名单；② dashboard i18n 孤儿键 qualityTitle/requestQualitySummary（已删卡片的键尸体，双语清除，i18n 奇偶测试锁定）；③ README 双语与 assignment.go 注释沿用 sidecar「quarantine/隔离」黑话（autoAssign 界限功能合法保留，措辞改为节点下线/evacuation）。git 权威清单（sidecar 链 15 提交触碰 83 文件）现存文件零残留；swagger/路由面/建表语句零残留。

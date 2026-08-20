@@ -1454,8 +1454,8 @@ attemptLoop:
 		}
 		if isTerminalRequestForbidden(credential.Provider, lastFailure) {
 			// already prepared as a terminal 403 response for the client
-		} else if response.StatusCode >= 400 && lastFailure == nil && !isRetryable(response.StatusCode) {
-			// Non-retryable upstream 4xx without an existing failure classification:
+		} else if response.StatusCode >= 400 && !isRetryable(response.StatusCode) {
+			// Non-retryable upstream 4xx, including after an account switch (a prior retryable failure must not disable sanitization):
 			// headers would otherwise be forwarded verbatim to the client, leaking
 			// upstream internals. Convert to a controlled UpstreamFailure that
 			// preserves the status and upstream error code for diagnostics while

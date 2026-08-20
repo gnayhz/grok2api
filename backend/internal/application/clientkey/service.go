@@ -31,8 +31,6 @@ var (
 	ErrSystemManaged      = errors.New("系统托管 Client Key 不允许人工操作")
 )
 
-const ()
-
 type CreateInput struct {
 	Name                 string
 	Enabled              bool

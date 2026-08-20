@@ -360,14 +360,17 @@ The real-time routing guard (`requestRetry`) is a top-level `config.yaml` sectio
 
 ```yaml
 requestRetry:
-  enabled: true
+  enabled: true # off by default
   maxAttempts: 6
   holdTimeout: 3s
   minOutputTokens: 32
   onExhausted: fail_closed # fail_open | fail_closed
+  earlyHeaderAbort: 0s     # optional header-budget early abort
+  sameAccountRetry: true   # retry the same account once before switching
+  accountCooldown: 24h
 ```
 
-When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, stored-response, and ForcedEgress probe requests are unchanged. Changes to this section hot-reload with the config file.
+When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, and stored-response requests are unchanged. Changes to this section hot-reload with the config file.
 
 ### Account risk attribution (RSC)
 

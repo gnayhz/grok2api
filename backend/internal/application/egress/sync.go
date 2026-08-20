@@ -69,10 +69,55 @@ func (s *Service) syncSource(ctx context.Context, operations OperationsRepositor
 		return ImportResult{}, ErrSubscriptionSync
 	}
 	s.invalidateOperationsConfig()
+	// Subscription upserts bypass the node-edit guard: a refreshed entry can
+	// turn a rule fixed target into an account-bound template. Best effort -
+	// a hygiene failure must not fail the sync that already committed.
+	_ = s.enforceRouteRuleHygieneAfterSync(ctx, operations)
 	if err := operations.UpdateEgressSourceSync(ctx, source.ID, now, nextSyncAt, imported, ""); err != nil {
 		return ImportResult{}, err
 	}
 	return ImportResult{Imported: imported, Skipped: skipped}, nil
+}
+
+// enforceRouteRuleHygieneAfterSync strips enabled fixed route rules whose
+// target can no longer serve them after a subscription sync. The repository
+// hygiene inside the sync transaction cannot decrypt proxy URLs, so an entry
+// that became an {account} template would otherwise keep routing a "fixed"
+// exit that actually rotates per caller identity.
+func (s *Service) enforceRouteRuleHygieneAfterSync(ctx context.Context, operations OperationsRepository) error {
+	config, err := operations.GetEgressOperationsConfig(ctx)
+	if err != nil {
+		return err
+	}
+	kept := make([]domain.RouteRule, 0, len(config.RouteRules))
+	changed := false
+	for _, rule := range config.RouteRules {
+		if !rule.Enabled || rule.TargetMode.Normalized() != domain.RouteRuleTargetFixed {
+			kept = append(kept, rule)
+			continue
+		}
+		node, err := s.repository.GetEgressNode(ctx, rule.TargetNodeID)
+		valid := err == nil && domain.CanNodeServeFixedRouteTarget(node, rule.Scope)
+		if valid {
+			if proxyURL, decryptErr := s.cipher.Decrypt(node.EncryptedProxyURL); decryptErr == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder) {
+				valid = false
+			}
+		}
+		if valid {
+			kept = append(kept, rule)
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	config.RouteRules = kept
+	if _, err := operations.SaveEgressOperationsConfig(ctx, config); err != nil {
+		return err
+	}
+	s.invalidateOperationsConfig()
+	return nil
 }
 
 func sourceNextSyncAt(source domain.SubscriptionSource, now time.Time) time.Time {
