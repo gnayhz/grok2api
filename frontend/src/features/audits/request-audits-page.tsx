@@ -82,9 +82,10 @@ export function RequestAuditsPage() {
     gcTime: AUDIT_PAGE_CACHE_TIME_MS,
     structuralSharing: false,
   });
-    const degradedQuery = useQuery({
-    queryKey: ["audit-degraded-withholds", period],
-    queryFn: () => getDashboard(period, i18n.language),
+  const dashboardTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const degradedQuery = useQuery({
+    queryKey: ["audit-degraded-withholds", period, dashboardTimezone],
+    queryFn: () => getDashboard(period, dashboardTimezone),
     refetchInterval: 30_000,
   });
 const summaryQuery = useQuery({
@@ -203,7 +204,7 @@ const summaryQuery = useQuery({
           <AuditMetric icon={Activity} loading={summaryLoading} label={t("audits.totalRequests")} value={formatNumber(summary?.usage.requests ?? 0, i18n.language, 0)} detail={t("audits.requestBreakdown", { success: formatNumber(summary?.usage.successfulRequests ?? 0, i18n.language, 0), failed: formatNumber(summary?.usage.failedRequests ?? 0, i18n.language, 0) })} />
           <AuditMetric icon={WholeWord} loading={summaryLoading} label={t("audits.totalTokens")} value={formatNumber(summary?.usage.totalTokens ?? 0, i18n.language, 0)} detail={t("audits.tokenEfficiency", { cacheRate: formatNumber(cacheRate, i18n.language, 1) })} />
           <AuditMetric icon={CircleCheck} loading={summaryLoading} label={t("audits.successRate")} value={`${formatNumber(summary?.usage.successRate ?? 0, i18n.language, 1)}%`} detail={t("audits.averageDuration", { duration: formatDuration(summary?.usage.averageDurationMs ?? 0) })} />
-          <AuditMetric icon={ShieldCheck} loading={degradedQuery.isPending} label={t("audits.degradedWithholds")} value={formatNumber(degradedQuery.data?.resources.qualityDegradedRequests ?? 0, i18n.language, 0)} detail={t("audits.degradedWithholdsDetail")} />
+          <AuditMetric icon={ShieldCheck} loading={degradedQuery.isPending} label={t("audits.degradedWithholds")} value={degradedQuery.isError ? "-" : formatNumber(degradedQuery.data?.resources.qualityDegradedRequests ?? 0, i18n.language, 0)} detail={t("audits.degradedWithholdsDetail")} />
           <AuditMetric
             icon={CircleDollarSign}
             loading={summaryLoading}

@@ -358,14 +358,17 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 
 ```yaml
 requestRetry:
-  enabled: true
+  enabled: true # 默认关闭
   maxAttempts: 6
   holdTimeout: 3s
   minOutputTokens: 32
   onExhausted: fail_closed # fail_open | fail_closed
+  earlyHeaderAbort: 0s     # 可选：响应头预算早断
+  sameAccountRetry: true   # 换号前先同号重试一次
+  accountCooldown: 24h
 ```
 
-开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具、stored response 钉账号和 ForcedEgress 探针。该段修改随配置热加载生效。
+开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具和 stored response 钉账号请求。该段修改随配置热加载生效。
 
 ### 账号风险归因（RSC）
 

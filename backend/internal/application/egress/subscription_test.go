@@ -35,6 +35,10 @@ func (r *subscriptionSyncRepositoryStub) UpdateEgressSourceSync(context.Context,
 	return nil
 }
 
+func (r *subscriptionSyncRepositoryStub) GetEgressOperationsConfig(context.Context) (domain.OperationsConfig, error) {
+	return domain.OperationsConfig{}, nil
+}
+
 func (r *subscriptionSyncRepositoryStub) nodesFor(sourceID uint64) []domain.Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
