@@ -92,6 +92,8 @@ type streamConverter struct {
 // streamRepeatTracker 在协议转换、缓冲和 stop filter 之前跟踪上游增量，
 // 避免任一下游路径绕过循环保护。
 type streamRepeatTracker struct {
+	// 循环检测：可见内容与推理各自计数。推理合法地远比可见输出更常重复
+	// 同一短标记，共用一个计数器会过早终止有效的 high/xhigh 响应。
 	lastContentDelta   string
 	contentRepeatCount int
 	lastReasonDelta    string
