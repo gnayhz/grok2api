@@ -7,22 +7,65 @@ type TableProps = React.HTMLAttributes<HTMLTableElement> & {
   rowHeight?: number
 }
 
-const Table = React.forwardRef<HTMLTableElement, TableProps>(({ className, viewportRows, rowHeight, ...props }, ref) => (
-  <div
-    data-slot="table-scroll-container"
-    className={cn(
-      "relative w-full overflow-auto",
-      viewportRows && "[&_thead]:sticky [&_thead]:top-0 [&_thead]:z-30 [&_thead]:bg-background"
-    )}
-    style={viewportRows && rowHeight ? { maxHeight: 36 + viewportRows * rowHeight } : undefined}
-  >
+// TableScrollViewport measures the rendered thead height instead of assuming
+// a fixed 36px header. The old constant made maxHeight = 36 + rows*rowHeight,
+// so any header that actually rendered taller (border-b, wrapped sort labels,
+// font/DPI variance) produced a 1-few-px vertical scrollbar that hijacked the
+// wheel at the end of page scrolling (audits page, 20 rows default).
+function TableScrollViewport({ viewportRows, rowHeight, children }: {
+  viewportRows: number
+  rowHeight: number
+  children: React.ReactNode
+}) {
+  const tableRef = React.useRef<HTMLTableElement>(null)
+  const [headerHeight, setHeaderHeight] = React.useState(36)
+
+  React.useLayoutEffect(() => {
+    const table = tableRef.current
+    if (!table || typeof ResizeObserver === "undefined") return
+    const measure = () => {
+      const thead = table.tHead
+      if (!thead) return
+      const next = Math.ceil(thead.getBoundingClientRect().height)
+      setHeaderHeight((current) => (Math.abs(current - next) > 0.5 ? next : current))
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(table)
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <div
+      data-slot="table-scroll-container"
+      className="relative w-full overflow-auto"
+      style={{ maxHeight: headerHeight + viewportRows * rowHeight }}
+    >
+      {children}
+    </div>
+  )
+}
+
+const Table = React.forwardRef<HTMLTableElement, TableProps>(({ className, viewportRows, rowHeight, children, ...props }, ref) => {
+  const stickyHeader = viewportRows !== undefined
+  const table = (
     <table
       ref={ref}
-      className={cn("w-full caption-bottom text-sm", className)}
+      className={cn("w-full caption-bottom text-sm", stickyHeader && "[&_thead]:sticky [&_thead]:top-0 [&_thead]:z-30 [&_thead]:bg-background", className)}
       {...props}
-    />
-  </div>
-))
+    >
+      {children}
+    </table>
+  )
+  if (!stickyHeader || !rowHeight) {
+    return (
+      <div data-slot="table-scroll-container" className="relative w-full overflow-auto">
+        {table}
+      </div>
+    )
+  }
+  return <TableScrollViewport viewportRows={viewportRows} rowHeight={rowHeight}>{table}</TableScrollViewport>
+})
 Table.displayName = "Table"
 
 const TableHeader = React.forwardRef<
