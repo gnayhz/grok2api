@@ -42,6 +42,14 @@ function TableScrollViewport({ viewportRows, rowHeight, children }: {
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(container)
+    // The table itself must be observed too: while maxHeight clamps the
+    // container, switching 100 rows -> 20 rows leaves the container at
+    // exactly cap in both states, so a container-only observer never fires
+    // and the stale 100-row measurement keeps the cap (scrollbar returns
+    // after page-size round trip). The table's natural height does change
+    // (96*rows vs 97*rows) and re-triggers measurement.
+    const table = container.querySelector("table")
+    if (table) observer.observe(table)
     return () => observer.disconnect()
   }, [])
 
