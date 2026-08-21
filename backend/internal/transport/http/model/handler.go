@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
@@ -34,6 +33,10 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/models/accounts", h.listAccounts)
 	router.POST("/models", h.create)
 	router.POST("/models/sync", h.sync)
+	// Read-only progress probe for reconnecting clients: the sync itself runs
+	// detached from the SSE connection, so a page reload can discover the
+	// in-flight run and resume displaying progress without restarting it.
+	router.GET("/models/sync/progress", h.syncProgress)
 	router.PATCH("/models/batch", h.batchUpdate)
 	router.DELETE("/models", h.batchDelete)
 	router.PATCH("/models/:id", h.update)
@@ -256,15 +259,20 @@ func (h *Handler) sync(c *gin.Context) {
 		err    error
 	}
 	result := make(chan syncResult, 1)
-	ctx, cancel := context.WithCancel(c.Request.Context())
-	defer cancel()
-	var completed atomic.Int64
-	var total atomic.Int64
+	// The sync itself runs on a context detached from this SSE connection
+	// (service.SyncObserved): with very large account pools the run outlives
+	// typical browser/proxy connection lifetimes. Cancelling here would only
+	// stop watching, not stop the run.
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
 	go func() {
-		synced, err := h.service.SyncObserved(ctx, func(current, maximum int) {
-			completed.Store(int64(current))
-			total.Store(int64(maximum))
-		})
+		synced, err := h.service.SyncObserved(watchCtx, nil)
+		// Map a watcher-side cancellation onto the shared snapshot error so a
+		// disconnect is never reported as a failed run to remaining viewers.
+		if err != nil && watchCtx.Err() != nil {
+			err = nil
+			synced = 0
+		}
 		result <- syncResult{synced: synced, err: err}
 	}()
 
@@ -276,6 +284,8 @@ func (h *Handler) sync(c *gin.Context) {
 	for {
 		select {
 		case <-c.Request.Context().Done():
+			// Viewer disconnected: cancel the watcher only. The detached run
+			// continues; progress stays available via /models/sync/progress.
 			return
 		case value := <-result:
 			if value.err != nil {
@@ -289,7 +299,10 @@ func (h *Handler) sync(c *gin.Context) {
 				return
 			}
 		case <-progressTicker.C:
-			current, maximum := int(completed.Load()), int(total.Load())
+			// Progress is read from the service snapshot so reconnecting viewers
+			// (and the original one) observe the same shared counters.
+			snapshot := h.service.SyncProgress()
+			current, maximum := snapshot.Completed, snapshot.Total
 			if maximum > 0 && (current != lastCompleted || maximum != lastTotal) {
 				if err := writeModelSyncEvent(c, "progress", gin.H{"completed": current, "total": maximum}); err != nil {
 					return
@@ -298,6 +311,12 @@ func (h *Handler) sync(c *gin.Context) {
 			}
 		}
 	}
+}
+
+// syncProgress reports the shared full-sync snapshot for reconnecting UIs.
+func (h *Handler) syncProgress(c *gin.Context) {
+	snapshot := h.service.SyncProgress()
+	c.JSON(http.StatusOK, gin.H{"active": snapshot.Active, "completed": snapshot.Completed, "total": snapshot.Total})
 }
 
 func writeModelSyncEvent(c *gin.Context, event string, value any) error {

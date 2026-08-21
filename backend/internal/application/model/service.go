@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 )
 
 const defaultModelSyncWorkers = 25
+
+// modelSyncRunTimeout bounds a detached full-account sync run. The run is
+// decoupled from the triggering SSE connection; without a cap a leaked worker
+// would hold the singleflight slot forever and block all future syncs.
+const modelSyncRunTimeout = time.Hour
 const syncFailurePersistTimeout = 5 * time.Second
 
 var maxModelBatchSize = repository.MaxPageSize * len(modeldomain.Capabilities())
@@ -76,6 +82,17 @@ type Service struct {
 	bulkPool  *batch.Pool
 	logger    *slog.Logger
 	syncAll   singleflight.Group
+
+	// syncRunMu guards the shared progress snapshot of the in-flight full sync.
+	// The sync itself is detached from any single SSE connection (see
+	// SyncObserved): browser disconnects no longer abort a very-large-account run.
+	// Observers publish here so a reconnecting client can resume displaying
+	// progress via SyncProgress.
+	syncRunMu     sync.RWMutex
+	syncRunActive bool
+	syncCompleted int
+	syncTotal     int
+	syncErr       error
 }
 
 func NewService(models repository.ModelRepository, accounts repository.AccountRepository, accountService *accountapp.Service, providers *provider.Registry) *Service {
@@ -417,12 +434,60 @@ func (s *Service) Sync(ctx context.Context) (int, error) {
 }
 
 // SyncObserved 执行全量模型同步，并按已完成账号数报告进度。
+// SyncRunSnapshot describes the in-flight (or last finished) full sync for
+// reconnecting progress displays. Active=false with Err=nil means a previous
+// run completed successfully (Completed==Total).
+type SyncRunSnapshot struct {
+	Active    bool
+	Completed int
+	Total     int
+	Err       error
+}
+
+// SyncProgress returns the shared progress snapshot of the full-account sync.
+func (s *Service) SyncProgress() SyncRunSnapshot {
+	s.syncRunMu.RLock()
+	defer s.syncRunMu.RUnlock()
+	return SyncRunSnapshot{Active: s.syncRunActive, Completed: s.syncCompleted, Total: s.syncTotal, Err: s.syncErr}
+}
+
+func (s *Service) storeSyncProgress(completed, total int) {
+	s.syncRunMu.Lock()
+	s.syncCompleted, s.syncTotal = completed, total
+	s.syncRunMu.Unlock()
+}
+
+// SyncObserved starts (or joins) the full-account model sync and streams
+// progress to observer until completion. The sync runs on a context detached
+// from the caller: with very large account pools a run takes tens of minutes, and a
+// browser/CDN disconnect on the SSE progress connection must not abort the
+// underlying work — the run keeps going and any client can re-attach via
+// SyncProgress (the singleflight group joins concurrent callers to the same
+// in-flight run). A timeout bounds the detached run against leaks.
 func (s *Service) SyncObserved(ctx context.Context, observer SyncProgressObserver) (int, error) {
 	result := s.syncAll.DoChan("all", func() (any, error) {
-		return s.syncAllAccounts(ctx, observer)
+		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), modelSyncRunTimeout)
+		defer cancel()
+		s.syncRunMu.Lock()
+		s.syncRunActive = true
+		s.syncCompleted, s.syncTotal, s.syncErr = 0, 0, nil
+		s.syncRunMu.Unlock()
+		synced, err := s.syncAllAccounts(runCtx, func(completed, total int) {
+			s.storeSyncProgress(completed, total)
+			if observer != nil {
+				observer(completed, total)
+			}
+		})
+		s.syncRunMu.Lock()
+		s.syncRunActive = false
+		s.syncErr = err
+		s.syncRunMu.Unlock()
+		return synced, err
 	})
 	select {
 	case <-ctx.Done():
+		// Caller gave up watching; the detached run continues and the snapshot
+		// stays queryable. Join it again by calling SyncObserved/SyncProgress.
 		return 0, ctx.Err()
 	case value := <-result:
 		if value.Err != nil {
