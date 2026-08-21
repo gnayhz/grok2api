@@ -7,39 +7,56 @@ type TableProps = React.HTMLAttributes<HTMLTableElement> & {
   rowHeight?: number
 }
 
-// TableScrollViewport measures the rendered thead height instead of assuming
-// a fixed 36px header. The old constant made maxHeight = 36 + rows*rowHeight,
-// so any header that actually rendered taller (border-b, wrapped sort labels,
-// font/DPI variance) produced a 1-few-px vertical scrollbar that hijacked the
-// wheel at the end of page scrolling (audits page, 20 rows default).
+// TableScrollViewport sizes the inner scroll viewport from rendered metrics
+// instead of a fixed 36px header assumption, and drops the maxHeight cap
+// entirely when the table essentially fits the design viewport. Data rows
+// carry a 1px bottom border that table layout renders on top of the fixed
+// row height (h-[96px] → 97px), so a 20-row page overflowed the old constant
+// by ~20px — a micro scrollbar that hijacked the wheel at the end of page
+// scrolling. When natural height is within half a row of the cap the table is
+// treated as "fits": the container never scrolls and the page takes over.
+// Larger pages (100+ rows) exceed the cap by many rows and keep internal
+// scrolling as designed.
 function TableScrollViewport({ viewportRows, rowHeight, children }: {
   viewportRows: number
   rowHeight: number
   children: React.ReactNode
 }) {
-  const tableRef = React.useRef<HTMLTableElement>(null)
-  const [headerHeight, setHeaderHeight] = React.useState(36)
+  const containerRef = React.useRef<HTMLDivElement>(null)
+  const [measured, setMeasured] = React.useState<{ header: number; total: number } | null>(null)
 
   React.useLayoutEffect(() => {
-    const table = tableRef.current
-    if (!table || typeof ResizeObserver === "undefined") return
+    const container = containerRef.current
+    if (!container || typeof ResizeObserver === "undefined") return
     const measure = () => {
-      const thead = table.tHead
-      if (!thead) return
-      const next = Math.ceil(thead.getBoundingClientRect().height)
-      setHeaderHeight((current) => (Math.abs(current - next) > 0.5 ? next : current))
+      const table = container.querySelector("table")
+      if (!table || !table.tHead) return
+      const header = Math.ceil(table.tHead.getBoundingClientRect().height)
+      const total = Math.ceil(table.getBoundingClientRect().height)
+      setMeasured((current) =>
+        current && Math.abs(current.header - header) <= 0.5 && Math.abs(current.total - total) <= 0.5
+          ? current
+          : { header, total }
+      )
     }
     measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(table)
+    observer.observe(container)
     return () => observer.disconnect()
   }, [])
 
+  const header = measured?.header ?? 36
+  const cap = header + viewportRows * rowHeight
+  // Half a row of tolerance: content that merely overflows by row borders or
+  // header rounding is "fits"; real multi-row overflow keeps the viewport.
+  const fits = measured ? measured.total <= cap + rowHeight / 2 : false
+
   return (
     <div
+      ref={containerRef}
       data-slot="table-scroll-container"
       className="relative w-full overflow-auto"
-      style={{ maxHeight: headerHeight + viewportRows * rowHeight }}
+      style={fits ? undefined : { maxHeight: cap }}
     >
       {children}
     </div>
