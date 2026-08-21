@@ -41,11 +41,13 @@ export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit:
       <DialogContent className="flex h-[min(620px,calc(100svh-2rem))] max-h-[calc(100svh-2rem)] min-h-0 flex-col gap-0 overflow-hidden p-0 text-xs sm:max-w-4xl">
         <DialogHeader className="shrink-0 px-5 py-4 pr-12">
           <DialogTitle>{t("audits.detailTitle")}</DialogTitle>
-          <DialogDescription className="flex min-w-0 flex-wrap gap-x-4 gap-y-0.5">
+          <DialogDescription asChild>
+          <div className="flex min-w-0 flex-wrap gap-x-4 gap-y-0.5">
             <span className="truncate" title={audit?.requestId}>{audit?.requestId}</span>
             {audit?.clientIp ? <Badge variant="outline"><Globe2 className="mr-1 size-3" />{t("audits.clientIp")}: {audit.clientIp}</Badge> : null}
             {audit?.reasoningEffort ? <Badge variant="secondary">{t("audits.reasoningEffort")}: {audit.reasoningEffort}</Badge> : null}
             {audit ? <span>{formatDateTime(audit.createdAt, i18n.language)}</span> : null}
+          </div>
           </DialogDescription>
         </DialogHeader>
 
