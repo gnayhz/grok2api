@@ -180,6 +180,7 @@ export function CreativeConsolePage() {
       model: effectiveModels[panelMode],
       modelOptions: modelGroups[panelMode],
       onModelChange: (model) => setSelectedModels((current) => ({ ...current, [panelMode]: model })),
+      active: mode === panelMode,
     };
   }
 
@@ -250,6 +251,9 @@ type CreativePanelProps = {
   model: string;
   modelOptions: ModelRouteDTO[];
   onModelChange: (model: string) => void;
+  // Whether the panel's tab is currently active. Voice-list prefetches wait
+  // for it so merely opening the console (chat tab) fires no voice requests.
+  active: boolean;
 };
 
 function ChatPanel({ apiKey, model, modelOptions, onModelChange, storageScope, toolbarElement }: CreativePanelProps & { storageScope: string; toolbarElement: HTMLDivElement | null }) {
@@ -930,7 +934,7 @@ function ImagePanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   );
 }
 
-function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePanelProps) {
+function VideoPanel({ apiKey, model, modelOptions, onModelChange, active }: CreativePanelProps) {
   const { t } = useTranslation();
   const [action, setAction] = useState<VideoAction>("generate");
   const [prompt, setPrompt] = useState("");
@@ -972,7 +976,9 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   const voicesQuery = useQuery({
     queryKey: ["creative-console", "video-voices", apiKey],
     queryFn: ({ signal }) => listVoices({ apiKey, model: "grok-voice-latest", signal }),
-    enabled: Boolean(apiKey && action === "generate"),
+    // Lazy: only prefetch reference voice options once the video tab itself is
+    // active — opening the console on the chat tab must not fire voice calls.
+    enabled: Boolean(apiKey && active && action === "generate"),
     staleTime: 60_000,
   });
   const voices = useMemo(() => voicesQuery.data ?? [], [voicesQuery.data]);
@@ -1361,7 +1367,7 @@ function VideoResult({ requestId, status, loading, error, onRetry }: { requestId
 }
 
 
-function VoicePanel({ apiKey, model, modelOptions, onModelChange }: CreativePanelProps) {
+function VoicePanel({ apiKey, model, modelOptions, onModelChange, active }: CreativePanelProps) {
   const { t } = useTranslation();
   const [subMode, setSubMode] = useState<"tts" | "stt">("tts");
   const [prompt, setPrompt] = useState("");
@@ -1392,7 +1398,8 @@ function VoicePanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   const voicesQuery = useQuery({
     queryKey: ["creative-console", "voices", apiKey, activeModel],
     queryFn: ({ signal }) => listVoices({ apiKey, model: activeModel || "grok-voice-latest", signal }),
-    enabled: Boolean(apiKey) && subMode === "tts",
+    // Lazy: fetch the voice list only when the voice tab is actually opened.
+    enabled: Boolean(apiKey && active) && subMode === "tts",
     staleTime: 60_000,
   });
   const voices = useMemo(() => voicesQuery.data ?? [], [voicesQuery.data]);

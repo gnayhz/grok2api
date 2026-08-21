@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { AudioLines, Clapperboard, Image as ImageIcon, MessagesSquare, MessageSquareText, Mic, MoreHorizontal, Paintbrush, Pencil, Plus, Radio, RefreshCw, Search, SquareTerminal, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -21,7 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { createModel, deleteModel, deleteModels, listModelAccountOptions, listModelGroups, syncModels, updateModel, updateModelsEnabled } from "@/entities/model/model-api";
+import { createModel, deleteModel, deleteModels, fetchModelSyncRun, listModelAccountOptions, listModelGroups, syncModels, updateModel, updateModelsEnabled } from "@/entities/model/model-api";
 import type { ModelEndpointCapability, ModelRouteDTO, ModelRouteGroupDTO } from "@/entities/model/types";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
@@ -153,6 +153,43 @@ export function ModelsPage() {
       toast.error(error instanceof Error ? error.message : t("errors.generic"), { id: modelSyncToastID });
     },
   });
+
+  // Sync-run recovery: the full-account sync is detached from the SSE
+  // connection (a very-large-account run outlives browser tabs). On mount, and
+  // whenever this page regains focus, probe the shared snapshot and resume
+  // displaying progress for an in-flight run the previous tab started.
+  const syncRunQuery = useQuery({
+    queryKey: ["models", "sync-run"],
+    queryFn: () => fetchModelSyncRun(),
+    refetchInterval: (query) => (query.state.data?.active ? 2_000 : false),
+    refetchOnWindowFocus: true,
+    staleTime: 10_000,
+  });
+  // Drive effects from primitives, not the polled object identity: data
+  // refreshes every 2s during a run and an object-keyed effect (or its
+  // cleanup) would re-fire on every poll — dismissing toasts and refetching
+  // the list for the entire multi-minute run.
+  const resumedRunActive = syncRunQuery.data?.active === true && !syncMutation.isPending;
+  const resumedCompleted = syncRunQuery.data?.completed ?? 0;
+  const resumedTotal = syncRunQuery.data?.total ?? 0;
+  const hasResumedRun = useRef(false);
+  useEffect(() => {
+    if (!resumedRunActive) return;
+    hasResumedRun.current = true;
+    toast.loading(t("models.syncingProgress", { completed: resumedCompleted, total: resumedTotal }), { id: modelSyncToastID });
+  }, [resumedRunActive, resumedCompleted, resumedTotal, t]);
+  useEffect(() => {
+    if (resumedRunActive || !hasResumedRun.current) return;
+    // A resumed run just finished: refresh the list once and clear the toast.
+    hasResumedRun.current = false;
+    void queryClient.invalidateQueries({ queryKey: ["models"] });
+    toast.success(t("models.syncedFinish"), { id: modelSyncToastID });
+  }, [resumedRunActive, queryClient, t]);
+  useEffect(() => () => {
+    // Leaving the page mid-resume: drop the progress toast (the detached run
+    // keeps going and any later visit resumes the display).
+    if (hasResumedRun.current) toast.dismiss(modelSyncToastID);
+  }, []);
 
   function showError(error: unknown): void {
     toast.error(error instanceof Error ? error.message : t("errors.generic"));

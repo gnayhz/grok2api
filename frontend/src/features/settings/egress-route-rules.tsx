@@ -84,9 +84,14 @@ export function EgressRouteRulesPanel({ rules, candidates, onChange }: RouteRule
 
   function setMode(trafficClass: EgressTrafficClass, mode: EgressRouteRuleTargetMode) {
     const current = ruleFor(trafficClass);
-    const nodeId = mode === "fixed"
-      ? (candidates.find((node) => node.id === current?.targetNodeId)?.id ?? candidates[0]?.id)
-      : undefined;
+    let nodeId: string | undefined;
+    if (mode === "fixed") {
+      // Never persist a fixed rule without a concrete node: the saved rule
+      // would render as an empty Select after reload (no matching item), which
+      // is exactly the "last row loses its selection after refresh" symptom.
+      if (candidates.length === 0) return;
+      nodeId = candidates.find((node) => node.id === current?.targetNodeId)?.id ?? candidates[0]?.id;
+    }
     setRule(trafficClass, { scope: "grok_build", class: trafficClass, targetMode: mode, targetNodeId: nodeId, enabled: current?.enabled ?? true });
   }
 
@@ -109,6 +114,11 @@ export function EgressRouteRulesPanel({ rules, candidates, onChange }: RouteRule
           const rule = ruleFor(trafficClass);
           const mode = rule?.targetMode ?? "none";
           const selectedAvailable = !rule?.targetNodeId || candidates.some((node) => node.id === rule.targetNodeId);
+          // Resolve the effective value first so the "unavailable" option is
+          // rendered whenever it is selected — a Radix Select whose value has
+          // no matching item displays an empty trigger (the refresh bug), so
+          // every possible value must have a rendered SelectItem.
+          const nodeValue = selectedAvailable ? (rule?.targetNodeId ?? "unavailable") : "unavailable";
           return (
             <div className="grid min-w-0 gap-2.5 py-1 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] sm:items-center sm:gap-8" key={trafficClass}>
               <div className="min-w-0">
@@ -135,15 +145,20 @@ export function EgressRouteRulesPanel({ rules, candidates, onChange }: RouteRule
                 </Select>
                 {mode === "fixed" ? (
                   <Select
-                    value={selectedAvailable ? (rule?.targetNodeId ?? "unavailable") : "unavailable"}
+                    /* While node candidates are still loading, a controlled value
+                       has no matching SelectItem and the Radix trigger renders
+                       blank — indistinguishable from a lost selection (seen on
+                       slow links as "last row empty after refresh"). Withhold the
+                       value until candidates arrive so the placeholder shows. */
+                    value={candidates.length === 0 ? undefined : nodeValue}
                     disabled={candidates.length === 0}
                     onValueChange={(nodeId) => setRule(trafficClass, { scope: "grok_build", class: trafficClass, targetMode: "fixed", targetNodeId: nodeId, enabled: rule?.enabled ?? true })}
                   >
                     <SelectTrigger aria-label={t("settings.egress.routeRuleNode", { trafficClass: t(routeRuleClassLabelKeys[trafficClass]) })}>
-                      <SelectValue />
+                      <SelectValue placeholder={t("common.loading")} />
                     </SelectTrigger>
                     <SelectContent>
-                      {!selectedAvailable ? <SelectItem value="unavailable" disabled>{t("settings.egress.fallbackNodeUnavailable")}</SelectItem> : null}
+                      {nodeValue === "unavailable" ? <SelectItem value="unavailable" disabled>{t("settings.egress.fallbackNodeUnavailable")}</SelectItem> : null}
                       {candidates.map((node) => (
                         <SelectItem key={node.id} value={node.id}>{node.name}</SelectItem>
                       ))}
