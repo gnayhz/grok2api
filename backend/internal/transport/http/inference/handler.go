@@ -2,6 +2,7 @@ package inference
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -528,6 +529,26 @@ func setResponseWriteDeadline(writer http.ResponseWriter) error {
 		return nil
 	}
 	return err
+}
+
+// isClientDisconnectDuringCopy reports whether the client connection is gone
+// while the upstream body is being forwarded. Server request contexts are
+// canceled by net/http when the client connection closes, so a non-nil
+// request-context error during the copy phase means the failure originated on
+// the client side (agent stream timeout, cancellation, or network drop), not
+// upstream. The upstream idle sentinel is attached to the upstream request
+// context (never this one) and is checked defensively so an idle abort can
+// never be misread as a client disconnect. Mirrors the gateway-side
+// isClientRequestCancel semantics used in the peek phase.
+func isClientDisconnectDuringCopy(c *gin.Context, err error) bool {
+	if c == nil || c.Request == nil || c.Request.Context() == nil {
+		return false
+	}
+	reqCtx := c.Request.Context()
+	if neterror.IsUpstreamStreamIdleTimeout(context.Cause(reqCtx)) {
+		return false
+	}
+	return reqCtx.Err() != nil
 }
 
 // writeMediaBody binds the validated non-HTML content type before emitting the
@@ -1280,19 +1301,26 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 		}
 	}
 	if err != nil {
-		switch {
-		case errors.Is(err, errResponseTransferLimit):
-			errorCode = "response_too_large"
-		case errors.Is(err, errUpstreamStreamFailed):
-			errorCode = "upstream_stream_error"
-		case errors.Is(err, errUpstreamStreamIncomplete):
-			errorCode = "upstream_stream_incomplete"
-		case errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout):
-			errorCode = "upstream_stream_idle_timeout"
-		case errors.Is(err, errUpstreamStreamRead):
-			errorCode = "upstream_stream_interrupted"
-		default:
-			errorCode = "stream_interrupted"
+		if isClientDisconnectDuringCopy(c, err) {
+			// 客户端已断开（agent 流超时/取消/网络中断）：与上游故障分开记账。
+			// 差分复现（2026-08-21）：此前该形态与上游 RST 同被记为
+			// upstream_stream_interrupted，污染真实上游中断率观测。
+			errorCode = "client_disconnected"
+		} else {
+			switch {
+			case errors.Is(err, errResponseTransferLimit):
+				errorCode = "response_too_large"
+			case errors.Is(err, errUpstreamStreamFailed):
+				errorCode = "upstream_stream_error"
+			case errors.Is(err, errUpstreamStreamIncomplete):
+				errorCode = "upstream_stream_incomplete"
+			case errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout):
+				errorCode = "upstream_stream_idle_timeout"
+			case errors.Is(err, errUpstreamStreamRead):
+				errorCode = "upstream_stream_interrupted"
+			default:
+				errorCode = "stream_interrupted"
+			}
 		}
 	}
 }
