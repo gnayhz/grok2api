@@ -1268,6 +1268,31 @@ func (r *ModelRepository) availableRoutes(query *gorm.DB) *gorm.DB {
 	return query.Where(availableRoutePredicate, true, account.AuthStatusActive)
 }
 
+type availabilityRow struct {
+	RouteID           uint64
+	SupportedAccounts int
+	SyncedAccounts    int
+	TotalAccounts     int
+	LastSyncedUnix    sql.NullInt64
+}
+
+func (r *ModelRepository) lastSyncedAggregateExpression() string {
+	if r.db.dialect == "postgres" {
+		return "CAST(MAX(EXTRACT(EPOCH FROM sync.last_success_at)) AS BIGINT)"
+	}
+	return "MAX(unixepoch(sync.last_success_at))"
+}
+
+// annotateAvailability fills per-route account support counts. The original
+// single query joined every route against the full same-provider account
+// universe (routes × accounts); with very large account pools the cross
+// product reaches millions of intermediate rows plus five COUNT(DISTINCT)
+// aggregates, pushing the models list latency into multi-second territory at
+// scale. The rewrite decomposes the same
+// semantics: unbound routes (the common case) read pre-aggregated per-provider
+// totals and per-(provider, upstream_model) capability counts computed in one
+// pass each, while manually bound routes keep the original join restricted to
+// the (rare) bound route IDs.
 func (r *ModelRepository) annotateAvailability(ctx context.Context, values []model.Route) error {
 	if len(values) == 0 {
 		return nil
@@ -1276,55 +1301,44 @@ func (r *ModelRepository) annotateAvailability(ctx context.Context, values []mod
 	for _, value := range values {
 		ids = append(ids, value.ID)
 	}
-	type availabilityRow struct {
-		RouteID           uint64
-		SupportedAccounts int
-		SyncedAccounts    int
-		TotalAccounts     int
-		LastSyncedUnix    sql.NullInt64
-	}
-	var rows []availabilityRow
-	lastSyncedExpression := "MAX(unixepoch(sync.last_success_at))"
-	if r.db.dialect == "postgres" {
-		lastSyncedExpression = "CAST(MAX(EXTRACT(EPOCH FROM sync.last_success_at)) AS BIGINT)"
-	}
-	err := r.db.db.WithContext(ctx).Raw(fmt.Sprintf(`
-		SELECT route.id AS route_id,
-			CASE WHEN COUNT(DISTINCT binding.account_id) > 0
-				THEN COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? AND binding.account_id IS NOT NULL THEN account.id END)
-				ELSE COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? AND (`+modelConsoleStaticSupportAvailabilityExpression+` OR `+modelWebBasicMediaStaticSupportAvailabilityExpression+` OR capability.account_id IS NOT NULL OR `+modelSharedPaidBuildSupportAvailabilityExpression+`) THEN account.id END)
-			END AS supported_accounts,
-			CASE WHEN COUNT(DISTINCT binding.account_id) > 0
-				THEN COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? AND binding.account_id IS NOT NULL AND sync.last_success_at IS NOT NULL THEN account.id END)
-				ELSE COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? AND sync.last_success_at IS NOT NULL THEN account.id END)
-			END AS synced_accounts,
-			CASE WHEN COUNT(DISTINCT binding.account_id) > 0
-				THEN COUNT(DISTINCT binding.account_id)
-				ELSE COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? THEN account.id END)
-			END AS total_accounts,
-			%s AS last_synced_unix
-		FROM model_routes route
-		LEFT JOIN provider_accounts account ON account.provider = route.provider
-		LEFT JOIN model_route_accounts binding ON binding.model_route_id = route.id AND binding.account_id = account.id
-		LEFT JOIN account_model_sync_states sync ON sync.account_id = account.id
-		LEFT JOIN account_model_capabilities capability ON capability.account_id = account.id AND capability.upstream_model = route.upstream_model
-		WHERE route.id IN ?
-		GROUP BY route.id
-	`, lastSyncedExpression), account.AuthStatusActive, account.AuthStatusActive, account.AuthStatusActive, account.AuthStatusActive, account.AuthStatusActive, ids).Scan(&rows).Error
-	if err != nil {
-		return err
-	}
 	var bindings []modelRouteAccountModel
 	if err := r.db.db.WithContext(ctx).Where("model_route_id IN ?", ids).Order("model_route_id ASC, account_id ASC").Find(&bindings).Error; err != nil {
 		return err
 	}
 	boundByRoute := make(map[uint64][]uint64, len(values))
+	boundIDs := make([]uint64, 0)
+	boundSeen := make(map[uint64]bool, len(bindings))
 	for _, binding := range bindings {
+		if !boundSeen[binding.ModelRouteID] {
+			boundSeen[binding.ModelRouteID] = true
+			boundIDs = append(boundIDs, binding.ModelRouteID)
+		}
 		boundByRoute[binding.ModelRouteID] = append(boundByRoute[binding.ModelRouteID], binding.AccountID)
 	}
-	byID := make(map[uint64]availabilityRow, len(rows))
-	for _, row := range rows {
-		byID[row.RouteID] = row
+	unboundIDs := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		if !boundSeen[id] {
+			unboundIDs = append(unboundIDs, id)
+		}
+	}
+	byID := make(map[uint64]availabilityRow, len(values))
+	if len(unboundIDs) > 0 {
+		rows, err := r.unboundAvailabilityRows(ctx, unboundIDs)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			byID[row.RouteID] = row
+		}
+	}
+	if len(boundIDs) > 0 {
+		rows, err := r.boundAvailabilityRows(ctx, boundIDs)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			byID[row.RouteID] = row
+		}
 	}
 	for index := range values {
 		row := byID[values[index].ID]
@@ -1338,6 +1352,135 @@ func (r *ModelRepository) annotateAvailability(ctx context.Context, values []mod
 		}
 	}
 	return nil
+}
+
+// consoleCatalogRoutePredicate mirrors the catalog half of
+// modelConsoleStaticSupportAvailabilityExpression (the provider equality is
+// enforced by the caller's CASE branch).
+const consoleCatalogRoutePredicate = `(
+	route.origin = 'catalog'
+	OR EXISTS (
+		SELECT 1 FROM model_routes console_catalog_route
+		WHERE console_catalog_route.provider = route.provider
+			AND console_catalog_route.upstream_model = route.upstream_model
+			AND console_catalog_route.capability = route.capability
+			AND console_catalog_route.origin = 'catalog'
+	)
+)`
+
+// webCatalogRoutePredicate mirrors the catalog half of
+// modelWebBasicMediaStaticSupportAvailabilityExpression for the four basic
+// media upstream models (provider and model-list checks stay in the CASE).
+const webCatalogRoutePredicate = `(
+	route.origin = 'catalog'
+	OR EXISTS (
+		SELECT 1 FROM model_routes web_catalog_route
+		WHERE web_catalog_route.provider = route.provider
+			AND web_catalog_route.upstream_model = route.upstream_model
+			AND web_catalog_route.capability = route.capability
+			AND web_catalog_route.origin = 'catalog'
+	)
+)`
+
+// unboundAvailabilityRows computes availability for routes without manual
+// account bindings using three one-pass aggregates:
+//
+//	provider_totals        enabled+active account totals/synced/last-synced per provider
+//	capability_counts      capability-backed support per (provider, upstream_model)
+//	paid_capability_counts grok_build paid/super accounts per upstream_model
+//
+// supported decomposition per route (identical set semantics to the original
+// join): console-catalog routes and web basic-media catalog routes count the
+// whole enabled+active provider pool (the static support is unconditional on
+// the account side and subsumes capability matches); every other route counts
+// capability matches, and grok_build routes additionally count the paid/super
+// pool when a paid peer exposes the capability — the union size is
+// caps + paidTotal − paidCaps by inclusion-exclusion, matching the original
+// COUNT(DISTINCT) dedup.
+func (r *ModelRepository) unboundAvailabilityRows(ctx context.Context, routeIDs []uint64) ([]availabilityRow, error) {
+	var paidTotal int64
+	if err := r.db.db.WithContext(ctx).Raw(`
+		SELECT COUNT(*) FROM provider_accounts account
+		WHERE account.provider = 'grok_build' AND account.enabled = TRUE AND account.auth_status = ?
+			AND (`+modelAccountBuildSuperPredicate+`)
+	`, account.AuthStatusActive).Scan(&paidTotal).Error; err != nil {
+		return nil, err
+	}
+	var rows []availabilityRow
+	err := r.db.db.WithContext(ctx).Raw(fmt.Sprintf(`
+		WITH provider_totals AS (
+			SELECT account.provider AS provider,
+				COUNT(*) AS total_accounts,
+				COUNT(sync.last_success_at) AS synced_accounts,
+				%s AS last_synced_unix
+			FROM provider_accounts account
+			LEFT JOIN account_model_sync_states sync ON sync.account_id = account.id
+			WHERE account.enabled = TRUE AND account.auth_status = ?
+			GROUP BY account.provider
+		),
+		capability_counts AS (
+			SELECT account.provider AS provider, capability.upstream_model AS upstream_model, COUNT(*) AS supported
+			FROM account_model_capabilities capability
+			JOIN provider_accounts account ON account.id = capability.account_id
+			WHERE account.enabled = TRUE AND account.auth_status = ?
+			GROUP BY account.provider, capability.upstream_model
+		),
+		paid_capability_counts AS (
+			SELECT capability.upstream_model AS upstream_model, COUNT(*) AS paid_with_capability
+			FROM account_model_capabilities capability
+			JOIN provider_accounts account ON account.id = capability.account_id
+			WHERE account.provider = 'grok_build' AND account.enabled = TRUE AND account.auth_status = ?
+				AND (`+modelAccountBuildSuperPredicate+`)
+			GROUP BY capability.upstream_model
+		)
+		SELECT route.id AS route_id,
+			CASE
+				WHEN route.provider = 'grok_console' AND `+consoleCatalogRoutePredicate+`
+					THEN COALESCE(provider_totals.total_accounts, 0)
+				WHEN route.provider = 'grok_web' AND route.upstream_model IN ('grok-imagine-image-quality', 'grok-imagine-image-2.0', 'imagine-image-edit', 'grok-imagine-video') AND `+webCatalogRoutePredicate+`
+					THEN COALESCE(provider_totals.total_accounts, 0)
+				WHEN route.provider = 'grok_build' AND COALESCE(paid_capability_counts.paid_with_capability, 0) > 0
+					THEN COALESCE(capability_counts.supported, 0) + ? - COALESCE(paid_capability_counts.paid_with_capability, 0)
+				ELSE COALESCE(capability_counts.supported, 0)
+			END AS supported_accounts,
+			COALESCE(provider_totals.synced_accounts, 0) AS synced_accounts,
+			COALESCE(provider_totals.total_accounts, 0) AS total_accounts,
+			provider_totals.last_synced_unix AS last_synced_unix
+		FROM model_routes route
+		LEFT JOIN provider_totals ON provider_totals.provider = route.provider
+		LEFT JOIN capability_counts ON capability_counts.provider = route.provider AND capability_counts.upstream_model = route.upstream_model
+		LEFT JOIN paid_capability_counts ON paid_capability_counts.upstream_model = route.upstream_model
+		WHERE route.id IN ?
+	`, r.lastSyncedAggregateExpression()), account.AuthStatusActive, account.AuthStatusActive, account.AuthStatusActive, paidTotal, routeIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// boundAvailabilityRows keeps the original route × account join for manually
+// bound routes, where supported/total must intersect the explicit binding set.
+// Bound routes are rare (bulk imports leave routes unbound), so the heavy join
+// runs only for those IDs.
+func (r *ModelRepository) boundAvailabilityRows(ctx context.Context, routeIDs []uint64) ([]availabilityRow, error) {
+	var rows []availabilityRow
+	err := r.db.db.WithContext(ctx).Raw(fmt.Sprintf(`
+		SELECT route.id AS route_id,
+			COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? AND binding.account_id IS NOT NULL THEN account.id END) AS supported_accounts,
+			COUNT(DISTINCT CASE WHEN account.enabled = TRUE AND account.auth_status = ? AND binding.account_id IS NOT NULL AND sync.last_success_at IS NOT NULL THEN account.id END) AS synced_accounts,
+			COUNT(DISTINCT binding.account_id) AS total_accounts,
+			%s AS last_synced_unix
+		FROM model_routes route
+		LEFT JOIN provider_accounts account ON account.provider = route.provider
+		LEFT JOIN model_route_accounts binding ON binding.model_route_id = route.id AND binding.account_id = account.id
+		LEFT JOIN account_model_sync_states sync ON sync.account_id = account.id
+		WHERE route.id IN ?
+		GROUP BY route.id
+	`, r.lastSyncedAggregateExpression()), account.AuthStatusActive, account.AuthStatusActive, routeIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func truncate(value string, limit int) string {
