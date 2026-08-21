@@ -123,10 +123,14 @@ func TestApplyDPoPAuthorizationUsesClockSkewInIAT(t *testing.T) {
 		t.Fatal(err)
 	}
 	access := "test-access-token"
+	publicJWK, jwkErr := publicDPoPJWK(&privateKey.PublicKey)
+	if jwkErr != nil {
+		t.Fatalf("构造测试 JWK 失败: %v", jwkErr)
+	}
 	session := dpopSession{
 		accessToken: access,
 		privateKey:  privateKey,
-		publicJWK:   publicDPoPJWK(&privateKey.PublicKey),
+		publicJWK:   publicJWK,
 		clockSkew:   -80 * time.Second,
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://console.x.ai/v1/usage", nil)

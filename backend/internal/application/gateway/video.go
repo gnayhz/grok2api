@@ -124,7 +124,8 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	routes, err := s.models.GetByPublicIDCandidates(ctx, input.PublicModel)
 	if err != nil {
-		return media.Job{}, ErrModelNotFound
+		// 候选为空出口统一消歧（round 60，同 image/voice-ws）。
+		return media.Job{}, s.distinguishMissingOrNoAccount(ctx, input.PublicModel, err)
 	}
 	routes, err = routesForVideoOperation(routes, operation)
 	if err != nil {
@@ -643,6 +644,12 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			retriableCreate = safeCreateFailure
 		} else if hasStatus {
 			switch {
+			case provider.IsPolicyForbidden(err):
+				// 源站结构化 403（JSON body）：应用层策略拒绝——egress 重试
+				// 与换号轮询都无济于事（同错跨号，round 55 活体 8 连败实证）。
+				// 立即终态失败，不冷却账号（策略与账号无关）。
+				failureHandled = true
+				retriableCreate = false
 			case status == http.StatusUnauthorized && lease.Credential.AuthType == account.AuthTypeSSO:
 				s.markSSOCredentialRejected(failureCtx, lease.Credential, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
 				failureHandled = true

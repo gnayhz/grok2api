@@ -689,6 +689,14 @@ func (r *videoUsageRepository) MarkMediaJobUsageRecorded(_ context.Context, _ st
 	return nil
 }
 
+func (r *videoUsageRepository) CountActiveMediaJobsByClientKeys(context.Context, []uint64) (int64, error) {
+	return 0, nil
+}
+
+func (r *videoUsageRepository) DeleteTerminalMediaJobsByClientKeys(context.Context, []uint64) (int64, error) {
+	return 0, nil
+}
+
 func TestResolveVideoAuditStatusCodePrefersUpstream429(t *testing.T) {
 	status429 := http.StatusTooManyRequests
 	job := media.Job{Status: media.StatusFailed, ErrorCode: "generation_failed", ErrorMessage: "Console 媒体上游返回 429: Too many requests"}

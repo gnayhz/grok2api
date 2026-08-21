@@ -728,7 +728,7 @@ func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credentia
 	if err := normalizeGzipResponse(resp); err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, 0, err
@@ -1047,7 +1047,7 @@ func (a *Adapter) getBilling(ctx context.Context, credential account.Credential,
 	if err := normalizeGzipResponse(resp); err != nil {
 		return account.Billing{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
 		return account.Billing{}, err
@@ -1076,7 +1076,7 @@ func (a *Adapter) getSubscriptionTier(ctx context.Context, credential account.Cr
 	if err := normalizeGzipResponse(resp); err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", err

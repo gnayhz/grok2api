@@ -55,3 +55,7 @@ __pycache__/
 .claude
 AGENTS.md
 CLAUDE.md
+
+# 实验日志与加固记录不入库（本地知识库）。
+EXPERIMENT-*.md
+HARDENING.md

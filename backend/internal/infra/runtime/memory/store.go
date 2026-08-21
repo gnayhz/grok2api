@@ -98,7 +98,13 @@ func NewConcurrencyLimiter() *ConcurrencyLimiter {
 	for index := range limiter.shards {
 		limiter.shards[index].counts = make(map[string]int)
 	}
-	limiter.indicesCache.New = func() any { return make([]int, 0, 256) }
+	// 池存 *[]int（指针）而非 []int：Put 一个切片会把 24 字节 slice header
+	// 装箱进 any 接口，每次归还都产生一次堆分配；指针可直接放入接口字，
+	// 归还零分配（sync.Pool 文档建议的形态）。
+	limiter.indicesCache.New = func() any {
+		buffer := make([]int, 0, 256)
+		return &buffer
+	}
 	return limiter
 }
 
@@ -154,16 +160,19 @@ func (l *ConcurrencyLimiter) CurrentMany(_ context.Context, keys []string) (map[
 		offsets[index+1] = offsets[index] + counts[index]
 	}
 	cursors := offsets
-	grouped := l.indicesCache.Get().([]int)
-	if cap(grouped) < len(keys) {
-		grouped = make([]int, len(keys))
+	groupedPtr, _ := l.indicesCache.Get().(*[]int)
+	if groupedPtr == nil || cap(*groupedPtr) < len(keys) {
+		replacement := make([]int, len(keys))
+		groupedPtr = &replacement
 	} else {
-		grouped = grouped[:len(keys)]
+		*groupedPtr = (*groupedPtr)[:len(keys)]
 	}
+	grouped := *groupedPtr
 	defer func() {
 		// 不保留异常大的候选池缓冲，避免一次峰值长期占用进程内存。
-		if cap(grouped) <= maxEntries {
-			l.indicesCache.Put(grouped[:0])
+		if cap(*groupedPtr) <= maxEntries {
+			*groupedPtr = (*groupedPtr)[:0]
+			l.indicesCache.Put(groupedPtr)
 		}
 	}()
 	for keyIndex, key := range keys {

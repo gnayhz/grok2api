@@ -1,15 +1,14 @@
 package relational
 
-import "regexp"
+import "github.com/chenyme/grok2api/backend/internal/infra/rsc"
 
 // rscRedactSecrets strips credential-shaped key=value pairs from upstream
 // RSC payload text so a compromised upstream cannot smuggle secrets into
 // persisted verdict diagnostics or risk logs (defense in depth; the payload
-// is upstream-controlled).
-var rscSecretPairPattern = regexp.MustCompile(`(?i)((?:access|refresh|id|sso|session|device)[_-]?token|client[_-]?secret|password|authorization|cookie|code[_-]?verifier)=[^&\s'<>]+`)
-
+// is upstream-controlled). The rule itself lives in the rsc package so the
+// risk service logs and this persistence layer cannot drift apart.
 func rscRedactSecrets(value string) string {
-	return rscSecretPairPattern.ReplaceAllString(value, `$1=[REDACTED]`)
+	return rsc.RedactSecrets(value)
 }
 
 func truncateRSCDetail(value string, limit int) string {

@@ -62,7 +62,7 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 	if err != nil {
 		return provider.TTSResult{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.TTSResult{}, consoleVoiceResponseError(response)
 	}
@@ -121,7 +121,7 @@ func (a *Adapter) ListTTSVoices(ctx context.Context, credential account.Credenti
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, consoleVoiceResponseError(response)
 	}
@@ -159,7 +159,7 @@ func (a *Adapter) GetTTSVoice(ctx context.Context, credential account.Credential
 	if err != nil {
 		return provider.VoiceInfo{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.VoiceInfo{}, consoleVoiceResponseError(response)
 	}
@@ -247,7 +247,7 @@ func (a *Adapter) TranscribeSpeech(ctx context.Context, request provider.STTRequ
 	if err != nil {
 		return provider.STTResult{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.STTResult{}, consoleVoiceResponseError(response)
 	}

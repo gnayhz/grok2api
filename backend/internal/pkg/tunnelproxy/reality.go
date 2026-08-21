@@ -107,7 +107,13 @@ func (p *realityProxy) handshake(ctx context.Context, connection net.Conn) (net.
 		return nil, err
 	}
 	hello := secure.HandshakeState.Hello
-	privateKey := secure.HandshakeState.State13.EcdheKey
+	// 与下方第二处一致：utls >=1.8 的密钥在 KeyShareKeys，fingerprint 构建
+	// 只填其一——直接读 EcdheKey 在 KeyShareKeys 路径上会得到 nil 并在
+	// ECDH 处解引用 panic（round 32 审查发现两处取键口径不一致）。
+	privateKey := realityX25519Key(secure.HandshakeState.State13)
+	if privateKey == nil {
+		return nil, errors.New("Reality ClientHello 未生成 X25519 密钥")
+	}
 
 	hello.SessionId = make([]byte, 32)
 	copy(hello.Raw[39:], hello.SessionId)
@@ -193,6 +199,8 @@ func realityX25519Key(state13 utls.TLS13OnlyState) *ecdh.PrivateKey {
 	if ks := state13.KeyShareKeys; ks != nil && ks.Ecdhe != nil && ks.Ecdhe.Curve() == ecdh.X25519() {
 		return ks.Ecdhe
 	}
+	//nolint:staticcheck // EcdheKey 是 fingerprint 构建（utls <1.8 语义）的
+	// 必要回退通道——上游文档确认 KeyShareKeys 优先时本字段仍被旧构建填充。
 	if key := state13.EcdheKey; key != nil && key.Curve() == ecdh.X25519() {
 		return key
 	}

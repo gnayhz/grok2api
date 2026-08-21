@@ -111,7 +111,9 @@ func (s *Service) executeImage(
 	eventID := newAuditEventID()
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
-		return nil, ErrModelNotFound
+		// 候选为空出口统一消歧（round 60：image/video/voice-ws 三处与
+		// resolve/voice 同型漏判——路由在但池无该 Provider 账号时误报 404）。
+		return nil, s.distinguishMissingOrNoAccount(ctx, publicModel, err)
 	}
 	route, preselectedSession, err := s.selectSchedulableMediaRoute(ctx, routes, key, capability, true, supports)
 	if err != nil {

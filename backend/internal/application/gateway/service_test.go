@@ -154,6 +154,10 @@ func (r *etagSyncResolver) GetByProviderUpstream(context.Context, account.Provid
 	return modeldomain.Route{}, repository.ErrNotFound
 }
 
+func (r *etagSyncResolver) HasEnabledRouteByPublicID(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "gateway.db"))
@@ -362,12 +366,12 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	}
 
 	adapter.setResourceStatus(http.StatusNotFound)
+	// 上游 404：不再透传原文 Header/Body（same leak class as ≥400 分支），
+	// 客户端收到受控的 ErrResponseNotFound；本地 ownership 仍同步删除。
 	missing, err := service.GetResponse(ctx, ResourceInput{ClientKey: clientKey, ResponseID: "resp-next"})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrResponseNotFound) {
+		t.Fatalf("上游 404 应映射为 ErrResponseNotFound，得到 result=%v err=%v", missing, err)
 	}
-	_ = missing.Body.Close()
-	missing.Finalize(Usage{}, "", "")
 	if _, err := responseRepo.Get(ctx, "resp-next", clientKey.ID, time.Now().UTC()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("stale ownership err = %v", err)
 	}
@@ -443,8 +447,8 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("interrupted account health = %#v, err=%v", interruptedAccount, err)
 	}
 	remaining := time.Until(*interruptedAccount.CooldownUntil)
-	if remaining < 23*time.Hour || remaining > 24*time.Hour+time.Minute {
-		t.Fatalf("idle stream cooldown = %s, want about 24h", remaining)
+	if remaining < 14*time.Minute || remaining > 15*time.Minute+time.Second {
+		t.Fatalf("idle stream cooldown = %s, want about 15m", remaining)
 	}
 }
 
@@ -4366,7 +4370,7 @@ func TestIsUpstreamStreamFailureIncludesIdleTimeout(t *testing.T) {
 
 func TestStreamFailureHealthPenaltyOnlyLongCoolsTrulyEmptyIdle(t *testing.T) {
 	t.Parallel()
-	status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{})
+	status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{}, 0)
 	if status != http.StatusGatewayTimeout || cooldown != qualityIdleAccountCooldown {
 		t.Fatalf("empty idle penalty = (%d, %s)", status, cooldown)
 	}
@@ -4375,7 +4379,7 @@ func TestStreamFailureHealthPenaltyOnlyLongCoolsTrulyEmptyIdle(t *testing.T) {
 		{OutputTokens: 1},
 		{ReasoningTokens: 1},
 	} {
-		status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", usage)
+		status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", usage, 0)
 		if status != 0 || cooldown != 0 {
 			t.Fatalf("non-empty idle usage %#v received long penalty (%d, %s)", usage, status, cooldown)
 		}

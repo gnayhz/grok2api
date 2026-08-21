@@ -251,6 +251,12 @@ func (s *Service) GetByPublicIDCandidates(ctx context.Context, publicID string) 
 	return s.models.GetByPublicIDCandidates(ctx, publicID)
 }
 
+// HasEnabledRouteByPublicID 透传仓储的存在性查询（不带账号可用性谓词），
+// 供网关在候选为空时区分「模型不存在」与「无可用账号」。
+func (s *Service) HasEnabledRouteByPublicID(ctx context.Context, publicID string) (bool, error) {
+	return s.models.HasEnabledRouteByPublicID(ctx, publicID)
+}
+
 func (s *Service) GetByProviderUpstream(ctx context.Context, providerValue account.Provider, upstreamModel string) (modeldomain.Route, error) {
 	return s.models.GetByProviderUpstream(ctx, providerValue, upstreamModel)
 }

@@ -84,7 +84,7 @@ func (flaresolverrSolver) Solve(ctx context.Context, cfg ClearanceConfig, proxyU
 	if err != nil {
 		return clearanceSolution{}, fmt.Errorf("调用 FlareSolverr: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxFlareSolverrResponseBytes+1))
 	if err != nil {
 		return clearanceSolution{}, fmt.Errorf("读取 FlareSolverr 响应: %w", err)

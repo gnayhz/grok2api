@@ -166,8 +166,8 @@ type batchNodeUpdateRequest struct {
 
 func (h *Handler) updateMany(c *gin.Context) {
 	var request batchNodeUpdateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseBoundedEgressNodeIDs(request.IDs, 5000)
@@ -185,8 +185,8 @@ func (h *Handler) updateMany(c *gin.Context) {
 
 func (h *Handler) deleteMany(c *gin.Context) {
 	var request batchNodeDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseBoundedEgressNodeIDs(request.IDs, 5000)
@@ -208,8 +208,8 @@ func (h *Handler) assignAccounts(c *gin.Context) {
 		return
 	}
 	var request accountAssignmentRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseAccountIDs(request.IDs)
@@ -231,8 +231,8 @@ func (h *Handler) assignAccounts(c *gin.Context) {
 
 func (h *Handler) unassignAccounts(c *gin.Context) {
 	var request accountAssignmentRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseAccountIDs(request.IDs)
@@ -324,8 +324,8 @@ func nodePagination(c *gin.Context) (int, int) {
 
 func (h *Handler) create(c *gin.Context) {
 	var request nodeRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.Create(c.Request.Context(), request.input())
@@ -342,8 +342,8 @@ func (h *Handler) update(c *gin.Context) {
 		return
 	}
 	var request nodeRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.Update(c.Request.Context(), id, request.input())
@@ -400,8 +400,8 @@ func (h *Handler) listProxyProfiles(c *gin.Context) {
 
 func (h *Handler) createProxyProfile(c *gin.Context) {
 	var request proxyProfileRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.CreateProxyProfile(c.Request.Context(), egressapp.ProxyProfileInput{Name: request.Name, ProxyURL: request.ProxyURL})
@@ -431,8 +431,8 @@ func (h *Handler) updateProxyProfile(c *gin.Context) {
 		return
 	}
 	var request proxyProfileRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.UpdateProxyProfile(c.Request.Context(), id, egressapp.ProxyProfileInput{Name: request.Name, ProxyURL: request.ProxyURL})
@@ -792,8 +792,8 @@ func (h *Handler) writeSourceListError(c *gin.Context, err error) bool {
 
 func (h *Handler) createSource(c *gin.Context) {
 	var request sourceRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.CreateSource(c.Request.Context(), request.input())
@@ -810,8 +810,8 @@ func (h *Handler) updateSource(c *gin.Context) {
 		return
 	}
 	var request sourceRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.UpdateSource(c.Request.Context(), id, request.input())
@@ -849,8 +849,8 @@ func (h *Handler) syncSource(c *gin.Context) {
 
 func (h *Handler) importText(c *gin.Context) {
 	var request importRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.ImportText(c.Request.Context(), egressapp.ImportInput{
@@ -882,8 +882,8 @@ func (h *Handler) testNode(c *gin.Context) {
 
 func (h *Handler) testNodes(c *gin.Context) {
 	var request probeBatchRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseOptionalAccountIDs(request.IDs)
@@ -910,8 +910,8 @@ func (h *Handler) operationsConfig(c *gin.Context) {
 
 func (h *Handler) updateOperationsConfig(c *gin.Context) {
 	var request operationsConfigRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	input, err := request.input()

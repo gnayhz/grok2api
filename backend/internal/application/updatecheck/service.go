@@ -131,7 +131,7 @@ func (s *Service) fetchLatest(ctx context.Context) (latestRelease, error) {
 	if err != nil {
 		return latestRelease{}, fmt.Errorf("检查 GitHub Release 失败: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return latestRelease{}, fmt.Errorf("GitHub Release 检查失败（HTTP %d）", response.StatusCode)
 	}

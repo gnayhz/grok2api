@@ -563,6 +563,21 @@ func (r *ModelRepository) GetByPublicIDCandidates(ctx context.Context, publicID 
 	return mapModelRows(rows), nil
 }
 
+// HasEnabledRouteByPublicID 报告该公开名是否存在已启用路由——刻意不带
+// availableRoutePredicate（启用账号存在性）：调用方用它区分「模型不存在」
+// （404）与「路由在但当前无可用账号」（503 upstream_unavailable）。
+func (r *ModelRepository) HasEnabledRouteByPublicID(ctx context.Context, publicID string) (bool, error) {
+	db := r.db.db.WithContext(ctx).Model(&modelRouteModel{}).Where("enabled = ?", true)
+	rows, err := findModelRoutesByPublicID(db, publicID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+	return len(rows) > 0, nil
+}
+
 func (r *ModelRepository) GetByPublicIDIncludingDisabled(ctx context.Context, publicID string) (model.Route, error) {
 	db := r.db.db.WithContext(ctx)
 	rows, err := findModelRoutesByPublicID(db, publicID)
@@ -575,37 +590,79 @@ func (r *ModelRepository) GetByPublicIDIncludingDisabled(ctx context.Context, pu
 func findModelRoutesByPublicID(db *gorm.DB, publicID string) ([]modelRouteModel, error) {
 	candidates := model.PublicIDCandidates(publicID)
 	requested := strings.TrimSpace(publicID)
-	query := db.Session(&gorm.Session{})
-	if len(candidates) > 0 {
-		aliasCandidates := append([]string(nil), candidates...)
-		if requested != "" && !slices.Contains(aliasCandidates, requested) {
-			aliasCandidates = append(aliasCandidates, requested)
-		}
-		query = query.Where(`
-			(model_routes.public_id IN ? OR EXISTS (
-				SELECT 1 FROM model_route_aliases alias
-				WHERE alias.model_route_id = model_routes.id AND alias.alias IN ?
-			))
-		`, candidates, aliasCandidates).Clauses(clause.OrderBy{Expression: clause.Expr{
-			SQL:  "CASE WHEN model_routes.public_id IN ? THEN 0 ELSE 1 END, " + modelProviderPriorityExpression + ", model_routes.id ASC",
-			Vars: []any{candidates},
-		}})
-	} else {
-		query = query.Where(`
-			EXISTS (
-				SELECT 1 FROM model_route_aliases alias
-				WHERE alias.model_route_id = model_routes.id AND alias.alias = ?
-			)
-		`, requested).Order(modelProviderPriorityExpression + ", model_routes.id ASC")
+	if len(candidates) == 0 && requested == "" {
+		return nil, gorm.ErrRecordNotFound
 	}
-	var rows []modelRouteModel
-	if err := query.Find(&rows).Error; err != nil {
+	aliasCandidates := append([]string(nil), candidates...)
+	if requested != "" && !slices.Contains(aliasCandidates, requested) {
+		aliasCandidates = append(aliasCandidates, requested)
+	}
+	// round 33 优化：原单条 "public_id IN ... OR EXISTS(alias)" 查询在路由表
+	// 增大后退化为 enabled 全扫 + 临时 B 树全排序（1000 路由实测 6ms，EXPLAIN
+	// 证实 OR 阻止复合索引点查）。改写为两个索引点查分支 + 应用层合并排序：
+	// public_id 分支走复合索引，别名分支走 alias 索引 + rowid 回表——均为
+	// O(log n)。合并行数为两候选集命中总和（实践中个位数），应用层排序成本
+	// 可忽略。排序键与原 ORDER BY 逐项等价：候选名命中优先于别名命中、
+	// Provider 优先级、id 升序。db 上预置的谓词（如账号可用性）经
+	// Session 复制在两分支同时生效，语义与原单条查询一致。
+	byID := make(map[uint64]modelRouteModel, len(candidates)+len(aliasCandidates))
+	direct := make(map[uint64]bool, len(candidates))
+	if len(candidates) > 0 {
+		var directRows []modelRouteModel
+		if err := db.Session(&gorm.Session{}).Where("public_id IN ?", candidates).Find(&directRows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range directRows {
+			byID[row.ID] = row
+			direct[row.ID] = true
+		}
+	}
+	var aliasRows []modelRouteModel
+	if err := db.Session(&gorm.Session{}).
+		Where("id IN (SELECT model_route_id FROM model_route_aliases WHERE alias IN ?)", aliasCandidates).
+		Find(&aliasRows).Error; err != nil {
 		return nil, err
+	}
+	for _, row := range aliasRows {
+		if _, exists := byID[row.ID]; !exists {
+			byID[row.ID] = row
+		}
+	}
+	rows := make([]modelRouteModel, 0, len(byID))
+	for _, row := range byID {
+		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
 		return nil, gorm.ErrRecordNotFound
 	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		left, right := rows[i], rows[j]
+		leftDirect, rightDirect := direct[left.ID], direct[right.ID]
+		if leftDirect != rightDirect {
+			return leftDirect
+		}
+		leftPriority, rightPriority := routeProviderPriority(left.Provider), routeProviderPriority(right.Provider)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		return left.ID < right.ID
+	})
 	return rows, nil
+}
+
+// routeProviderPriority 与 SQL 的 modelProviderPriorityExpression 语义一致
+// （grok_build < grok_web < grok_console < 其它）。
+func routeProviderPriority(provider string) int {
+	switch provider {
+	case "grok_build":
+		return 0
+	case "grok_web":
+		return 1
+	case "grok_console":
+		return 2
+	default:
+		return 3
+	}
 }
 
 func (r *ModelRepository) GetByProviderUpstream(ctx context.Context, provider account.Provider, upstreamModel string) (model.Route, error) {

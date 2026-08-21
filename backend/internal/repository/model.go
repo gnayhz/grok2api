@@ -18,6 +18,9 @@ type ModelRepository interface {
 	Get(ctx context.Context, id uint64) (model.Route, error)
 	GetByPublicID(ctx context.Context, publicID string) (model.Route, error)
 	GetByPublicIDCandidates(ctx context.Context, publicID string) ([]model.Route, error)
+	// HasEnabledRouteByPublicID 不带账号可用性谓词，仅判断已启用路由是否存在
+	//（用于区分 404 模型不存在与 503 无可用账号）。
+	HasEnabledRouteByPublicID(ctx context.Context, publicID string) (bool, error)
 	GetByProviderUpstream(ctx context.Context, provider account.Provider, upstreamModel string) (model.Route, error)
 	UpsertDiscovered(ctx context.Context, provider account.Provider, upstreamModels []string) error
 	UpsertRoutes(ctx context.Context, values []model.Route) error

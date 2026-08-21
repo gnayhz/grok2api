@@ -444,7 +444,7 @@ func (h *Handler) generateImage(c *gin.Context) {
 
 func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
 	errorCode := ""
-	defer result.Body.Close()
+	defer func() { _ = result.Body.Close() }()
 	defer func() { result.Finalize(gateway.Usage{}, "", errorCode) }()
 	if isUpstreamCredentialStatus(result.StatusCode) {
 		errorCode = "upstream_unavailable"
@@ -1157,7 +1157,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream && !compact, streamProtocolResponses)
+	h.writeResponsesResult(c, result, request.Stream && !compact, request.Model)
 }
 
 func isJSONRequest(c *gin.Context) bool {
@@ -1213,22 +1213,30 @@ func (h *Handler) handleOwnedResource(c *gin.Context, deleteResource bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, false, streamProtocolResponses)
+	// stored-response 查询无请求模型可兜底：trailer 的 model 由流内元数据
+	// 或 compat 状态补全。
+	h.writeResponsesResult(c, result, false, "")
 }
 
 func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream bool, protocol streamProtocol) {
-	h.writeProtocolResult(c, result, stream, false, protocol)
+	h.writeProtocolResult(c, result, stream, false, protocol, "")
+}
+
+// writeResponsesResult 额外携带请求模型作为 trailer 的 model 兜底：流在
+// 首个事件前中止时元数据为空，serde 仍要求 model 键非缺失（TUI 0.2.93）。
+func (h *Handler) writeResponsesResult(c *gin.Context, result *gateway.Result, stream bool, fallbackModel string) {
+	h.writeProtocolResult(c, result, stream, false, streamProtocolResponses, fallbackModel)
 }
 
 func (h *Handler) writeAnthropicResult(c *gin.Context, result *gateway.Result, stream bool) {
-	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic)
+	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic, "")
 }
 
-func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol) {
+func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol, fallbackModel string) {
 	usage := gateway.Usage{}
 	responseID := ""
 	errorCode := ""
-	defer result.Body.Close()
+	defer func() { _ = result.Body.Close() }()
 	defer func() { result.Finalize(usage, responseID, errorCode) }()
 	if isUpstreamCredentialStatus(result.StatusCode) {
 		errorCode = "upstream_unavailable"
@@ -1256,14 +1264,20 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	}
 	var err error
 	if stream {
-		metadata, copyErr := copyStream(c.Writer, result.Body, protocol, result.MarkFirstToken)
+		metadata, copyErr := copyStreamWithFallbackModel(c.Writer, result.Body, protocol, result.MarkFirstToken, fallbackModel)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
 		if metadata.StreamFailure != nil && result.RecordStreamFailure != nil {
 			result.RecordStreamFailure(*metadata.StreamFailure)
 		}
+		if result.RecordDelivery != nil {
+			result.RecordDelivery(gateway.DeliveryStats{Events: metadata.DeliveredEvents, Bytes: metadata.DeliveredBytes})
+		}
 	} else {
 		metadata, copyErr := copyJSON(c.Writer, result.Body, protocol)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
+		if result.RecordDelivery != nil {
+			result.RecordDelivery(gateway.DeliveryStats{Events: metadata.DeliveredEvents, Bytes: metadata.DeliveredBytes})
+		}
 	}
 	if err != nil {
 		switch {
@@ -1290,15 +1304,36 @@ type responseMetadata struct {
 	Model                    string
 	SequenceNumber           int64
 	StreamFailure            *gateway.StreamFailureDiagnostic
+	// DeliveredEvents/DeliveredBytes 由 copyStream 填充：转发到客户端的
+	// SSE data 事件数与累计写出字节（非流式为响应体字节数）。回答
+	// 「200 且带错误码时实际交付了多少」（轮26）。
+	DeliveredEvents int64
+	DeliveredBytes  int64
 }
 
 func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func()) (responseMetadata, error) {
+	return copyStreamWithFallbackModel(writer, source, protocol, onFirstToken, "")
+}
+
+// copyStreamWithFallbackModel 把请求模型注入 compat 状态作为 model 兜底：
+// 流在首个 response 事件前中止时，trailer 的 model 键仍能带上真实值。
+func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func(), fallbackModel string) (metadata responseMetadata, returnErr error) {
 	inspector := &responseInspector{protocol: protocol, onFirstToken: onFirstToken}
 	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolChat}
 	var compat responsesCompatState
+	compat.model = strings.TrimSpace(fallbackModel)
 	buffer := make([]byte, responseCopyBufferBytes)
 	received := 0
 	transferred := 0
+	// 所有 return 出口都经过 inspector.Metadata()——defer 把累计写出字节与
+	// inspector 已计的事件数统一回填，无需逐出口补写（轮26）。
+	// 命名返回值 + defer：所有 return 出口的返回值在 defer 统一补写交付统计
+	//（inspector.Metadata() 是值拷贝，改 inspector 字段无法影响已拷贝的返回值——
+	// 轮26 首版 defer 写 inspector 字段导致流式统计恒 0，活体 919 行实证）。
+	defer func() {
+		metadata.DeliveredBytes = int64(transferred)
+		metadata.DeliveredEvents = inspector.metadata.DeliveredEvents
+	}()
 	for {
 		n, readErr := source.Read(buffer)
 		if n > 0 {
@@ -1424,21 +1459,33 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 		}
 		compat.rememberFromMeta(meta)
 		id := compat.ensureID()
-		response := map[string]any{
-			"id":                 id,
-			"object":             "response",
-			"created_at":         compat.createdAt,
-			"completed_at":       compat.createdAt,
-			"status":             "incomplete",
-			"output":             []any{},
-			"error":              nil,
-			"incomplete_details": map[string]any{"reason": code},
+		// Grok TUI 0.2.93 treats any response.incomplete as fatal
+		// max_tokens_truncation (ignoring incomplete_details.reason), so a
+		// synthesized incomplete trailer killed the turn instead of letting the
+		// client retry. Stream aborts are transport failures: emit
+		// response.failed, which TUI maps to a retryable error.
+		model := strings.TrimSpace(meta.Model)
+		if model == "" {
+			model = strings.TrimSpace(compat.model)
 		}
-		if model := strings.TrimSpace(meta.Model); model != "" {
-			response["model"] = model
+		response := map[string]any{
+			"id":           id,
+			"object":       "response",
+			"created_at":   compat.createdAt,
+			"completed_at": compat.createdAt,
+			"status":       "failed",
+			// serde 也要求 model 键必填：缺失即反序列化失败，宁可空串。
+			"model":  model,
+			"output": []any{},
+			"error": map[string]any{
+				// 严格客户端（TUI 0.2.93 serde）对非标准 code 枚举反序列化失败；
+				// 细节码保留在 message 前缀里供人读与日志检索。
+				"code":    "server_error",
+				"message": code + ": " + message,
+			},
 		}
 		event := map[string]any{
-			"type":            "response.incomplete",
+			"type":            "response.failed",
 			"id":              id,
 			"sequence_number": meta.SequenceNumber + 1,
 			"response":        response,
@@ -1448,7 +1495,7 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 		if err != nil {
 			return nil
 		}
-		return []byte("event: response.incomplete\ndata: " + string(payload) + "\n\n")
+		return []byte("event: response.failed\ndata: " + string(payload) + "\n\n")
 	case streamProtocolAnthropic:
 		payload, err := json.Marshal(map[string]any{
 			"type":  "error",
@@ -1472,13 +1519,13 @@ func (f *internalSSEMarkerFilter) Filter(chunk []byte, final bool) []byte {
 	if !f.enabled {
 		return chunk
 	}
-	marker := []byte(reasoningStartSSEComment + "\n\n")
 	f.pending = append(f.pending, chunk...)
 	result := make([]byte, 0, len(f.pending))
 	for {
-		if index := bytes.Index(f.pending, marker); index >= 0 {
+		index, markerLength := nextInternalSSEMarker(f.pending)
+		if index >= 0 {
 			result = append(result, f.pending[:index]...)
-			f.pending = f.pending[index+len(marker):]
+			f.pending = f.pending[index+markerLength:]
 			continue
 		}
 		if final {
@@ -1487,17 +1534,33 @@ func (f *internalSSEMarkerFilter) Filter(chunk []byte, final bool) []byte {
 			return result
 		}
 		keep := 0
-		limit := min(len(f.pending), len(marker)-1)
-		for size := limit; size > 0; size-- {
-			if bytes.Equal(f.pending[len(f.pending)-size:], marker[:size]) {
-				keep = size
-				break
+		for _, marker := range internalSSEMarkers {
+			limit := min(len(f.pending), len(marker)-1)
+			for size := limit; size > keep; size-- {
+				if bytes.Equal(f.pending[len(f.pending)-size:], marker[:size]) {
+					keep = size
+					break
+				}
 			}
 		}
 		result = append(result, f.pending[:len(f.pending)-keep]...)
 		f.pending = f.pending[len(f.pending)-keep:]
 		return result
 	}
+}
+
+// nextInternalSSEMarker 返回最早出现的内部注释及其长度（未找到时 index<0）。
+func nextInternalSSEMarker(value []byte) (int, int) {
+	index := -1
+	length := 0
+	for _, marker := range internalSSEMarkers {
+		candidate := bytes.Index(value, marker)
+		if candidate >= 0 && (index < 0 || candidate < index) {
+			index = candidate
+			length = len(marker)
+		}
+	}
+	return index, length
 }
 
 func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (responseMetadata, error) {
@@ -1531,7 +1594,10 @@ func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtoc
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				if metadataComplete {
-					return normalizeMetadataUsage(extractMetadata(metadataBody), protocol), nil
+					metadata := normalizeMetadataUsage(extractMetadata(metadataBody), protocol)
+					metadata.DeliveredBytes = int64(transferred)
+					metadata.DeliveredEvents = 1 // 非流式：单 JSON 响应体
+					return metadata, nil
 				}
 				return responseMetadata{}, nil
 			}
@@ -1553,6 +1619,13 @@ type responseInspector struct {
 
 const reasoningStartSSEComment = ": grok2api-reasoning-start"
 
+// internalSSEMarkers 是发往客户端前必须剥除的内部 SSE 注释（转换器的
+// reasoning 时序标记）。新增内部注释必须同步加入此列表，否则会泄漏到
+// 公协议。
+var internalSSEMarkers = [][]byte{
+	[]byte(reasoningStartSSEComment + "\n\n"),
+}
+
 func (i *responseInspector) Inspect(chunk []byte) {
 	i.pending = append(i.pending, chunk...)
 	for {
@@ -1565,6 +1638,7 @@ func (i *responseInspector) Inspect(chunk []byte) {
 				// apply the long empty-stream cooldown.
 				if bytes.HasPrefix(bytes.TrimSpace(i.pending), []byte("data:")) {
 					i.metadata.Usage.OutputObserved = true
+					i.metadata.DeliveredEvents++
 				}
 				i.pending = nil
 			}
@@ -1577,6 +1651,7 @@ func (i *responseInspector) Inspect(chunk []byte) {
 			continue
 		}
 		if bytes.HasPrefix(line, []byte("data:")) {
+			i.metadata.DeliveredEvents++
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if containsGeneratedDelta(value, i.protocol) {
 				i.metadata.Usage.OutputObserved = true

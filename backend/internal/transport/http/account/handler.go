@@ -166,6 +166,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.PATCH("/accounts/:id", h.update)
 	router.DELETE("/accounts/:id", h.delete)
 	router.POST("/accounts/:id/refresh-token", h.refreshToken)
+	router.POST("/accounts/:id/clear-cooldown", h.clearCooldown)
 	router.POST("/accounts/:id/refresh-billing", h.refreshBilling)
 	router.POST("/accounts/:id/refresh-quota", h.refreshWebQuota)
 }
@@ -456,8 +457,8 @@ func (h *Handler) summary(c *gin.Context) {
 
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -475,8 +476,8 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -502,8 +503,8 @@ func (h *Handler) batchDelete(c *gin.Context) {
 
 func (h *Handler) previewDeletion(c *gin.Context) {
 	var request deletionPreviewRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -537,8 +538,8 @@ func (h *Handler) previewDeletion(c *gin.Context) {
 
 func (h *Handler) batchRefreshBilling(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -612,8 +613,8 @@ func (h *Handler) detectBuildAccounts(c *gin.Context) {
 
 func (h *Handler) batchResetQuota(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -644,8 +645,8 @@ func (h *Handler) resetAllBuildQuota(c *gin.Context) {
 
 func (h *Handler) cleanup(c *gin.Context) {
 	var request accountCleanupRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	targets, err := parseLinkedDeleteTargets(request.LinkedDeleteTargets)
@@ -674,8 +675,8 @@ func (h *Handler) cleanup(c *gin.Context) {
 // cleanupPreview returns root and linked-peer counts for the cleanup dialog.
 func (h *Handler) cleanupPreview(c *gin.Context) {
 	var request accountCleanupRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	targets, err := parseLinkedDeleteTargets(request.LinkedDeleteTargets)
@@ -706,8 +707,8 @@ func (h *Handler) cleanupPreview(c *gin.Context) {
 
 func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -738,8 +739,8 @@ func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 
 func (h *Handler) batchRefreshTokens(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -1104,7 +1105,7 @@ func readAccountImportDocuments(c *gin.Context, fileDescription string) ([][]byt
 		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "请选择有效的"+fileDescription)
 		return nil, false
 	}
-	defer form.RemoveAll()
+	defer func() { _ = form.RemoveAll() }()
 	files := append(form.File["files"], form.File["file"]...)
 	if len(files) == 0 {
 		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "请选择有效的"+fileDescription)
@@ -1202,8 +1203,8 @@ func (h *Handler) exportCredentials(c *gin.Context) {
 
 func (h *Handler) exportSelectedCredentials(c *gin.Context) {
 	var request credentialExportRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -1244,8 +1245,8 @@ func (h *Handler) update(c *gin.Context) {
 		return
 	}
 	var request updateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	value, err := h.service.Update(c.Request.Context(), id, accountapp.UpdateInput{
@@ -1383,6 +1384,23 @@ func (h *Handler) refreshToken(c *gin.Context) {
 	value, err := h.service.RefreshToken(c.Request.Context(), id)
 	if err != nil {
 		h.writeServiceError(c, "tokenRefreshFailed", err, http.StatusBadGateway, "刷新账号凭据失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newAccountResponse(value))
+}
+
+func (h *Handler) clearCooldown(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	if err := h.service.ClearCooldown(c.Request.Context(), id); err != nil {
+		h.writeServiceError(c, "accountCooldownClearFailed", err, http.StatusInternalServerError, "解除账号冷却失败")
+		return
+	}
+	value, err := h.service.Get(c.Request.Context(), id)
+	if err != nil {
+		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "读取账号失败")
 		return
 	}
 	response.Success(c, http.StatusOK, newAccountResponse(value))

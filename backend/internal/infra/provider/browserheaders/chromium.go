@@ -34,12 +34,15 @@ func ApplyChromiumClientHints(header http.Header, userAgent string) {
 	switch {
 	case strings.Contains(lower, "windows"):
 		platform = "Windows"
+	// iPhone/iPad 的 UA 都含 "like Mac OS X"——必须先于 macOS 判定，
+	// 否则移动设备报桌面平台，与 Sec-Ch-Ua-Mobile=?1 构成可检测的
+	// 指纹矛盾（round 35 矩阵测试发现）。
+	case strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad"):
+		platform = "iOS"
 	case strings.Contains(lower, "mac os x") || strings.Contains(lower, "macintosh"):
 		platform = "macOS"
 	case strings.Contains(lower, "android"):
 		platform = "Android"
-	case strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad"):
-		platform = "iOS"
 	case strings.Contains(lower, "linux"):
 		platform = "Linux"
 	}

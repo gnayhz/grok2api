@@ -285,7 +285,10 @@ func (s *Service) executeVoice(
 	eventID := newAuditEventID()
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
-		return nil, ErrModelNotFound
+		// 与 resolvePublicModelRoutes 同口径的 404/503 消歧（round 59：
+		// 语音路径是第五个候选为空出口，此前漏判——voice 路由存在但池无
+		// console 账号时被误报"模型不存在"而非 503 upstream_unavailable）。
+		return nil, s.distinguishMissingOrNoAccount(ctx, publicModel, err)
 	}
 	route, preselectedSession, err := s.selectSchedulableMediaRoute(ctx, routes, key, capability, consumesQuota, supports)
 	if err != nil {

@@ -550,7 +550,7 @@ func (a *Adapter) forwardQualityImageChatCompletion(ctx context.Context, request
 	if generated.StatusCode < http.StatusOK || generated.StatusCode >= http.StatusMultipleChoices {
 		return generated, nil
 	}
-	defer generated.Body.Close()
+	defer func() { _ = generated.Body.Close() }()
 	var payload struct {
 		Data []map[string]any `json:"data"`
 	}
@@ -880,7 +880,7 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		go a.streamImageEdit(streamCtx, writer, response.Body, lease, request.Credential, request.PartialImages, request.Size, ratio)
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: &cancelBody{ReadCloser: reader, cancel: cancel}, QuotaUnits: 1}, nil
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	capture := &boundedCapture{limit: 8 << 20}
 	parsed, consumeErr := consumeUpstream(io.TeeReader(response.Body, capture), nil)
 	if consumeErr != nil {
@@ -965,7 +965,7 @@ func (a *Adapter) streamImageEdit(
 	aspectRatio string,
 ) {
 	defer lease.Release()
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	createdAt := time.Now().Unix()
 	parsed := parsedChat{}
 	capture := &boundedCapture{limit: 8 << 20}
@@ -1265,7 +1265,7 @@ func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egr
 	if err != nil {
 		return uploadedFile{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, webMediaDiagnosticBodyLimit+1))
 		if readErr != nil {
@@ -1404,7 +1404,7 @@ func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	return parseMediaPostResponseWithDiagnostics(response, func(upstreamErr *webMediaUpstreamError) {
 		a.logWebMediaUpstreamRejection(stage, response, upstreamErr)
 	})
@@ -1573,7 +1573,7 @@ func (a *Adapter) imageBytes(ctx context.Context, credential account.Credential,
 
 func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter, connection *websocket.Conn, lease *egress.Lease, credential account.Credential, count, partialImages int, modelConfig imagineModelConfig) {
 	defer lease.Release()
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -1745,7 +1745,7 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, credential account.C
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
 		return nil, ctx.Err() == nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
 		retryable := response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500

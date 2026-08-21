@@ -536,3 +536,24 @@ func mediaJobAccountID(value uint64) *uint64 {
 	}
 	return &value
 }
+
+func (r *MediaJobRepository) CountActiveMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error) {
+	if len(keyIDs) == 0 {
+		return 0, nil
+	}
+	var count int64
+	err := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
+		Where("client_key_id IN ? AND status IN ?", keyIDs, []string{string(media.StatusQueued), string(media.StatusInProgress)}).
+		Count(&count).Error
+	return count, err
+}
+
+func (r *MediaJobRepository) DeleteTerminalMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error) {
+	if len(keyIDs) == 0 {
+		return 0, nil
+	}
+	result := r.db.db.WithContext(ctx).
+		Where("client_key_id IN ? AND status IN ?", keyIDs, []string{string(media.StatusCompleted), string(media.StatusFailed)}).
+		Delete(&mediaJobModel{})
+	return result.RowsAffected, result.Error
+}

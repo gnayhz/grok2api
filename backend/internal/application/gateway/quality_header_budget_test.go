@@ -40,12 +40,16 @@ func TestEarlyHeaderAbortSwitchesPath(t *testing.T) {
 	fixture.assertAttempts(t, 1, 1)
 }
 
-// TestEarlyHeaderAbortFiresOncePerRequest：第一次触发后预算解除——第二次
-// 尝试即使头迟滞也应完整等待并按流内容判定（避免系统性慢路径 fail-closed）。
-func TestEarlyHeaderAbortFiresOncePerRequest(t *testing.T) {
+// TestEarlyHeaderAbortAppliesPerAttempt：预算对每次流式尝试生效（2026-08-21
+// 语义修订）：两个账号都头迟滞时，第二次尝试同样被预算中止——单发语义
+// 曾让第二次慢头尝试悬挂满 5 分钟 ResponseHeaderTimeout（魔法球实测 368s
+// 中的 300s）。系统性慢（但健康）的头路径在实测中不存在（健康头 0.7-2.2s
+// 恒定），若真出现应由调大 earlyHeaderAbort 或关闭预算处理，而非自动放行。
+func TestEarlyHeaderAbortAppliesPerAttempt(t *testing.T) {
 	t.Parallel()
 	fixture := newSameAccountFixture(t)
-	// 两个账号都头迟滞但流内容健康：第一次触发预算中止，第二次必须等下去。
+	// 两个账号都头迟滞且无健康替代：每次尝试都在预算处被中止，最终按
+	// 耗尽处理（不会等到 120ms 的头），总耗时应远小于两次完整头等待。
 	for index := range fixture.credentials {
 		fixture.adapter.responses[fixture.credentials[index].ID] = []scriptedBuildResponse{
 			{status: 200, body: aFormStream(), headerDelay: 120 * time.Millisecond},
@@ -56,19 +60,13 @@ func TestEarlyHeaderAbortFiresOncePerRequest(t *testing.T) {
 	cfg.EarlyHeaderAbort = 30 * time.Millisecond
 	service := fixture.service(t, cfg)
 
-	result, err := service.CreateChatCompletion(context.Background(), fixture.request())
-	if err != nil {
-		t.Fatalf("second attempt must wait past the disarmed budget, err=%v", err)
+	started := time.Now()
+	_, _ = service.CreateChatCompletion(context.Background(), fixture.request())
+	elapsed := time.Since(started)
+	// 预算每次生效：两次尝试各 ~30ms 中止 + 重试开销，绝不接近 2×120ms。
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("per-attempt budget must abort every slow-header attempt at 30ms: %s", elapsed)
 	}
-	body, _ := io.ReadAll(result.Body)
-	_ = result.Body.Close()
-	if !strings.Contains(string(body), "reasoning_content") {
-		t.Fatal("slow-but-healthy stream must be delivered, not aborted")
-	}
-	// Prove the budget actually fired: account 0 was aborted at the header
-	// stage and the request switched to account 1, which then waited past
-	// the disarmed budget. Without the abort, account 0 would deliver and
-	// account 1 would never be attempted (vacuous-test fix).
 	fixture.assertAttempts(t, 0, 1)
 	fixture.assertAttempts(t, 1, 1)
 }
@@ -95,19 +93,24 @@ func TestEarlyHeaderAbortHealthyStreamDeliversFully(t *testing.T) {
 	}
 }
 
-// TestEarlyHeaderBudgetHelper：预算只在 hold 激活、已配置、单发未用时生效。
+// TestEarlyHeaderBudgetHelper：预算只在 hold 激活、流式、已配置、单发未用时生效。
+// 非流式的响应头要等整个生成完成（clean 6-15s），套用流式预算会误杀健康请求
+// （2026-08-21 实测：medium/hard clean 非流式在 5.0s 被误断成 504）。
 func TestEarlyHeaderBudgetHelper(t *testing.T) {
 	cfg := QualityRetryRuntime{EarlyHeaderAbort: 10 * time.Second}
-	if qualityHeaderBudget(cfg, true, true) != 10*time.Second {
-		t.Fatal("armed+enabled must return the budget")
+	if qualityHeaderBudget(cfg, true, true, true) != 10*time.Second {
+		t.Fatal("armed+enabled+streaming must return the budget")
 	}
-	if qualityHeaderBudget(cfg, false, true) != 0 {
+	if qualityHeaderBudget(cfg, false, true, true) != 0 {
 		t.Fatal("hold disabled must disarm")
 	}
-	if qualityHeaderBudget(cfg, true, false) != 0 {
+	if qualityHeaderBudget(cfg, true, false, true) != 0 {
+		t.Fatal("non-streaming must disarm (headers arrive at end of generation)")
+	}
+	if qualityHeaderBudget(cfg, true, true, false) != 0 {
 		t.Fatal("already fired must disarm")
 	}
-	if qualityHeaderBudget(QualityRetryRuntime{}, true, true) != 0 {
+	if qualityHeaderBudget(QualityRetryRuntime{}, true, true, true) != 0 {
 		t.Fatal("unset budget stays off")
 	}
 }

@@ -27,7 +27,7 @@ func ConvertResponseStreamWithOptions(source io.ReadCloser, operation string, op
 	}
 	reader, writer := io.Pipe()
 	go func() {
-		defer source.Close()
+		defer func() { _ = source.Close() }()
 		converter := newStreamConverter(writer, operation, options)
 		err := consumeSSE(source, converter.handle)
 		if err == nil {

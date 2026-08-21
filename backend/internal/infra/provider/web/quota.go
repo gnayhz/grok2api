@@ -402,7 +402,7 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
 		return account.QuotaWindow{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
 		return account.QuotaWindow{}, err

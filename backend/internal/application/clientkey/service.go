@@ -83,6 +83,10 @@ type Service struct {
 	cipher        *security.Cipher
 	activeMu      sync.RWMutex
 	activeBilling map[string]struct{}
+	// mediaJobs 可选：装配时注入。删除 client key 时预检活跃媒体作业
+	//（media_jobs.client_key_id 是 ON DELETE RESTRICT 外键）并清理终态
+	// 作业行——缺失时退回旧行为（依赖 FK 报错落 500）。
+	mediaJobs repository.MediaJobRepository
 }
 
 type billingReservationRepository interface {
@@ -99,6 +103,12 @@ func NewService(keys repository.ClientKeyRepository, rateLimiter repository.Rate
 	service := &Service{keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, activeBilling: make(map[string]struct{})}
 	service.UpdateDefaults(defaultRPM, defaultMax)
 	return service
+}
+
+// SetMediaJobRepository 注入媒体作业仓储（可选依赖）：使 BatchDelete 能以
+// 可操作的冲突错误替代 FK RESTRICT 落下的裸 500（round 51）。
+func (s *Service) SetMediaJobRepository(mediaJobs repository.MediaJobRepository) {
+	s.mediaJobs = mediaJobs
 }
 
 func (s *Service) UpdateDefaults(defaultRPM, defaultMax int) {
@@ -337,6 +347,19 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	}
 	if err := s.rejectInternalKeys(ctx, values); err != nil {
 		return 0, err
+	}
+	if s.mediaJobs != nil {
+		// media_jobs.client_key_id 是 ON DELETE RESTRICT：作业行存在时
+		// DeleteMany 被 FK 拒绝并落裸 500。活跃作业给出可操作的冲突；
+		// 终态作业只剩归档价值（审计行有 client_key_name 快照），随删。
+		if active, activeErr := s.mediaJobs.CountActiveMediaJobsByClientKeys(ctx, values); activeErr != nil {
+			return 0, activeErr
+		} else if active > 0 {
+			return 0, fmt.Errorf("%w: %d 个媒体作业仍在执行（queued/in_progress），请先等待完成或清理后再删除该 Key", ErrConflict, active)
+		}
+		if _, terminalErr := s.mediaJobs.DeleteTerminalMediaJobsByClientKeys(ctx, values); terminalErr != nil {
+			return 0, terminalErr
+		}
 	}
 	deleted, err := s.keys.DeleteMany(ctx, values)
 	if err == nil {

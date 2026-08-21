@@ -109,5 +109,17 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 		c.AbortWithStatusJSON(status, gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}})
 		return
 	}
-	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": "invalid_request_error", "code": code, "param": nil}})
+	// type 与 handler.writeOpenAIError 同口径（此前硬编码 invalid_request_error，
+	// 401/429 的 OpenAI 规范类型漂移——inference handler 的同名函数有正确分支，
+	// 中间件这份是漂移副本，round 24 活体矩阵发现）。
+	errorType := "invalid_request_error"
+	switch {
+	case status == http.StatusUnauthorized:
+		errorType = "authentication_error"
+	case status == http.StatusTooManyRequests:
+		errorType = "rate_limit_error"
+	case status >= 500:
+		errorType = "server_error"
+	}
+	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": errorType, "code": code, "param": nil}})
 }

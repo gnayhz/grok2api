@@ -4214,7 +4214,7 @@ func (s *Service) finishBuildDetectResponse(ctx context.Context, response *provi
 		HTTPStatus: response.StatusCode,
 	}
 	if response.Body != nil {
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 	}
 	body := readDetectBodyForClassification(response.Body)
 	rejection := provider.ClassifyCredentialRejection(response.StatusCode, body, nil)
@@ -4655,6 +4655,19 @@ func (s *Service) SetAccountRiskStatus(ctx context.Context, id uint64, flagged b
 // would let a persistently failing account never cool down.
 func (s *Service) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
 	if err := s.accounts.ClearMissingThinkingCooldown(ctx, id); err != nil {
+		return mapRepositoryError(err)
+	}
+	return nil
+}
+
+// ClearCooldown is the manual operator escape hatch: it unconditionally lifts
+// the request-path cooldown (failure_count / cooldown_until / last_error).
+// Unlike ClearMissingThinkingCooldown it is not verdict-scoped — an operator
+// invoking it explicitly takes over the judgment, including generic 5xx
+// cooldowns and the missing-thinking strike marker. The enabled state stays
+// untouched: re-enabling a disabled account remains a separate action.
+func (s *Service) ClearCooldown(ctx context.Context, id uint64) error {
+	if err := s.accounts.ClearCooldown(ctx, id); err != nil {
 		return mapRepositoryError(err)
 	}
 	return nil

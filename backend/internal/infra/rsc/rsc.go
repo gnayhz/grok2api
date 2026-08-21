@@ -220,3 +220,17 @@ func (c *Checker) attempt(ctx context.Context, ssoToken string) Result {
 	result.CheckedAt = now
 	return result
 }
+
+// secretPairPattern strips credential-shaped key=value pairs from upstream
+// RSC payload text so a compromised upstream cannot smuggle secrets into
+// persisted verdict diagnostics or risk logs (defense in depth; the payload
+// is upstream-controlled). Shared by the persistence layer (pre-save) and
+// the risk service (pre-log) — both sides must see the same rule.
+var secretPairPattern = regexp.MustCompile(`(?i)((?:access|refresh|id|sso|session|device)[_-]?token|client[_-]?secret|password|authorization|cookie|code[_-]?verifier)=[^&\s'<>]+`)
+
+// RedactSecrets removes credential-shaped pairs from upstream RSC text.
+// It is exported so every consumer of RSC payload fragments (logs, storage)
+// applies the identical rule instead of drifting copies.
+func RedactSecrets(value string) string {
+	return secretPairPattern.ReplaceAllString(value, `$1=[REDACTED]`)
+}

@@ -42,7 +42,7 @@ func (c *responsesToolCompatibility) normalizeResponseJSON(body []byte) ([]byte,
 func (c *responsesToolCompatibility) normalizeResponseStream(source io.ReadCloser) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
-		defer source.Close()
+		defer func() { _ = source.Close() }()
 		err := consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
 			if isPrivateBuildControlEvent(event) {
 				return nil

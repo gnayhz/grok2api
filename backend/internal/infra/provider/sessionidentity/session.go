@@ -66,7 +66,7 @@ func FetchWithLease(ctx context.Context, baseURL, token string, lease *infraegre
 		egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, 0, err)
 		return provider.AccountIdentity{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, responseBodyLimit+1))
 	if err != nil {
 		return provider.AccountIdentity{}, err

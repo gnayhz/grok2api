@@ -369,7 +369,7 @@ func (a *Adapter) downloadConsoleImageAttempt(ctx context.Context, credential ac
 		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, 0, err)
 		return nil, ctx.Err() == nil, fmt.Errorf("下载 Console 图片: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	// 标准 net/http 响应会保留最终请求 URL；兼容不填充 Request 的自定义出口客户端时，
 	// 初始 URL 已在发起请求前完成校验。若存在最终 URL，则额外检查重定向目标。
 	if response.Request != nil && response.Request.URL != nil {
@@ -653,7 +653,7 @@ func (a *Adapter) doConsoleVideoJSON(ctx context.Context, credential account.Cre
 		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(response.Body, consoleMediaBodyLimit+1))
 	if err != nil {
 		return nil, err

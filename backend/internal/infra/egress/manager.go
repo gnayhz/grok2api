@@ -762,7 +762,7 @@ func (m *Manager) probeEgressEndpoint(ctx context.Context, target preparedEgress
 		return result, err
 	}
 	statusCode = response.StatusCode
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	stage = "read_response"
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if readErr != nil {

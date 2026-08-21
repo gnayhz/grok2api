@@ -46,12 +46,24 @@ func OpenSQLite(ctx context.Context, path string) (*Database, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据库目录: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(INCREMENTAL)&_txlock=immediate", path)
 	db, err := gorm.Open(glebarezsqlite.Open(dsn), gormConfig())
 	if err != nil {
 		return nil, fmt.Errorf("打开 SQLite: %w", err)
 	}
-	return configureDatabase(ctx, db, "sqlite", 16, 16)
+	database, err := configureDatabase(ctx, db, "sqlite", 16, 16)
+	if err != nil {
+		return nil, err
+	}
+	// 存量库迁移：auto_vacuum 模式只在 VACUUM 后生效（round 72 实测
+	// 长跑库 83% 页面为删除空洞——retention/媒体作业清理留下的空间
+	// 从不回收，页扫描与备份体积虚胖）。仅当模式尚未生效时执行一次。
+	if mode := database.sqliteAutoVacuumMode(ctx); mode != incrementalAutoVacuum {
+		if vacuumErr := database.sqliteVacuumOnce(ctx); vacuumErr != nil {
+			return nil, fmt.Errorf("迁移 SQLite auto_vacuum: %w", vacuumErr)
+		}
+	}
+	return database, nil
 }
 
 // OpenPostgres 打开 PostgreSQL 数据库并配置连接池。
@@ -126,4 +138,28 @@ func (d *Database) Close() error {
 		return err
 	}
 	return sqlDB.Close()
+}
+
+const incrementalAutoVacuum = "incremental"
+
+// sqliteAutoVacuumMode 返回当前库的 auto_vacuum 模式（none/full/incremental）。
+// PRAGMA 返回数字（0=none/1=full/2=incremental），归一化为名称。
+func (d *Database) sqliteAutoVacuumMode(ctx context.Context) string {
+	var raw sql.NullString
+	d.db.WithContext(ctx).Raw("PRAGMA auto_vacuum").Scan(&raw)
+	switch strings.TrimSpace(raw.String) {
+	case "1", "full":
+		return "full"
+	case "2", "incremental":
+		return incrementalAutoVacuum
+	default:
+		return "none"
+	}
+}
+
+// sqliteVacuumOnce 执行一次 VACUUM——这是让已存在库切换到 INCREMENTAL
+// auto_vacuum 的唯一途径（pragma 只对新库生效）。8.8MB 实测库秒级完成；
+// 大库也仅在首次迁移时付出一次成本。
+func (d *Database) sqliteVacuumOnce(ctx context.Context) error {
+	return d.db.WithContext(ctx).Exec("VACUUM").Error
 }

@@ -76,3 +76,20 @@ func TestLegacyQualityGuardKeyRejected(t *testing.T) {
 		t.Fatalf("legacy qualityGuard key must be rejected with a clear error, got: %v", err)
 	}
 }
+
+func TestValidateRequestRetryIdleAccountCooldown(t *testing.T) {
+	t.Parallel()
+	base := func(d time.Duration) RequestRetryConfig {
+		return RequestRetryConfig{Enabled: true, IdleAccountCooldown: Duration(d)}
+	}
+	for _, invalid := range []time.Duration{59 * time.Second, 169 * time.Hour} {
+		if err := validateRequestRetry(base(invalid)); err == nil || !strings.Contains(err.Error(), "idleAccountCooldown") {
+			t.Fatalf("idle cooldown %v should be rejected, got %v", invalid, err)
+		}
+	}
+	for _, valid := range []time.Duration{0, time.Minute, 24 * time.Hour, 168 * time.Hour} {
+		if err := validateRequestRetry(base(valid)); err != nil {
+			t.Fatalf("idle cooldown %v should be accepted, got %v", valid, err)
+		}
+	}
+}

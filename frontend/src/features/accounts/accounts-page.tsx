@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
+import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -42,6 +42,7 @@ import {
   previewAccountDeletion,
   previewCleanup,
   enableWebAccountNSFW,
+  clearAccountCooldown,
   convertWebAccountsToBuild,
   detectBuildAccounts,
   exportAccountBatch,
@@ -2400,11 +2401,44 @@ function AccountStatus({ account }: { account: AccountDTO }) {
 				: "generic";
 			return (
 				<StatusTooltip content={`${t("accounts.cooldownReasons." + reasonKey)} · ${formatDateTime(account.cooldownUntil, i18n.language)}`}>
-					<Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.statusCooldown")}</Badge>
+					<div className="inline-flex items-center gap-1">
+						<Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.statusCooldown")}</Badge>
+						<ClearCooldownButton account={account} />
+					</div>
 				</StatusTooltip>
 			);
 				  }
   return <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("accounts.statusActive")}</Badge>;
+}
+
+function ClearCooldownButton({ account }: { account: AccountDTO }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const clearCooldown = useMutation({
+    mutationFn: () => clearAccountCooldown(String(account.id)),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success(t("accounts.cooldownCleared"));
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof ApiError ? error.message : t("accounts.cooldownClearFailed"));
+    },
+  });
+  return (
+    <button
+      type="button"
+      className="text-muted-foreground transition-colors hover:text-foreground"
+      aria-label={t("accounts.clearCooldown")}
+      title={t("accounts.clearCooldownHelp")}
+      disabled={clearCooldown.isPending}
+      onClick={(event) => {
+        event.stopPropagation();
+        clearCooldown.mutate();
+      }}
+    >
+      {clearCooldown.isPending ? <Spinner className="size-3" /> : <X className="size-3" />}
+    </button>
+  );
 }
 
 function formatAdditionalRefreshErrorDetails(account: AccountDTO): string | undefined {

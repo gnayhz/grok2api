@@ -360,17 +360,18 @@ The real-time routing guard (`requestRetry`) is a top-level `config.yaml` sectio
 
 ```yaml
 requestRetry:
-  enabled: true # off by default
+  enabled: true             # production-recommended (Go built-in default stays off)
   maxAttempts: 6
-  holdTimeout: 3s
-  minOutputTokens: 32
+  holdTimeout: 3s           # wait cap for small-output degraded streams; healthy streams deliver on first visible thinking delta
+  minOutputTokens: 8
   onExhausted: fail_closed # fail_open | fail_closed
-  earlyHeaderAbort: 0s     # optional header-budget early abort
+  earlyHeaderAbort: 0s     # optional header-budget early abort (5s recommended: clean first byte 0.7-2.1s vs degraded 3.0-15.6s, zero overlap, 2026-08-20 measured)
   sameAccountRetry: true   # retry the same account once before switching
-  accountCooldown: 24h
+  accountCooldown: 12h
+  idleAccountCooldown: 15m # empty/silent-stream cooldown (independent)
 ```
 
-When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, and stored-response requests are unchanged. Changes to this section hot-reload with the config file.
+When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, and stored-response requests are unchanged. Changes to this section require a process restart — it is not part of the runtime-settings hot-reload surface (verified: flipping the file without restart leaves the guard behavior unchanged).
 
 ### Account risk attribution (RSC)
 
@@ -389,7 +390,26 @@ identity:
 - A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`; risky
   verdicts never recover automatically. Changes to this section require a restart.
 
+### Request audits
+
+Every inference request lands in the audit ledger (request_audits) with per-attempt
+diagnostics (request_audit_attempts), including quality-guard retries (stages
+`quality_hold` for withheld attempts and `quality_idle` for empty/evidence/created-timeout aborts).
+Two observability columns answer "how much did the client actually receive":
+
+- `deliveredEvents / deliveredBytes` - SSE data events forwarded and cumulative
+  bytes written to the client (non-streaming: body bytes). A 200-with-error-code
+  row now states exactly what reached the client; both fields are exposed in the
+  admin request-audits API and the audits page performance summary.
+
+Retention: `audit.retention` (default 0 = keep forever; non-zero 24h-8760h)
+deletes aged audit rows and their attempt details in hourly batched sweeps
+(500 rows/batch, 30s budget per sweep). The task starts only when retention is
+non-zero - the default is byte-identical to upstream behavior. Changes require a
+process restart.
+
 ### Verification matrix
+
 
 The backend ships a one-shot verification script consolidating the review
 gates established during hardening:
@@ -407,10 +427,12 @@ See [HARDENING.md](./HARDENING.md) for the complete hardening log: detection rul
 
 Three independent cooldown families are visible in the admin UI:
 
-- **Routing guard** (`requestRetry.accountCooldown`): `missing_thinking` (first
-  strike cools; a later strike after expiry disables the account),
-  `missing_thinking_disabled`, and `quality_idle_timeout` (empty/silent stream,
-  kept separate from the failure counter). A clean RSC verdict lifts these.
+- **Routing guard** (`requestRetry.accountCooldown` / `idleAccountCooldown`):
+  `missing_thinking` (first strike cools; a later strike after expiry disables
+  the account), `missing_thinking_disabled`, and `quality_idle_timeout`
+  (empty/silent stream, kept separate from the failure counter and with its own
+  configurable duration). A clean RSC verdict lifts these. The admin UI shows a
+  clear action on a cooling badge as the manual operator escape hatch.
 - **Routing cooldown** (`routing.cooldownBase`/`cooldownMax`): generic upstream
   failures with exponential backoff; never cleared by risk attribution.
 - **Egress-node cooldown**: exponential backoff and health re-probes for fixed-node
@@ -467,6 +489,11 @@ A non-empty `GROK2API_DATABASE_URL` overrides `database.postgres.dsn` and automa
 ### Client IPs behind a reverse proxy
 
 Request audits record the normalized client IPv4 or IPv6 address. Direct deployments need no extra configuration. Behind Nginx or another reverse proxy, configure both sides:
+
+> When the public port differs from the internal one (port mapping or a proxy),
+> also set `frontend.publicApiBaseURL` (config file or the admin settings page,
+> hot-applied) — media download URLs are built from it and otherwise point at the
+> internal `127.0.0.1:8000` default, unreachable for clients.
 
 1. Forward the standard client IP headers from the proxy:
 

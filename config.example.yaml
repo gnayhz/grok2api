@@ -44,6 +44,12 @@ bootstrapAdmin:
 frontend:
   # [通常不要修改] Go 服务同源托管的前端构建目录。
   staticPath: "./frontend/dist"
+  # [按需修改] 对外可达的 API 基址，用于拼装图片/视频等媒体资源的下载
+  # url。默认 http://127.0.0.1:8000——端口映射（如宿主 38000→容器 8000）
+  # 或反代部署必须显式设置，否则媒体 url 指向容器内地址，客户端不可达
+  # （2026-08-21 实测：设为 http://宿主:38000 后生成→下载全链 200）。
+  # 也可在管理端设置面热修改（即时生效）。留空使用默认值。
+  # publicApiBaseURL: "http://127.0.0.1:8000"
 
 database:
   # [按需修改] 单实例使用 sqlite；多实例改为 postgres。
@@ -134,17 +140,37 @@ audit:
   ledgerFailureThreshold: 1
   ledgerUnhealthyGrace: 10s
   ledgerQueueHighWatermarkPercent: 90
+  # 审计保留时长：超过该时长的 request_audits 及 attempts 明细由后台任务
+  # 每小时分批删除（每批 500 条，单轮 30s 预算）。0 = 永久保留（默认）；
+  # 非零须在 24h-8760h 之间；修改需重启进程。
+  retention: 0
 
 # 实时路由守卫（requestRetry）：进程内请求级降智拦截，在请求路径上完成
 # 检测与重试（推理证据判定 + 同号重试 + 换号 + RSC 归因），
-# 不依赖主动探测或被动 TPS 统计；修改后随配置热加载生效。
+# 不依赖主动探测或被动 TPS 统计；修改后需重启进程生效（本段不在
+# 管理端运行时设置面内，配置热加载总线不会重读本文件——2026-08-21
+# 实测：yaml 翻转 enabled 后未重启守卫行为不变，重启后生效）。
 requestRetry:
-  enabled: false
+  # 生产推荐开启：30s hold 等待流末加密思考（grok-4.6 实测），降智路径
+  # 由 earlyHeaderAbort 在响应头阶段提前拦截，二者互补。
+  enabled: true
   maxAttempts: 6
   holdTimeout: 3s
+  # 流式零证据截止：静默期超过该时长仍无思考证据且无任何可见输出时，
+  # 中止该次上游尝试并按空闲路径重试。复杂提示词的降智流首输出静默期
+  # 实测 75-121s（总客户端死寂可达 ~10min），而干净流首个思考增量 2.1s
+  # 即达（含复杂提示词）——15s 截止有 7 倍安全边际，把降智流式尝试压到
+  # 预算内。0 = 默认 15s；非零须在 3s-5m。仅作用流式（非流式响应头等
+  # 整个生成完成，无中期信号，由完整 body 判决覆盖）。
+  evidenceTimeout: 15s
+  # 流式首事件截止：连任何 SSE data 事件（response.created/首 chunk）都
+  # 未到达即中止该次尝试并重试。直连复测（绕过网关）：clean 首事件恒定
+  # 0.8-2.2s（与提示词复杂度无关），降智排队期间零 data 事件达 68-125s
+  # （仅 keepalive 注释）。0 = 默认 5s；非零须在 1s-2m。
+  createdTimeout: 5s
   # 中途突发内容达到该阈值可提前扣留（无需等流结束）；推理模型对任何
   # 长度的回答都会思考，终态无推理一律扣留，与该阈值无关。
-  minOutputTokens: 32
+  minOutputTokens: 8
   onExhausted: fail_closed # fail_open | fail_closed
   # [实验] 响应头预算早断（0=关闭）：实测健康推理路径的响应头恒定秒级返回
   # （与生成长度无关），降智路径连头都要等整个生成完成（复杂问题 30s+）。
@@ -159,7 +185,13 @@ requestRetry:
   # First missing-thinking hit cools the account; a later hit after the
   # cooldown expires disables it. 0 disables account cooldown; nonzero
   # must be 1m-168h.
-  accountCooldown: 24h
+  accountCooldown: 12h
+  # 空流/静默超时（0 token 或 2min 无数据）的账号冷却，独立于上面的
+  # missing-thinking 冷却（空流常与出口 IP 相关而非账号本身，冷却时长
+  # 可独立调整）。0 = 默认 24h；非零须在 1m-168h。冷却中的账号可在
+  # 管理页「冷却」徽标上一键解除（人工逃生门）。空流多与出口 IP/瞬态
+  # 相关（RSC clean 自动解除），默认短冷却即可。
+  idleAccountCooldown: 15m
 
 # [按需启用] 账号级 RSC 风险归因：质量扣留触发异步 RSC 检查（经关联的
 # Web SSO）。clean 账号免于惩罚（出口 IP 嫌疑）；risk 结论永不恢复并

@@ -45,10 +45,15 @@ func TestExampleConfigQualityRetryWiring(t *testing.T) {
 		earlyHeaderAbort time.Duration
 		sameAccountRetry bool
 		accountCooldown  time.Duration
+		idleCooldown     time.Duration
+		evidenceTimeout  time.Duration
+		createdTimeout   time.Duration
 	}{
-		enabled: false, maxAttempts: 6, holdTimeout: 3 * time.Second,
-		minOutputTokens: 32, onExhausted: "fail_closed", earlyHeaderAbort: 0,
-		sameAccountRetry: true, accountCooldown: 24 * time.Hour,
+		enabled: true, maxAttempts: 6, holdTimeout: 3 * time.Second,
+		minOutputTokens: 8, onExhausted: "fail_closed", earlyHeaderAbort: 0,
+		sameAccountRetry: true, accountCooldown: 12 * time.Hour,
+		idleCooldown: 15 * time.Minute, evidenceTimeout: 15 * time.Second,
+		createdTimeout: 5 * time.Second,
 	}
 	if runtime.Enabled != wants.enabled {
 		t.Errorf("Enabled = %v", runtime.Enabled)
@@ -73,5 +78,14 @@ func TestExampleConfigQualityRetryWiring(t *testing.T) {
 	}
 	if runtime.AccountCooldown != wants.accountCooldown {
 		t.Errorf("AccountCooldown = %s", runtime.AccountCooldown)
+	}
+	if runtime.IdleAccountCooldown != wants.idleCooldown {
+		t.Errorf("IdleAccountCooldown = %s", runtime.IdleAccountCooldown)
+	}
+	if runtime.EvidenceTimeout != wants.evidenceTimeout {
+		t.Errorf("EvidenceTimeout = %s", runtime.EvidenceTimeout)
+	}
+	if runtime.CreatedTimeout != wants.createdTimeout {
+		t.Errorf("CreatedTimeout = %s", runtime.CreatedTimeout)
 	}
 }

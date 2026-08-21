@@ -358,17 +358,18 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 
 ```yaml
 requestRetry:
-  enabled: true # 默认关闭
+  enabled: true             # 生产推荐开启（Go 内置默认保持关闭，升级不翻转）
   maxAttempts: 6
-  holdTimeout: 3s
-  minOutputTokens: 32
+  holdTimeout: 3s           # 小输出降智流的等待上限；健康流在首个可见思考增量即放行
+  minOutputTokens: 8
   onExhausted: fail_closed # fail_open | fail_closed
-  earlyHeaderAbort: 0s     # 可选：响应头预算早断
+  earlyHeaderAbort: 0s     # 可选：响应头预算早断（建议 5s；2026-08-20 实测 clean 首字节 0.7-2.1s vs 降智 3.0-15.6s 零重叠）
   sameAccountRetry: true   # 换号前先同号重试一次
-  accountCooldown: 24h
+  accountCooldown: 12h
+  idleAccountCooldown: 15m # 空流/静默冷却（独立配置）
 ```
 
-开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具和 stored response 钉账号请求。该段修改随配置热加载生效。
+开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具和 stored response 钉账号请求。该段修改需重启进程生效——不在管理端运行时设置面内（实测：改文件不重启守卫行为不变）。
 
 ### 账号风险归因（RSC）
 
@@ -383,7 +384,22 @@ requestRetry:
 - 巡检循环按 `patrol.bucketDays` 周期复查 clean/error 结论；风险结论永不自动恢复。
   本段修改需重启进程生效。
 
+### 请求审计
+
+每条推理请求写入审计账本（request_audits），附带逐次尝试明细
+（request_audit_attempts）——包括守卫重试（扣留尝试 stage 为 `quality_hold`，空流/证据超时/首事件超时中止为 `quality_idle`）。
+两个可观测列直接回答「客户端实际收到多少」：
+
+- `deliveredEvents / deliveredBytes` —— 转发到客户端的 SSE data 事件数与累计写出字节（非流式为响应体
+  字节数）。200 且带错误码的行现在能精确陈述客户端收到的内容；两个字段
+  均在管理端审计 API 与审计页性能摘要中展示。
+
+保留：`audit.retention`（默认 0 = 永久保留；非零取值 24h–8760h）按小时批量清理过期审计行
+及其尝试明细（每批 500 行，单轮 30s 预算）。仅 retention 非零时才启动清理
+任务——默认行为与上游逐字节一致。修改需重启进程。
+
 ### 验证矩阵
+
 
 后端内置一键验证脚本，固化加固过程中建立的审查闸门：
 
@@ -400,9 +416,10 @@ requestRetry:
 
 管理后台可见三族相互独立的冷却：
 
-- **实时路由守卫冷却**（`requestRetry.accountCooldown`）：`missing_thinking`（首次打击进入冷却，
-  冷却过期后再打击则停用）、`missing_thinking_disabled`、`quality_idle_timeout`（空流/静默
-  超时，与失败计数分离）。clean RSC 结论可解除这三类。
+- **实时路由守卫冷却**（`requestRetry.accountCooldown` / `idleAccountCooldown`）：
+  `missing_thinking`（首次打击进入冷却，冷却过期后再打击则停用）、`missing_thinking_disabled`、
+  `quality_idle_timeout`（空流/静默超时，与失败计数分离，时长独立可配）。clean RSC 结论可
+  解除这三类；管理页冷却徽标上提供一键解除作为人工逃生门。
 - **路由冷却**（`routing.cooldownBase`/`cooldownMax`）：泛型上游失败的指数退避；
   风险归因永不清除。
 - **出口节点冷却**：固定节点传输失败的指数退避与健康复测；与账号状态无关。
@@ -457,6 +474,9 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 ### 反向代理后的客户端 IP
 
 请求审计会记录规范化的客户端 IPv4 或 IPv6 地址。客户端直连 grok2api 时无需额外配置；经过 Nginx 等反向代理时，需要同时配置代理和 grok2api：
+> 公网端口与内部端口不一致（端口映射或反代）时，还需设置 `frontend.publicApiBaseURL`（配置文件或管理端设置面，热生效）——图片/视频等媒体下载 url 以它为前缀拼装，
+> 否则使用内置 `127.0.0.1:8000` 默认值，客户端不可达。
+
 
 1. 在 Nginx 中转发标准客户端 IP 请求头：
 

@@ -109,11 +109,15 @@ type Record struct {
 	ContextInputTokens      int64
 	ContextOutputTokens     int64
 	FirstTokenMS            *int64
-	DurationMS              int64
-	ErrorCode               string
-	AttemptCount            int
-	Attempts                []Attempt
-	CreatedAt               time.Time
+	// DeliveredEvents/DeliveredBytes：流式=转发到客户端的 SSE data 事件数与
+	// 累计字节；非流式=响应体字节数。回答「200 且带错误码时实际交付了多少」。
+	DeliveredEvents int64
+	DeliveredBytes  int64
+	DurationMS      int64
+	ErrorCode       string
+	AttemptCount    int
+	Attempts        []Attempt
+	CreatedAt       time.Time
 }
 
 // Summary 表示指定审计范围内的聚合用量。

@@ -188,6 +188,29 @@ func (r *failureAttemptRecorder) captureQualityDegraded(credential accountdomain
 	})
 }
 
+// captureQualityIdle 记录守卫空闲路径中止的尝试（empty/evidence-timeout/
+// created-timeout）——此前该路径不写 attempt 明细，多账号轮换轨迹在审计
+// 里不可见（round 41 活体发现 938 号审计零 attempt；对照 quality_hold 有）。
+func (r *failureAttemptRecorder) captureQualityIdle(credential accountdomain.Credential, startedAt time.Time, errorCode string) {
+	status := http.StatusOK
+	if errorCode == "" {
+		errorCode = ErrorQualityDegraded
+	}
+	r.append(audit.Attempt{
+		Source:             audit.AttemptSourceUpstreamHTTP,
+		Stage:              "quality_idle",
+		AccountID:          auditAccountID(credential.ID),
+		AccountName:        credential.Name,
+		Method:             r.method,
+		RequestPath:        r.path,
+		StartedAt:          startedAt.UTC(),
+		DurationMS:         time.Since(startedAt).Milliseconds(),
+		UpstreamStatusCode: &status,
+		UpstreamStatus:     "200 OK",
+		TransportError:     errorCode,
+	})
+}
+
 func (r *failureAttemptRecorder) append(attempt audit.Attempt) {
 	attempt.Number = len(r.attempts) + 1
 	r.attempts = append(r.attempts, attempt)
@@ -303,7 +326,11 @@ func isAllowedDiagnosticHeader(name string) bool {
 		return true
 	}
 	switch name {
-	case "content-length", "content-type", "date", "retry-after", "server", "cf-ray", "request-id", "traceparent", "tracestate", "via", "x-correlation-id", "x-request-id", "x-grok2api-compatibility-warnings":
+	// cf-mitigated 是 Cloudflare 拦截的直接标记（challenge/block）——
+	// 403 归因的关键证据：存在=CF 层拦截，缺失=源站策略（round 54，视频
+	// 403 诊断因该头不在白名单而丢失现场）。cf-cache-status 辅助判定
+	// 响应是否来自边缘缓存。
+	case "content-length", "content-type", "date", "retry-after", "server", "cf-ray", "cf-mitigated", "cf-cache-status", "request-id", "traceparent", "tracestate", "via", "x-correlation-id", "x-request-id", "x-grok2api-compatibility-warnings":
 		return true
 	default:
 		return false
@@ -314,8 +341,23 @@ func sanitizeDiagnosticText(value string, limit int) string {
 	value = diagnosticCookiePattern.ReplaceAllString(value, "$1: [REDACTED]")
 	value = diagnosticAuthorizationPattern.ReplaceAllString(value, "$1 [REDACTED]")
 	value = diagnosticSecretPattern.ReplaceAllString(value, "$1[REDACTED]")
+	value = redactURLEncodedSecretPairs(value)
 	value = diagnosticURLPattern.ReplaceAllStringFunc(value, sanitizeUpstreamURL)
 	return truncateDiagnosticText(value, limit)
+}
+
+// redactURLEncodedSecretPairs 处理 %3D（'=' 编码）的敏感对：明文模式匹配
+// 不到 key%3Dvalue 形态（round 23 PoC 实证 access_token%3Dsecret 原样存活）。
+// 命中敏感键的片段键保留、值 [REDACTED]；不含 %3d 或无敏感键的文本零改动
+// （普通 %XX 转义的 URL 不受影响）。camelCase 明文形态由既有模式的裸 token
+// 子词 + (?i) 覆盖（PoC 实证，清单的 camelCase 缺口描述不成立）。
+var diagnosticURLEncodedSecretPattern = regexp.MustCompile(`(?i)(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|sso[_-]?token|session[_-]?token|client[_-]?secret|api[_-]?key|x-api-key|password)["']?%3D)[^&\s"'<>]+`)
+
+func redactURLEncodedSecretPairs(value string) string {
+	if !strings.Contains(strings.ToLower(value), "%3d") {
+		return value
+	}
+	return diagnosticURLEncodedSecretPattern.ReplaceAllString(value, "$1[REDACTED]")
 }
 
 func truncateDiagnosticText(value string, limit int) string {

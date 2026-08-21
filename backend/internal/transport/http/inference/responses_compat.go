@@ -12,6 +12,7 @@ import (
 type responsesCompatState struct {
 	responseID      string
 	createdAt       int64
+	model           string
 	itemSeq         int
 	itemIDs         map[int64]string
 	usedItemIDs     map[string]struct{}
@@ -102,6 +103,9 @@ func (s *responsesCompatState) rememberFromMeta(meta responseMetadata) {
 	if id := strings.TrimSpace(meta.ResponseID); id != "" {
 		s.responseID = id
 	}
+	if model := strings.TrimSpace(meta.Model); model != "" {
+		s.model = model
+	}
 	s.ensureID()
 }
 
@@ -173,6 +177,16 @@ func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) b
 			resp["output"] = []any{}
 			changed = true
 		}
+		if model := strings.TrimSpace(stringAny(resp["model"])); model != "" {
+			state.model = model
+		} else if responsesEventIsTerminal(typ) {
+			// Grok TUI serde requires `model` on response.completed / failed;
+			// a missing key fails deserialization even when the value is empty.
+			// Only terminal events are backfilled so non-terminal frames keep
+			// their original wire shape.
+			resp["model"] = state.model
+			changed = true
+		}
 		if errObj, ok := resp["error"].(map[string]any); ok && strings.TrimSpace(stringAny(errObj["id"])) == "" {
 			errObj["id"] = "err_" + strings.TrimPrefix(state.ensureID(), "resp_")
 			changed = true
@@ -222,6 +236,17 @@ func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) b
 		}
 	}
 	return changed
+}
+
+// responsesEventIsTerminal reports whether the event concludes the response
+// stream; only these carry the serde-required model field on failure paths.
+func responsesEventIsTerminal(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func responsesEventCarriesResponseID(eventType string) bool {

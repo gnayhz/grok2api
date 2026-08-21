@@ -123,7 +123,7 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 	if err != nil {
 		return provider.ImageInput{}, fmt.Errorf("下载对话图片: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.ImageInput{}, fmt.Errorf("%w: 下载地址返回 %d", errInvalidChatImage, response.StatusCode)
 	}
@@ -161,7 +161,7 @@ func (a *Adapter) loadChatFile(ctx context.Context, lease *egress.Lease, input, 
 	if err != nil {
 		return provider.ImageInput{}, fmt.Errorf("下载对话文件: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.ImageInput{}, fmt.Errorf("%w: 下载地址返回 %d", errInvalidChatFile, response.StatusCode)
 	}

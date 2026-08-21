@@ -62,7 +62,8 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
-		return nil, ErrModelNotFound
+		// 候选为空出口统一消歧（round 60，同 image/video）。
+		return nil, s.distinguishMissingOrNoAccount(ctx, publicModel, err)
 	}
 	supportsVoiceWebSocket := func(providerValue accountdomain.Provider) bool {
 		_, ok := s.providers.VoiceWebSocket(providerValue)
