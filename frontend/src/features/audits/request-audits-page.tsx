@@ -372,7 +372,7 @@ function ResponsePerformance({ audit, locale }: { audit: AuditDTO; locale: strin
       <span className="text-muted-foreground">{t("audits.throughputMetric")}</span>
       <PerformanceValue value={throughput} unit={t("audits.tokensPerSecondUnit")} />
       <span className="text-muted-foreground">{t("audits.deliveredMetric")}</span>
-      <PerformanceValue value={audit.deliveredEvents > 0 || audit.deliveredBytes > 0 ? `${formatNumber(audit.deliveredEvents, locale)} × ${formatNumber(Math.round(audit.deliveredBytes / 1024), locale)} ${t("audits.deliveredBytesUnit")}` : "—"} unit="" />
+      <PerformanceValue value={audit.deliveredEvents > 0 || audit.deliveredBytes > 0 ? `${formatNumber(audit.deliveredEvents, locale)} ${t('audits.deliveredChunkUnit')} · ${formatNumber(Math.round(audit.deliveredBytes / 1024), locale)} ${t("audits.deliveredBytesUnit")}` : "—"} unit="" />
     </div>
   );
 }
