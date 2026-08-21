@@ -316,6 +316,12 @@ export function refreshAccountToken(id: string): Promise<AccountDTO> {
   return apiRequest(`/api/admin/v1/accounts/${id}/refresh-token`, { method: "POST" }, decodeAccount);
 }
 
+/** Manual operator escape hatch: unconditionally lift the request-path cooldown
+ *  (failure count / cooldown until / reason marker). The enabled state is untouched. */
+export function clearAccountCooldown(id: string): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/clear-cooldown`, { method: "POST" }, decodeAccount);
+}
+
 export function acceptWebAccountTerms(id: string): Promise<{ completed: boolean }> {
   return apiRequest(`/api/admin/v1/accounts/web/${id}/accept-terms`, { method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
 }

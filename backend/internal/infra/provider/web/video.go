@@ -34,6 +34,14 @@ func (e *webMediaUpstreamError) Error() string {
 	if e == nil {
 		return ""
 	}
+	// 归因后缀进 TransportError → 审计尝试明细：html/empty body 或 CF
+	// challenge 标记是浏览器会话层拒绝（Cloudflare/页面挑战）；JSON body
+	// 是源站应用层策略（round 55 活体确证：视频 403 "page out of date"
+	// 实为 body_kind=json 的源站结构化拒绝——server=cloudflare + cf_ray
+	// 见 web_media_upstream_rejected 日志）。text 形态未观测，不猜。
+	if e.cloudflareChallenge || e.bodyKind == "html" || e.bodyKind == "empty" {
+		return e.summary + "（浏览器会话层拒绝：body=" + e.bodyKind + "）"
+	}
 	return e.summary
 }
 
@@ -42,6 +50,12 @@ func (e *webMediaUpstreamError) HTTPStatusCode() int {
 		return 0
 	}
 	return e.status
+}
+
+// IsPolicyForbidden 实现 provider.PolicyForbiddenError：403 + JSON body =
+// 源站应用层策略拒绝（round 55 活体确证的视频端点形态）。
+func (e *webMediaUpstreamError) IsPolicyForbidden() bool {
+	return e != nil && e.status == http.StatusForbidden && e.bodyKind == "json"
 }
 
 // isClearanceRefreshableMediaError distinguishes browser-session challenges
@@ -184,7 +198,6 @@ func extractWebMediaUpstreamErrorFields(body []byte) (code, message string, stru
 	if err := json.Unmarshal(body, &root); err != nil {
 		return "", "", false
 	}
-	structured = true
 	if errorObject, ok := root["error"].(map[string]any); ok {
 		code = firstWebMediaDiagnosticCode(errorObject, "code", "type", "error")
 		message = firstString(errorObject, "message", "error", "detail")

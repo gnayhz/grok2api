@@ -211,7 +211,7 @@ func fetchRemoteImage(ctx context.Context, rawURL string) ([]byte, error) {
 		}
 
 		if isImportRedirect(resp.StatusCode) && resp.Header.Get("Location") != "" {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			transport.CloseIdleConnections()
 			if redirects >= ingestMaxRedirects {
 				return nil, errors.New("重定向次数过多")
@@ -231,7 +231,7 @@ func fetchRemoteImage(ctx context.Context, rawURL string) ([]byte, error) {
 }
 
 func readImportedImage(resp *http.Response) ([]byte, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("上游返回 HTTP %d", resp.StatusCode)
 	}
@@ -261,8 +261,8 @@ func (h *Handler) importInputImageFromURL(c *gin.Context) {
 	}
 	defer h.releaseIngest()
 	var request importImageRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	rawURL := strings.TrimSpace(request.URL)
@@ -317,7 +317,7 @@ func (h *Handler) uploadInputAsset(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "mediaUploadReadFailed", "读取上传文件失败")
 		return
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	data, err := io.ReadAll(io.LimitReader(src, ingestMaxImageBytes+1))
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "mediaUploadReadFailed", "读取上传文件失败")

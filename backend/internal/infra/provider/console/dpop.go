@@ -203,7 +203,10 @@ func (a *Adapter) fetchDPoPSession(ctx context.Context, ssoToken string, lease *
 	if err != nil {
 		return dpopSession{}, fmt.Errorf("生成 Console DPoP 密钥: %w", err)
 	}
-	publicJWK := publicDPoPJWK(&privateKey.PublicKey)
+	publicJWK, err := publicDPoPJWK(&privateKey.PublicKey)
+	if err != nil {
+		return dpopSession{}, err
+	}
 	payload, err := json.Marshal(map[string]any{"jwk": publicJWK})
 	if err != nil {
 		return dpopSession{}, err
@@ -353,14 +356,23 @@ func (a *Adapter) doDPoPRequestWithContentType(
 	return nil, errors.New("Console DPoP 重试状态无效")
 }
 
-func publicDPoPJWK(key *ecdsa.PublicKey) dpopJWK {
+// publicDPoPJWK 把 P-256 公钥编码为 DPoP JWK。坐标取自未压缩 SEC1 点
+// （PublicKey.Bytes，0x04 || X(32) || Y(32)）——与旧实现 key.X/key.Y
+// FillBytes(32) 逐字节等价（golden 测试锁定）。JWK 的 crv 固定 P-256，
+// 其它曲线直接拒绝：偏移切片对非 32 字节坐标会产出错误编码。
+func publicDPoPJWK(key *ecdsa.PublicKey) (dpopJWK, error) {
+	point, err := key.Bytes()
+	if err != nil {
+		return dpopJWK{}, fmt.Errorf("编码 Console DPoP 公钥: %w", err)
+	}
+	if len(point) != 65 || point[0] != 4 {
+		return dpopJWK{}, errors.New("Console DPoP 公钥非 P-256 未压缩点")
+	}
 	return dpopJWK{
 		Kty: "EC", Crv: "P-256",
-		//lint:ignore SA1019 crypto/ecdh 迁移暂缓：只读坐标编码，无密钥篡改风险
-		X: base64.RawURLEncoding.EncodeToString(key.X.FillBytes(make([]byte, 32))),
-		//lint:ignore SA1019 crypto/ecdh 迁移暂缓：只读坐标编码，无密钥篡改风险
-		Y: base64.RawURLEncoding.EncodeToString(key.Y.FillBytes(make([]byte, 32))),
-	}
+		X: base64.RawURLEncoding.EncodeToString(point[1:33]),
+		Y: base64.RawURLEncoding.EncodeToString(point[33:65]),
+	}, nil
 }
 
 func dpopJWKThumbprint(jwk dpopJWK) (string, error) {

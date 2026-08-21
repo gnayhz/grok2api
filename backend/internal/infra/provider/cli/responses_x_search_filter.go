@@ -61,7 +61,7 @@ func filterBuildPromptCacheResponse(response *http.Response, streaming bool, rou
 func (f *buildXSearchResponseFilter) stream(source io.ReadCloser) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
-		defer source.Close()
+		defer func() { _ = source.Close() }()
 		err := consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
 			if !event.HasData() {
 				return event.writeTo(writer)

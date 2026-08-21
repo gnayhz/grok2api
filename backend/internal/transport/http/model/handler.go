@@ -180,7 +180,9 @@ func (h *Handler) listAccounts(c *gin.Context) {
 func (h *Handler) create(c *gin.Context) {
 	var request createRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		// 附 gin binding 详情（缺哪个 required 字段/类型错在哪）——
+		// 笼统"请求参数无效"曾让 round 90 的探测三次才锁定字段形态。
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
 	accountIDs, err := parseIDs(request.AccountIDs)
@@ -201,8 +203,8 @@ func (h *Handler) create(c *gin.Context) {
 
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids := make([]uint64, 0, len(request.IDs))
@@ -224,8 +226,8 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -340,7 +342,7 @@ func (h *Handler) update(c *gin.Context) {
 	}
 	var request updateRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + err.Error())
 		return
 	}
 	var accountIDs *[]uint64

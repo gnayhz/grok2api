@@ -576,14 +576,54 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		{name: "responses reasoning none", body: `{"reasoning":{"effort":"none"}}`},
 		{name: "messages thinking disabled", body: `{"thinking":{"type":"disabled"}}`},
 		{name: "messages zero thinking budget", body: `{"thinking":{"type":"enabled","budget_tokens":0}}`},
-		{name: "client tools", body: `{"tools":[{"type":"function","function":{"name":"charge"}}]}`},
-		{name: "legacy functions", body: `{"functions":[{"name":"charge"}]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
 			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
-				t.Fatal("explicitly disabled reasoning and tool requests must not be held")
+				t.Fatal("explicitly disabled reasoning requests must not be held")
+			}
+		})
+	}
+	// Grok TUI attaches a tools schema to every agent turn, including the
+	// first thinking-only one: a schema declaration alone must NOT exempt the
+	// request, otherwise all TUI traffic escapes the guard.
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "client tools schema", body: `{"tools":[{"type":"function","function":{"name":"charge"}}]}`},
+		{name: "legacy functions schema", body: `{"functions":[{"name":"charge"}]}`},
+		{name: "tui tools schema plus user input", body: `{"tools":[{"type":"function","name":"read_file"}],"input":[{"role":"user","content":"hello"}]}`},
+		// 用户消息文本里引用工具标记字样：JSON 序列化转义后不含干净的字面量
+		// （\"...\" 不产生完整匹配），预检短路为"无工具结果"——必须仍然 hold。
+		{name: "escaped marker in message text", body: `{"input":[{"role":"user","content":"pass \"function_call_output\" and \"tool_result\" in a string"}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := input
+			request.Body = []byte(test.body)
+			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+				t.Fatal("tools schema declaration alone must still hold so TUI thinking turns are classified")
+			}
+		})
+	}
+	// In-flight tool results are the replay-safety boundary: retrying a turn
+	// whose input already carries tool output can repeat external side effects.
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "function_call_output", body: `{"input":[{"role":"user","content":"hi"},{"type":"function_call_output","call_id":"c1","output":"done"}]}`},
+		{name: "tool_result", body: `{"input":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}`},
+		{name: "tool_use_output", body: `{"input":[{"type":"tool_use_output","output":"done"}]}`},
+		{name: "role tool message", body: `{"messages":[{"role":"user","content":"hi"},{"role":"tool","content":"done"}]}`},
+		{name: "nested tool output", body: `{"input":[{"role":"user","content":[{"type":"tool_result","content":"done"}]}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := input
+			request.Body = []byte(test.body)
+			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+				t.Fatal("in-flight tool results must not be held")
 			}
 		})
 	}
@@ -695,8 +735,8 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	if emptyAccount.LastError != accountdomain.LastErrorQualityIdle {
 		t.Fatalf("empty stream cooldown marker = %q, want quality_idle_timeout", emptyAccount.LastError)
 	}
-	if remaining := time.Until(*emptyAccount.CooldownUntil); remaining < 23*time.Hour || remaining > 24*time.Hour+time.Minute {
-		t.Fatalf("empty stream cooldown = %s, want about 24h", remaining)
+	if remaining := time.Until(*emptyAccount.CooldownUntil); remaining < 14*time.Minute || remaining > 15*time.Minute+time.Second {
+		t.Fatalf("empty stream cooldown = %s, want about 15m", remaining)
 	}
 	noThinkingAccount, err := accountRepo.Get(ctx, credentials[1].ID)
 	if err != nil {
@@ -705,8 +745,8 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	if !noThinkingAccount.Enabled || noThinkingAccount.LastError != lastErrorMissingThinking || noThinkingAccount.CooldownUntil == nil {
 		t.Fatalf("missing-thinking account was not cooled: %#v", noThinkingAccount)
 	}
-	if remaining := time.Until(*noThinkingAccount.CooldownUntil); remaining < 23*time.Hour || remaining > 24*time.Hour+time.Minute {
-		t.Fatalf("missing-thinking cooldown = %s, want about 24h", remaining)
+	if remaining := time.Until(*noThinkingAccount.CooldownUntil); remaining < 11*time.Hour || remaining > 12*time.Hour+time.Minute {
+		t.Fatalf("missing-thinking cooldown = %s, want about 12h", remaining)
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 20)
 	if err != nil {
@@ -913,7 +953,7 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 func TestNormalizeQualityRetryDefaults(t *testing.T) {
 	t.Parallel()
 	got := normalizeQualityRetry(QualityRetryRuntime{Enabled: true})
-	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 32 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second || got.AccountCooldown != 24*time.Hour {
+	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 8 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second || got.AccountCooldown != 12*time.Hour || got.IdleAccountCooldown != 15*time.Minute {
 		t.Fatalf("defaults = %#v", got)
 	}
 }

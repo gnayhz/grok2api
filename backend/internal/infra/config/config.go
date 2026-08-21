@@ -253,6 +253,10 @@ type AuditConfig struct {
 	LedgerFailureThreshold      int      `yaml:"ledgerFailureThreshold"`
 	LedgerUnhealthyGrace        Duration `yaml:"ledgerUnhealthyGrace"`
 	LedgerQueueHighWatermarkPct int      `yaml:"ledgerQueueHighWatermarkPercent"`
+	// Retention 是审计记录保留时长：超过该时长的 request_audits 及其
+	// attempts 明细会被后台任务分批删除（0 = 永久保留，默认）。修改需
+	// 重启进程（审计不在运行时设置面内）。非零须在 24h-8760h 之间。
+	Retention Duration `yaml:"retention"`
 }
 
 // RequestRetryConfig holds the real-time routing guard policy（实时路由守卫）：
@@ -274,6 +278,20 @@ type RequestRetryConfig struct {
 	// separates transient exit-IP pollution from a degraded account.
 	// 默认开启（生产实测有效区分瞬时 IP 污染与降智账号）；显式置 false 关闭。
 	SameAccountRetry bool `yaml:"sameAccountRetry"`
+	// EvidenceTimeout 是流式请求的零证据截止：静默期超过该时长仍无思考
+	// 证据且无任何可见输出时，中止该次上游尝试并按空闲路径重试
+	// （0=默认 15s）。复杂提示词在降智路径的首输出静默期实测 75-121s，
+	// 而干净流首个思考增量 2.1s 即达（含复杂提示词），15s 有 7 倍安全边际。
+	EvidenceTimeout Duration `yaml:"evidenceTimeout"`
+	// CreatedTimeout 是流式请求的首事件截止：连任何 SSE data 事件（实践中
+	// 即 response.created / 首 chunk / message_start）都未到达时，中止该次
+	// 上游尝试并重试（0=默认 5s）。直连复测证实排队延迟在上游时钟内：
+	// clean 首 created 0.8-2.2s（与提示词复杂度无关），降智 68-125s——
+	// 5s 截止有 2.3 倍安全边际，比证据截止更早（4-5s vs 15s）。
+	CreatedTimeout Duration `yaml:"createdTimeout"`
+	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 24h），独立于
+	// missing-thinking 的 AccountCooldown；上下限与 AccountCooldown 相同。
+	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
 }
 
 type ClientKeyDefaultsConfig struct {
@@ -665,6 +683,9 @@ func (c Config) Validate() error {
 	if c.Audit.CommitDelay.Value() < minAuditCommitDelay || c.Audit.CommitDelay.Value() > maxAuditCommitDelay {
 		return errors.New("audit.commitDelay 必须在 1ms 到 50ms 之间")
 	}
+	if d := c.Audit.Retention.Value(); d != 0 && (d < 24*time.Hour || d > 8760*time.Hour) {
+		return errors.New("audit.retention 必须在 24h 到 8760h 之间（0 表示永久保留）")
+	}
 	if c.Audit.LedgerMode != "observe" && c.Audit.LedgerMode != "enforce" {
 		return errors.New("audit.ledgerMode 必须是 observe 或 enforce")
 	}
@@ -730,25 +751,20 @@ func validateRequestRetry(value RequestRetryConfig) error {
 	if d := value.AccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
 		return errors.New("requestRetry.accountCooldown 必须在 1m 到 168h 之间")
 	}
+	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
+		return errors.New("requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间（0 表示默认 24h）")
+	}
+	if d := value.EvidenceTimeout.Value(); d != 0 && (d < 3*time.Second || d > 5*time.Minute) {
+		return errors.New("requestRetry.evidenceTimeout 必须在 3s 到 5m 之间（0 表示默认 15s）")
+	}
+	if d := value.CreatedTimeout.Value(); d != 0 && (d < time.Second || d > 2*time.Minute) {
+		return errors.New("requestRetry.createdTimeout 必须在 1s 到 2m 之间（0 表示默认 5s）")
+	}
 	return nil
 }
 
 func validAutoAssignShare(value float64) bool {
 	return value == 0 || (value >= 0.05 && value <= 1)
-}
-
-func validUniquePositiveIDs(values []uint64) bool {
-	seen := make(map[uint64]struct{}, len(values))
-	for _, value := range values {
-		if value == 0 {
-			return false
-		}
-		if _, exists := seen[value]; exists {
-			return false
-		}
-		seen[value] = struct{}{}
-	}
-	return true
 }
 
 // validateAPIBaseURL 仅允许无凭据、query、fragment 的 HTTP(S) API 根地址。

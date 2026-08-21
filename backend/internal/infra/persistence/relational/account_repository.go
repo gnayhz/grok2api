@@ -2235,6 +2235,41 @@ func (r *AccountRepository) ClearMissingThinkingCooldown(ctx context.Context, id
 	return nil
 }
 
+// ClearCooldown 人工运维逃生门：无条件清零请求路径健康三列（failure_count /
+// cooldown_until / last_error）。与 ClearMissingThinkingCooldown 的差别是
+// 不按 last_error 限定范围——管理员显式调用即接管判断（含 5xx 冷却与
+// missing-thinking 打击标记）。enabled 状态不动：恢复停用账号是独立操作。
+func (r *AccountRepository) ClearCooldown(ctx context.Context, id uint64) error {
+	if id == 0 {
+		return repository.ErrNotFound
+	}
+	// 保留持久打击标记：missing_thinking 家族是质量打击而非瞬态冷却错误。
+	// 清掉计时器不得把下次降智当首次打击——那会绕过二击停用策略，
+	// 让惯犯每次人工清冷却后都只吃一遍 24h 冷却。
+	var current struct{ LastError string }
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("last_error").Where("id = ?", id).Take(&current).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return mapError(err)
+	}
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id = ?", id).
+		Updates(map[string]any{"cooldown_until": nil, "failure_count": 0, "last_error": account.NormalizeHealthMarker(current.LastError)})
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	var providerRow struct{ Provider string }
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("provider").Where("id = ?", id).Take(&providerRow).Error; err != nil {
+		return mapError(err)
+	}
+	r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountHealthChanged, Provider: account.Provider(providerRow.Provider), AccountID: id})
+	return nil
+}
+
 func (r *AccountRepository) TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error {
 	if id == 0 || usedAt.IsZero() {
 		return repository.ErrNotFound

@@ -63,7 +63,7 @@ func (h *Handler) getImage(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	etag := `"` + asset.SHA256 + `"`
 	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
 		c.Header("ETag", etag)
@@ -93,7 +93,7 @@ func (h *Handler) getVideo(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	seeker, ok := body.(io.ReadSeeker)
 	if !ok {
 		c.Status(http.StatusInternalServerError)
@@ -160,8 +160,8 @@ func (h *Handler) imageStats(c *gin.Context) {
 
 func (h *Handler) deleteImages(c *gin.Context) {
 	var request deleteImagesRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	deleted, err := h.service.AdminDeleteImages(c.Request.Context(), request.IDs)
@@ -223,8 +223,8 @@ func (h *Handler) videoStats(c *gin.Context) {
 
 func (h *Handler) deleteVideos(c *gin.Context) {
 	var request deleteVideosRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	deleted, err := h.service.AdminDeleteVideoJobs(c.Request.Context(), request.IDs)

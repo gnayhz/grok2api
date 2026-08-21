@@ -142,6 +142,11 @@ func (r *aliasRouteResolver) GetByProviderUpstream(_ context.Context, providerVa
 	return modeldomain.Route{}, repository.ErrNotFound
 }
 
+func (r *aliasRouteResolver) HasEnabledRouteByPublicID(_ context.Context, publicID string) (bool, error) {
+	_, exists := r.byPublic[publicID]
+	return exists, nil
+}
+
 func TestResolvePublicModelRoutesGatesDynamicAliasesAndPreservesCompatibility(t *testing.T) {
 	route := modeldomain.Route{
 		ID: 1, PublicID: "Build/grok-4.5", Provider: account.ProviderBuild, UpstreamModel: "grok-4.5",

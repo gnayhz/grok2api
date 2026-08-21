@@ -184,7 +184,7 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 		}
 		file, header, err := c.Request.FormFile("file")
 		if err == nil {
-			defer file.Close()
+			defer func() { _ = file.Close() }()
 			data, readErr := io.ReadAll(io.LimitReader(file, h.maxBodyBytes+1))
 			if readErr != nil {
 				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "读取音频文件失败")

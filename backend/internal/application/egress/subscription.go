@@ -109,7 +109,7 @@ func fetchProxySubscription(ctx context.Context, value string, viaProxy string) 
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("订阅服务返回 HTTP %d", response.StatusCode)
 	}

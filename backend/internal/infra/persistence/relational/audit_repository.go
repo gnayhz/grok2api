@@ -24,11 +24,12 @@ type AuditRepository struct{ db *Database }
 func NewAuditRepository(db *Database) *AuditRepository { return &AuditRepository{db: db} }
 
 const (
-	auditInsertBatchSize   = 20
-	auditLookupBatchSize   = 500
-	attemptInsertBatchSize = 40
-	auditSuccessPredicate  = "status_code >= 200 AND status_code < 300 AND (error_code IS NULL OR error_code = '')"
-	auditSuccessAggregate  = "COALESCE(SUM(CASE WHEN " + auditSuccessPredicate + " THEN 1 ELSE 0 END), 0)"
+	auditInsertBatchSize    = 20
+	auditLookupBatchSize    = 500
+	attemptInsertBatchSize  = 40
+	auditRetentionBatchSize = 500
+	auditSuccessPredicate   = "status_code >= 200 AND status_code < 300 AND (error_code IS NULL OR error_code = '')"
+	auditSuccessAggregate   = "COALESCE(SUM(CASE WHEN " + auditSuccessPredicate + " THEN 1 ELSE 0 END), 0)"
 )
 
 var errAuditBatchRequiresFallback = errors.New("audit batch requires idempotent fallback")
@@ -363,7 +364,7 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 		ReasoningTokens: nonNegative(value.ReasoningTokens), TotalTokens: nonNegative(value.TotalTokens), CostInUSDTicks: nonNegative(value.CostInUSDTicks),
 		EstimatedCostInUSDTicks: nonNegative(value.EstimatedCostInUSDTicks), PricingModel: truncate(value.PricingModel, 100), PricingVersion: truncate(value.PricingVersion, 20),
 		NumSourcesUsed: nonNegative(value.NumSourcesUsed), NumServerSideToolsUsed: nonNegative(value.NumServerSideToolsUsed),
-		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), FirstTokenMS: normalizedFirstToken(value), DurationMS: nonNegative(value.DurationMS),
+		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), FirstTokenMS: normalizedFirstToken(value), DeliveredEvents: nonNegative(value.DeliveredEvents), DeliveredBytes: nonNegative(value.DeliveredBytes), DurationMS: nonNegative(value.DurationMS),
 		ErrorCode: truncate(value.ErrorCode, 100), AttemptCount: len(value.Attempts), CreatedAt: value.CreatedAt,
 	}
 	attempts := make([]requestAuditAttemptModel, 0, len(value.Attempts))
@@ -733,4 +734,36 @@ func applyAuditQuery(query *gorm.DB, search string, start, end time.Time, filter
 		query = query.Where("streaming = ?", false)
 	}
 	return query
+}
+
+// DeleteOlderThan 分批删除早于 cutoff 的审计及其 attempts 明细。
+// 先按 id 升序圈定本批审计（与 created_at 索引序一致），在单事务内先删
+// attempts 再删审计，保证任何中断不会留下孤儿 attempts。返回删除的审计
+// 条数；调用方以 返回值 < limit 判定本批排空。
+func (r *AuditRepository) DeleteOlderThan(ctx context.Context, cutoff time.Time, limit int) (int, error) {
+	if limit < 1 {
+		limit = auditRetentionBatchSize
+	}
+	var ids []uint64
+	if err := r.db.db.WithContext(ctx).
+		Model(&requestAuditModel{}).
+		Where("created_at < ?", cutoff.UTC()).
+		Order("id ASC").
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("audit_id IN ?", ids).Delete(&requestAuditAttemptModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id IN ?", ids).Delete(&requestAuditModel{}).Error
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }

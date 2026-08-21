@@ -111,7 +111,7 @@ func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRef
 	if err != nil {
 		return tokenPayload{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return tokenPayload{}, err
@@ -280,6 +280,24 @@ func isASCIITokenMaterial(value string) bool {
 	return true
 }
 func redactOAuthDiagnosticText(value string) string {
+	// 嵌套 JSON 字符串（值本身是序列化的对象/数组）：先解析递归脱敏再
+	// 重新序列化——键级规则对内层 access_token 等生效（round 21 修复：
+	// PoC 实证内嵌 {"access_token":...} 原样存活）。
+	if trimmed := strings.TrimSpace(value); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var parsed any
+		if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+			if redacted, err := json.Marshal(redactOAuthDiagnosticValue("", parsed)); err == nil {
+				value = string(redacted)
+			}
+		}
+	}
+	// URL 编码形态（access_token%3D...）：解码后命中敏感对模式即整体脱敏
+	// （保守：解码形态可能被二次编码，不逐段还原）。
+	if decoded := urlDecodeLoose(value); decoded != value {
+		if oauthSensitivePairPattern.MatchString(decoded) || oauthBearerPattern.MatchString(decoded) {
+			return "[REDACTED]"
+		}
+	}
 	value = oauthBearerPattern.ReplaceAllString(value, "Bearer [REDACTED]")
 	value = oauthJWTPattern.ReplaceAllString(value, "[REDACTED]")
 	value = oauthSensitivePairPattern.ReplaceAllString(value, "$1=[REDACTED]")
@@ -294,6 +312,16 @@ func redactOAuthDiagnosticText(value string) string {
 		}
 	}
 	return strings.Join(fields, " ")
+}
+
+// urlDecodeLoose 解码 %XX 一次；失败时原样返回。仅用于脱敏预检，
+// 不要求解码结果可逆——命中敏感模式即整体 [REDACTED]。
+func urlDecodeLoose(value string) string {
+	decoded, err := url.QueryUnescape(value)
+	if err != nil {
+		return value
+	}
+	return decoded
 }
 
 func normalizeOAuthErrorMessage(value string, limit int) string {
@@ -338,7 +366,7 @@ func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Va
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return err

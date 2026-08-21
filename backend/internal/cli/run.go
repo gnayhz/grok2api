@@ -37,7 +37,7 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer application.Close()
+	defer func() { _ = application.Close() }()
 	return application.Run(ctx)
 }
 

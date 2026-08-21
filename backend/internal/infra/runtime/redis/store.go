@@ -402,7 +402,7 @@ func (s *Store) PublishInvalidation(ctx context.Context, event repository.Invali
 
 func (s *Store) ListenInvalidations(ctx context.Context, handler func(context.Context, repository.InvalidationEvent) error) error {
 	pubsub := s.client.Subscribe(ctx, s.key("events", "invalidation"))
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 	if _, err := pubsub.Receive(ctx); err != nil {
 		return err
 	}
@@ -429,7 +429,7 @@ func (s *Store) ListenInvalidations(ctx context.Context, handler func(context.Co
 // ListenSettingsChanges 监听设置变更并调用重载函数，go-redis 会在连接中断后自动重连。
 func (s *Store) ListenSettingsChanges(ctx context.Context, handler func(context.Context) error) error {
 	pubsub := s.client.Subscribe(ctx, s.key("events", "settings"))
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 	if _, err := pubsub.Receive(ctx); err != nil {
 		return err
 	}

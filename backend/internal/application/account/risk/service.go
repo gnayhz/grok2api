@@ -14,6 +14,7 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/rsc"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 )
 
@@ -295,7 +296,9 @@ func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
 	perfmetrics.Default.Inc("account_rsc_check_total", perfmetrics.Labels{
 		Subsystem: "account", Operation: "rsc_check", Outcome: verdict.Verdict,
 	})
-	s.logger.Info("account_rsc_checked", "account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
+	// 日志与落库同一脱敏规则（rsc.RedactSecrets）：BotFlagDtl 是上游可控
+	// 文本，此前仓储层落库前脱敏但日志打原始值——同一载荷两套口径。
+	s.logger.Info("account_rsc_checked", "account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 	return verdict
 }
 

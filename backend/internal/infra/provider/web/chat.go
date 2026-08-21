@@ -171,7 +171,7 @@ func (p *parsedChat) appendText(value string) {
 	if p == nil || value == "" {
 		return
 	}
-	p.Text.WriteString(value)
+	_, _ = p.Text.WriteString(value)
 }
 
 func (p *parsedChat) resetText(value string) {
@@ -179,7 +179,7 @@ func (p *parsedChat) resetText(value string) {
 		return
 	}
 	p.Text.Reset()
-	p.Text.WriteString(value)
+	_, _ = p.Text.WriteString(value)
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
@@ -444,7 +444,7 @@ func (a *Adapter) handleResponseResource(ctx context.Context, request provider.R
 func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser, lease *infraegress.Lease, credential account.Credential, responseID, model, operation, prompt string, previous *inferencedomain.WebResponseState, tools toolConfiguration, parallelTools bool, options conversation.ResponseOptions) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
-		defer source.Close()
+		defer func() { _ = source.Close() }()
 		defer lease.Release()
 		parsed := &parsedChat{
 			ResponseID: responseID, InputTokens: estimateTokens(prompt), Tools: tools.ResponseTools,
@@ -1586,8 +1586,8 @@ func citationAnnotation(parsed *parsedChat, rawURL string, index int) map[string
 	return annotation
 }
 
-// lookupSourcePageTitle returns a non-empty page title for rawURL, or "" if unknown.
-// Unlike searchSourceTitle, it does not fall back to the URL itself.
+// lookupSourcePageTitle returns a non-empty page title for rawURL, or "" if
+// unknown. It never falls back to the URL itself (callers decide fallback).
 func lookupSourcePageTitle(sources []map[string]any, rawURL string) string {
 	if normalized, valid := searchresult.NormalizeURL(rawURL); valid {
 		rawURL = normalized
@@ -1601,16 +1601,6 @@ func lookupSourcePageTitle(sources []map[string]any, rawURL string) string {
 		}
 	}
 	return ""
-}
-
-func searchSourceTitle(sources []map[string]any, rawURL string) string {
-	if title := lookupSourcePageTitle(sources, rawURL); title != "" {
-		return title
-	}
-	if normalized, valid := searchresult.NormalizeURL(rawURL); valid {
-		return normalized
-	}
-	return rawURL
 }
 
 func upsertHostedSearchCall(parsed *parsedChat, id, kind, query, status string) *hostedSearchCall {
@@ -2496,21 +2486,21 @@ func (f *webStopFilter) Flush() string {
 func writeStreamStart(writer io.Writer, operation, responseID, model string, inputTokens int64) {
 	if operation == "chat" {
 		chunk := map[string]any{"id": strings.Replace(responseID, "resp_", "chatcmpl_", 1), "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}}}
-		writeSSE(writer, "", chunk)
+		_ = writeSSE(writer, "", chunk)
 		return
 	}
 	if operation == conversation.OperationMessages {
-		writeSSE(writer, "message_start", map[string]any{
+		_ = writeSSE(writer, "message_start", map[string]any{
 			"type": "message_start", "message": map[string]any{
 				"id": strings.Replace(responseID, "resp_", "msg_", 1), "type": "message", "role": "assistant", "model": model,
 				"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
 				"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
 			},
 		})
-		writeSSE(writer, "content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
+		_ = writeSSE(writer, "content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
 		return
 	}
-	writeSSE(writer, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": responseID, "object": "response", "status": "in_progress", "model": model, "output": []any{}}})
+	_ = writeSSE(writer, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": responseID, "object": "response", "status": "in_progress", "model": model, "output": []any{}}})
 }
 
 type webVisibleStreamPhase struct {
@@ -2610,25 +2600,25 @@ func writeStreamDone(writer io.Writer, operation, responseID, model string, pars
 		if toolUsage := payload["server_side_tool_usage"]; toolUsage != nil {
 			chunk["server_side_tool_usage"] = toolUsage
 		}
-		writeSSE(writer, "", chunk)
+		_ = writeSSE(writer, "", chunk)
 		_, _ = io.WriteString(writer, "data: [DONE]\n\n")
 		return
 	}
 	if operation == conversation.OperationMessages {
-		writeSSE(writer, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		_ = writeSSE(writer, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 		stopReason := "end_turn"
 		if len(parsed.ToolCalls) > 0 {
 			stopReason = "tool_use"
 		}
 		usage, _ := payload["usage"].(map[string]any)
-		writeSSE(writer, "message_delta", map[string]any{
+		_ = writeSSE(writer, "message_delta", map[string]any{
 			"type": "message_delta", "delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
 			"usage": map[string]any{"output_tokens": usage["output_tokens"]},
 		})
-		writeSSE(writer, "message_stop", map[string]any{"type": "message_stop"})
+		_ = writeSSE(writer, "message_stop", map[string]any{"type": "message_stop"})
 		return
 	}
-	writeSSE(writer, "response.completed", map[string]any{"type": "response.completed", "response": payload})
+	_ = writeSSE(writer, "response.completed", map[string]any{"type": "response.completed", "response": payload})
 }
 
 // writeStreamAnnotations emits Chat Completions delta.annotations. Responses

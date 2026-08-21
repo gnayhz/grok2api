@@ -292,48 +292,53 @@ type billingReservationModel struct {
 func (billingReservationModel) TableName() string { return "billing_reservations" }
 
 type requestAuditModel struct {
-	ID                      uint64    `gorm:"primaryKey;autoIncrement"`
-	EventID                 string    `gorm:"size:64;check:chk_request_audits_event_id,event_id = '' OR length(event_id) BETWEEN 16 AND 64"`
-	RequestID               string    `gorm:"size:64;not null;check:chk_request_audits_request_id,length(request_id) BETWEEN 1 AND 64"`
-	ClientKeyID             uint64    `gorm:"not null;check:chk_request_audits_client_key_id,client_key_id > 0"`
-	ClientKeyName           string    `gorm:"size:160;check:chk_request_audits_client_key_name,length(client_key_name) <= 160"`
-	ClientIP                string    `gorm:"size:45;not null;default:'';check:chk_request_audits_client_ip,length(client_ip) <= 45"`
-	ModelRouteID            uint64    `gorm:"not null;check:chk_request_audits_model_route_id,model_route_id > 0"`
-	ModelPublicID           string    `gorm:"size:255;check:chk_request_audits_model_public_id,length(model_public_id) <= 255"`
-	ModelUpstreamModel      string    `gorm:"size:255;check:chk_request_audits_model_upstream_model,length(model_upstream_model) <= 255"`
-	Provider                string    `gorm:"size:32;not null;check:chk_request_audits_provider,provider IN ('grok_build','grok_web','grok_console')"`
-	Operation               string    `gorm:"size:32;not null;check:chk_request_audits_operation,operation IN ('responses','compaction','chat','messages','image','image_edit','video','tts','stt','realtime','voice')"`
-	UsageSource             string    `gorm:"size:16;not null;check:chk_request_audits_usage_source,usage_source IN ('upstream','estimated','none')"`
-	ReasoningEffort         string    `gorm:"size:32;not null;default:'';check:chk_request_audits_reasoning_effort,length(reasoning_effort) <= 32"`
-	AccountID               *uint64   `gorm:"check:chk_request_audits_account_id,account_id IS NULL OR account_id > 0"`
-	AccountName             string    `gorm:"size:160;check:chk_request_audits_account_name,length(account_name) <= 160"`
-	EgressNodeID            *uint64   `gorm:"check:chk_request_audits_egress_node_id,egress_node_id IS NULL OR egress_node_id > 0"`
-	EgressNodeName          string    `gorm:"size:160;not null;default:'';check:chk_request_audits_egress_node_name,length(egress_node_name) <= 160"`
-	EgressScope             string    `gorm:"size:32;not null;default:'';check:chk_request_audits_egress_scope,egress_scope IN ('','grok_build','grok_web','grok_console','grok_web_asset','grok_console_asset')"`
-	EgressMode              string    `gorm:"size:16;not null;default:'';check:chk_request_audits_egress_mode,egress_mode IN ('','direct','proxy')"`
-	StatusCode              int       `gorm:"not null;check:chk_request_audits_status_code,status_code BETWEEN 100 AND 599"`
-	Streaming               bool      `gorm:"not null;default:false"`
-	MediaInputImages        int64     `gorm:"not null;default:0"`
-	MediaOutputImages       int64     `gorm:"not null;default:0"`
-	MediaOutputSeconds      int64     `gorm:"not null;default:0"`
-	InputTokens             int64     `gorm:"not null;default:0;check:chk_request_audits_metrics,media_input_images >= 0 AND media_output_images >= 0 AND media_output_seconds >= 0 AND input_tokens >= 0 AND cached_input_tokens >= 0 AND output_tokens >= 0 AND reasoning_tokens >= 0 AND total_tokens >= 0 AND cost_in_usd_ticks >= 0 AND estimated_cost_in_usd_ticks >= 0 AND num_sources_used >= 0 AND num_server_side_tools_used >= 0 AND context_input_tokens >= 0 AND context_output_tokens >= 0 AND duration_ms >= 0"`
-	CachedInputTokens       int64     `gorm:"not null;default:0"`
-	OutputTokens            int64     `gorm:"not null;default:0"`
-	ReasoningTokens         int64     `gorm:"not null;default:0"`
-	TotalTokens             int64     `gorm:"not null;default:0"`
-	CostInUSDTicks          int64     `gorm:"not null;default:0"`
-	EstimatedCostInUSDTicks int64     `gorm:"not null;default:0"`
-	PricingModel            string    `gorm:"size:100;check:chk_request_audits_pricing_model,length(pricing_model) <= 100"`
-	PricingVersion          string    `gorm:"size:20;check:chk_request_audits_pricing_version,length(pricing_version) <= 20"`
-	NumSourcesUsed          int64     `gorm:"not null;default:0"`
-	NumServerSideToolsUsed  int64     `gorm:"not null;default:0"`
-	ContextInputTokens      int64     `gorm:"not null;default:0"`
-	ContextOutputTokens     int64     `gorm:"not null;default:0"`
-	FirstTokenMS            *int64    `gorm:"column:first_token_ms"`
-	DurationMS              int64     `gorm:"not null;default:0"`
-	ErrorCode               string    `gorm:"size:100;check:chk_request_audits_error_code,length(error_code) <= 100"`
-	AttemptCount            int       `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
-	CreatedAt               time.Time `gorm:"not null"`
+	ID                      uint64  `gorm:"primaryKey;autoIncrement"`
+	EventID                 string  `gorm:"size:64;check:chk_request_audits_event_id,event_id = '' OR length(event_id) BETWEEN 16 AND 64"`
+	RequestID               string  `gorm:"size:64;not null;check:chk_request_audits_request_id,length(request_id) BETWEEN 1 AND 64"`
+	ClientKeyID             uint64  `gorm:"not null;check:chk_request_audits_client_key_id,client_key_id > 0"`
+	ClientKeyName           string  `gorm:"size:160;check:chk_request_audits_client_key_name,length(client_key_name) <= 160"`
+	ClientIP                string  `gorm:"size:45;not null;default:'';check:chk_request_audits_client_ip,length(client_ip) <= 45"`
+	ModelRouteID            uint64  `gorm:"not null;check:chk_request_audits_model_route_id,model_route_id > 0"`
+	ModelPublicID           string  `gorm:"size:255;check:chk_request_audits_model_public_id,length(model_public_id) <= 255"`
+	ModelUpstreamModel      string  `gorm:"size:255;check:chk_request_audits_model_upstream_model,length(model_upstream_model) <= 255"`
+	Provider                string  `gorm:"size:32;not null;check:chk_request_audits_provider,provider IN ('grok_build','grok_web','grok_console')"`
+	Operation               string  `gorm:"size:32;not null;check:chk_request_audits_operation,operation IN ('responses','compaction','chat','messages','image','image_edit','video','tts','stt','realtime','voice')"`
+	UsageSource             string  `gorm:"size:16;not null;check:chk_request_audits_usage_source,usage_source IN ('upstream','estimated','none')"`
+	ReasoningEffort         string  `gorm:"size:32;not null;default:'';check:chk_request_audits_reasoning_effort,length(reasoning_effort) <= 32"`
+	AccountID               *uint64 `gorm:"check:chk_request_audits_account_id,account_id IS NULL OR account_id > 0"`
+	AccountName             string  `gorm:"size:160;check:chk_request_audits_account_name,length(account_name) <= 160"`
+	EgressNodeID            *uint64 `gorm:"check:chk_request_audits_egress_node_id,egress_node_id IS NULL OR egress_node_id > 0"`
+	EgressNodeName          string  `gorm:"size:160;not null;default:'';check:chk_request_audits_egress_node_name,length(egress_node_name) <= 160"`
+	EgressScope             string  `gorm:"size:32;not null;default:'';check:chk_request_audits_egress_scope,egress_scope IN ('','grok_build','grok_web','grok_console','grok_web_asset','grok_console_asset')"`
+	EgressMode              string  `gorm:"size:16;not null;default:'';check:chk_request_audits_egress_mode,egress_mode IN ('','direct','proxy')"`
+	StatusCode              int     `gorm:"not null;check:chk_request_audits_status_code,status_code BETWEEN 100 AND 599"`
+	Streaming               bool    `gorm:"not null;default:false"`
+	MediaInputImages        int64   `gorm:"not null;default:0"`
+	MediaOutputImages       int64   `gorm:"not null;default:0"`
+	MediaOutputSeconds      int64   `gorm:"not null;default:0"`
+	InputTokens             int64   `gorm:"not null;default:0;check:chk_request_audits_metrics,media_input_images >= 0 AND media_output_images >= 0 AND media_output_seconds >= 0 AND input_tokens >= 0 AND cached_input_tokens >= 0 AND output_tokens >= 0 AND reasoning_tokens >= 0 AND total_tokens >= 0 AND cost_in_usd_ticks >= 0 AND estimated_cost_in_usd_ticks >= 0 AND num_sources_used >= 0 AND num_server_side_tools_used >= 0 AND context_input_tokens >= 0 AND context_output_tokens >= 0 AND duration_ms >= 0"`
+	CachedInputTokens       int64   `gorm:"not null;default:0"`
+	OutputTokens            int64   `gorm:"not null;default:0"`
+	ReasoningTokens         int64   `gorm:"not null;default:0"`
+	TotalTokens             int64   `gorm:"not null;default:0"`
+	CostInUSDTicks          int64   `gorm:"not null;default:0"`
+	EstimatedCostInUSDTicks int64   `gorm:"not null;default:0"`
+	PricingModel            string  `gorm:"size:100;check:chk_request_audits_pricing_model,length(pricing_model) <= 100"`
+	PricingVersion          string  `gorm:"size:20;check:chk_request_audits_pricing_version,length(pricing_version) <= 20"`
+	NumSourcesUsed          int64   `gorm:"not null;default:0"`
+	NumServerSideToolsUsed  int64   `gorm:"not null;default:0"`
+	ContextInputTokens      int64   `gorm:"not null;default:0"`
+	ContextOutputTokens     int64   `gorm:"not null;default:0"`
+	FirstTokenMS            *int64  `gorm:"column:first_token_ms"`
+	// DeliveredEvents/DeliveredBytes 是流式转发到客户端的 SSE data 事件数与
+	// 累计字节（非流式为响应体字节/1）。回答「200 且带错误码的请求实际交付了
+	// 多少」——尾部挂起/中断场景的客户端可见性（2026-08-21 轮26）。
+	DeliveredEvents int64     `gorm:"not null;default:0"`
+	DeliveredBytes  int64     `gorm:"not null;default:0"`
+	DurationMS      int64     `gorm:"not null;default:0"`
+	ErrorCode       string    `gorm:"size:100;check:chk_request_audits_error_code,length(error_code) <= 100"`
+	AttemptCount    int       `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
+	CreatedAt       time.Time `gorm:"not null"`
 }
 
 func (requestAuditModel) TableName() string { return "request_audits" }

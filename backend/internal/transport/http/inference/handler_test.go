@@ -991,7 +991,7 @@ func TestCopyStreamWritesTerminalOnIdleTimeout(t *testing.T) {
 		want     []string
 	}{
 		{name: "chat", protocol: streamProtocolChat, want: []string{`"code":"upstream_stream_idle_timeout"`, "data: [DONE]"}},
-		{name: "responses", protocol: streamProtocolResponses, want: []string{`"type":"response.incomplete"`, `"id":"resp_abort"`, `"created_at":`, `"sequence_number":`, `"incomplete_details"`}},
+		{name: "responses", protocol: streamProtocolResponses, want: []string{`"type":"response.failed"`, `"id":"resp_abort"`, `"created_at":`, `"sequence_number":`, `"code":"server_error"`, `"message":"upstream_stream_idle_timeout: `, `"status":"failed"`, `"model":`}},
 		{name: "anthropic", protocol: streamProtocolAnthropic, want: []string{`"type":"error"`, "上游流式响应长时间无数据"}},
 	}
 	for _, test := range tests {
@@ -1046,7 +1046,7 @@ func TestCopyStreamFlushesUnterminatedResponsesTailBeforeAbort(t *testing.T) {
 		t.Fatalf("copy error = %v", err)
 	}
 	got := recorder.Body.String()
-	if !strings.Contains(got, `"delta":"partial"`) || !strings.Contains(got, "\n\nevent: response.incomplete") {
+	if !strings.Contains(got, `"delta":"partial"`) || !strings.Contains(got, "\n\nevent: response.failed") {
 		t.Fatalf("unterminated tail and abort event were not separated: %q", got)
 	}
 	if marked != 1 {
@@ -1070,7 +1070,7 @@ func TestCopyStreamDropsMalformedResponsesTailBeforeAbort(t *testing.T) {
 	if strings.Contains(got, string(malformed)) {
 		t.Fatalf("malformed tail leaked before terminal event: %q", got)
 	}
-	if !strings.Contains(got, `"type":"response.incomplete"`) {
+	if !strings.Contains(got, `"type":"response.failed"`) {
 		t.Fatalf("abort event missing after malformed tail: %q", got)
 	}
 }
@@ -1099,8 +1099,44 @@ func TestCopyStreamWritesTerminalOnIncompleteEOF(t *testing.T) {
 		t.Fatalf("copy error = %v", err)
 	}
 	got := recorder.Body.String()
-	if !strings.Contains(got, `"type":"response.incomplete"`) || !strings.Contains(got, `"reason":"upstream_stream_incomplete"`) {
+	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"message":"upstream_stream_incomplete: `) {
 		t.Fatalf("incomplete EOF missing terminal SSE event: %q", got)
+	}
+}
+
+func TestCopyStreamAbortTrailerAlwaysIncludesModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	// 流在首个事件前中止：无 model 元数据。TUI serde 要求 response.failed
+	// 必含 model 键——宁可空串也不能缺失。
+	_, err := copyStream(context.Writer, &chunkErrorReader{}, streamProtocolResponses, nil)
+	if !errors.Is(err, errUpstreamStreamRead) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"model":`) {
+		t.Fatalf("abort trailer missing response.failed or model: %q", got)
+	}
+}
+
+func TestCopyStreamStripsAllInternalSSEMarkers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := []byte(": grok2api-reasoning-start\n\n" +
+		`data: {"choices":[{"delta":{"content":"answer"}}]}` + "\n\n" +
+		"data: [DONE]\n\n")
+	_, err := copyStream(context.Writer, bytes.NewReader(body), streamProtocolChat, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := recorder.Body.String()
+	if strings.Contains(got, "grok2api-reasoning-start") {
+		t.Fatalf("internal SSE marker leaked to client: %q", got)
+	}
+	if !strings.Contains(got, `"content":"answer"`) || !strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("public events must survive marker stripping: %q", got)
 	}
 }
 

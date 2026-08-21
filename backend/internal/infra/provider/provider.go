@@ -1091,6 +1091,22 @@ func (r *Registry) RetryForbiddenAsEgress(value account.Provider) bool {
 	return ok && definition.Inference.RetryForbiddenAsEgress
 }
 
+// PolicyForbiddenError 由上游错误实现：HTTP 403 且响应体是结构化 JSON——
+// 源站应用层策略拒绝（内容审核/端点资格等），不是浏览器会话挑战也不是
+// 账号级故障。调用方对这类失败不应做 egress 重试或换号轮询（round 55
+// 活体：视频 403 "page out of date" 实为 body_kind=json 的源站拒绝，
+// 8 次换号重试是纯配额消耗——每号 2 次 × 4 号全部同错）。
+type PolicyForbiddenError interface {
+	error
+	IsPolicyForbidden() bool
+}
+
+// IsPolicyForbidden 判定错误链中是否携带源站策略级 403。
+func IsPolicyForbidden(err error) bool {
+	var policy PolicyForbiddenError
+	return errors.As(err, &policy) && policy.IsPolicyForbidden()
+}
+
 func (r *Registry) Responses(value account.Provider) (ResponseAdapter, bool) {
 	adapter, ok := r.Get(value)
 	if !ok {

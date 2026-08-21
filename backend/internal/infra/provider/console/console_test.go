@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
+
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -2088,9 +2088,14 @@ func verifyTestDPoPProof(t *testing.T, request *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		publicKey := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(xBytes), Y: new(big.Int).SetBytes(yBytes)}
-		if !publicKey.Curve.IsOnCurve(publicKey.X, publicKey.Y) {
-			return nil, errors.New("DPoP JWK point is not on P-256")
+		point := make([]byte, 65)
+		point[0] = 4
+		copy(point[1:33], xBytes)
+		copy(point[33:65], yBytes)
+		// ParseUncompressedPublicKey 自带 on-curve 校验（替代弃用的 IsOnCurve）。
+		publicKey, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+		if err != nil {
+			return nil, fmt.Errorf("DPoP JWK point 无效: %w", err)
 		}
 		return publicKey, nil
 	}, jwt.WithValidMethods([]string{"ES256"}))

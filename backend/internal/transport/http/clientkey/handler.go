@@ -103,8 +103,8 @@ func (h *Handler) list(c *gin.Context) {
 
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -122,8 +122,8 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -141,8 +141,8 @@ func (h *Handler) batchDelete(c *gin.Context) {
 
 func (h *Handler) create(c *gin.Context) {
 	var request createRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	expiresAt, err := parseTime(request.ExpiresAt)
@@ -196,8 +196,8 @@ func (h *Handler) update(c *gin.Context) {
 		return
 	}
 	var request updateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
 		return
 	}
 	providerScope, tierScope, err := parseRequestedScopes(request.ProviderScope, request.TierScope, request.AccountPool)

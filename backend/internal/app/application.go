@@ -28,7 +28,6 @@ import (
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
@@ -64,6 +63,7 @@ type Application struct {
 	database          *relational.Database
 	server            *http.Server
 	audits            *auditapp.Service
+	auditRetention    time.Duration
 	responses         repository.ResponseRepository
 	cleanupLock       repository.DistributedLock
 	runtime           io.Closer
@@ -310,6 +310,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressService.SetOperationsConfigInvalidator(egressManager)
 	egressManager.SetFailureProber(egressService.TestNode)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
+	// 媒体作业预检/清理：删除 key 前处置 media_jobs 的 RESTRICT 外键引用
+	//（round 51：失败视频作业曾使 key 不可删并落裸 500）。
+	clientKeyService.SetMediaJobRepository(mediaJobRepo)
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
 	auditService.UpdateWriterConfig(cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value(), cfg.Audit.CommitDelay.Value())
 	auditService.UpdateLedgerConfig(auditLedgerConfig(cfg.Audit))
@@ -415,7 +418,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
-		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
+		audits: auditService, auditRetention: cfg.Audit.Retention.Value(), responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup, accountRisk: riskService, accountRiskPatrol: riskPatrol,
 	}, nil
@@ -464,7 +467,7 @@ func (a *Application) runAccountRiskPatrol(ctx context.Context) {
 		}
 		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		patrolDue, errorRetryDue := a.accountRisk.PatrolCutoffs()
-		due, err := query.ListPatrolDue(patrolCtx, accountdomain.ProviderWeb, patrolDue, errorRetryDue, 50)
+		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, 50)
 		if err != nil {
 			a.logger.Warn("account_risk_patrol_query_failed", "error", err.Error())
 			cancel()
@@ -520,14 +523,17 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 
 func qualityRetryRuntime(value config.RequestRetryConfig) gateway.QualityRetryRuntime {
 	return gateway.QualityRetryRuntime{
-		Enabled:          value.Enabled,
-		MaxAttempts:      value.MaxAttempts,
-		HoldTimeout:      value.HoldTimeout.Value(),
-		MinOutputTokens:  int64(value.MinOutputTokens),
-		OnExhausted:      value.OnExhausted,
-		AccountCooldown:  value.AccountCooldown.Value(),
-		SameAccountRetry: value.SameAccountRetry,
-		EarlyHeaderAbort: value.EarlyHeaderAbort.Value(),
+		Enabled:             value.Enabled,
+		MaxAttempts:         value.MaxAttempts,
+		HoldTimeout:         value.HoldTimeout.Value(),
+		MinOutputTokens:     int64(value.MinOutputTokens),
+		OnExhausted:         value.OnExhausted,
+		AccountCooldown:     value.AccountCooldown.Value(),
+		SameAccountRetry:    value.SameAccountRetry,
+		EarlyHeaderAbort:    value.EarlyHeaderAbort.Value(),
+		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
+		EvidenceTimeout:     value.EvidenceTimeout.Value(),
+		CreatedTimeout:      value.CreatedTimeout.Value(),
 	}
 }
 
@@ -609,6 +615,13 @@ func (a *Application) Run(ctx context.Context) error {
 		})
 		return nil
 	})
+	if a.auditRetention > 0 {
+		// audit.retention：审计表无界增长的长时运行防线（0 = 关闭，不启动）。
+		// 与 requestRetry 同理不在运行时设置面内，修改需重启进程。
+		startBackground("audit_retention", func(taskCtx context.Context) error {
+			return a.audits.RunRetention(taskCtx, a.auditRetention)
+		})
+	}
 	startBackground("model_cooldown_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 10*time.Minute, "model_cooldown_cleanup", func(runCtx context.Context) error {
 			_, err := a.accountRepo.PruneExpiredModelQuotaBlocks(runCtx, time.Now().UTC(), 1000)

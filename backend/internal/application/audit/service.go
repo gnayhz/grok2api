@@ -964,3 +964,51 @@ func (s *Service) notifyDropped(eventID string) {
 	}()
 	observer([]string{eventID})
 }
+
+// RunRetention 周期清理超过保留时长的审计记录（audit.retention，0 = 关闭
+// 由调用方不启动本循环保证）。每轮在时间预算内连续分批删除，直到本批
+// 排空或预算耗尽；排空后等下一个周期。删除路径与写入路径独立：本循环
+// 出错只记录并等待下轮，绝不阻塞审计写入。
+func (s *Service) RunRetention(ctx context.Context, retention time.Duration) error {
+	const interval = time.Hour
+	const budget = 30 * time.Second
+	if retention <= 0 {
+		<-ctx.Done()
+		return nil
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		s.runRetentionSweep(ctx, retention, budget)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) runRetentionSweep(ctx context.Context, retention, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	total := 0
+	for time.Now().Before(deadline) {
+		batchCtx, cancel := context.WithDeadline(ctx, deadline)
+		deleted, err := s.audits.DeleteOlderThan(batchCtx, time.Now().UTC().Add(-retention), auditRetentionBatchSize)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				s.logger.Warn("audit_retention_delete_failed", "error", err, "deleted_so_far", total)
+			}
+			return
+		}
+		total += deleted
+		if deleted < auditRetentionBatchSize {
+			break
+		}
+	}
+	if total > 0 {
+		s.logger.Info("audit_retention_swept", "deleted", total)
+	}
+}
+
+const auditRetentionBatchSize = 500

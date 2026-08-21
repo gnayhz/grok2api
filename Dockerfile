@@ -7,7 +7,9 @@ FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS frontend-builder
 WORKDIR /src/frontend
 RUN corepack enable
 
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml 携带 overrides——缺失时 frozen install 因 lockfile
+# 配置不匹配而拒绝（round 39 部署发现）。
+COPY frontend/package.json frontend/pnpm-workspace.yaml frontend/pnpm-lock.yaml ./
 RUN --mount=type=cache,id=grok2api-pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && \
     pnpm fetch --frozen-lockfile

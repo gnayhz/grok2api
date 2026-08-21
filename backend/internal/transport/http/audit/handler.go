@@ -67,6 +67,8 @@ type auditResponse struct {
 	ContextOutputTokens     int64                     `json:"contextOutputTokens"`
 	FirstTokenMS            *int64                    `json:"firstTokenMs,omitempty"`
 	OutputTokensPerSecond   *float64                  `json:"outputTokensPerSecond,omitempty"`
+	DeliveredEvents         int64                     `json:"deliveredEvents"`
+	DeliveredBytes          int64                     `json:"deliveredBytes"`
 	DurationMS              int64                     `json:"durationMs"`
 	ErrorCode               string                    `json:"errorCode,omitempty"`
 	AttemptCount            int                       `json:"attemptCount"`
@@ -127,6 +129,14 @@ func (h *Handler) list(c *gin.Context) {
 	if c.Query("pagination") == "cursor" {
 		h.listCursor(c)
 		return
+	}
+	// 兼容分页不接过滤参数——此前会静默忽略并返回全量（round 83 活体
+	// 钓出：errorCode 过滤在旧分页下无声失效）。显式 400 优于静默。
+	for _, name := range []string{"model", "status", "mode", "key", "account", "errorCode", "sortBy", "sortOrder"} {
+		if c.Query(name) != "" {
+			response.Error(c, http.StatusBadRequest, "filterRequiresCursor", "过滤/排序参数需要 pagination=cursor 分页")
+			return
+		}
 	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
@@ -304,7 +314,7 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		Billing:        newBillingBreakdown(value),
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens,
-		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DurationMS: value.DurationMS,
+		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DeliveredEvents: value.DeliveredEvents, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
 		ErrorCode: value.ErrorCode, AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
 	}
 }

@@ -420,7 +420,7 @@ func (a *Adapter) doVideoJSON(ctx context.Context, credential account.Credential
 	if err := normalizeGzipResponse(resp); err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, buildVideoMaxBodySize+1))
 	if err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -17,13 +18,23 @@ const (
 	qualityProtocolResponses  = "responses"
 	qualityProtocolAnthropic  = "anthropic"
 	qualityHoldMaxBufferBytes = 4 << 20
+	// 注：chat 流转换器在 reasoning item 打开时发出的时序注释
+	// ": grok2api-reasoning-start"（见 chat_stream.go markChatReasoningStart）
+	// 不是思考证据——降智流同样会发；扫描器按 SSE 注释行（非 data: 前缀）
+	// 统一跳过，语义见 ObserveQualityChunk 行循环内的 NOTE。
 )
 
 type qualityScanState struct {
-	protocol        string
-	pending         []byte
-	hasThinking     bool
-	visibleRunes    int
+	protocol     string
+	pending      []byte
+	hasThinking  bool
+	visibleRunes int
+	// aggregateRunes 记录仅在终态聚合形式到达的文本（completed.output[].
+	// content[].text，无增量 delta）：同样是真实可见输出，计入可见估计。
+	aggregateRunes int
+	// semanticOutput 表示流携带非文本的语义输出（工具调用参数、非文本
+	// 内容块）：既不是空流，也不适合按 token 阈值扣留——直接交付。
+	semanticOutput  bool
 	reasoningTokens int64
 	outputTokens    int64
 	usage           Usage
@@ -32,6 +43,9 @@ type qualityScanState struct {
 	// oversizedLine 标记出现过 >1MiB 的单行：内容无法可靠解析，按与缓冲
 	// 上限一致的 fail-open 处理。
 	oversizedLine bool
+	// sawDataEvent 标记已解析到至少一个 SSE data 事件（任意类型）。供首事件
+	// 截止使用：keepalive 注释不算——降智排队期间上游只发注释或零字节。
+	sawDataEvent bool
 	// 逐帧解码 scratch：事件结构体挂在 state 上复用（见类型注释）。
 	chatEvent      qualityChatEvent
 	responsesEvent qualityResponsesEvent
@@ -129,19 +143,27 @@ func qualityProtocolForOperation(operation audit.Operation) string {
 	}
 }
 
+// semanticOutputOnly 报告"仅语义输出"形态：流有工具调用等非文本输出，
+// 没有任何文本、思考或聚合内容。这样的流既不是空流也不适合按 token
+// 阈值扣留——调用决策的重放收益低而不确定性非零，直接交付。
+func (s *qualityScanState) semanticOutputOnly() bool {
+	return s.semanticOutput && s.visibleRunes == 0 && s.aggregateRunes == 0 && !s.hasThinking
+}
+
 func (s *qualityScanState) signals() QualityStreamSignals {
-	visible := int64((s.visibleRunes + 3) / 4)
+	visibleRunes := max(s.visibleRunes, s.aggregateRunes)
+	visible := int64((visibleRunes + 3) / 4)
 	// usage 声明仅在流本身已有内容/推理证据时才补充 output 估计：零内容
 	// 零推理的流（含 usage 帧先于 terminal 到达的合并形态）不能靠 usage
 	// 声明变成"有输出"——那会把 R5 空流误判成可扣留流（外部复核发现）。
-	if s.usage.Reported && (s.visibleRunes > 0 || s.hasThinking) {
+	if s.usage.Reported && (visibleRunes > 0 || s.hasThinking) {
 		fromUsage := s.usage.OutputTokens - s.usage.ReasoningTokens
 		if fromUsage > visible {
 			visible = fromUsage
 		}
 	}
 	output := s.outputTokens
-	if s.usage.Reported && (s.visibleRunes > 0 || s.hasThinking) && s.usage.OutputTokens > output {
+	if s.usage.Reported && (visibleRunes > 0 || s.hasThinking) && s.usage.OutputTokens > output {
 		output = s.usage.OutputTokens
 	}
 	// Thinking evidence is stream events only: non-empty reasoning text deltas
@@ -168,6 +190,8 @@ type qualityChatChoice struct {
 		Reasoning        string `json:"reasoning"`
 		ReasoningContent string `json:"reasoning_content"`
 		ThinkingContent  string `json:"thinking_content"`
+		ToolCalls        []any  `json:"tool_calls"`
+		FunctionCall     any    `json:"function_call"`
 	} `json:"delta"`
 	FinishReason string `json:"finish_reason"`
 }
@@ -189,17 +213,59 @@ type qualityChatEvent struct {
 	} `json:"usage"`
 }
 
+// qualityReasoningItem 覆盖终态聚合输出的观测面（type + content）。注意
+// encrypted_content 不在观测面内：2026-08-20 实测降智流（RSC risk）与
+// clean 流都携带密文，它对降智判定毫无判别力，不是思考证据。
+type qualityReasoningItem struct {
+	Type    string `json:"type"`
+	Content []struct {
+		Type    string `json:"type"`
+		Text    string `json:"text"`
+		Refusal string `json:"refusal"`
+	} `json:"content"`
+}
+
+// noteResponsesAggregateOutput 统计终态聚合送达的可见文本（completed.output
+// 里的 message content），并识别非文本内容块为语义输出。部分上游不发送
+// 增量 delta、只在 completed 一次性给出全文：那同样是真实可见输出。
+func noteResponsesAggregateOutput(state *qualityScanState, item qualityReasoningItem) int {
+	if !strings.EqualFold(strings.TrimSpace(item.Type), "message") {
+		if strings.TrimSpace(item.Type) != "" && !strings.EqualFold(strings.TrimSpace(item.Type), "reasoning") {
+			// Function/shell/MCP 等调用 item 是有意义的输出，即使上游省略
+			// usage 与参数增量事件。
+			state.semanticOutput = true
+		}
+		return 0
+	}
+	visibleRunes := 0
+	for _, content := range item.Content {
+		text := content.Text
+		if text == "" {
+			text = content.Refusal
+		}
+		if text != "" {
+			visibleRunes += utf8.RuneCountInString(text)
+			continue
+		}
+		if content.Type != "" && content.Type != "output_text" && content.Type != "refusal" {
+			state.semanticOutput = true
+		}
+	}
+	if visibleRunes > 0 {
+		state.semanticOutput = true
+	}
+	return visibleRunes
+}
+
 type qualityResponsesEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta"`
-	Item  struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-	} `json:"item"`
+	Type     string               `json:"type"`
+	Delta    string               `json:"delta"`
+	Item     qualityReasoningItem `json:"item"`
 	Response *struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
-		Usage *struct {
+		ID     string                 `json:"id"`
+		Model  string                 `json:"model"`
+		Output []qualityReasoningItem `json:"output"`
+		Usage  *struct {
 			OutputTokens        int64 `json:"output_tokens"`
 			InputTokens         int64 `json:"input_tokens"`
 			TotalTokens         int64 `json:"total_tokens"`
@@ -214,11 +280,13 @@ type qualityAnthropicEvent struct {
 	Type         string `json:"type"`
 	ContentBlock struct {
 		Type string `json:"type"`
+		Text string `json:"text"`
 	} `json:"content_block"`
 	Delta struct {
-		Type     string `json:"type"`
-		Text     string `json:"text"`
-		Thinking string `json:"thinking"`
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 	Usage *struct {
 		OutputTokens        int64 `json:"output_tokens"`
@@ -252,14 +320,13 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 		if len(line) == 0 {
 			continue
 		}
-		// NOTE: the ": grok2api-reasoning-start" SSE comment alone must NOT
-		// set hasThinking. The converter emits it on response.output_item.added
-		// {type:"reasoning"}, and degraded (B-form) streams also open that item
-		// while never streaming reasoning text — only non-empty reasoning deltas
-		// prove delivered thinking content.
+		// NOTE: SSE comments（如转换器发出的 ": grok2api-reasoning-start"）
+		// 不构成思考证据——降智流同样会发。仅有可见的推理文本增量
+		// （reasoning_text / reasoning_summary_text.delta 等）证明思考。
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
+		state.sawDataEvent = true
 		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 		if bytes.Equal(payload, []byte("[DONE]")) {
 			state.terminal = true
@@ -313,6 +380,11 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 		if delta.Content != "" {
 			noteVisibleContent(state, delta.Content)
 		}
+		// 工具调用参数是语义输出：纯 tool_calls 流不是空流，也不按 token
+		// 阈值扣留（调用决策的重放收益低、不确定性非零，直接交付）。
+		if len(delta.ToolCalls) > 0 || delta.FunctionCall != nil {
+			state.semanticOutput = true
+		}
 		if choice.FinishReason != "" {
 			state.terminal = true
 		}
@@ -331,18 +403,31 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 		if event.Delta != "" {
 			state.hasThinking = true
 		}
-	case "response.output_item.added":
-		// A reasoning item header alone is not delivered thinking: B-form
-		// degraded streams open the item but never emit reasoning text deltas.
+	case "response.output_item.added", "response.output_item.done":
+		// A reasoning item header alone is not delivered thinking: degraded
+		// streams open the item (and even deliver encrypted_content ciphertext
+		// on item.done) while never emitting visible reasoning text deltas.
 	case "response.output_text.delta":
 		if event.Delta != "" {
 			noteVisibleContent(state, event.Delta)
+		}
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.mcp_call_arguments.delta":
+		if event.Delta != "" {
+			state.semanticOutput = true
 		}
 	}
 	if event.Response != nil {
 		if state.responseID == "" {
 			state.responseID = event.Response.ID
 		}
+		// response.completed 的 output 数组可能只在末尾携带聚合形式的文本
+		// （无增量 delta）——那是真实可见输出；其中的 reasoning 项（含密文）
+		// 不是思考证据，跳过。
+		aggregateRunes := 0
+		for _, item := range event.Response.Output {
+			aggregateRunes += noteResponsesAggregateOutput(state, item)
+		}
+		state.aggregateRunes = max(state.aggregateRunes, aggregateRunes)
 		if event.Response.Usage != nil {
 			state.usage.Reported = true
 			state.usage.InputTokens = event.Response.Usage.InputTokens
@@ -367,12 +452,28 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 	case "content_block_start":
 		// A thinking block start alone is not delivered thinking; only a
 		// non-empty thinking_delta below proves streamed thinking content.
+		if event.ContentBlock.Type != "" && event.ContentBlock.Type != "text" && event.ContentBlock.Type != "thinking" {
+			// tool_use 等非文本内容块是语义输出。
+			state.semanticOutput = true
+		}
+	case "content_block_stop":
+		if event.ContentBlock.Type == "text" && event.ContentBlock.Text != "" {
+			// 部分 Messages 兼容上游只在 block 结束时给出全文（聚合送达）。
+			noteVisibleContent(state, event.ContentBlock.Text)
+			state.semanticOutput = true
+		}
 	case "content_block_delta":
 		if event.Delta.Type == "thinking_delta" && event.Delta.Thinking != "" {
 			state.hasThinking = true
 		}
+		// signature_delta（Messages 对 encrypted_content 的表达）不是思考
+		// 证据：与 Responses 密文同理，降智流同样携带签名。
 		if event.Delta.Type == "text_delta" && event.Delta.Text != "" {
 			noteVisibleContent(state, event.Delta.Text)
+		}
+		if event.Delta.Type == "input_json_delta" && event.Delta.PartialJSON != "" {
+			// 工具调用参数增量是语义输出。
+			state.semanticOutput = true
 		}
 	}
 	if event.Usage != nil {
@@ -402,6 +503,16 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 	var held bytes.Buffer
 	holdTimer := time.NewTimer(cfg.HoldTimeout)
 	defer holdTimer.Stop()
+	// 零证据截止：复杂提示词的降智流首输出静默期实测 75-121s（2026-08-21
+	// 魔法球实测），干净流首思考增量 2.1s 即达。截止内无证据且无输出即中止
+	// 该次尝试（走空闲路径重试），把降智流式尝试从“完整静默期”压到预算内。
+	evidenceTimer := time.NewTimer(cfg.EvidenceTimeout)
+	defer evidenceTimer.Stop()
+	// 首事件截止：直连复测证实降智排队期间上游零 data 事件（仅 keepalive
+	// 注释或零字节，response.created 等 68-125s），clean 恒定 0.8-2.2s。
+	// 比证据截止更早一档（5s vs 15s），把降智尝试成本再压低 2/3。
+	createdTimer := time.NewTimer(cfg.CreatedTimeout)
+	defer createdTimer.Stop()
 	// holdExpired 粘性：timer 只触发一次，之后到达的小输出也必须按“hold
 	// 已超时”立即扣留，而不是退回 Wait 等待 EOF——否则慢速降智流会把首
 	// 字节无限推迟到流关闭。
@@ -410,8 +521,12 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 		// 空流短路（与 finishQualityPeek 同语义）：terminal 已到而零内容零
 		// 推理时，usage 声明（含 output_tokens>0 的形式）不得把空流洗成可
 		// 扣留的“有内容”流——那会走扣留重试而不是空流冷却路径。
+		// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
 		// oversizedLine 时跳过：超长行证据不可靠应 fail-open，而非空流。
-		if state.terminal && !state.hasThinking && state.visibleRunes == 0 && !state.oversizedLine {
+		if state.terminal && !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.oversizedLine {
+			if state.semanticOutputOnly() {
+				return newPrefixReplay(&held, pump), QualityDeliver, state.usage, state.responseID, nil
+			}
 			return newPrefixReplay(&held, pump), QualityWait, state.usage, state.responseID, errQualityEmptyStream
 		}
 		sig := state.signals()
@@ -429,6 +544,22 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 			sig.HoldExpired = true
 			if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
 				return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
+			}
+		case <-evidenceTimer.C:
+			// 截止触发时仍零思考证据、零可见/聚合输出、非语义输出流：该次
+			// 尝试按零证据超时中止（服务端走空闲冷却+RSC 归因+重试）。已有
+			// 任何输出或证据的流不受影响（证据提前放行/输出达到阈值扣留）。
+			if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.semanticOutput && !state.oversizedLine {
+				_ = pump.Close()
+				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, errQualityEvidenceTimeout
+			}
+		case <-createdTimer.C:
+			// 首事件截止：连一个 data 事件都没到（keepalive 注释不算）。降智
+			// 排队期间的真实形态（直连复测 68-125s 零 data 事件）。中止该次
+			// 尝试走空闲路径；任何 data 事件已到达则本截止失效（由证据截止接管）。
+			if !state.sawDataEvent {
+				_ = pump.Close()
+				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, errQualityCreatedTimeout
 			}
 		case result, ok := <-pump.results:
 			if !ok {
@@ -466,8 +597,12 @@ func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *quality
 	signals := state.signals()
 	// 空流判定只看流证据：只有 usage 帧（声称 reasoning tokens）而零内容零
 	// 推理事件的流同样是空流——usage 声明不能把空 200 洗成可投递响应。
+	// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
 	// oversizedLine 优先走 fail-open（调用方 ClassifyQualityHold 已处理）。
-	if !state.hasThinking && state.visibleRunes == 0 && !state.oversizedLine {
+	if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.oversizedLine {
+		if state.semanticOutput {
+			return newPrefixReplay(held, pump), QualityDeliver, state.usage, state.responseID, nil
+		}
 		return newPrefixReplay(held, pump), QualityWait, state.usage, state.responseID, errQualityEmptyStream
 	}
 	return newPrefixReplay(held, pump), ClassifyQualityHold(signals, cfg.MinOutputTokens), state.usage, state.responseID, nil
@@ -481,4 +616,119 @@ func newPrefixReplay(held *bytes.Buffer, rest io.ReadCloser) io.ReadCloser {
 		return rest
 	}
 	return &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(held.Bytes()), rest), source: rest}
+}
+
+// qualityResponseBody 覆盖非流式上游响应（Build/Console 均为 Responses 形状）
+// 的观测面。summary/content 的可见思考文本与流式扫描器同语义；
+// encrypted_content 与 usage 声明不构成证据（2026-08-20 实测：降智响应
+// 密文与非零 reasoning_tokens 照常存在，无判别力）。
+type qualityResponseBody struct {
+	ID     string `json:"id"`
+	Model  string `json:"model"`
+	Output []struct {
+		Type    string `json:"type"`
+		Summary []struct {
+			Text string `json:"text"`
+		} `json:"summary"`
+		Content []struct {
+			Type    string `json:"type"`
+			Text    string `json:"text"`
+			Refusal string `json:"refusal"`
+		} `json:"content"`
+	} `json:"output"`
+	Usage *struct {
+		OutputTokens        int64 `json:"output_tokens"`
+		InputTokens         int64 `json:"input_tokens"`
+		TotalTokens         int64 `json:"total_tokens"`
+		OutputTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
+	} `json:"usage"`
+}
+
+// peekQualityBody 非流式响应的完整 body 判决。客户端本就要等完整 JSON 才能
+// 收到任何字节，读完再判的扣留附加延迟为零：不存在流式路径的时序复杂度
+// （无 hold 窗口/阈值/早断/前缀重放）。证据规则与流式扫描器一致：可见思考
+// 文本是唯一健康证据。无法识别的响应形状（无 output 数组的合法 JSON）
+// fail-open 放行，与 oversizedLine 同语义——不猜测质量。
+func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, string, error) {
+	cfg = normalizeQualityRetry(cfg)
+	if body == nil {
+		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, "", errQualityEmptyStream
+	}
+	data, readErr := io.ReadAll(body)
+	_ = body.Close()
+	replay := io.NopCloser(bytes.NewReader(data))
+	if readErr != nil {
+		return replay, QualityWait, Usage{}, "", readErr
+	}
+	var parsed qualityResponseBody
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		// 200 但 body 非合法 JSON：按空流处理（可重试），不猜质量。
+		return replay, QualityWait, Usage{}, "", errQualityEmptyStream
+	}
+	if parsed.Output == nil {
+		// 合法 JSON 但非 Responses 形状：fail-open，不猜质量。
+		return replay, QualityDeliver, Usage{}, parsed.ID, nil
+	}
+	state := qualityScanState{protocol: qualityProtocolResponses}
+	for _, item := range parsed.Output {
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		switch itemType {
+		case "reasoning":
+			// 与流式一致：reasoning item 的可见文本（summary/内容）是思考
+			// 证据；仅携带密文的 reasoning item 不是。
+			for _, summary := range item.Summary {
+				if strings.TrimSpace(summary.Text) != "" {
+					state.hasThinking = true
+				}
+			}
+			for _, content := range item.Content {
+				if strings.TrimSpace(content.Text) != "" {
+					state.hasThinking = true
+				}
+			}
+		case "message":
+			for _, content := range item.Content {
+				text := content.Text
+				if text == "" {
+					text = content.Refusal
+				}
+				if text != "" {
+					state.aggregateRunes += utf8.RuneCountInString(text)
+					continue
+				}
+				if content.Type != "" && content.Type != "output_text" && content.Type != "refusal" {
+					state.semanticOutput = true
+				}
+			}
+		default:
+			if itemType != "" {
+				// function_call / web_search_call 等调用 item 是语义输出。
+				state.semanticOutput = true
+			}
+		}
+	}
+	usage := Usage{}
+	if parsed.Usage != nil {
+		usage = Usage{
+			Reported:        true,
+			InputTokens:     parsed.Usage.InputTokens,
+			OutputTokens:    parsed.Usage.OutputTokens,
+			ReasoningTokens: parsed.Usage.OutputTokensDetails.ReasoningTokens,
+			TotalTokens:     parsed.Usage.TotalTokens,
+			ResponseModel:   parsed.Model,
+		}
+	}
+	// 空响应判定与 finishQualityPeek 同语义：零内容零思考且非纯语义输出 = 空流。
+	if !state.hasThinking && state.aggregateRunes == 0 {
+		if state.semanticOutput {
+			return replay, QualityDeliver, usage, parsed.ID, nil
+		}
+		return replay, QualityWait, usage, parsed.ID, errQualityEmptyStream
+	}
+	// body 已完整到达：恒为终态证据。
+	sig := state.signals()
+	sig.Terminal = true
+	return replay, ClassifyQualityHold(sig, cfg.MinOutputTokens), usage, parsed.ID, nil
 }

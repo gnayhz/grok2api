@@ -63,6 +63,15 @@ type MediaJobRepository interface {
 	ListUnrecordedTerminalMediaJobs(ctx context.Context, limit int) ([]media.Job, error)
 	TryClaimMediaJob(ctx context.Context, id string, now, leaseUntil time.Time, claimToken string) (media.Job, bool, error)
 	MarkMediaJobUsageRecorded(ctx context.Context, id string, recordedAt time.Time) error
+	// CountActiveMediaJobsByClientKeys 计数这些 key 名下仍处非终态
+	//（queued/in_progress）的媒体作业——client key 删除前预检用：活跃作业
+	// 阻止删除（media_jobs.client_key_id 是 ON DELETE RESTRICT 外键）。
+	CountActiveMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error)
+	// DeleteTerminalMediaJobsByClientKeys 清理这些 key 名下的终态
+	//（completed/failed）作业行——终态作业只剩归档价值（审计行有
+	// client_key_name 快照），残留会让 RESTRICT 外键永久阻止 key 删除
+	//（round 51：失败视频作业使 key 不可删，落裸 500）。
+	DeleteTerminalMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error)
 }
 
 // MediaAssetRepository 定义媒体资源元数据持久化能力。

@@ -246,7 +246,7 @@ func (s *statsigSigner) requestSignature(ctx context.Context, endpoint, method, 
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, statsigResponseLimit+1))
 	if err != nil {
 		return "", err
@@ -341,7 +341,7 @@ func fetchStatsigMetaResponse(ctx context.Context, baseURL, token string, lease 
 	if err != nil {
 		return statsigMetaResponse{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, statsigMetaBodyLimit+1))
 	if err != nil {
 		return statsigMetaResponse{}, err
