@@ -173,6 +173,7 @@ export function ModelsPage() {
   const resumedRunActive = syncRunQuery.data?.active === true && !syncMutation.isPending;
   const resumedCompleted = syncRunQuery.data?.completed ?? 0;
   const resumedTotal = syncRunQuery.data?.total ?? 0;
+  const resumedFailed = syncRunQuery.data?.failed === true;
   const hasResumedRun = useRef(false);
   useEffect(() => {
     if (!resumedRunActive) return;
@@ -181,11 +182,13 @@ export function ModelsPage() {
   }, [resumedRunActive, resumedCompleted, resumedTotal, t]);
   useEffect(() => {
     if (resumedRunActive || !hasResumedRun.current) return;
-    // A resumed run just finished: refresh the list once and clear the toast.
+    // A resumed run just finished: refresh the list once and surface the real
+    // outcome — a detached run that failed must not report success.
     hasResumedRun.current = false;
     void queryClient.invalidateQueries({ queryKey: ["models"] });
-    toast.success(t("models.syncedFinish"), { id: modelSyncToastID });
-  }, [resumedRunActive, queryClient, t]);
+    if (resumedFailed) toast.error(t("models.syncedRunFailed"), { id: modelSyncToastID });
+    else toast.success(t("models.syncedFinish"), { id: modelSyncToastID });
+  }, [resumedRunActive, resumedFailed, queryClient, t]);
   useEffect(() => () => {
     // Leaving the page mid-resume: drop the progress toast (the detached run
     // keeps going and any later visit resumes the display).

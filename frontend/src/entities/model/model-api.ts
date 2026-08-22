@@ -95,7 +95,7 @@ const decodeModelSyncEvent = createObjectDecoder<ModelSyncEventDTO>("model sync 
 
 export type ModelSyncProgressDTO = { completed: number; total: number };
 
-export type ModelSyncRunDTO = { active: boolean; completed: number; total: number };
+export type ModelSyncRunDTO = { active: boolean; completed: number; total: number; failed: boolean };
 
 // fetchModelSyncRun reports the shared full-sync snapshot. The sync runs
 // detached from the SSE connection, so a reloaded page can discover an
@@ -103,10 +103,10 @@ export type ModelSyncRunDTO = { active: boolean; completed: number; total: numbe
 export async function fetchModelSyncRun(): Promise<ModelSyncRunDTO> {
   const payload = await apiRequest<unknown>("/api/admin/v1/models/sync/progress", { method: "GET" }, (raw) => raw);
   const record = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null;
-  if (!record || typeof record.active !== "boolean" || typeof record.completed !== "number" || typeof record.total !== "number") {
+  if (!record || typeof record.active !== "boolean" || typeof record.completed !== "number" || typeof record.total !== "number" || typeof record.failed !== "boolean") {
     throw new ApiError(502, "invalidResponse", i18n.t("apiErrors.invalidResponse"));
   }
-  return { active: record.active, completed: record.completed, total: record.total };
+  return { active: record.active, completed: record.completed, total: record.total, failed: record.failed };
 }
 
 export async function syncModels(onProgress?: (progress: ModelSyncProgressDTO) => void): Promise<{ synced: number }> {

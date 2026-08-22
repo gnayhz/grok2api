@@ -39,6 +39,9 @@ type RouteRulesPanelProps = {
   // hint instead of a perpetual "loading" placeholder (a silent query error
   // otherwise looks like nodes that never arrive).
   nodesFailed?: boolean;
+  // True once the node query has completed successfully (the list may still be
+  // empty): distinguishes "no eligible nodes" from "still loading".
+  nodesLoaded?: boolean;
   onRetryNodes?: () => void;
   onChange: (next: EgressRouteRuleDTO[]) => void;
 };
@@ -67,7 +70,7 @@ function RouteRuleStatBadges({ stat }: { stat?: EgressRouteRuleStatDTO }) {
  * or a direct connection. Unconfigured classes keep the existing scope-pool
  * behavior, and account-bound inference/video always honor their binding.
  */
-export function EgressRouteRulesPanel({ rules, candidates, nodesFailed, onRetryNodes, onChange }: RouteRulesPanelProps) {
+export function EgressRouteRulesPanel({ rules, candidates, nodesFailed, nodesLoaded, onRetryNodes, onChange }: RouteRulesPanelProps) {
   const { t } = useTranslation();
   // Stats are display-only; the query stays silent so a failed fetch never
   // blocks rule editing.
@@ -165,7 +168,7 @@ export function EgressRouteRulesPanel({ rules, candidates, nodesFailed, onRetryN
                     onValueChange={(nodeId) => setRule(trafficClass, { scope: "grok_build", class: trafficClass, targetMode: "fixed", targetNodeId: nodeId, enabled: rule?.enabled ?? true })}
                   >
                     <SelectTrigger aria-label={t("settings.egress.routeRuleNode", { trafficClass: t(routeRuleClassLabelKeys[trafficClass]) })}>
-                      <SelectValue placeholder={nodesFailed ? t("errors.generic") : t("common.loading")} />
+                      <SelectValue placeholder={nodesFailed ? t("settings.egress.routeRuleNodesFailedRetry") : nodesLoaded && candidates.length === 0 ? t("settings.egress.routeRuleNoCandidates") : t("common.loading")} />
                     </SelectTrigger>
                     <SelectContent>
                       {nodeValue === "unavailable" ? <SelectItem value="unavailable" disabled>{t("settings.egress.fallbackNodeUnavailable")}</SelectItem> : null}
