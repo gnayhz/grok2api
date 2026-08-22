@@ -242,6 +242,8 @@ export function EgressAutomation({ scopeLabel }: { scopeLabel: (scope: EgressSco
             <EgressRouteRulesPanel
               rules={operationsForm.routeRules}
               candidates={buildCandidates}
+              nodesFailed={nodesQuery.isError}
+              onRetryNodes={() => void nodesQuery.refetch()}
               onChange={(routeRules) => setOperationsDraft({ ...operationsForm, routeRules })}
             />
           </div>

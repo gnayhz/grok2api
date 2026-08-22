@@ -85,8 +85,8 @@ type Service struct {
 
 	// syncRunMu guards the shared progress snapshot of the in-flight full sync.
 	// The sync itself is detached from any single SSE connection (see
-	// SyncObserved): browser disconnects no longer abort a very-large-account run.
-	// Observers publish here so a reconnecting client can resume displaying
+	// SyncObserved): browser disconnects no longer abort a run over a very
+	// large account pool. Observers publish here so a reconnecting client can resume displaying
 	// progress via SyncProgress.
 	syncRunMu     sync.RWMutex
 	syncRunActive bool
