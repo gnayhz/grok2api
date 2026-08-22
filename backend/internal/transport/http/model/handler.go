@@ -316,7 +316,7 @@ func (h *Handler) sync(c *gin.Context) {
 // syncProgress reports the shared full-sync snapshot for reconnecting UIs.
 func (h *Handler) syncProgress(c *gin.Context) {
 	snapshot := h.service.SyncProgress()
-	c.JSON(http.StatusOK, gin.H{"active": snapshot.Active, "completed": snapshot.Completed, "total": snapshot.Total})
+	c.JSON(http.StatusOK, gin.H{"active": snapshot.Active, "completed": snapshot.Completed, "total": snapshot.Total, "failed": snapshot.Err != nil})
 }
 
 func writeModelSyncEvent(c *gin.Context, event string, value any) error {
