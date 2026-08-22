@@ -155,7 +155,8 @@ export function ModelsPage() {
   });
 
   // Sync-run recovery: the full-account sync is detached from the SSE
-  // connection (a very-large-account run outlives browser tabs). On mount, and
+  // connection (a run over a very large account pool outlives browser
+  // tabs). On mount, and
   // whenever this page regains focus, probe the shared snapshot and resume
   // displaying progress for an in-flight run the previous tab started.
   const syncRunQuery = useQuery({

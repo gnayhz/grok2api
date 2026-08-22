@@ -35,6 +35,11 @@ const routeRuleClassHelpKeys: Record<EgressTrafficClass, string> = {
 type RouteRulesPanelProps = {
   rules: EgressRouteRuleDTO[];
   candidates: EgressNodeDTO[];
+  // True when the node-candidates query failed: the trigger shows an error
+  // hint instead of a perpetual "loading" placeholder (a silent query error
+  // otherwise looks like nodes that never arrive).
+  nodesFailed?: boolean;
+  onRetryNodes?: () => void;
   onChange: (next: EgressRouteRuleDTO[]) => void;
 };
 
@@ -62,7 +67,7 @@ function RouteRuleStatBadges({ stat }: { stat?: EgressRouteRuleStatDTO }) {
  * or a direct connection. Unconfigured classes keep the existing scope-pool
  * behavior, and account-bound inference/video always honor their binding.
  */
-export function EgressRouteRulesPanel({ rules, candidates, onChange }: RouteRulesPanelProps) {
+export function EgressRouteRulesPanel({ rules, candidates, nodesFailed, onRetryNodes, onChange }: RouteRulesPanelProps) {
   const { t } = useTranslation();
   // Stats are display-only; the query stays silent so a failed fetch never
   // blocks rule editing.
@@ -109,6 +114,11 @@ export function EgressRouteRulesPanel({ rules, candidates, onChange }: RouteRule
         </Tooltip>
       </div>
       <p className="mt-1 px-0.5 text-xs leading-5 text-muted-foreground">{t("settings.egress.routeRulesScopeHint")}</p>
+      {nodesFailed ? (
+        <button type="button" className="mt-1 text-xs font-medium text-amber-600 underline underline-offset-2 dark:text-amber-400" onClick={onRetryNodes}>
+          {t("settings.egress.routeRuleNodesFailedRetry")}
+        </button>
+      ) : null}
       <div className="mt-3 space-y-2">
         {routeRuleClasses.map((trafficClass) => {
           const rule = ruleFor(trafficClass);
@@ -155,7 +165,7 @@ export function EgressRouteRulesPanel({ rules, candidates, onChange }: RouteRule
                     onValueChange={(nodeId) => setRule(trafficClass, { scope: "grok_build", class: trafficClass, targetMode: "fixed", targetNodeId: nodeId, enabled: rule?.enabled ?? true })}
                   >
                     <SelectTrigger aria-label={t("settings.egress.routeRuleNode", { trafficClass: t(routeRuleClassLabelKeys[trafficClass]) })}>
-                      <SelectValue placeholder={t("common.loading")} />
+                      <SelectValue placeholder={nodesFailed ? t("errors.generic") : t("common.loading")} />
                     </SelectTrigger>
                     <SelectContent>
                       {nodeValue === "unavailable" ? <SelectItem value="unavailable" disabled>{t("settings.egress.fallbackNodeUnavailable")}</SelectItem> : null}
