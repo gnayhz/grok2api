@@ -73,7 +73,7 @@ type Node struct {
 	// PoolIDs 是节点所属的全部代理池（多对多）；空表示未入池（参与自动调度）。
 	PoolIDs []uint64
 	// PoolPriority 是节点在某个池上下文里的首选顺序（ListEgressNodesByPool
-	// 返回时填充；小者先）。固定首选/顺位轮换的"首"由此决定。
+	// 返回时填充；小者先）。首选优先/节点轮询的"首"由此决定。
 	PoolPriority      int64
 	EncryptedProxyURL string
 	// UserAgent/EncryptedCloudflareCookie/Clearance* 是 FlareSolverr 托管
@@ -224,7 +224,7 @@ type Pool struct {
 	Strategy       PoolStrategy
 	FallbackMode   PoolFallbackMode
 	FallbackPoolID uint64
-	// RotationCursorNodeID 持久化的顺位轮换游标（当前钉住的节点）。
+	// RotationCursorNodeID 持久化的节点轮询游标（当前钉住的节点）。
 	RotationCursorNodeID uint64
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
@@ -249,7 +249,7 @@ type PublicPool struct {
 	MemberIDs []uint64
 	// PreferredNodeID 是池内设为首选的节点（priority 最小）；0 = 未设置。
 	PreferredNodeID uint64
-	// RotationCursorNodeID 是顺位轮换当前钉住的节点；0 = 未开始。
+	// RotationCursorNodeID 是节点轮询当前钉住的节点；0 = 未开始。
 	RotationCursorNodeID uint64
 	CreatedAt            time.Time
 	UpdatedAt            time.Time

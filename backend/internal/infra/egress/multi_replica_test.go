@@ -11,7 +11,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-// sharedCursorRepo 把顺位轮换游标持久化进池行(CAS 语义), 模拟共享数据库。
+// sharedCursorRepo 把节点轮询游标持久化进池行(CAS 语义), 模拟共享数据库。
 type sharedCursorRepo struct {
 	poolStubRepo
 	sync.Mutex
@@ -91,7 +91,7 @@ func TestGuardStateSoftCooldownReplicaLocal(t *testing.T) {
 	}
 }
 
-// 顺位轮换游标:热游标进程内,持久游标 CAS 落共享库。副本 A 推进后,
+// 节点轮询游标:热游标进程内,持久游标 CAS 落共享库。副本 A 推进后,
 // 新副本(或重启后的副本)从持久游标续位,不回退到首个成员。
 func TestRotationCursorContinuityAcrossReplicas(t *testing.T) {
 	managerA, managerB, repo := newSharedReplicaManagers(t)
@@ -122,7 +122,7 @@ func TestRotationCursorContinuityAcrossReplicas(t *testing.T) {
 	}
 
 	// 新副本 B:热游标为空,必须从共享持久游标(20)续位;20 失效后到 30,
-	// 绝不回退到 10(顺位轮换"不回头"跨副本保持)。
+	// 绝不回退到 10(节点轮询"不回头"跨副本保持)。
 	poolB := domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRotation, FallbackMode: domain.PoolFallbackNone, RotationCursorNodeID: repo.storedCursor(1)}
 	without20 := []domain.Node{members[0], members[2]}
 	continued := managerB.selectRotationNode(poolB, without20, members)

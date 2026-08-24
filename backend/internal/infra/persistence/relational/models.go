@@ -596,7 +596,7 @@ type egressPoolModel struct {
 	Strategy       string `gorm:"size:16;not null;default:affinity;check:chk_egress_pools_strategy,strategy IN ('affinity','random','sticky','rotation')"`
 	FallbackMode   string `gorm:"size:16;not null;default:none;check:chk_egress_pools_fallback_mode,fallback_mode IN ('none','pool','direct')"`
 	FallbackPoolID uint64 `gorm:"not null;default:0;check:chk_egress_pools_fallback_pool,(fallback_mode <> 'pool' AND fallback_pool_id = 0) OR (fallback_mode = 'pool' AND fallback_pool_id > 0)"`
-	// RotationCursorNodeID 持久化顺位轮换的游标节点，重启不归位。
+	// RotationCursorNodeID 持久化节点轮询的游标节点，重启不归位。
 	RotationCursorNodeID uint64    `gorm:"not null;default:0"`
 	CreatedAt            time.Time `gorm:"not null"`
 	UpdatedAt            time.Time `gorm:"not null"`
@@ -610,7 +610,7 @@ type egressPoolMemberModel struct {
 	PoolID uint64 `gorm:"primaryKey;autoIncrement:false"`
 	NodeID uint64 `gorm:"primaryKey;autoIncrement:false;index:idx_egress_pool_members_node"`
 	// Priority 是池内首选顺序（小者先）；0 = 未指定，按节点 ID 兑底。
-	// 固定首选/顺位轮换的"首"由此决定，管理员可在节点管理里指定。
+	// 首选优先/节点轮询的"首"由此决定，管理员可在节点管理里指定。
 	Priority int64 `gorm:"not null;default:0"`
 }
 

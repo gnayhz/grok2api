@@ -521,7 +521,7 @@ func (r *EgressRepository) EgressPoolPreferredNodes(ctx context.Context) (map[ui
 	return result, nil
 }
 
-// UpdateEgressPoolRotationCursor 持久化顺位轮换游标，重启不归位。
+// UpdateEgressPoolRotationCursor 持久化节点轮询游标，重启不归位。
 func (r *EgressRepository) UpdateEgressPoolRotationCursor(ctx context.Context, poolID, fromNodeID, nodeID uint64) error {
 	// CAS:仅当库中游标仍是推进前的旧值时才写,并发推进/多实例交错时旧值不会覆盖新值。
 	result := r.db.db.WithContext(ctx).
@@ -538,7 +538,7 @@ func (r *EgressRepository) UpdateEgressPoolRotationCursor(ctx context.Context, p
 }
 
 // SetEgressPoolMemberPriority 设置池内一个成员的首选顺序。priority 越小越
-// 靠前；固定首选/顺位轮换取“最靠前的可用成员”。
+// 靠前；首选优先/节点轮询取“最靠前的可用成员”。
 func (r *EgressRepository) SetEgressPoolMemberPriority(ctx context.Context, poolID, nodeID uint64, priority int64) error {
 	result := r.db.db.WithContext(ctx).
 		Model(&egressPoolMemberModel{}).

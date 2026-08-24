@@ -209,8 +209,8 @@ func (s *Service) validateMemberNodes(ctx context.Context, nodeIDs []uint64) err
 	return nil
 }
 
-// SetPoolMemberPriority 设置池内一个成员的首选顺序（小者先）。固定首选/
-// 顺位轮换的"首"由此决定。
+// SetPoolMemberPriority 设置池内一个成员的首选顺序（小者先）。首选优先/
+// 节点轮询的"首"由此决定。
 func (s *Service) SetPoolMemberPriority(ctx context.Context, poolID, nodeID uint64, priority int64) error {
 	store, err := s.poolStore()
 	if err != nil {
