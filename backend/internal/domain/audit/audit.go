@@ -115,6 +115,8 @@ type Record struct {
 	DeliveredBytes  int64
 	DurationMS      int64
 	ErrorCode       string
+	// QualityFailOpen: 请求经质量守卫判定降级但按 fail-open 策略交付。
+	QualityFailOpen bool
 	AttemptCount    int
 	Attempts        []Attempt
 	CreatedAt       time.Time

@@ -25,6 +25,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 const webResponseTTL = 30 * 24 * time.Hour
@@ -341,6 +342,14 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				a.feedbackAntiBot(ctx, lease, statsigTarget)
 				return antiBotProviderResponse(), nil
 			}
+			if errors.Is(consumeErr, errWebUsageLimit) {
+				// usage-limit/封禁信号是上游配额状态, 与传输错误不同:以 429 语义
+				// 返回, 让网关走限流处理(账号冷却/换号)而不是当作网络故障重试。
+				// 与 lite-image 路径(image.go)对齐; 此前哨兵在 chat 主链路从不被
+				// 检查, 流内 usage limit 以裸错误终止。
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusTooManyRequests, nil)
+				return usageLimitProviderResponse(), nil
+			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
 			return nil, consumeErr
 		}
@@ -446,164 +455,168 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 	go func() {
 		defer func() { _ = source.Close() }()
 		defer lease.Release()
-		parsed := &parsedChat{
-			ResponseID: responseID, InputTokens: estimateTokens(prompt), Tools: tools.ResponseTools,
-			ToolChoice: tools.ResponseChoice, ParallelTools: parallelTools,
-			DisableInlineCitations: !options.InlineCitationsEnabled(),
-		}
-		if previous != nil {
-			parsed.ConversationID = previous.ConversationID
-		}
-		var clientText strings.Builder
-		archivedImages := make(map[string]struct{})
-		var sieve *toolStreamSieve
-		if len(tools.Functions) > 0 && tools.Choice != "none" {
-			sieve = newToolStreamSieve(tools.available)
-		}
-		messagesStream := newWebMessagesStream(writer, responseID, model, parsed.InputTokens, options)
-		visiblePhase := webVisibleStreamPhase{}
-		annotationCursor := 0
-		hostedSearchEmitted := make(map[string]struct{})
-		var responsesStream *webResponsesStream
-		if operation == conversation.OperationResponses {
-			responsesStream = newWebResponsesStream(writer, responseID)
-		}
-		writeDelta := func(kind, delta string) error {
-			if !visiblePhase.Allow(kind, delta) {
-				return nil
+		// 直接解析上游字节流的转换主体, panic 不得击穿进程。
+		streampipe.Run(writer, func() error {
+			parsed := &parsedChat{
+				ResponseID: responseID, InputTokens: estimateTokens(prompt), Tools: tools.ResponseTools,
+				ToolChoice: tools.ResponseChoice, ParallelTools: parallelTools,
+				DisableInlineCitations: !options.InlineCitationsEnabled(),
 			}
-			if responsesStream != nil {
-				return responsesStream.Delta(kind, delta)
+			if previous != nil {
+				parsed.ConversationID = previous.ConversationID
 			}
-			return writeWebStreamDelta(writer, messagesStream, operation, responseID, model, kind, delta)
-		}
-		writeToolCalls := func(calls []parsedToolCall) error {
-			if responsesStream != nil {
-				return responsesStream.ToolCalls(calls)
+			var clientText strings.Builder
+			archivedImages := make(map[string]struct{})
+			var sieve *toolStreamSieve
+			if len(tools.Functions) > 0 && tools.Choice != "none" {
+				sieve = newToolStreamSieve(tools.available)
 			}
-			return writeWebStreamToolCalls(writer, messagesStream, operation, responseID, model, calls)
-		}
-		flushAnnotations := func() error {
-			if annotationCursor >= len(parsed.Annotations) {
-				return nil
+			messagesStream := newWebMessagesStream(writer, responseID, model, parsed.InputTokens, options)
+			visiblePhase := webVisibleStreamPhase{}
+			annotationCursor := 0
+			hostedSearchEmitted := make(map[string]struct{})
+			var responsesStream *webResponsesStream
+			if operation == conversation.OperationResponses {
+				responsesStream = newWebResponsesStream(writer, responseID)
 			}
-			newOnes := parsed.Annotations[annotationCursor:]
-			annotationCursor = len(parsed.Annotations)
-			if responsesStream != nil {
-				return responsesStream.Annotations(newOnes, annotationCursor-len(newOnes))
-			}
-			return writeStreamAnnotations(writer, operation, responseID, model, newOnes, annotationCursor-len(newOnes))
-		}
-		flushHostedSearch := func() error {
-			if operation != conversation.OperationResponses {
-				return nil
-			}
-			for _, call := range parsed.HostedSearchCalls {
-				// Wait until the tool_result arrives (completed / has sources).
-				if call.Status != "completed" && len(call.Sources) == 0 {
-					continue
+			writeDelta := func(kind, delta string) error {
+				if !visiblePhase.Allow(kind, delta) {
+					return nil
 				}
-				if _, emitted := hostedSearchEmitted[call.ID]; emitted {
-					continue
+				if responsesStream != nil {
+					return responsesStream.Delta(kind, delta)
 				}
-				if err := responsesStream.HostedSearch(call); err != nil {
+				return writeWebStreamDelta(writer, messagesStream, operation, responseID, model, kind, delta)
+			}
+			writeToolCalls := func(calls []parsedToolCall) error {
+				if responsesStream != nil {
+					return responsesStream.ToolCalls(calls)
+				}
+				return writeWebStreamToolCalls(writer, messagesStream, operation, responseID, model, calls)
+			}
+			flushAnnotations := func() error {
+				if annotationCursor >= len(parsed.Annotations) {
+					return nil
+				}
+				newOnes := parsed.Annotations[annotationCursor:]
+				annotationCursor = len(parsed.Annotations)
+				if responsesStream != nil {
+					return responsesStream.Annotations(newOnes, annotationCursor-len(newOnes))
+				}
+				return writeStreamAnnotations(writer, operation, responseID, model, newOnes, annotationCursor-len(newOnes))
+			}
+			flushHostedSearch := func() error {
+				if operation != conversation.OperationResponses {
+					return nil
+				}
+				for _, call := range parsed.HostedSearchCalls {
+					// Wait until the tool_result arrives (completed / has sources).
+					if call.Status != "completed" && len(call.Sources) == 0 {
+						continue
+					}
+					if _, emitted := hostedSearchEmitted[call.ID]; emitted {
+						continue
+					}
+					if err := responsesStream.HostedSearch(call); err != nil {
+						return err
+					}
+					hostedSearchEmitted[call.ID] = struct{}{}
+				}
+				return nil
+			}
+			flushSideChannel := func() error {
+				if err := flushHostedSearch(); err != nil {
 					return err
 				}
-				hostedSearchEmitted[call.ID] = struct{}{}
+				return flushAnnotations()
 			}
-			return nil
-		}
-		flushSideChannel := func() error {
-			if err := flushHostedSearch(); err != nil {
-				return err
+			if operation != conversation.OperationMessages {
+				writeStreamStart(writer, operation, responseID, model, parsed.InputTokens)
 			}
-			return flushAnnotations()
-		}
-		if operation != conversation.OperationMessages {
-			writeStreamStart(writer, operation, responseID, model, parsed.InputTokens)
-		}
-		err := consumeUpstreamInto(source, parsed, func(kind, delta string) error {
-			if len(parsed.ToolCalls) > 0 && kind != "reasoning" {
-				return flushSideChannel()
-			}
-			if kind == "image" {
-				rawURL := delta
-				item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: delta}, "url")
-				if imageErr != nil {
-					return imageErr
+			err := consumeUpstreamInto(source, parsed, func(kind, delta string) error {
+				if len(parsed.ToolCalls) > 0 && kind != "reasoning" && kind != "image" {
+					// 工具调用被识别后, 剩余纯文本增量是工具语法的原文(不下发, 这是
+					// 过滤器的本意); 但 image 增量仍是有效生成内容——同一请求的非流式
+					// 路径(archiveChatImages)能返回它们, 流式丢图会让客户端拿到缺失图片
+					// 的不完整回答且 URL 不归档。图片落到下方正常分支处理。
+					return flushSideChannel()
 				}
-				delta = liteImageMarkdown(item)
-				if parsed.Text.Len() > 0 {
-					delta = "\n\n" + delta
+				if kind == "image" {
+					rawURL := delta
+					item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: delta}, "url")
+					if imageErr != nil {
+						return imageErr
+					}
+					delta = liteImageMarkdown(item)
+					if parsed.Text.Len() > 0 {
+						delta = "\n\n" + delta
+					}
+					parsed.appendText(delta)
+					archivedImages[rawURL] = struct{}{}
+					kind = "text"
 				}
-				parsed.appendText(delta)
-				archivedImages[rawURL] = struct{}{}
-				kind = "text"
-			}
-			if kind == "text" && sieve != nil {
-				result := sieve.Feed(delta)
-				if result.SafeText != "" {
-					clientText.WriteString(result.SafeText)
-					if err := writeDelta(kind, result.SafeText); err != nil {
+				if kind == "text" && sieve != nil {
+					result := sieve.Feed(delta)
+					if result.SafeText != "" {
+						clientText.WriteString(result.SafeText)
+						if err := writeDelta(kind, result.SafeText); err != nil {
+							return err
+						}
+					}
+					if result.Complete {
+						if len(result.Calls) == 0 {
+							clientText.WriteString(result.Raw)
+							if err := writeDelta(kind, result.Raw); err != nil {
+								return err
+							}
+							return flushSideChannel()
+						}
+						parsed.ToolCalls = result.Calls
+						return writeToolCalls(result.Calls)
+					}
+					return flushSideChannel()
+				}
+				if kind == "text" {
+					if delta != "" {
+						clientText.WriteString(delta)
+					}
+				}
+				if delta != "" {
+					if err := writeDelta(kind, delta); err != nil {
 						return err
 					}
 				}
-				if result.Complete {
-					if len(result.Calls) == 0 {
-						clientText.WriteString(result.Raw)
-						if err := writeDelta(kind, result.Raw); err != nil {
-							return err
-						}
-						return flushSideChannel()
-					}
-					parsed.ToolCalls = result.Calls
-					return writeToolCalls(result.Calls)
-				}
 				return flushSideChannel()
+			})
+			if err != nil {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+				return err
 			}
-			if kind == "text" {
-				if delta != "" {
-					clientText.WriteString(delta)
+			if sieve != nil && len(parsed.ToolCalls) == 0 {
+				result := sieve.Flush()
+				if result.SafeText != "" {
+					clientText.WriteString(result.SafeText)
+					if err := writeDelta("text", result.SafeText); err != nil {
+						return err
+					}
+				}
+				if len(result.Calls) > 0 {
+					parsed.ToolCalls = result.Calls
+					if err := writeToolCalls(result.Calls); err != nil {
+						return err
+					}
 				}
 			}
-			if delta != "" {
-				if err := writeDelta(kind, delta); err != nil {
-					return err
-				}
-			}
-			return flushSideChannel()
-		})
-		if err != nil {
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
-			_ = writer.CloseWithError(err)
-			return
-		}
-		if sieve != nil && len(parsed.ToolCalls) == 0 {
-			result := sieve.Flush()
-			if result.SafeText != "" {
-				clientText.WriteString(result.SafeText)
-				if err := writeDelta("text", result.SafeText); err != nil {
-					_ = writer.CloseWithError(err)
-					return
-				}
-			}
-			if len(result.Calls) > 0 {
-				parsed.ToolCalls = result.Calls
-				if err := writeToolCalls(result.Calls); err != nil {
-					_ = writer.CloseWithError(err)
-					return
-				}
-			}
-		}
-		if len(parsed.ToolCalls) == 0 {
+			// 图片补归档不再被工具调用门控:parsed.Images 中的 URL 未必都有对应的
+			// image 增量(如工具调用前已被解析), 与非流式路径 archiveChatImages 行为
+			// 对齐——流式不应因工具调用而少内容。
 			for _, rawURL := range parsed.Images {
 				if _, exists := archivedImages[rawURL]; exists {
 					continue
 				}
 				item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: rawURL}, "url")
 				if imageErr != nil {
-					_ = writer.CloseWithError(imageErr)
-					return
+					return imageErr
 				}
 				delta := liteImageMarkdown(item)
 				if clientText.Len() > 0 {
@@ -611,34 +624,31 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 				}
 				clientText.WriteString(delta)
 				if err := writeDelta("text", delta); err != nil {
-					_ = writer.CloseWithError(err)
-					return
+					return err
 				}
 			}
-		}
-		parsed.resetText(clientText.String())
-		if operation == conversation.OperationResponses {
-			finalizeXAIAnnotations(parsed)
-			if finishErr := responsesStream.Finish(parsed); finishErr != nil {
-				_ = writer.CloseWithError(finishErr)
-				return
+			parsed.resetText(clientText.String())
+			if operation == conversation.OperationResponses {
+				finalizeXAIAnnotations(parsed)
+				if finishErr := responsesStream.Finish(parsed); finishErr != nil {
+					return finishErr
+				}
 			}
-		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
-		payload := buildOpenAIResult(operation, responseID, model, *parsed, false, options)
-		data, _ := json.Marshal(payload)
-		if operation == conversation.OperationResponses {
-			a.saveResponseState(context.WithoutCancel(ctx), credential.ID, responseID, *parsed, data)
-		}
-		if operation == conversation.OperationMessages {
-			if finishErr := messagesStream.Finish(*parsed, payload); finishErr != nil {
-				_ = writer.CloseWithError(finishErr)
-				return
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+			payload := buildOpenAIResult(operation, responseID, model, *parsed, false, options)
+			data, _ := json.Marshal(payload)
+			if operation == conversation.OperationResponses {
+				a.saveResponseState(context.WithoutCancel(ctx), credential.ID, responseID, *parsed, data)
 			}
-		} else {
-			writeStreamDone(writer, operation, responseID, model, *parsed, payload)
-		}
-		_ = writer.Close()
+			if operation == conversation.OperationMessages {
+				if finishErr := messagesStream.Finish(*parsed, payload); finishErr != nil {
+					return finishErr
+				}
+			} else {
+				writeStreamDone(writer, operation, responseID, model, *parsed, payload)
+			}
+			return nil
+		})
 	}()
 	return reader
 }
@@ -1144,6 +1154,13 @@ func antiBotProviderResponse() *provider.Response {
 	return jsonProviderResponse(http.StatusForbidden, map[string]any{"error": map[string]any{
 		"message": "Grok Web 出口会话被上游反机器人规则拒绝，请检查代理、User-Agent 与 Cloudflare Cookie 是否来自同一浏览器会话",
 		"type":    "upstream_error", "code": "anti_bot_rejected",
+	}})
+}
+
+func usageLimitProviderResponse() *provider.Response {
+	return jsonProviderResponse(http.StatusTooManyRequests, map[string]any{"error": map[string]any{
+		"message": "Grok Web 账号已达用量上限，请稍后重试",
+		"type":    "rate_limit_error", "code": "usage_limit_reached",
 	}})
 }
 

@@ -20,8 +20,10 @@ import (
 
 type subscriptionSyncRepositoryStub struct {
 	OperationsRepository
-	mu    sync.Mutex
-	nodes map[uint64][]domain.Node
+	mu               sync.Mutex
+	nodes            map[uint64][]domain.Node
+	syncedPool       uint64
+	syncedPoolSource uint64
 }
 
 func (r *subscriptionSyncRepositoryStub) UpsertEgressNodesFromSource(_ context.Context, sourceID uint64, nodes []domain.Node) (int, error) {
@@ -37,6 +39,10 @@ func (r *subscriptionSyncRepositoryStub) UpdateEgressSourceSync(context.Context,
 
 func (r *subscriptionSyncRepositoryStub) GetEgressOperationsConfig(context.Context) (domain.OperationsConfig, error) {
 	return domain.OperationsConfig{}, nil
+}
+
+func (r *subscriptionSyncRepositoryStub) SaveEgressOperationsConfig(_ context.Context, config domain.OperationsConfig) (domain.OperationsConfig, error) {
+	return config, nil
 }
 
 func (r *subscriptionSyncRepositoryStub) nodesFor(sourceID uint64) []domain.Node {
@@ -418,7 +424,7 @@ func TestSyncSourceUsesItsOwnFetchProxy(t *testing.T) {
 			t.Fatal(encryptErr)
 		}
 		_, syncErr := service.syncSource(context.Background(), repository, domain.SubscriptionSource{
-			ID: id, Name: "source", Scope: domain.ScopeBuild, Enabled: true,
+			ID: id, Name: "source", Enabled: true,
 			EncryptedURL: encryptedSourceURL, EncryptedProxyURL: encryptedProxyURL, RefreshIntervalSeconds: 900,
 		})
 		if syncErr != nil {
@@ -429,6 +435,7 @@ func TestSyncSourceUsesItsOwnFetchProxy(t *testing.T) {
 	if firstProxy.hits.Load() != 1 || secondProxy.hits.Load() != 1 {
 		t.Fatalf("proxy hits: first=%d second=%d", firstProxy.hits.Load(), secondProxy.hits.Load())
 	}
+
 	for id, expected := range map[uint64]string{1: firstProxy.nodeProxy, 2: secondProxy.nodeProxy} {
 		nodes := repository.nodesFor(id)
 		if len(nodes) != 1 {

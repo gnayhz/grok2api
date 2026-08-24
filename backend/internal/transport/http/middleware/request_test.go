@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -262,5 +263,41 @@ func TestSecurityHeaders(t *testing.T) {
 		if value := response.Header().Get(name); value != expected {
 			t.Fatalf("%s = %q", name, value)
 		}
+	}
+}
+// 5xx 必须计入 http_request_server_error_total（方法路径 × 状态码），非 5xx
+// 零计数——管理面曾出现三处 500 仅存于单条日志、无法进入分钟级指标周期的
+// 观测缺口（见 EGRESS-REVIEW-STATUS 审查轮次）。
+func TestAccessLogCountsServerErrorTotals(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(AccessLog(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.GET("/boom", func(c *gin.Context) { c.Status(http.StatusInternalServerError) })
+	router.GET("/okay", func(c *gin.Context) { c.Status(http.StatusOK) })
+	for range 3 {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/boom", nil))
+	}
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/okay", nil))
+	samples := perfmetrics.Default.CollectAndReset()
+	var (
+		boomCount uint64
+		okaySeen  bool
+	)
+	for _, sample := range samples {
+		if sample.Name != "http_request_server_error_total" {
+			continue
+		}
+		if sample.Labels.Operation == "/boom" && sample.Labels.Outcome == "500" {
+			boomCount = sample.Count
+		}
+		if sample.Labels.Operation == "/okay" {
+			okaySeen = true
+		}
+	}
+	if boomCount != 3 {
+		t.Fatalf("boom sample count = %d, want 3 (samples %+v)", boomCount, samples)
+	}
+	if okaySeen {
+		t.Fatalf("non-5xx must not be counted")
 	}
 }

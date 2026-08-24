@@ -15,7 +15,7 @@ type recordingAttributor struct {
 	degraded []uint64
 }
 
-func (r *recordingAttributor) OnDegraded(_ context.Context, credential accountdomain.Credential) {
+func (r *recordingAttributor) OnDegraded(_ context.Context, credential accountdomain.Credential, _ uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.degraded = append(r.degraded, credential.ID)

@@ -39,81 +39,77 @@ export type SettingsConfigDTO = {
 
 export type ClearanceMode = "manual" | "flaresolverr" | "on_demand";
 
+export type EgressNodePoolRef = { id: string; name: string };
+
 export type EgressNodeDTO = {
-	id: string; name: string; scope: EgressScope; enabled: boolean;
-	proxyConfigured: boolean; proxyDisplay?: string; proxyFingerprint?: string; userAgent: string; cookieConfigured: boolean;
-	accountBoundProxy: boolean; proxyPool: boolean; proxyProfileId?: string; proxyProfileName?: string;
-	sourceId?: string; accountCapacity: number; assignedAccountCount: number;
+	id: string; name: string; enabled: boolean;
+	proxyConfigured: boolean; proxyDisplay?: string; proxyFingerprint?: string; proxyPool: boolean;
+	sourceId?: string; sourceName?: string; pools?: EgressNodePoolRef[];
+	accountBoundProxy: boolean;
+	rotationConfigured: boolean; rotationEnabled: boolean; lastRotatedAt?: string; rotationAttempts: number; lastRotationError?: string;
+	degradeCount: number; lastDegradedAt?: string;
 	health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
-	probeStatus: "unknown" | "healthy" | "unhealthy"; lastProbedAt?: string; probeLatencyMs: number; exitIp?: string; probeError?: string;
-	probeProvider?: "ipinfo" | "cloudflare";
+	probeStatus: "unknown" | "healthy" | "unhealthy"; lastProbedAt?: string; probeLatencyMs: number; exitIp?: string; probeError?: string; probeProvider?: "ipinfo" | "cloudflare";
 	ipv4Probe: EgressIPProbeDTO; ipv6Probe: EgressIPProbeDTO;
 };
 
 export type EgressNodeInput = {
-	name: string; scope: EgressScope; enabled: boolean; proxyPool: boolean; proxyURL?: string;
-	proxyProfileId?: string;
-	accountCapacity: number; clearProxyURL?: boolean; userAgent: string; cloudflareCookies?: string; clearCookies?: boolean;
+	name: string; enabled: boolean; proxyPool?: boolean;
+	proxyURL?: string; clearProxyURL?: boolean;
+	rotationURL?: string; clearRotationURL?: boolean; rotationEnabled?: boolean;
 };
 
-export type EgressProxyProfileDTO = {
-	id: string; name: string; proxyDisplay?: string; proxyFingerprint?: string;
-	boundNodeCount: number; createdAt: string; updatedAt: string;
-};
+export type EgressPoolStrategy = "affinity" | "random" | "sticky" | "rotation";
+export type EgressPoolFallbackMode = "none" | "pool" | "direct";
 
-export type EgressProxyProfileInput = { name: string; proxyURL?: string };
-export type EgressProxyProfileListDTO = {
-	items: EgressProxyProfileDTO[];
-	page: number;
-	pageSize: number;
-	total: number;
-};
+export type EgressRoutingScope = "grok_build" | "grok_web" | "grok_console";
+export type EgressTrafficClass = "inference" | "credential" | "billing" | "model_sync" | "video";
+export type EgressRoutingTargetMode = "auto" | "direct" | "node" | "pool";
+export type EgressRoutingTarget = { mode: EgressRoutingTargetMode; nodeId?: string; poolId?: string };
 
-export type EgressScope = "grok_build" | "grok_web" | "grok_console" | "grok_web_asset" | "grok_console_asset";
-export type EgressFallbackMode = "none" | "direct" | "fixed";
-export type EgressFallbackConfigDTO = { mode: EgressFallbackMode; nodeId?: string };
 export type EgressNodeListDTO = {
   items: EgressNodeDTO[];
   page: number;
   pageSize: number;
   total: number;
-  defaultUserAgents: Record<EgressScope, string>;
-};
+  };
+
 export type EgressSourceDTO = {
-  id: string; name: string; scope: EgressScope; enabled: boolean; urlConfigured: boolean; proxyConfigured: boolean;
-  refreshIntervalSeconds: number; defaultAccountCapacity: number;
+  id: string; name: string; enabled: boolean; urlConfigured: boolean; proxyConfigured: boolean;
+  poolId?: string; poolName?: string; refreshIntervalSeconds: number;
   lastSyncedAt?: string; nextSyncAt?: string; lastSyncImported: number; lastSyncError?: string;
 };
+
 export type EgressSourceListDTO = {
   items: EgressSourceDTO[];
   page: number;
   pageSize: number;
   total: number;
 };
+
 export type EgressSourceInput = {
-  name: string; scope: EgressScope; enabled: boolean; url?: string; clearUrl?: boolean;
-  proxyURL?: string; clearProxyURL?: boolean;
-  refreshIntervalSeconds: number; defaultAccountCapacity: number;
+  name: string; enabled: boolean; url?: string; clearUrl?: boolean;
+  proxyURL?: string; clearProxyURL?: boolean; refreshIntervalSeconds?: number; poolId?: string;
 };
-export type EgressTrafficClass = "inference" | "credential" | "billing" | "model_sync" | "video";
-export type EgressRouteRuleTargetMode = "fixed" | "direct";
-export type EgressRouteRuleDTO = {
-  scope: EgressScope; class: EgressTrafficClass; targetMode: EgressRouteRuleTargetMode; targetNodeId?: string; enabled: boolean;
-};
+
 export type EgressOperationsConfigDTO = {
-  probeProvider: "ipinfo" | "cloudflare"; probeIntervalSeconds: number; autoAssignEnabled: boolean; autoBalanceEnabled: boolean;
-  assignmentIntervalSeconds: number; fallbacks: Record<EgressScope, EgressFallbackConfigDTO>; routeRules: EgressRouteRuleDTO[]; updatedAt: string;
+  probeProvider: "ipinfo" | "cloudflare";
+  probeIntervalSeconds: number;
+  defaultTarget: EgressRoutingTarget;
+  scopeTargets: Partial<Record<EgressRoutingScope, EgressRoutingTarget>>;
+  classTargets: Partial<Record<EgressTrafficClass, EgressRoutingTarget>>;
+  updatedAt: string;
 };
-export type EgressRouteRuleStatDTO = {
-  scope: EgressScope; class: EgressTrafficClass;
-  hit: number; skippedBinding: number; nodeUnavailable: number; directUnavailable: number; lastSeen?: string;
+
+export type EgressRoutingStatDTO = {
+  level: string; mode: string; hit: number; fallback: number; lastSeen?: string;
 };
+
 export type EgressImportResultDTO = { imported: number; skipped: number };
 export type EgressIPProbeDTO = { status: "unknown" | "healthy" | "unhealthy"; testedAt?: string; latencyMs: number; exitIp?: string; error?: string };
 export type EgressProbeResultDTO = { status: "unknown" | "healthy" | "unhealthy"; testedAt: string; latencyMs: number; exitIp?: string; error?: string; probeProvider?: "ipinfo" | "cloudflare"; ipv4: EgressIPProbeDTO; ipv6: EgressIPProbeDTO };
 export type EgressProbeBatchResultDTO = { requested: number; healthy: number; unhealthy: number };
-export type EgressRebalanceResultDTO = { assigned: number; rebalanced: number; unplaced: number };
-export type EgressUnhealthyCleanupPreviewDTO = { nodes: number; boundAccounts: number; subscriptionManaged: number };
+export type EgressUnhealthyCleanupPreviewDTO = { nodes: number; subscriptionManaged: number };
 
 export type SettingsSnapshotDTO = {
   config: SettingsConfigDTO;
@@ -217,9 +213,11 @@ const egressIPProbeValidator = hasShape({
 });
 type EgressNodeWireDTO = Omit<EgressNodeDTO, "ipv4Probe" | "ipv6Probe"> & { ipv4Probe?: EgressIPProbeDTO; ipv6Probe?: EgressIPProbeDTO };
 type EgressSourceWireDTO = Omit<EgressSourceDTO, "proxyConfigured"> & { proxyConfigured?: boolean };
-type EgressOperationsConfigWireDTO = Omit<EgressOperationsConfigDTO, "probeProvider" | "routeRules"> & {
+type EgressOperationsConfigWireDTO = Omit<EgressOperationsConfigDTO, "probeProvider" | "defaultTarget" | "scopeTargets" | "classTargets"> & {
   probeProvider?: "ipinfo" | "cloudflare";
-  routeRules?: EgressRouteRuleDTO[];
+  defaultTarget?: EgressRoutingTarget;
+  scopeTargets?: Partial<Record<EgressRoutingScope, EgressRoutingTarget>>;
+  classTargets?: Partial<Record<EgressTrafficClass, EgressRoutingTarget>>;
 };
 type EgressProbeResultWireDTO = Omit<EgressProbeResultDTO, "ipv4" | "ipv6"> & { ipv4?: EgressIPProbeDTO; ipv6?: EgressIPProbeDTO };
 const unknownEgressIPProbe = (): EgressIPProbeDTO => ({ status: "unknown", latencyMs: 0 });
@@ -228,49 +226,45 @@ const withEgressNodeProbeDefaults = (value: EgressNodeWireDTO): EgressNodeDTO =>
   ipv4Probe: value.ipv4Probe ?? unknownEgressIPProbe(),
   ipv6Probe: value.ipv6Probe ?? unknownEgressIPProbe(),
 });
-const withEgressSourceDefaults = (value: EgressSourceWireDTO): EgressSourceDTO => ({
-  ...value,
-  proxyConfigured: value.proxyConfigured ?? false,
-});
+const withEgressSourceDefaults = (value: EgressSourceWireDTO): EgressSourceDTO => ({ ...value, proxyConfigured: value.proxyConfigured ?? false });
+const egressNodePoolRefValidator = hasShape({ id: isString, name: isString });
+
 const egressNodeValidator = hasShape({
-  id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean,
-  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
-  sourceId: isOptional(isString), proxyProfileId: isOptional(isString), proxyProfileName: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
+  id: isString, name: isString, enabled: isBoolean,
+  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), proxyPool: isBoolean,
+  sourceId: isOptional(isString), sourceName: isOptional(isString), pools: isOptional(isArrayOf(egressNodePoolRefValidator)),
+  accountBoundProxy: isBoolean,
+  rotationConfigured: isBoolean, rotationEnabled: isBoolean, lastRotatedAt: isOptional(isString), rotationAttempts: isNumber, lastRotationError: isOptional(isString),
+  degradeCount: isNumber, lastDegradedAt: isOptional(isString),
+  health: isNumber, failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString),
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
-  cooldownUntil: isOptional(isString), lastError: isOptional(isString),
 });
+
 const decodeEgressNodeRaw = createObjectDecoder<EgressNodeWireDTO>("egress node", {
-  id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean,
-  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
-  sourceId: isOptional(isString), proxyProfileId: isOptional(isString), proxyProfileName: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
+  id: isString, name: isString, enabled: isBoolean,
+  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), proxyPool: isBoolean,
+  sourceId: isOptional(isString), sourceName: isOptional(isString), pools: isOptional(isArrayOf(egressNodePoolRefValidator)),
+  accountBoundProxy: isBoolean,
+  rotationConfigured: isBoolean, rotationEnabled: isBoolean, lastRotatedAt: isOptional(isString), rotationAttempts: isNumber, lastRotationError: isOptional(isString),
+  degradeCount: isNumber, lastDegradedAt: isOptional(isString),
+  health: isNumber, failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString),
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
-  cooldownUntil: isOptional(isString), lastError: isOptional(isString),
 });
 const decodeEgressNode = (value: unknown) => withEgressNodeProbeDefaults(decodeEgressNodeRaw(value));
-const decodeEgressProxyProfile = createObjectDecoder<EgressProxyProfileDTO>("egress proxy profile", {
-  id: isString, name: isString, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString),
-  boundNodeCount: isNumber, createdAt: isString, updatedAt: isString,
-});
-const decodeEgressProxyProfiles = createObjectDecoder<EgressProxyProfileListDTO>("egress proxy profiles", { items: isArrayOf(hasShape({
-  id: isString, name: isString, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString),
-  boundNodeCount: isNumber, createdAt: isString, updatedAt: isString,
-})), page: isNumber, pageSize: isNumber, total: isNumber });
 type EgressNodeListWireDTO = {
   items: EgressNodeWireDTO[];
   page?: number;
   pageSize?: number;
   total?: number;
-  defaultUserAgents: Omit<Record<EgressScope, string>, "grok_console_asset"> & { grok_console_asset?: string };
-};
+  };
 const decodeEgressNodeListRaw = createObjectDecoder<EgressNodeListWireDTO>("egress node list", {
   items: isArrayOf(egressNodeValidator),
   page: isOptional(isNumber),
   pageSize: isOptional(isNumber),
   total: isOptional(isNumber),
-  defaultUserAgents: hasShape({ grok_build: isString, grok_web: isString, grok_console: isString, grok_web_asset: isString, grok_console_asset: isOptional(isString) }),
-});
+  });
 const decodeEgressNodeList = (value: unknown): EgressNodeListDTO => {
   const decoded = decodeEgressNodeListRaw(value);
   return {
@@ -279,22 +273,18 @@ const decodeEgressNodeList = (value: unknown): EgressNodeListDTO => {
     page: decoded.page ?? 1,
     pageSize: decoded.pageSize ?? Math.max(20, decoded.items.length),
     total: decoded.total ?? decoded.items.length,
-    defaultUserAgents: {
-      ...decoded.defaultUserAgents,
-      grok_console_asset: decoded.defaultUserAgents.grok_console_asset ?? decoded.defaultUserAgents.grok_console,
-    },
   };
 };
 const egressSourceValidator = hasShape({
-  id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean, urlConfigured: isBoolean,
+  id: isString, name: isString, enabled: isBoolean, urlConfigured: isBoolean,
   proxyConfigured: isOptional(isBoolean),
-  refreshIntervalSeconds: isNumber, defaultAccountCapacity: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
+  refreshIntervalSeconds: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
   lastSyncImported: isNumber, lastSyncError: isOptional(isString),
 });
 const decodeEgressSourceRaw = createObjectDecoder<EgressSourceWireDTO>("egress source", {
-  id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean, urlConfigured: isBoolean,
+  id: isString, name: isString, enabled: isBoolean, urlConfigured: isBoolean,
   proxyConfigured: isOptional(isBoolean),
-  refreshIntervalSeconds: isNumber, defaultAccountCapacity: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
+  refreshIntervalSeconds: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
   lastSyncImported: isNumber, lastSyncError: isOptional(isString),
 });
 const decodeEgressSource = (value: unknown) => withEgressSourceDefaults(decodeEgressSourceRaw(value));
@@ -319,28 +309,27 @@ const decodeEgressSourceList = (value: unknown): EgressSourceListDTO => {
 };
 const decodeEgressImportResult = createObjectDecoder<EgressImportResultDTO>("egress import result", { imported: isNumber, skipped: isNumber });
 const decodeEgressProbeBatchResult = createObjectDecoder<EgressProbeBatchResultDTO>("egress probe result", { requested: isNumber, healthy: isNumber, unhealthy: isNumber });
-const decodeEgressRebalanceResult = createObjectDecoder<EgressRebalanceResultDTO>("egress rebalance result", { assigned: isNumber, rebalanced: isNumber, unplaced: isNumber });
-const egressFallbackConfigValidator = hasShape({ mode: isOneOf("none", "direct", "fixed"), nodeId: isOptional(isString) });
-const egressRouteRuleValidator = hasShape({
-  scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"),
-  class: isOneOf("inference", "credential", "billing", "model_sync", "video"),
-  targetMode: isOneOf("fixed", "direct"),
-  targetNodeId: isOptional(isString),
-  enabled: isBoolean,
-});
+const egressRoutingTargetValidator = hasShape({ mode: isOneOf("auto", "direct", "node", "pool"), nodeId: isOptional(isString), poolId: isOptional(isString) });
 const decodeEgressOperationsConfigRaw = createObjectDecoder<EgressOperationsConfigWireDTO>("egress operations config", {
-  probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")), probeIntervalSeconds: isNumber, autoAssignEnabled: isBoolean, autoBalanceEnabled: isBoolean, assignmentIntervalSeconds: isNumber,
-  fallbacks: isRecordOf(egressFallbackConfigValidator), routeRules: isOptional(isArrayOf(egressRouteRuleValidator)), updatedAt: isString,
+  probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")), probeIntervalSeconds: isNumber,
+  defaultTarget: isOptional(egressRoutingTargetValidator),
+  scopeTargets: isOptional(isRecordOf(egressRoutingTargetValidator)),
+  classTargets: isOptional(isRecordOf(egressRoutingTargetValidator)),
+  updatedAt: isString,
 });
 const decodeEgressOperationsConfig = (value: unknown): EgressOperationsConfigDTO => {
   const decoded = decodeEgressOperationsConfigRaw(value);
-  return { ...decoded, probeProvider: decoded.probeProvider ?? "cloudflare", routeRules: decoded.routeRules ?? [] };
+  return {
+    ...decoded,
+    probeProvider: decoded.probeProvider ?? "cloudflare",
+    defaultTarget: decoded.defaultTarget ?? { mode: "auto" },
+    scopeTargets: decoded.scopeTargets ?? {},
+    classTargets: decoded.classTargets ?? {},
+  };
 };
-const decodeEgressRouteRuleStats = createObjectDecoder<{ items: EgressRouteRuleStatDTO[] }>("egress route rule stats", {
+const decodeEgressRoutingStats = createObjectDecoder<{ items: EgressRoutingStatDTO[] }>("egress routing stats", {
   items: isArrayOf(hasShape({
-    scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"),
-    class: isOneOf("inference", "credential", "billing", "model_sync", "video"),
-    hit: isNumber, skippedBinding: isNumber, nodeUnavailable: isNumber, directUnavailable: isNumber,
+    level: isString, mode: isString, hit: isNumber, fallback: isNumber,
     lastSeen: isOptional(isString),
   })),
 });
@@ -352,6 +341,24 @@ const decodeEgressProbeResult = (value: unknown): EgressProbeResultDTO => {
   const decoded = decodeEgressProbeResultRaw(value);
   return { ...decoded, ipv4: decoded.ipv4 ?? unknownEgressIPProbe(), ipv6: decoded.ipv6 ?? unknownEgressIPProbe() };
 };
+
+const egressPoolValidator = hasShape({
+	id: isString, name: isString, enabled: isBoolean,
+	strategy: isOneOf("affinity", "random", "sticky", "rotation"),
+	fallbackMode: isOneOf("none", "pool", "direct"), fallbackPoolId: isOptional(isString), fallbackPoolName: isOptional(isString),
+	memberCount: isNumber, healthyCount: isNumber, quarantinedCount: isNumber, memberIds: isArrayOf(isString), preferredNodeId: isOptional(isString), rotationCursorNodeId: isOptional(isString), lastSelectedNodeId: isOptional(isString), createdAt: isString, updatedAt: isString,
+});
+
+const decodeEgressPool = createObjectDecoder<EgressPoolDTO>("egress pool", {
+	id: isString, name: isString, enabled: isBoolean,
+	strategy: isOneOf("affinity", "random", "sticky", "rotation"),
+	fallbackMode: isOneOf("none", "pool", "direct"), fallbackPoolId: isOptional(isString), fallbackPoolName: isOptional(isString),
+	memberCount: isNumber, healthyCount: isNumber, quarantinedCount: isNumber, memberIds: isArrayOf(isString), preferredNodeId: isOptional(isString), rotationCursorNodeId: isOptional(isString), lastSelectedNodeId: isOptional(isString), createdAt: isString, updatedAt: isString,
+});
+
+type EgressPoolListWire = { items: EgressPoolDTO[] };
+const decodeEgressPools = createObjectDecoder<EgressPoolListWire>("egress pools", { items: isArrayOf(egressPoolValidator) });
+
 
 export function getSettings(): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", {}, decodeSettingsSnapshot);
@@ -365,26 +372,22 @@ type ListEgressNodesInput = {
   page?: number;
   pageSize?: number;
   search?: string;
-  scope?: EgressScope | "";
   enabled?: string;
   probe?: string;
-  assignment?: string;
   sortBy?: string;
   sortOrder?: SortOrder;
 };
 
-export function listEgressNodes(input: ListEgressNodesInput = {}): Promise<EgressNodeListDTO> {
+export function listEgressNodes(input: ListEgressNodesInput = {}, signal?: AbortSignal): Promise<EgressNodeListDTO> {
   const query = new URLSearchParams({ page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
   if (input.search) query.set("search", input.search);
-  if (input.scope) query.set("scope", input.scope);
   if (input.enabled) query.set("enabled", input.enabled);
   if (input.probe) query.set("probe", input.probe);
-  if (input.assignment) query.set("assignment", input.assignment);
   if (input.sortBy && input.sortOrder) {
     query.set("sortBy", input.sortBy);
     query.set("sortOrder", input.sortOrder);
   }
-  return apiRequest(`/api/admin/v1/egress-nodes?${query}`, {}, decodeEgressNodeList);
+  return apiRequest(`/api/admin/v1/egress-nodes?${query}`, { signal }, decodeEgressNodeList);
 }
 
 export async function listAllEgressNodes(input: Omit<ListEgressNodesInput, "page" | "pageSize"> = {}): Promise<EgressNodeListDTO> {
@@ -407,34 +410,12 @@ export function updateEgressNode(id: string, input: EgressNodeInput): Promise<Eg
   return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "PUT", body: input }, decodeEgressNode);
 }
 
+export function getEgressNodeRotationURL(id: string): Promise<{ rotationURL: string }> {
+	return apiRequest(`/api/admin/v1/egress-nodes/${id}/rotation-url/reveal`, { method: "POST" }, createObjectDecoder<{ rotationURL: string }>("egress rotation URL", { rotationURL: isString }));
+}
+
 export function getEgressNodeProxyURL(id: string): Promise<{ proxyURL: string }> {
   return apiRequest(`/api/admin/v1/egress-nodes/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress proxy URL", { proxyURL: isString }));
-}
-
-export function listEgressProxyProfiles(input: { page?: number; pageSize?: number; search?: string } = {}): Promise<EgressProxyProfileListDTO> {
-	const query = new URLSearchParams({ page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
-	if (input.search) query.set("search", input.search);
-	return apiRequest(`/api/admin/v1/egress-proxy-profiles?${query}`, {}, decodeEgressProxyProfiles);
-}
-
-export function createEgressProxyProfile(input: EgressProxyProfileInput): Promise<EgressProxyProfileDTO> {
-  return apiRequest("/api/admin/v1/egress-proxy-profiles", { method: "POST", body: input }, decodeEgressProxyProfile);
-}
-
-export function getEgressProxyProfile(id: string): Promise<EgressProxyProfileDTO> {
-	return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}`, {}, decodeEgressProxyProfile);
-}
-
-export function updateEgressProxyProfile(id: string, input: EgressProxyProfileInput): Promise<EgressProxyProfileDTO> {
-  return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}`, { method: "PUT", body: input }, decodeEgressProxyProfile);
-}
-
-export function deleteEgressProxyProfile(id: string): Promise<{ deleted: boolean }> {
-  return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
-}
-
-export function getEgressProxyProfileURL(id: string): Promise<{ proxyURL: string }> {
-  return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress proxy profile URL", { proxyURL: isString }));
 }
 
 export function deleteEgressNode(id: string): Promise<{ deleted: boolean }> {
@@ -451,7 +432,7 @@ export function updateEgressNodesEnabled(ids: string[], enabled: boolean): Promi
 
 export function previewUnhealthyEgressNodes(): Promise<EgressUnhealthyCleanupPreviewDTO> {
   return apiRequest("/api/admin/v1/egress-nodes/cleanup-preview", {}, createObjectDecoder<EgressUnhealthyCleanupPreviewDTO>("egress node cleanup preview", {
-    nodes: isNumber, boundAccounts: isNumber, subscriptionManaged: isNumber,
+    nodes: isNumber, subscriptionManaged: isNumber,
   }));
 }
 
@@ -463,26 +444,89 @@ export function refreshEgressClearance(id: string): Promise<{ refreshed: boolean
   return apiRequest(`/api/admin/v1/egress-nodes/${id}/refresh-clearance`, { method: "POST" }, decodeBooleanResult<{ refreshed: boolean }>("refreshed"));
 }
 
+export function rotateEgressNode(id: string): Promise<{ queued: boolean }> {
+  return apiRequest(`/api/admin/v1/egress-nodes/${id}/rotate`, { method: "POST" }, createObjectDecoder<{ queued: boolean }>("egress node rotate", { queued: isBoolean }));
+}
+
 export function testEgressNode(id: string): Promise<EgressProbeResultDTO> {
   return apiRequest(`/api/admin/v1/egress-nodes/${id}/test`, { method: "POST" }, decodeEgressProbeResult);
+}
+
+export function batchSetEgressRotation(ids: string[], template: string): Promise<{ updated: number; skipped: number }> {
+  return apiRequest("/api/admin/v1/egress-nodes/batch-rotation", { method: "POST", body: { ids, template } }, createObjectDecoder<{ updated: number; skipped: number }>("egress batch rotation", { updated: isNumber, skipped: isNumber }));
 }
 
 export function testEgressNodes(ids?: string[]): Promise<EgressProbeBatchResultDTO> {
   return apiRequest("/api/admin/v1/egress-nodes/test", { method: "POST", body: { ids: ids ?? [] } }, decodeEgressProbeBatchResult);
 }
 
+export type EgressPoolDTO = {
+	id: string; name: string; enabled: boolean;
+	strategy: EgressPoolStrategy;
+	fallbackMode: EgressPoolFallbackMode; fallbackPoolId?: string; fallbackPoolName?: string;
+	memberCount: number; healthyCount: number; quarantinedCount: number; memberIds: string[];
+	preferredNodeId?: string;
+	rotationCursorNodeId?: string;
+	lastSelectedNodeId?: string;
+	createdAt: string; updatedAt: string;
+};
+
+export type EgressPoolInput = {
+	name: string; enabled: boolean;
+	strategy: EgressPoolStrategy;
+	fallbackMode: EgressPoolFallbackMode; fallbackPoolId?: string;
+};
+
+export function listEgressPools(): Promise<EgressPoolDTO[]> {
+	return apiRequest("/api/admin/v1/egress-pools", {}, decodeEgressPools).then((value) => value.items);
+}
+
+/** 池内节点调度统计：验证策略分布的进程内存计数，重启/清零归零。 */
+export type EgressPoolStatDTO = {
+	nodeId: string; selections: number; failures: number; lastSelectedAt?: string;
+};
+
+export function getEgressPoolStats(id: string): Promise<{ items: EgressPoolStatDTO[]; since: string }> {
+	return apiRequest(`/api/admin/v1/egress-pools/${id}/stats`, {}, createObjectDecoder<{ items: EgressPoolStatDTO[]; since: string }>("egress pool stats", {
+		items: isArrayOf(hasShape({ nodeId: isString, selections: isNumber, failures: isNumber, lastSelectedAt: isOptional(isString) })),
+		since: isString,
+	}));
+}
+
+export function resetEgressPoolStats(id: string): Promise<void> {
+	return apiRequest(`/api/admin/v1/egress-pools/${id}/stats`, { method: "DELETE" }, createObjectDecoder<{ reset: boolean }>("egress pool stats reset", { reset: isBoolean })).then(() => undefined);
+}
+/** 设置池内成员首选顺序（小者先；固定首选/顺位轮换的“首”）。 */
+export function setEgressPoolMemberPriority(id: string, nodeId: string, priority: number): Promise<void> {
+	return apiRequest(`/api/admin/v1/egress-pools/${id}/members/${nodeId}/priority`, { method: "PUT", body: { priority } }, createObjectDecoder<{ updated: boolean }>("egress pool member priority", { updated: isBoolean })).then(() => undefined);
+}
+
+export function createEgressPool(input: EgressPoolInput): Promise<EgressPoolDTO> {
+	return apiRequest("/api/admin/v1/egress-pools", { method: "POST", body: input }, decodeEgressPool);
+}
+
+export function updateEgressPool(id: string, input: EgressPoolInput): Promise<EgressPoolDTO> {
+	return apiRequest(`/api/admin/v1/egress-pools/${id}`, { method: "PUT", body: input }, decodeEgressPool);
+}
+
+export function deleteEgressPool(id: string): Promise<{ deleted: boolean }> {
+	return apiRequest(`/api/admin/v1/egress-pools/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+}
+
+export function setEgressPoolMembers(poolId: string, nodeIds: string[]): Promise<{ updated: boolean }> {
+	return apiRequest(`/api/admin/v1/egress-pools/${poolId}/members`, { method: "PUT", body: { ids: nodeIds } }, createObjectDecoder<{ updated: boolean }>("set pool members", { updated: isBoolean }));
+}
+
 type ListEgressSourcesInput = {
   page?: number;
   pageSize?: number;
   search?: string;
-  scope?: EgressScope;
 };
 
 export function listEgressSources(input?: ListEgressSourcesInput): Promise<EgressSourceListDTO> {
   if (!input) return apiRequest("/api/admin/v1/egress-sources", {}, decodeEgressSourceList);
   const query = new URLSearchParams({ page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
   if (input.search) query.set("search", input.search);
-  if (input.scope) query.set("scope", input.scope);
   return apiRequest(`/api/admin/v1/egress-sources?${query}`, {}, decodeEgressSourceList);
 }
 
@@ -498,11 +542,19 @@ export function deleteEgressSource(id: string): Promise<{ deleted: boolean }> {
   return apiRequest(`/api/admin/v1/egress-sources/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
 }
 
+export function getEgressSourceURL(id: string): Promise<{ url: string }> {
+  return apiRequest(`/api/admin/v1/egress-sources/${id}/url/reveal`, { method: "POST" }, createObjectDecoder<{ url: string }>("egress source URL", { url: isString }));
+}
+
+export function getEgressSourceProxyURL(id: string): Promise<{ proxyURL: string }> {
+  return apiRequest(`/api/admin/v1/egress-sources/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress source proxy URL", { proxyURL: isString }));
+}
+
 export function syncEgressSource(id: string): Promise<EgressImportResultDTO> {
   return apiRequest(`/api/admin/v1/egress-sources/${id}/sync`, { method: "POST" }, decodeEgressImportResult);
 }
 
-export function importEgressText(input: { name: string; scope: EgressScope; accountCapacity: number; content: string }): Promise<EgressImportResultDTO> {
+export function importEgressText(input: { name: string; content: string }): Promise<EgressImportResultDTO> {
   return apiRequest("/api/admin/v1/egress-imports", { method: "POST", body: input }, decodeEgressImportResult);
 }
 
@@ -513,18 +565,7 @@ export function getEgressOperationsConfig(): Promise<EgressOperationsConfigDTO> 
 export function updateEgressOperationsConfig(input: Omit<EgressOperationsConfigDTO, "updatedAt">): Promise<EgressOperationsConfigDTO> {
   return apiRequest("/api/admin/v1/egress-operations", { method: "PUT", body: input }, decodeEgressOperationsConfig);
 }
-export function getEgressRouteRuleStats(): Promise<{ items: EgressRouteRuleStatDTO[] }> {
-  return apiRequest("/api/admin/v1/egress-operations/route-rule-stats", {}, decodeEgressRouteRuleStats);
-}
 
-export function rebalanceEgressAccounts(): Promise<EgressRebalanceResultDTO> {
-  return apiRequest("/api/admin/v1/egress-operations/rebalance", { method: "POST" }, decodeEgressRebalanceResult);
-}
-
-export function assignEgressAccounts(nodeID: string, provider: "grok_build" | "grok_web" | "grok_console", ids: string[], mode: "manual" | "auto" = "manual"): Promise<{ assigned: number }> {
-  return apiRequest(`/api/admin/v1/egress-nodes/${nodeID}/accounts`, { method: "POST", body: { provider, ids, mode } }, createObjectDecoder<{ assigned: number }>("egress account assignment", { assigned: isNumber }));
-}
-
-export function unassignEgressAccounts(provider: "grok_build" | "grok_web" | "grok_console", ids: string[]): Promise<{ assigned: number }> {
-  return apiRequest("/api/admin/v1/egress-nodes/accounts", { method: "DELETE", body: { provider, ids } }, createObjectDecoder<{ assigned: number }>("egress account assignment", { assigned: isNumber }));
+export function getEgressRoutingStats(): Promise<{ items: EgressRoutingStatDTO[] }> {
+  return apiRequest("/api/admin/v1/egress-operations/routing-stats", {}, decodeEgressRoutingStats);
 }

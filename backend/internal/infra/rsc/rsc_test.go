@@ -13,7 +13,7 @@ func homepage(payload string) string {
 
 // Ported from regc parse_rsc_risk tests.
 func TestParsesRegistrationDeny(t *testing.T) {
-	body := homepage("{\"user\":{\"botFlagSource\":1,\"botFlagDetails\":\"policy=deny,risk=0.95,event=$registration\"}}")
+	body := homepage(realisticUserPayload(1, "policy=deny,risk=0.95,event=$registration"))
 	result := ParseRisk(body)
 	if result.Verdict != VerdictDenied || result.BotFlagSource != 1 || !result.HasRiskScore || result.RiskScore != 0.95 {
 		t.Fatalf("deny fixture = %#v", result)
@@ -24,7 +24,7 @@ func TestParsesRegistrationDeny(t *testing.T) {
 }
 
 func TestParsesFlaggedSourceWithoutDeny(t *testing.T) {
-	body := homepage("{\"user\":{\"botFlagSource\":2,\"botFlagDetails\":\"castle_token: no_token event=$login source=Web\"}}")
+	body := homepage(realisticUserPayload(2, "castle_token: no_token event=$login source=Web"))
 	result := ParseRisk(body)
 	if result.Verdict != VerdictFlagged || result.BotFlagSource != 2 {
 		t.Fatalf("flagged fixture = %#v", result)
@@ -40,7 +40,7 @@ func TestCleanAccountHasNoFlag(t *testing.T) {
 }
 
 func TestNullSourceIsNotFlagged(t *testing.T) {
-	body := homepage("{\"user\":{\"botFlagSource\":null}}")
+	body := homepage(realisticUserPayload(0, ""))
 	result := ParseRisk(body)
 	if result.Verdict != VerdictClean {
 		t.Fatalf("null-source fixture = %#v", result)
@@ -64,7 +64,7 @@ func TestEmptyBodyIsError(t *testing.T) {
 
 // Real-world shape observed in production: nested escaping plus risk score.
 func TestProductionRiskShape(t *testing.T) {
-	body := homepage("{\"user\":{\"botFlagSource\":1,\"botFlagDetails\":\"policy=deny,risk=0.86,event=$registration\"}}")
+	body := homepage(realisticUserPayload(1, "policy=deny,risk=0.86,event=$registration"))
 	result := ParseRisk(body)
 	if result.Verdict != VerdictDenied || result.RiskScore != 0.86 || !result.Risky() {
 		t.Fatalf("production fixture = %#v", result)

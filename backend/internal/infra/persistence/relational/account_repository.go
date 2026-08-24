@@ -86,18 +86,6 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 		query = query.Where("EXISTS (SELECT 1 FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id AND profile.tier = ?)", input.Filter.QuotaType)
 	}
 	query = applyAccountStatusFilter(query, input.Filter.Status, input.Filter.Now)
-	switch input.Filter.Egress {
-	case "bound":
-		query = query.Where("egress_node_id IS NOT NULL")
-		if nodeID := input.Filter.EgressNodeID; nodeID > 0 {
-			query = query.Where("egress_node_id = ?", nodeID)
-		}
-		if sourceID := input.Filter.EgressSourceID; sourceID > 0 {
-			query = query.Where("EXISTS (SELECT 1 FROM egress_nodes node WHERE node.id = provider_accounts.egress_node_id AND node.source_id = ?)", sourceID)
-		}
-	case "unbound":
-		query = query.Where("egress_node_id IS NULL")
-	}
 	if input.Filter.Refreshable != nil {
 		if *input.Filter.Refreshable {
 			query = query.Where("EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.encrypted_refresh <> '')")
@@ -1365,15 +1353,12 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 		row.BuildAPIFallback = existing.BuildAPIFallback
 		row.BuildRouteMode = existing.BuildRouteMode
 		row.BuildSuperEntitled = existing.BuildSuperEntitled
-		row.EgressNodeID = existing.EgressNodeID
-		row.EgressAssignmentMode = existing.EgressAssignmentMode
-		row.EgressAssignedAt = existing.EgressAssignedAt
 		// reauth_marked_at 与 Update 路径一致：保持 reauth 时永不被普通 upsert 改写。
 		applyReauthMarkedAtTransition(&row, *existing)
 		if err := tx.Save(&row).Error; err != nil {
 			return repository.AccountUpsertResult{}, accountModel{}, err
 		}
-		if err := saveAccountRelations(tx, value, row.ID); err != nil {
+		if err := saveAccountRelations(tx, value, row.ID, false); err != nil {
 			return repository.AccountUpsertResult{}, accountModel{}, err
 		}
 		return repository.AccountUpsertResult{ID: row.ID}, row, nil
@@ -1398,7 +1383,7 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 	if err := tx.Create(&row).Error; err != nil {
 		return repository.AccountUpsertResult{}, accountModel{}, err
 	}
-	if err := saveAccountRelations(tx, value, row.ID); err != nil {
+	if err := saveAccountRelations(tx, value, row.ID, false); err != nil {
 		return repository.AccountUpsertResult{}, accountModel{}, err
 	}
 	return repository.AccountUpsertResult{ID: row.ID, Created: true}, row, nil
@@ -1423,7 +1408,7 @@ func (r *AccountRepository) Update(ctx context.Context, value account.Credential
 		if err := tx.Save(&row).Error; err != nil {
 			return err
 		}
-		return saveAccountRelations(tx, value, row.ID)
+		return saveAccountRelations(tx, value, row.ID, true)
 	}); err != nil {
 		return account.Credential{}, mapError(err)
 	}
@@ -1447,9 +1432,38 @@ func applyReauthMarkedAtTransition(row *accountModel, existing accountModel) {
 	row.ReauthMarkedAt = nil
 }
 
-func saveAccountRelations(tx *gorm.DB, value account.Credential, accountID uint64) error {
+// preserveConcurrentRefreshWrites 防御全实体保存与并发 OAuth 刷新之间的丢更新:
+// 轮换密文与退避状态只有 UpdateTokens/UpdateCredentialRefreshFailure 两个定向写方,
+// MarkReauthRequired/SetAccountEnabled/管理端 Update 这类 Get→改→整体 Save 的路径
+// 不得用旧快照回滚它们——上游轮换 refresh token 后旧值已作废, 回滚即账号永久
+// 失效。事务内重读最新行并保留这些列; 新建账号(行不存在)保持原值。
+// ExpiresAt/RefreshDueAt/LastRefreshAt 不在保留之列:测试与工具路径会经全实体
+// Update 调度它们, 且过期值被旧快照覆盖只会让下次刷新提前(无害, token 已保留)。
+func preserveConcurrentRefreshWrites(tx *gorm.DB, credential *accountCredentialModel) {
+	var existing accountCredentialModel
+	if err := tx.Where("account_id = ?", credential.AccountID).First(&existing).Error; err != nil {
+		return
+	}
+	credential.EncryptedRefresh = existing.EncryptedRefresh
+	credential.RefreshFailures = existing.RefreshFailures
+	credential.RefreshUnclassifiedAuthFailures = existing.RefreshUnclassifiedAuthFailures
+	credential.LastRefreshErrorStatus = existing.LastRefreshErrorStatus
+	credential.LastRefreshError = existing.LastRefreshError
+	credential.LastRefreshErrorMessage = existing.LastRefreshErrorMessage
+	credential.LastRefreshErrorResponse = existing.LastRefreshErrorResponse
+	credential.RefreshPermanent = existing.RefreshPermanent
+}
+
+// saveAccountRelations 落库凭据行。preserveRefreshState 仅在 Update(风控标记/
+// 停用/管理端编辑这类 Get→改→整体 Save 的路径)启用:防止旧快照回滚并发刷新已
+// 轮换的 refresh token。upsert 路径(重新导入/令牌同步)携带的正是要写入的新
+// 凭据, 必须原样落库, 不得保留旧行。
+func saveAccountRelations(tx *gorm.DB, value account.Credential, accountID uint64, preserveRefreshState bool) error {
 	value.ID = accountID
 	credential := fromAccountCredentialDomain(value)
+	if preserveRefreshState {
+		preserveConcurrentRefreshWrites(tx, &credential)
+	}
 	if err := tx.Save(&credential).Error; err != nil {
 		return err
 	}
@@ -1627,76 +1641,6 @@ func (r *AccountRepository) UpdateMany(ctx context.Context, providerValue accoun
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged})
 	}
 	return updated, nil
-}
-
-// UpdateEgressBindings assigns one egress node to multiple accounts of one
-// provider. A nil node clears the binding and restores normal pool selection.
-func (r *AccountRepository) UpdateEgressBindings(ctx context.Context, providerValue account.Provider, ids []uint64, nodeID *uint64, mode account.EgressAssignmentMode, assignedAt time.Time) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	values := map[string]any{
-		"egress_node_id": nodeID,
-	}
-	if nodeID == nil {
-		values["egress_assignment_mode"] = ""
-		values["egress_assigned_at"] = nil
-	} else {
-		values["egress_assignment_mode"] = string(mode)
-		values["egress_assigned_at"] = assignedAt.UTC()
-	}
-	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
-		Where("provider = ? AND id IN ?", providerValue, ids).
-		Updates(values)
-	return result.RowsAffected, mapError(result.Error)
-}
-
-// ListEgressAssignments returns all accounts for one provider with their
-// binding metadata. It deliberately includes disabled accounts so capacity
-// reporting reflects every account that reserves a proxy slot.
-func (r *AccountRepository) ListEgressAssignments(ctx context.Context, providerValue account.Provider) ([]account.Credential, error) {
-	var rows []accountModel
-	if err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").
-		Where("provider = ?", providerValue).Order("id ASC").Find(&rows).Error; err != nil {
-		return nil, mapError(err)
-	}
-	values := make([]account.Credential, 0, len(rows))
-	for _, row := range rows {
-		values = append(values, toAccountDomain(row))
-	}
-	return values, nil
-}
-
-func (r *AccountRepository) ListEgressBindingProviders(ctx context.Context, nodeID uint64) ([]account.Provider, error) {
-	if nodeID == 0 {
-		return []account.Provider{}, nil
-	}
-	return r.listEgressBindingProviders(r.db.db.WithContext(ctx).Model(&accountModel{}).Where("egress_node_id = ?", nodeID))
-}
-
-func (r *AccountRepository) ListEgressSourceBindingProviders(ctx context.Context, sourceID uint64) ([]account.Provider, error) {
-	if sourceID == 0 {
-		return []account.Provider{}, nil
-	}
-	query := r.db.db.WithContext(ctx).Model(&accountModel{}).
-		Joins("JOIN egress_nodes ON egress_nodes.id = provider_accounts.egress_node_id").
-		Where("egress_nodes.source_id = ?", sourceID)
-	return r.listEgressBindingProviders(query)
-}
-
-func (r *AccountRepository) listEgressBindingProviders(query *gorm.DB) ([]account.Provider, error) {
-	var raw []string
-	if err := query.Distinct("provider_accounts.provider").Order("provider_accounts.provider ASC").Pluck("provider_accounts.provider", &raw).Error; err != nil {
-		return nil, mapError(err)
-	}
-	result := make([]account.Provider, 0, len(raw))
-	for _, value := range raw {
-		provider := account.Provider(value)
-		if provider.IsValid() {
-			result = append(result, provider)
-		}
-	}
-	return result, nil
 }
 
 func (r *AccountRepository) Delete(ctx context.Context, id uint64) error {

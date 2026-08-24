@@ -342,14 +342,14 @@ curl http://127.0.0.1:8000/v1/responses \
 
 ## Egress and Cloudflare
 
-Egress nodes are scoped to Build, Web, Console, or Web assets. The admin console supports:
+Egress nodes are pure proxy resources - no scope, no account binding. The admin console supports:
 
 - HTTP, HTTPS, SOCKS4/4A, SOCKS5/5H, Resin, Trojan, VLESS, Shadowsocks, and VMess
 - TCP, WebSocket, and TLS tunnel transports; unsupported variants are rejected during import
 - Subscription and text/Base64 import
-- Batch probes, filtering, deletion, assignment, and balancing
-- Fallback per scope: none, direct, or a fixed node
-- Per-traffic-class egress routing for Grok Build: pin inference, OAuth, billing, model sync, or video calls to a dedicated node or direct connection. Inference and video honor account bindings; auxiliary calls follow the rule even for bound accounts, and unavailable targets fall back to the scope pool
+- Batch probes, filtering, and deletion
+- Three-level exit routing resolved per request: traffic class (inference / credential / billing / model sync / video) -> scope (Build / Web / Console) -> default exit -> automatic schedule. Each level can be unset (follows the next level down), direct, one fixed node, or a dedicated pool. "Falling back" only means an unset level resolving to the next level down; a configured target is a strict binding — when its node is quarantined/cooling/disabled or its pool is exhausted, requests fail fast with an explicit error instead of silently rerouting to other exits. Use a pool for fault tolerance: member rotation, chained pools, and in-pool direct fallback all stay inside the configured boundary
+- Dedicated pools: named node groups with their own scheduling strategy (caller-sticky rendezvous, random, first-preferred, forward rotation) and an exhausted-fallback (another pool or direct)
 - Proxy-pool mode without global cooldown after one connection failure
 - Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
 - Give each sticky session its own fixed node (`proxyPool=false`). Do not merge several stickies into one node, or a failing session can only be found by taking down the whole group
@@ -390,7 +390,22 @@ identity:
 - A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`; risky
   verdicts never recover automatically. Changes to this section require a restart.
 
+### Exit-IP quality guard and automatic rotation
+
+See [EXIT-IP-GUARD.md](EXIT-IP-GUARD.md) for full deployment steps (multi-instance servers, batch webhook templating, end-to-end verification).
+When RSC attribution returns **clean**, the exit IP is the suspect. The exit-IP quality guard (`egress` config section) closes the loop:
+
+- A degraded attempt excludes its egress node for the rest of that request, so the retry immediately lands on a different fixed exit IP.
+- Attribution clean → the node is quarantined (default 24h), and its per-node rotation webhook is POSTed (e.g. restart MicroWARP to obtain a new exit IP).
+- After a settle delay the node is probed; the exit IP must have changed. A one-shot canary (a tiny streaming inference request: first SSE event within budget and thinking evidence present) decides re-admission.
+- Canary pass → quarantine released and the node rejoins the pool. Fail → rotate again, up to `maxAttemptsPerQuarantine` (default 3) per quarantine cycle, then stay quarantined with a warning.
+- With RSC attribution disabled or unlinked accounts, cross-account confirmation is the fallback: two distinct accounts degrading on the same node inside the window quarantine it.
+- Only fixed (non-pool) nodes participate in quality quarantine and rotation; proxy-pool (rotating-endpoint) members are exempt from both, keeping only per-request exclusion. Rate guards: ≥10 minutes between rotations per node, ≤6 rotations per hour globally.
+
+Configure each MicroWARP endpoint as its own fixed node and set its rotation webhook (token-checked POST endpoint that restarts the tunnel service) in the node editor; see EXIT-IP-GUARD.md for a complete rotate-server deployment guide.
 ### Request audits
+
+
 
 Every inference request lands in the audit ledger (request_audits) with per-attempt
 diagnostics (request_audit_attempts), including quality-guard retries (stages
@@ -407,6 +422,7 @@ deletes aged audit rows and their attempt details in hourly batched sweeps
 (500 rows/batch, 30s budget per sweep). The task starts only when retention is
 non-zero - the default is byte-identical to upstream behavior. Changes require a
 process restart.
+
 
 ### Verification matrix
 
@@ -532,7 +548,6 @@ Important optional settings:
 - `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
 - `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
 - `routing.segmentedSelectorEnabled`: enabled by default for pools with at least 3,000 eligible accounts; bounds dynamic concurrency reads while retaining quota/tier priorities, sticky sessions, full-planner fallback, and atomic guards.
-- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`: optional large-pool guards. `0` (default) keeps the historical unbounded first-pass evacuation and the existing 200-move ceiling for capacity/rebalance repair. Set `0.05`–`1` only when taking a failed node out of service would otherwise dump thousands of auto accounts onto the last healthy exits. `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` and `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` override the YAML when set.
 - Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
 - **Sync latest version** applies the validated Grok Build client version and User-Agent.
 

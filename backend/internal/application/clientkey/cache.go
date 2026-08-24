@@ -12,6 +12,11 @@ const (
 	touchTrackerMaxEntries = 10000
 	keyAuthCacheTTL        = time.Second
 	keyAuthCacheMaxEntries = 10000
+	// 未知前缀的负缓存 TTL:伪造 key 的每个请求原本都会打一次 GetByPrefix
+	// DB 查询(正缓存只存命中), 无凭据流量可借此放大数据库压力。短 TTL 让
+	// "先失败、随后创建同前缀 key"的窗口几乎不可察觉(前缀为随机 6 字节 hex,
+	// 碰撞概率本身可忽略; Create 仍会显式失效)。
+	keyAuthNegativeTTL = 2 * time.Second
 )
 
 type cachedAuthKey struct {
@@ -20,12 +25,13 @@ type cachedAuthKey struct {
 }
 
 type authKeyCache struct {
-	mu       sync.RWMutex
-	byPrefix map[string]cachedAuthKey
+	mu        sync.RWMutex
+	byPrefix  map[string]cachedAuthKey
+	negatives map[string]time.Time
 }
 
 func newAuthKeyCache() *authKeyCache {
-	return &authKeyCache{byPrefix: make(map[string]cachedAuthKey)}
+	return &authKeyCache{byPrefix: make(map[string]cachedAuthKey), negatives: make(map[string]time.Time)}
 }
 
 func (c *authKeyCache) get(prefix string, now time.Time) (clientkeydomain.Key, bool) {
@@ -68,6 +74,42 @@ func (c *authKeyCache) put(prefix string, value clientkeydomain.Key, now time.Ti
 			break
 		}
 	}
+}
+
+// getNegative 报告该前缀在负缓存窗口内(近期确认不存在)。
+func (c *authKeyCache) getNegative(prefix string, now time.Time) bool {
+	c.mu.RLock()
+	until, ok := c.negatives[prefix]
+	c.mu.RUnlock()
+	return ok && now.Before(until)
+}
+
+// putNegative 记录一次"前缀不存在"的查询结果。
+func (c *authKeyCache) putNegative(prefix string, now time.Time) {
+	if prefix == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.negatives[prefix] = now.Add(keyAuthNegativeTTL)
+	for candidate, until := range c.negatives {
+		if !now.Before(until) {
+			delete(c.negatives, candidate)
+		}
+	}
+	for len(c.negatives) > keyAuthCacheMaxEntries {
+		for candidate := range c.negatives {
+			delete(c.negatives, candidate)
+			break
+		}
+	}
+}
+
+// deleteNegative 在创建新 key 时清掉同前缀的负缓存记录。
+func (c *authKeyCache) deleteNegative(prefix string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.negatives, prefix)
 }
 
 func (c *authKeyCache) deleteID(id uint64) {

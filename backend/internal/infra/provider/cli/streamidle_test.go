@@ -250,7 +250,7 @@ func TestEgressTransportIdleTimeoutCancelsHTTP2BodyRead(t *testing.T) {
 
 type emptyEgressRepository struct{}
 
-func (emptyEgressRepository) ListEgressNodes(context.Context, domainegress.Scope, repository.SortQuery) ([]domainegress.Node, error) {
+func (emptyEgressRepository) ListEgressNodes(context.Context, repository.SortQuery) ([]domainegress.Node, error) {
 	return nil, nil
 }
 

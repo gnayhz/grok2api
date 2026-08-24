@@ -156,9 +156,22 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
 }
 
 // Attributor is the risk-attribution surface the gateway consumes; the
-// concrete risk.Service satisfies it.
+// concrete risk.Service satisfies it. egressNodeID carries the egress node
+// that served the degraded attempt (0 = direct/untraced) so a clean RSC
+// verdict can be routed into exit-IP quarantine instead of account penalty.
 type Attributor interface {
-	OnDegraded(ctx context.Context, credential accountdomain.Credential)
+	OnDegraded(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64)
+}
+
+// EgressDegradationObserver receives request-level exit-IP degradation
+// evidence. The egress application service implements it to run cross-account
+// confirmation and (with RSC attribution disabled or pending) node quarantine.
+type EgressDegradationObserver interface {
+	OnEgressDegraded(ctx context.Context, nodeID, accountID uint64)
+	// MarkDegradeEvidence applies the pending node soft-cooldown after one
+	// degrade verdict so other accounts stop hitting the suspect exit until
+	// attribution confirms or the escalated deadline expires.
+	MarkDegradeEvidence(nodeID uint64)
 }
 
 // UpdateAccountRisk installs the attribution hook; nil keeps it unset.
@@ -171,6 +184,22 @@ func (s *Service) UpdateAccountRisk(attributor Attributor) {
 
 func (s *Service) accountRiskAttributor() Attributor {
 	if value, ok := s.accountRisk.Load().(Attributor); ok {
+		return value
+	}
+	return nil
+}
+
+// UpdateEgressGuard installs the exit-IP degradation observer; nil keeps it
+// unset.
+func (s *Service) UpdateEgressGuard(observer EgressDegradationObserver) {
+	if observer == nil {
+		return
+	}
+	s.egressGuard.Store(observer)
+}
+
+func (s *Service) egressDegradationObserver() EgressDegradationObserver {
+	if value, ok := s.egressGuard.Load().(EgressDegradationObserver); ok {
 		return value
 	}
 	return nil

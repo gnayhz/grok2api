@@ -400,30 +400,47 @@ func (s *DeviceSessionStore) Delete(_ context.Context, id string) error {
 // LockStore 提供单实例非阻塞短期锁。
 type LockStore struct {
 	mu    sync.Mutex
-	locks map[string]string
+	locks map[string]lockEntry
 }
 
-func NewLockStore() *LockStore { return &LockStore{locks: make(map[string]string)} }
+// lockEntry 记录锁的持有令牌与到期时间。TTL 与 redis 实现对齐:持锁方
+// panic/丢弃 release 闭包时, 锁在 TTL 后自愈(此前永不过期, 维护任务会
+// 永久卡死直到重启进程)。
+type lockEntry struct {
+	token     string
+	expiresAt time.Time // 零值=不过期(兼容显式传 0 的调用方)
+}
 
-func (s *LockStore) Acquire(_ context.Context, key string, _ time.Duration) (func(), bool, error) {
+func NewLockStore() *LockStore { return &LockStore{locks: make(map[string]lockEntry)} }
+
+func (s *LockStore) Acquire(_ context.Context, key string, ttl time.Duration) (func(), bool, error) {
 	tokenBytes := make([]byte, 16)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, false, err
 	}
 	token := hex.EncodeToString(tokenBytes)
+	now := time.Now().UTC()
 	s.mu.Lock()
-	if _, exists := s.locks[key]; exists {
-		s.mu.Unlock()
-		return nil, false, nil
+	if entry, exists := s.locks[key]; exists {
+		if entry.expiresAt.IsZero() || now.Before(entry.expiresAt) {
+			s.mu.Unlock()
+			return nil, false, nil
+		}
+		// 过期锁:惰性回收后允许重新获取。
+		delete(s.locks, key)
 	}
-	s.locks[key] = token
+	var expiresAt time.Time
+	if ttl > 0 {
+		expiresAt = now.Add(ttl)
+	}
+	s.locks[key] = lockEntry{token: token, expiresAt: expiresAt}
 	s.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if s.locks[key] == token {
+			if entry, exists := s.locks[key]; exists && entry.token == token {
 				delete(s.locks, key)
 			}
 		})

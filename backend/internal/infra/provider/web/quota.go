@@ -14,6 +14,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -86,6 +87,8 @@ func (a *Adapter) SyncQuotaGroup(ctx context.Context, credential account.Credent
 	if group != account.QuotaGroupWebImagine {
 		return provider.QuotaGroupSnapshot{}, fmt.Errorf("unsupported Web quota group %q", group)
 	}
+	// 额度同步按账单语义路由。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassBilling)
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {

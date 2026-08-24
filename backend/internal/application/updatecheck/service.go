@@ -125,7 +125,9 @@ func (s *Service) fetchLatest(ctx context.Context) (latestRelease, error) {
 		return latestRelease{}, err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("User-Agent", "grok2api/"+s.current)
+	// UA 不携带精确版本号:该请求发往第三方 api.github.com, 版本号属于被动
+	// 指纹; 检查结果只在管理端展示, UA 无需精确到版本。
+	request.Header.Set("User-Agent", "grok2api/update-check")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	response, err := s.client.Do(request)
 	if err != nil {

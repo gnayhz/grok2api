@@ -18,6 +18,10 @@ const (
 	qualityProtocolResponses  = "responses"
 	qualityProtocolAnthropic  = "anthropic"
 	qualityHoldMaxBufferBytes = 4 << 20
+	// qualityBodyPeekLimit 是非流式判决的内存上限:流式路径扣留缓冲有 4MiB 界,
+	// 非流式此前无界。取 32MiB——足够容纳任何合法的完整 JSON 响应, 超过即视为
+	// 异常形态, 放弃判决直接透传。
+	qualityBodyPeekLimit = 32 << 20
 	// 注：chat 流转换器在 reasoning item 打开时发出的时序注释
 	// ": grok2api-reasoning-start"（见 chat_stream.go markChatReasoningStart）
 	// 不是思考证据——降智流同样会发；扫描器按 SSE 注释行（非 data: 前缀）
@@ -646,6 +650,16 @@ type qualityResponseBody struct {
 	} `json:"usage"`
 }
 
+// chainedBody 把 Close 传导给底层 body 的重放 Reader, 用于需要继续透传
+// 原始 body 的返回路径。
+type chainedBody struct {
+	Reader io.Reader
+	closer io.Closer
+}
+
+func (c *chainedBody) Read(p []byte) (int, error) { return c.Reader.Read(p) }
+func (c *chainedBody) Close() error               { return c.closer.Close() }
+
 // peekQualityBody 非流式响应的完整 body 判决。客户端本就要等完整 JSON 才能
 // 收到任何字节，读完再判的扣留附加延迟为零：不存在流式路径的时序复杂度
 // （无 hold 窗口/阈值/早断/前缀重放）。证据规则与流式扫描器一致：可见思考
@@ -656,7 +670,15 @@ func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser
 	if body == nil {
 		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, "", errQualityEmptyStream
 	}
-	data, readErr := io.ReadAll(body)
+	data, readErr := io.ReadAll(io.LimitReader(body, qualityBodyPeekLimit+1))
+	if int64(len(data)) > qualityBodyPeekLimit {
+		// 超预算的响应不再判决:重放已读字节并继续透传剩余 body(fail-open, 与
+		// "无法识别的响应形状"同语义——不猜测质量)。此前 io.ReadAll 无上限, 异常/
+		// 被劫持上游的超大 200 body 会在判决前全量驻留内存, 并发下 OOM。
+		// Close 必须传导给原始 body: Build 路径的 egressResponseBody.Close 同时
+		// 释放上游连接与 egress 租约, NopCloser 会两者都泄漏。
+		return &chainedBody{Reader: io.MultiReader(bytes.NewReader(data), body), closer: body}, QualityDeliver, Usage{}, "", nil
+	}
 	_ = body.Close()
 	replay := io.NopCloser(bytes.NewReader(data))
 	if readErr != nil {

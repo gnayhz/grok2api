@@ -277,6 +277,23 @@ func (s *Service) executeImage(
 				continue
 			}
 		}
+		// 非 remote-window 的 402/429 与所有 5xx:与 voice/video 路径对齐——账号
+		// 侧限流同样 MarkFailure 冷却(否则限流账号持续被选中挨打), 5xx 可重试。
+		// 此前图片是三个媒体入口中唯一缺这层的, 上游限流时成功率显著更低。
+		if response.StatusCode == http.StatusPaymentRequired || response.StatusCode == http.StatusTooManyRequests {
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+			s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+			if attemptPolicy.hasNext(attempt) {
+				_, _ = readRetryableBody(response.Body)
+				lease.Release()
+				continue
+			}
+		}
+		if response.StatusCode >= http.StatusInternalServerError && attemptPolicy.hasNext(attempt) {
+			_, _ = readRetryableBody(response.Body)
+			lease.Release()
+			continue
+		}
 		break
 	}
 	if response == nil {

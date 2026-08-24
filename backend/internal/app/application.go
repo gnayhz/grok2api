@@ -72,6 +72,7 @@ type Application struct {
 	settings          *settingsapp.Service
 	gateway           *gateway.Service
 	media             *mediaapp.Service
+	updateCheck       bool
 	quotaRecovery     *quotarecoveryapp.Service
 	accounts          *accountapp.Service
 	models            *modelapp.Service
@@ -194,6 +195,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		return nil, fmt.Errorf("不支持的运行态驱动: %s", cfg.RuntimeStore.Driver)
 	}
 	logger.Info("deployment_topology", "replicas", cfg.Deployment.Replicas, "instance_id", cfg.Deployment.InstanceID, "cluster_id", cfg.Deployment.ClusterID, "database", cfg.Database.Driver, "runtime_store", cfg.RuntimeStore.Driver, "media_driver", cfg.Media.Driver, "shared_media", cfg.Deployment.SharedMedia)
+	if cfg.Deployment.Replicas > 1 {
+		// L2 软冷却/跨账号降智证据/轮换队列为进程内状态:多副本下跨账号确认
+		// 阈值实际按副本放大(需 threshold×N 个账号落在同一副本), 运维按单副本
+		// 语义配置会得到不符预期的隔离灵敏度。
+		logger.Warn("deployment_topology_guard_state_replica_local", "replicas", cfg.Deployment.Replicas, "hint", "qualityGuard cross-account evidence and soft cooldowns are per-replica")
+	}
 	mediaService := mediaapp.NewServiceWithTickets(mediaAssetRepo, mediaJobRepo, mediaUploadTicketRepo, localMediaStore, refreshLock, mediaConfig(cfg))
 
 	egressManager := infraegress.NewManager(egressRepo, cipher)
@@ -303,14 +310,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
 	accountSyncService.SetBulkPool(importPool)
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
-	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, accountRepo)
-	egressService.ConfigureAutoAssignBounds(cfg.Routing.AutoAssignMaxNodeShare, cfg.Routing.AutoAssignMaxMigrationShare)
+	egressService := egressapp.NewService(egressRepo, cipher)
 	egressService.SetClearanceManager(egressManager)
 	egressService.SetNodeProber(egressManager)
 	egressService.SetOperationsConfigInvalidator(egressManager)
+	egressService.SetPoolCacheInvalidator(egressManager)
 	egressManager.SetFailureProber(egressService.TestNode)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	// 媒体作业预检/清理：删除 key 前处置 media_jobs 的 RESTRICT 外键引用
+	egressService.SetQualityQuarantiner(egressManager)
+	egressService.SetQualityGuardConfig(egressQualityGuardConfig(cfg))
+	// L2 软冷却时长接通配置:此前字段已文档化但从未接线, 取值被静默忽略。
+	egressManager.SetDegradeEvidenceCooldowns(cfg.Egress.QualityGuard.SoftCooldownBase.Value(), cfg.Egress.QualityGuard.SoftCooldownMax.Value())
+	egressService.SetQualityLogger(logger)
+	egressService.SetRotationConfig(egressRotationConfig(cfg))
+	egressService.SetRotationLogger(logger)
 	//（round 51：失败视频作业曾使 key 不可删并落裸 500）。
 	clientKeyService.SetMediaJobRepository(mediaJobRepo)
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
@@ -341,9 +355,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.RequestRetry))
 	if service := newAccountRiskService(cfg, database, accountService, logger); service != nil {
 		gatewayService.UpdateAccountRisk(service)
+		// RSC 归因 clean → 出口 IP 嫌疑：交给 egress 服务隔离+换 IP。
+		service.SetEgressQuarantiner(egressService)
 		// reconcile 与 patrol 交给 Run() 的 background WaitGroup 托管：进程关闭时
 		riskService, riskPatrol = service, cfg.AccountRisk.RSCCheck.Patrol.Enabled
+		// 人工解除风险标记时级联删除身份组 verdict(否则被对账/降智回滚)。
+		accountService.SetRiskVerdictClearer(service)
 	}
+	// 出口降级观测（跨账号确认兜底）+ canary 验证都由 gateway 提供。
+	gatewayService.UpdateEgressGuard(egressService)
+	gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(cfg))
+	egressService.SetEgressQualityProber(gatewayService)
 	gatewayService.UpdateVideoMaxAttempts(cfg.Routing.VideoMaxAttempts)
 	gatewayService.UpdateMarkBuildChatDeniedAsReauth(cfg.Routing.MarkBuildChatDeniedAsReauth)
 	gatewayService.SetLogger(logger)
@@ -393,7 +415,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
 		selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
-		egressService.ConfigureAutoAssignBounds(next.Routing.AutoAssignMaxNodeShare, next.Routing.AutoAssignMaxMigrationShare)
+		egressService.SetQualityGuardConfig(egressQualityGuardConfig(next))
+		egressManager.SetDegradeEvidenceCooldowns(next.Egress.QualityGuard.SoftCooldownBase.Value(), next.Egress.QualityGuard.SoftCooldownMax.Value())
+		egressService.SetRotationConfig(egressRotationConfig(next))
+		gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(next))
 		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
@@ -419,9 +444,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, auditRetention: cfg.Audit.Retention.Value(), responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
-		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
+		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService, updateCheck: serverUpdateCheckEnabled(cfg),
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup, accountRisk: riskService, accountRiskPatrol: riskPatrol,
 	}, nil
+}
+
+// serverUpdateCheckEnabled 解析出网检查开关:nil 保持默认开启, 显式 false 关闭。
+func serverUpdateCheckEnabled(cfg config.Config) bool {
+	if cfg.Server.UpdateCheckEnabled == nil {
+		return true
+	}
+	return *cfg.Server.UpdateCheckEnabled
 }
 
 func invalidationSourceInstance(cfg config.Config) string {
@@ -432,6 +465,39 @@ func invalidationSourceInstance(cfg config.Config) string {
 }
 
 // newAccountRiskService builds the RSC attribution service when enabled in
+// egressQualityGuardConfig maps file config onto the egress quality guard.
+func egressQualityGuardConfig(cfg config.Config) egressapp.QualityGuardConfig {
+	return egressapp.QualityGuardConfig{
+		QuarantineCooldown:       cfg.Egress.QualityGuard.QuarantineCooldown.Value(),
+		CrossAccountThreshold:    cfg.Egress.QualityGuard.CrossAccountThreshold,
+		CrossAccountWindow:       cfg.Egress.QualityGuard.CrossAccountWindow.Value(),
+		TentativeReleaseCooldown: cfg.Egress.QualityGuard.TentativeReleaseCooldown.Value(),
+	}
+}
+
+// egressRotationConfig maps file config onto the rotation scheduler.
+func egressRotationConfig(cfg config.Config) egressapp.RotationConfig {
+	return egressapp.RotationConfig{
+		Enabled:                  cfg.Egress.Rotation.Enabled,
+		MaxAttemptsPerQuarantine: cfg.Egress.Rotation.MaxAttemptsPerQuarantine,
+		MinNodeInterval:          cfg.Egress.Rotation.MinNodeInterval.Value(),
+		MaxGlobalPerHour:         cfg.Egress.Rotation.MaxGlobalPerHour,
+		WebhookTimeout:           cfg.Egress.Rotation.WebhookTimeout.Value(),
+		WebhookRetries:           cfg.Egress.Rotation.WebhookRetries,
+		SettleDelay:              cfg.Egress.Rotation.SettleDelay.Value(),
+		ProbeTimeout:             cfg.Egress.Rotation.ProbeTimeout.Value(),
+		ProbeInterval:            cfg.Egress.Rotation.ProbeInterval.Value(),
+	}
+}
+
+// gatewayEgressCanaryConfig maps file config onto the gateway canary.
+func gatewayEgressCanaryConfig(cfg config.Config) gateway.EgressCanaryRuntime {
+	return gateway.EgressCanaryRuntime{
+		ModelPublicID:  cfg.Egress.Rotation.CanaryModelPublicID,
+		CreatedTimeout: cfg.Egress.Rotation.CanaryCreatedTimeout.Value(),
+	}
+}
+
 // config; nil means attribution stays off and the gateway relies on its
 // escalating behavioral penalties alone.
 func newAccountRiskService(cfg config.Config, database *relational.Database, accounts *accountapp.Service, logger *slog.Logger) *risk.Service {
@@ -570,6 +636,12 @@ func (a *Application) Run(ctx context.Context) error {
 		cancelBackground()
 		background.Wait()
 	}()
+	// 出口 IP 轮换 worker（事件驱动，配置启用时才启动）。
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		a.egressOps.RunRotationWorker(runCtx)
+	}()
 	errCh := make(chan error, 1)
 	go func() {
 		a.logger.Info("server_started", "listen", a.server.Addr)
@@ -600,14 +672,18 @@ func (a *Application) Run(ctx context.Context) error {
 		})
 		return nil
 	})
-	startBackground("release_check", func(taskCtx context.Context) error {
-		a.updates.Check(taskCtx)
-		a.runPeriodicTask(taskCtx, 24*time.Hour, "release_check", func(checkCtx context.Context) error {
-			a.updates.Check(checkCtx)
+	if a.updateCheck {
+		startBackground("release_check", func(taskCtx context.Context) error {
+			a.updates.Check(taskCtx)
+			a.runPeriodicTask(taskCtx, 24*time.Hour, "release_check", func(checkCtx context.Context) error {
+				a.updates.Check(checkCtx)
+				return nil
+			})
 			return nil
 		})
-		return nil
-	})
+	} else {
+		a.logger.Info("update_check_disabled", "reason", "server.updateCheckEnabled=false")
+	}
 	startBackground("billing_reservation_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 10*time.Minute, "billing_reservation_cleanup", func(runCtx context.Context) error {
 			_, err := a.clientKeys.CleanupExpiredBilling(runCtx, 1000)

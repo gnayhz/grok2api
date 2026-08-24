@@ -1,14 +1,29 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// countingReadCloser 记录 Close 是否被调用, 用于验证重放 Reader 会把
+// Close 传导给底层 body。
+type countingReadCloser struct {
+	Reader io.Reader
+	closed *int32
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) { return c.Reader.Read(p) }
+func (c *countingReadCloser) Close() error {
+	atomic.StoreInt32(c.closed, 1)
+	return nil
+}
 
 // TestPeekPathsDoNotLeakGoroutines 是长时运行稳定性维度的回归锁：每个
 // peekQualityStream/peekQualityBody 返回路径（判决/超时/取消/异常）都会
@@ -198,6 +213,27 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 			}
 			_, _ = io.Copy(io.Discard, replay)
 			_ = replay.Close()
+		}, nil},
+		struct {
+			name  string
+			run   func(i int)
+			drain func()
+		}{"oversized body closes underlying body", func(int) {
+			var closed int32
+			raw := &countingReadCloser{Reader: bytes.NewReader(make([]byte, qualityBodyPeekLimit+1)), closed: &closed}
+			replay, verdict, _, _, err := peekQualityBody(raw, cfg)
+			if err != nil || verdict != QualityDeliver {
+				t.Errorf("oversized verdict=%s err=%v", verdict, err)
+			}
+			if replay == nil {
+				t.Fatal("replay is nil")
+			}
+			if err := replay.Close(); err != nil {
+				t.Errorf("replay close: %v", err)
+			}
+			if atomic.LoadInt32(&closed) != 1 {
+				t.Fatalf("underlying body not closed by replay.Close (closed=%d): upstream connection and egress lease leak", closed)
+			}
 		}, nil},
 	)
 

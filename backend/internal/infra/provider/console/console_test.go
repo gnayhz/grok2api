@@ -980,7 +980,7 @@ func TestAdapterDoesNotPenalizeEgressForBlockedAccount(t *testing.T) {
 				t.Fatal(err)
 			}
 			repository := &recordingConsoleEgressRepository{node: egressdomain.Node{
-				ID: 1, Name: "console", Scope: egressdomain.ScopeConsole, Enabled: true, Health: 1,
+				ID: 1, Name: "console", Enabled: true, Health: 1,
 			}}
 			adapter := NewAdapter(Config{BaseURL: server.URL, TimeoutSeconds: 5}, infraegress.NewManager(repository, cipher), cipher, nil)
 			credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}
@@ -2167,7 +2167,7 @@ func (s *consoleImageAssetStoreStub) Saved() [][]byte {
 
 type consoleEgressRepositoryStub struct{}
 
-func (consoleEgressRepositoryStub) ListEgressNodes(context.Context, egressdomain.Scope, repository.SortQuery) ([]egressdomain.Node, error) {
+func (consoleEgressRepositoryStub) ListEgressNodes(context.Context, repository.SortQuery) ([]egressdomain.Node, error) {
 	return nil, nil
 }
 
@@ -2193,12 +2193,9 @@ type recordingConsoleEgressRepository struct {
 	updates int
 }
 
-func (r *recordingConsoleEgressRepository) ListEgressNodes(_ context.Context, scope egressdomain.Scope, _ repository.SortQuery) ([]egressdomain.Node, error) {
+func (r *recordingConsoleEgressRepository) ListEgressNodes(_ context.Context, _ repository.SortQuery) ([]egressdomain.Node, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.node.Scope != scope {
-		return nil, nil
-	}
 	return []egressdomain.Node{r.node}, nil
 }
 

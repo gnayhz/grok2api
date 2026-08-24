@@ -89,6 +89,9 @@ func summarizeResponseMedia(body []byte) (responseMediaSummary, error) {
 // mayContainResponseMedia 是推理热路径上的低成本预筛选。绝大多数纯文本请求
 // 不再创建 JSON decoder；命中仅代表值得精确扫描，最终统计仍由结构化解析决定。
 func mayContainResponseMedia(body []byte) bool {
+	// 预筛必须保持宽松:ContentArrays 统计对纯文本请求也有意义(如上游按
+	// content 数组计费时核对), 收紧到结构键名会丢统计(TestPureTextContent-
+	// ArraysSkipMediaAuditLog 锁定)。树物化的成本由 maxBodyBytes 上界约束。
 	return bytes.Contains(body, []byte("image"))
 }
 

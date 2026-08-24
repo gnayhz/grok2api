@@ -161,7 +161,7 @@ func (h *Handler) imageStats(c *gin.Context) {
 func (h *Handler) deleteImages(c *gin.Context) {
 	var request deleteImagesRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
 	deleted, err := h.service.AdminDeleteImages(c.Request.Context(), request.IDs)
@@ -224,7 +224,7 @@ func (h *Handler) videoStats(c *gin.Context) {
 func (h *Handler) deleteVideos(c *gin.Context) {
 	var request deleteVideosRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
 	deleted, err := h.service.AdminDeleteVideoJobs(c.Request.Context(), request.IDs)

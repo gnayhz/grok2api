@@ -18,7 +18,7 @@ func TestOnDegradedWebCredentialRunsCheck(t *testing.T) {
 	checker := &fakeChecker{result: cleanResult()}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
 
-	service.OnDegraded(context.Background(), accountdomain.Credential{ID: 90, Provider: accountdomain.ProviderWeb})
+	service.OnDegraded(context.Background(), accountdomain.Credential{ID: 90, Provider: accountdomain.ProviderWeb}, 0)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && checker.calls.Load() == 0 {

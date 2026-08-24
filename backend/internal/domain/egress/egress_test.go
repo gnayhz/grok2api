@@ -2,25 +2,201 @@ package egress
 
 import "testing"
 
-func TestSupportsScopePreservesPrimaryAndResourceCompatibility(t *testing.T) {
+func TestRoutingScopeMergesAssetsIntoParentFamily(t *testing.T) {
 	tests := []struct {
-		name               string
-		nodeScope, request Scope
-		want               bool
+		scope Scope
+		want  Scope
 	}{
-		{name: "exact Console asset", nodeScope: ScopeConsoleAsset, request: ScopeConsoleAsset, want: true},
-		{name: "Console serves Console asset", nodeScope: ScopeConsole, request: ScopeConsoleAsset, want: true},
-		{name: "Web serves Console asset", nodeScope: ScopeWeb, request: ScopeConsoleAsset, want: true},
-		{name: "Web serves Web asset", nodeScope: ScopeWeb, request: ScopeWebAsset, want: true},
-		{name: "Console asset does not serve primary Console", nodeScope: ScopeConsoleAsset, request: ScopeConsole, want: false},
-		{name: "Web asset does not serve primary Web", nodeScope: ScopeWebAsset, request: ScopeWeb, want: false},
-		{name: "Build remains isolated", nodeScope: ScopeBuild, request: ScopeConsoleAsset, want: false},
+		{ScopeBuild, ScopeBuild},
+		{ScopeWeb, ScopeWeb},
+		{ScopeConsole, ScopeConsole},
+		{ScopeWebAsset, ScopeWeb},
+		{ScopeConsoleAsset, ScopeConsole},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := SupportsScope(test.nodeScope, test.request); got != test.want {
-				t.Fatalf("SupportsScope(%q, %q) = %v, want %v", test.nodeScope, test.request, got, test.want)
+		t.Run(string(test.scope), func(t *testing.T) {
+			if got := RoutingScope(test.scope); got != test.want {
+				t.Fatalf("RoutingScope(%q) = %q, want %q", test.scope, got, test.want)
 			}
 		})
+	}
+}
+
+func TestRequestScopesAndTrafficClasses(t *testing.T) {
+	scopes := RequestScopes()
+	if len(scopes) != 5 {
+		t.Fatalf("RequestScopes() = %v, want 5 entries", scopes)
+	}
+	classes := TrafficClasses()
+	if len(classes) != 5 {
+		t.Fatalf("TrafficClasses() = %v, want 5 entries", classes)
+	}
+	for _, class := range classes {
+		if !class.IsValid() {
+			t.Errorf("expected %q to be valid", class)
+		}
+	}
+	for _, class := range []TrafficClass{"", "auxiliary", "INFERENCE", "unknown"} {
+		if class.IsValid() {
+			t.Errorf("expected %q to be invalid", class)
+		}
+	}
+}
+
+func TestOperationsConfigTargetFor(t *testing.T) {
+	config := OperationsConfig{
+		DefaultTarget: RoutingTarget{Mode: RoutingTargetDirect},
+		ScopeTargets: map[Scope]RoutingTarget{
+			ScopeBuild: {Mode: RoutingTargetNode, NodeID: 7},
+			ScopeWeb:   {Mode: RoutingTargetAuto},
+		},
+		ClassTargets: map[TrafficClass]RoutingTarget{
+			TrafficClassBilling: {Mode: RoutingTargetPool, PoolID: 3},
+		},
+	}
+
+	// Class level wins over scope and default.
+	if got := config.TargetFor(ScopeBuild, TrafficClassBilling); got.Mode != RoutingTargetPool || got.PoolID != 3 {
+		t.Errorf("class override = %+v, want pool 3", got)
+	}
+	// Scope level wins over default.
+	if got := config.TargetFor(ScopeBuild, TrafficClassInference); got.Mode != RoutingTargetNode || got.NodeID != 7 {
+		t.Errorf("scope override = %+v, want node 7", got)
+	}
+	// Empty class still uses the scope target.
+	if got := config.TargetFor(ScopeBuild, ""); got.NodeID != 7 {
+		t.Errorf("empty class should still use scope target, got %+v", got)
+	}
+	// Default target applies for unconfigured scope.
+	if got := config.TargetFor(ScopeConsole, TrafficClassVideo); got.Mode != RoutingTargetDirect {
+		t.Errorf("default target = %+v, want direct", got)
+	}
+	// Explicit auto scope beats the default.
+	if got := config.TargetFor(ScopeWeb, TrafficClassInference); got.Mode != RoutingTargetAuto {
+		t.Errorf("explicit auto scope = %+v, want auto", got)
+	}
+}
+
+func TestOperationsConfigTargetForUnconfiguredFallsBackToAuto(t *testing.T) {
+	config := OperationsConfig{}
+	got := config.TargetFor(ScopeWebAsset, TrafficClassVideo)
+	if got.Mode != RoutingTargetAuto {
+		t.Errorf("empty config resolved to %+v, want auto", got)
+	}
+}
+
+func TestRoutingTargetValidity(t *testing.T) {
+	valid := []RoutingTarget{
+		{},
+		{Mode: RoutingTargetAuto},
+		{Mode: RoutingTargetDirect},
+		{Mode: RoutingTargetNode, NodeID: 1},
+		{Mode: RoutingTargetPool, PoolID: 2},
+	}
+	for _, target := range valid {
+		if !target.Valid() {
+			t.Errorf("expected %+v to be valid", target)
+		}
+	}
+	invalid := []RoutingTarget{
+		{Mode: RoutingTargetNode},
+		{Mode: RoutingTargetNode, NodeID: 1, PoolID: 2},
+		{Mode: RoutingTargetPool},
+		{Mode: RoutingTargetAuto, NodeID: 1},
+		{Mode: RoutingTargetDirect, PoolID: 1},
+		{Mode: RoutingTargetMode("bogus"), NodeID: 1},
+	}
+	for _, target := range invalid {
+		if target.Valid() {
+			t.Errorf("expected %+v to be invalid", target)
+		}
+	}
+	var zeroTarget RoutingTarget
+	if zeroTarget.Configured() {
+		t.Error("zero target should be unconfigured")
+	}
+	if got := RoutingTargetMode("").Normalized(); got != RoutingTargetAuto {
+		t.Errorf("empty mode normalized to %q, want auto", got)
+	}
+	resolved := RoutingTarget{Mode: RoutingTargetMode("bogus")}.Resolved()
+	if resolved.Mode != RoutingTargetAuto {
+		t.Errorf("resolved bogus mode = %q, want auto", resolved.Mode)
+	}
+}
+
+func TestValidateRoutingTargets(t *testing.T) {
+	validScopes := map[Scope]RoutingTarget{
+		ScopeBuild:   {Mode: RoutingTargetNode, NodeID: 1},
+		ScopeWeb:     {Mode: RoutingTargetDirect},
+		ScopeConsole: {Mode: RoutingTargetAuto},
+	}
+	validClasses := map[TrafficClass]RoutingTarget{
+		TrafficClassBilling: {Mode: RoutingTargetPool, PoolID: 2},
+	}
+	if err := ValidateRoutingTargets(RoutingTarget{Mode: RoutingTargetDirect}, validScopes, validClasses); err != nil {
+		t.Fatalf("valid targets rejected: %v", err)
+	}
+	if err := ValidateRoutingTargets(RoutingTarget{}, nil, nil); err != nil {
+		t.Fatalf("empty targets rejected: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		def     RoutingTarget
+		scopes  map[Scope]RoutingTarget
+		classes map[TrafficClass]RoutingTarget
+	}{
+		{"invalid default", RoutingTarget{Mode: RoutingTargetNode}, nil, nil},
+		{"asset scope key", RoutingTarget{}, map[Scope]RoutingTarget{ScopeWebAsset: {Mode: RoutingTargetDirect}}, nil},
+		{"invalid class key", RoutingTarget{}, nil, map[TrafficClass]RoutingTarget{TrafficClass("other"): {Mode: RoutingTargetDirect}}},
+		{"scope node without id", RoutingTarget{}, map[Scope]RoutingTarget{ScopeBuild: {Mode: RoutingTargetNode}}, nil},
+		{"class direct with pool", RoutingTarget{}, nil, map[TrafficClass]RoutingTarget{TrafficClassVideo: {Mode: RoutingTargetDirect, PoolID: 3}}},
+		{"unconfigured scope entry", RoutingTarget{}, map[Scope]RoutingTarget{ScopeWeb: {}}, nil},
+	}
+	for _, testCase := range cases {
+		if err := ValidateRoutingTargets(testCase.def, testCase.scopes, testCase.classes); err == nil {
+			t.Errorf("%s: expected validation error", testCase.name)
+		}
+	}
+}
+
+func TestPoolStrategyNormalized(t *testing.T) {
+	for _, strategy := range []PoolStrategy{PoolStrategyAffinity, PoolStrategyRandom, PoolStrategySticky} {
+		if !strategy.IsValid() {
+			t.Errorf("expected %q valid", strategy)
+		}
+	}
+	if PoolStrategy("").IsValid() {
+		t.Error("empty strategy should be invalid")
+	}
+	if got := PoolStrategy("").Normalized(); got != PoolStrategyAffinity {
+		t.Errorf("zero strategy normalized to %q, want affinity (legacy rendezvous)", got)
+	}
+	if got := PoolFallbackMode("").Normalized(); got != PoolFallbackNone {
+		t.Errorf("zero fallback normalized to %q, want none", got)
+	}
+}
+
+func TestCanNodeServeFixedTarget(t *testing.T) {
+	base := Node{Enabled: true, EncryptedProxyURL: "secret"}
+	if !CanNodeServeFixedTarget(base) {
+		t.Error("enabled node with proxy should serve fixed target")
+	}
+	disabled := base
+	disabled.Enabled = false
+	if CanNodeServeFixedTarget(disabled) {
+		t.Error("disabled node must not serve fixed target")
+	}
+	noProxy := base
+	noProxy.EncryptedProxyURL = ""
+	if CanNodeServeFixedTarget(noProxy) {
+		t.Error("node without proxy must not serve fixed target")
+	}
+	// 旋转出口(节点级代理池模式)可以服务固定目标:固定的是隧道而非
+	// 瞬时出口 IP,运行时对其豁免硬/软冷却,不会被坏 IP 卡死。
+	pooled := base
+	pooled.ProxyPool = true
+	if !CanNodeServeFixedTarget(pooled) {
+		t.Error("rotating (pool-mode) node must serve fixed target")
 	}
 }

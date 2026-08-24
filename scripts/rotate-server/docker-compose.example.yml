@@ -1,0 +1,58 @@
+# =====================================================================
+# B/C 服务器完整示例：多个 WARP 实例(不同宿主端口) + rotate-server。
+# 全部 Docker、全部环境变量配置——不需要修改任何脚本。
+#
+# 使用步骤：
+#   1. 把 scripts/rotate-server 整个目录拷到 B/C 服务器,如 /opt/rotate-server
+#   2. 按需修改: WARP 镜像/数量/端口、ROTATE_TOKEN、ROTATE_INSTANCES
+#   3. docker compose up -d   (build: . 会自动构建 rotate-server 镜像)
+#
+# 与 grok2api 的对应关系(A 服务器侧)：
+#   节点代理地址:          socks5://<本机公网IP>:<宿主端口>   (如 1080/1081)
+#   批量换IP Webhook 模板:  http://<本机公网IP>:9000/rotate/{port}?token=<ROTATE_TOKEN>
+#   {port} 替换成 1080/1081...,正好命中 ROTATE_INSTANCES 里对应的容器
+# =====================================================================
+
+services:
+  warp-a:
+    image: caomingjun/warp:latest        # ← 换成你的 MicroWARP 镜像
+    container_name: warp-a               # ← 必须与 ROTATE_INSTANCES 右侧一致
+    restart: unless-stopped
+    ports:
+      - "1080:1080"                      # ← 宿主端口 = ROTATE_INSTANCES 左侧别名
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+
+  warp-b:
+    image: caomingjun/warp:latest
+    container_name: warp-b
+    restart: unless-stopped
+    ports:
+      - "1081:1080"                      # 宿主端口不同,容器内端口可相同
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+
+  rotate-server:
+    build: .                             # 用同目录 Dockerfile 构建
+    container_name: rotate-server
+    restart: unless-stopped
+    ports:
+      # 安全提醒(必做, 非可选):本端口与上方 WARP SOCKS 端口默认绑定全部接口。
+      # 部署后必须用防火墙只放行 grok2api 服务器 IP(见 EXIT-IP-GUARD.md §2.4),
+      # 否则无认证的 WARP SOCKS 会对整个互联网开放(带宽盗用+出口 IP 被拉黑)。
+      # 也可以在此直接绑定指定接口: - "192.0.2.10:9000:9000"
+      - "9000:9000"
+    environment:
+      ROTATE_TOKEN: "change-me-openssl-rand-hex-24"        # ← 必改
+      ROTATE_INSTANCES: "1080=warp-a,1081=warp-b"          # ← 必改:别名=容器名
+      # ROTATE_MIN_INTERVAL: "60"       # 可选:同实例重启冷却秒数
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # 重启本机 WARP 容器所必需
+
+# 已有 WARP 容器不在本 compose 里? 没关系——rotate-server 按容器名全局查找,
+# 把 ROTATE_INSTANCES 右侧写成已存在容器的 container_name 即可;
+# 此时本文件可以只保留 rotate-server 一个服务。

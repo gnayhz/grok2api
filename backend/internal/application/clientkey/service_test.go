@@ -374,5 +374,30 @@ func (r *countingClientKeyRepository) GetByPrefix(ctx context.Context, prefix st
 	return r.ClientKeyRepository.GetByPrefix(ctx, prefix)
 }
 
+// 未知前缀的负缓存:伪造 key 的重复鉴权不再逐请求打 DB(正缓存只存命中,
+// 此前每个伪造前缀都触发一次 GetByPrefix)。
+func TestAuthenticateCachesUnknownPrefixNegatively(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "negative-cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	counting := &countingClientKeyRepository{ClientKeyRepository: relational.NewClientKeyRepository(database)}
+	service := NewService(counting, nil, nil, 60, 5, testCipher(t))
+	for range 3 {
+		// Key 形如 g2a_<prefix>_<secret>:格式合法但前缀不存在, 才会走到 DB 查询。
+		if _, _, err := service.Authenticate(ctx, "g2a_deadbeefcafe_"+strings.Repeat("ab", 24)); err != ErrInvalidKey {
+			t.Fatalf("err = %v, want ErrInvalidKey", err)
+		}
+	}
+	if counting.lookups != 1 {
+		t.Fatalf("GetByPrefix lookups = %d, want 1 (subsequent hits served by negative cache)", counting.lookups)
+	}
+}
+
 var _ repository.RateLimiter = failingRateLimiter{}
 var _ repository.ConcurrencyLimiter = failingConcurrencyLimiter{}

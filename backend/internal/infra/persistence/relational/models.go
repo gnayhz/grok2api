@@ -54,17 +54,11 @@ type accountModel struct {
 	// BuildRouteMode 仅控制 grok_build 推理地址；其它 Provider 固定 auto。
 	BuildRouteMode string `gorm:"size:16;not null;default:auto;check:chk_accounts_build_route_mode,build_route_mode IN ('auto','build','xai')"`
 	// BuildSuperEntitled 仅对 grok_build 有意义：管理员确认的 Super/1.5 entitlement；其他 Provider 保持 false。
-	BuildSuperEntitled bool `gorm:"not null;default:false"`
-	// EgressNodeID is nullable so existing accounts retain the legacy pool
-	// routing behavior until an administrator explicitly assigns a node.
-	EgressNodeID         *uint64 `gorm:"index:idx_accounts_egress_node"`
-	EgressAssignmentMode string  `gorm:"size:16;not null;default:'';check:chk_accounts_egress_assignment_mode,egress_assignment_mode IN ('','manual','auto')"`
-	EgressAssignedAt     *time.Time
-	CreatedAt            time.Time               `gorm:"not null"`
-	UpdatedAt            time.Time               `gorm:"not null"`
-	Credential           *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	WebProfile           *webAccountProfileModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	EgressNode           *egressNodeModel        `gorm:"foreignKey:EgressNodeID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
+	BuildSuperEntitled bool                    `gorm:"not null;default:false"`
+	CreatedAt          time.Time               `gorm:"not null"`
+	UpdatedAt          time.Time               `gorm:"not null"`
+	Credential         *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	WebProfile         *webAccountProfileModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 }
 
 func (accountModel) TableName() string { return "provider_accounts" }
@@ -92,6 +86,15 @@ type accountCredentialModel struct {
 }
 
 func (accountCredentialModel) TableName() string { return "account_credentials" }
+
+// schemaMigrationMarkerModel 记录一次性迁移/回填是否已执行, 防止每次启动
+// 重复回填覆盖运维的后续手动修改(如节点的换 IP 轮换暂停开关)。
+type schemaMigrationMarkerModel struct {
+	Name      string    `gorm:"primaryKey;size:128"`
+	AppliedAt time.Time `gorm:"not null"`
+}
+
+func (schemaMigrationMarkerModel) TableName() string { return "schema_migration_markers" }
 
 type accountProviderLinkModel struct {
 	WebAccountID   uint64        `gorm:"primaryKey"`
@@ -333,10 +336,13 @@ type requestAuditModel struct {
 	// DeliveredEvents/DeliveredBytes 是流式转发到客户端的 SSE data 事件数与
 	// 累计字节（非流式为响应体字节/1）。回答「200 且带错误码的请求实际交付了
 	// 多少」——尾部挂起/中断场景的客户端可见性（2026-08-21 轮26）。
-	DeliveredEvents int64     `gorm:"not null;default:0"`
-	DeliveredBytes  int64     `gorm:"not null;default:0"`
-	DurationMS      int64     `gorm:"not null;default:0"`
-	ErrorCode       string    `gorm:"size:100;check:chk_request_audits_error_code,length(error_code) <= 100"`
+	DeliveredEvents int64  `gorm:"not null;default:0"`
+	DeliveredBytes  int64  `gorm:"not null;default:0"`
+	DurationMS      int64  `gorm:"not null;default:0"`
+	ErrorCode       string `gorm:"size:100;check:chk_request_audits_error_code,length(error_code) <= 100"`
+	// QualityFailOpen 标记 fail-open 交付的降智响应:主行仍按成功记账(计费
+	// 不变), 该列让运营能从审计数据区分"质量降级但放行"与"健康响应"。
+	QualityFailOpen bool      `gorm:"not null;default:false"`
 	AttemptCount    int       `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
 	CreatedAt       time.Time `gorm:"not null"`
 }
@@ -487,12 +493,13 @@ func (runtimeSettingsModel) TableName() string { return "runtime_settings" }
 type egressSubscriptionSourceModel struct {
 	ID                     uint64 `gorm:"primaryKey;autoIncrement"`
 	Name                   string `gorm:"size:160;not null;uniqueIndex;check:chk_egress_subscription_sources_name,length(trim(name)) BETWEEN 1 AND 160"`
-	Scope                  string `gorm:"size:32;not null;check:chk_egress_subscription_sources_scope,scope IN ('grok_build','grok_web','grok_console','grok_web_asset','grok_console_asset')"`
-	Enabled                bool   `gorm:"not null;default:true"`
+	// Enabled 无 default 标签:GORM 会把带 default 的零值字段在 INSERT 时静默
+	// 代入默认值——显式 Enabled=false(管理员“暂不启用”的源)会被 default:true
+	// 复活并被维护循环立即拉取。
+	Enabled                bool   `gorm:"not null"`
 	EncryptedURL           string `gorm:"type:text;not null;default:'';check:chk_egress_subscription_sources_url,length(encrypted_url) <= 65536"`
 	EncryptedProxyURL      string `gorm:"type:text;not null;default:'';check:chk_egress_subscription_sources_proxy_url,length(encrypted_proxy_url) <= 65536"`
 	RefreshIntervalSeconds int    `gorm:"not null;default:900;check:chk_egress_subscription_sources_refresh,refresh_interval_seconds BETWEEN 60 AND 86400"`
-	DefaultAccountCapacity int    `gorm:"not null;default:0;check:chk_egress_subscription_sources_capacity,default_account_capacity BETWEEN 0 AND 100000"`
 	LastSyncedAt           *time.Time
 	NextSyncAt             *time.Time `gorm:"index:idx_egress_subscription_sources_due"`
 	LastSyncImported       int        `gorm:"not null;default:0;check:chk_egress_subscription_sources_imported,last_sync_imported >= 0"`
@@ -503,33 +510,31 @@ type egressSubscriptionSourceModel struct {
 
 func (egressSubscriptionSourceModel) TableName() string { return "egress_subscription_sources" }
 
-type egressProxyProfileModel struct {
-	ID                uint64    `gorm:"primaryKey;autoIncrement"`
-	Name              string    `gorm:"size:160;not null;uniqueIndex;check:chk_egress_proxy_profiles_name,length(trim(name)) BETWEEN 1 AND 160"`
-	EncryptedProxyURL string    `gorm:"type:text;not null;check:chk_egress_proxy_profiles_url,length(encrypted_proxy_url) BETWEEN 1 AND 65536"`
-	CreatedAt         time.Time `gorm:"not null"`
-	UpdatedAt         time.Time `gorm:"not null"`
-}
-
-func (egressProxyProfileModel) TableName() string { return "egress_proxy_profiles" }
-
 type egressNodeModel struct {
 	ID                          uint64  `gorm:"primaryKey;autoIncrement"`
 	Name                        string  `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
-	Scope                       string  `gorm:"size:32;not null;check:chk_egress_nodes_specific_scope,scope IN ('grok_build','grok_web','grok_console','grok_web_asset','grok_console_asset')"`
-	Enabled                     bool    `gorm:"not null;default:true"`
+	// Enabled 无 default 标签:GORM 会把带 default 的零值字段在 INSERT 时静默
+	// 代入默认值——显式 Enabled=false(管理员创建停用节点)会被 default:true
+	// 复活,未验证代理立即进入调度。其余 default 列的零值均由 from*Domain
+	// 映射归一化为与列默认一致,唯独 bool 的 false 无法与“未设置”区分。
+	Enabled                     bool    `gorm:"not null"`
 	ProxyPool                   bool    `gorm:"not null;default:false"`
 	SourceID                    *uint64 `gorm:"uniqueIndex:uidx_egress_nodes_source_key,priority:1;index:idx_egress_nodes_source;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
 	SourceKey                   string  `gorm:"size:64;not null;default:'';uniqueIndex:uidx_egress_nodes_source_key,priority:2;check:chk_egress_nodes_source_key,length(source_key) <= 64"`
-	AccountCapacity             int     `gorm:"not null;default:0;check:chk_egress_nodes_capacity,account_capacity BETWEEN 0 AND 100000"`
-	ProxyProfileID              *uint64 `gorm:"index:idx_egress_nodes_proxy_profile;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 	EncryptedProxyURL           string  `gorm:"type:text;not null;default:'';check:chk_egress_nodes_proxy_url,length(encrypted_proxy_url) <= 65536"`
 	UserAgent                   string  `gorm:"size:512;not null;default:'';check:chk_egress_nodes_user_agent,length(user_agent) <= 512"`
 	EncryptedCloudflareCookie   string  `gorm:"type:text;not null;default:'';check:chk_egress_nodes_cf_cookie,length(encrypted_cloudflare_cookie) <= 65536"`
 	ClearanceRefreshedAt        *time.Time
-	ClearanceFingerprint        string  `gorm:"size:64;not null;default:'';check:chk_egress_nodes_clearance_fingerprint,length(clearance_fingerprint) IN (0, 64)"`
-	ClearanceBindingFingerprint string  `gorm:"size:64;not null;default:'';check:chk_egress_nodes_clearance_binding_fingerprint,length(clearance_binding_fingerprint) IN (0, 64)"`
-	Health                      float64 `gorm:"not null;default:1;check:chk_egress_nodes_health,health >= 0 AND health <= 1"`
+	ClearanceFingerprint        string `gorm:"size:64;not null;default:'';check:chk_egress_nodes_clearance_fingerprint,length(clearance_fingerprint) IN (0, 64)"`
+	ClearanceBindingFingerprint string `gorm:"size:64;not null;default:'';check:chk_egress_nodes_clearance_binding_fingerprint,length(clearance_binding_fingerprint) IN (0, 64)"`
+	EncryptedRotationURL        string `gorm:"type:text;not null;default:'';check:chk_egress_nodes_rotation_url,length(encrypted_rotation_url) <= 65536"`
+	RotationEnabled             bool   `gorm:"not null;default:false;index:idx_egress_nodes_rotation_enabled"`
+	LastRotatedAt               *time.Time
+	RotationAttempts            int    `gorm:"not null;default:0;check:chk_egress_nodes_rotation_attempts,rotation_attempts >= 0"`
+	LastRotationError           string `gorm:"size:512;not null;default:'';check:chk_egress_nodes_rotation_error,length(last_rotation_error) <= 512"`
+	DegradeCount                int    `gorm:"not null;default:0;check:chk_egress_nodes_degrade_count,degrade_count >= 0"`
+	LastDegradedAt              *time.Time
+	Health                      float64 `gorm:"not null;check:chk_egress_nodes_health,health >= 0 AND health <= 1"`
 	FailureCount                int     `gorm:"not null;default:0;check:chk_egress_nodes_failures,failure_count >= 0"`
 	CooldownUntil               *time.Time
 	LastError                   string `gorm:"size:512;check:chk_egress_nodes_last_error,length(last_error) <= 512"`
@@ -552,32 +557,45 @@ type egressNodeModel struct {
 	CreatedAt                   time.Time                      `gorm:"not null"`
 	UpdatedAt                   time.Time                      `gorm:"not null"`
 	Source                      *egressSubscriptionSourceModel `gorm:"foreignKey:SourceID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
-	ProxyProfile                *egressProxyProfileModel       `gorm:"foreignKey:ProxyProfileID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 }
 
 func (egressNodeModel) TableName() string { return "egress_nodes" }
 
+type egressPoolModel struct {
+	ID             uint64 `gorm:"primaryKey;autoIncrement"`
+	Name           string `gorm:"size:160;not null;uniqueIndex:uidx_egress_pools_name;check:chk_egress_pools_name,length(trim(name)) BETWEEN 1 AND 160"`
+	// Enabled 无 default 标签:同 egress_nodes——停用池不得被列默认 true 复活,
+	// 否则“已停用池不承流、回退链在停用池终止”的语义在创建瞬间即被破坏。
+	Enabled        bool   `gorm:"not null"`
+	Strategy       string `gorm:"size:16;not null;default:affinity;check:chk_egress_pools_strategy,strategy IN ('affinity','random','sticky','rotation')"`
+	FallbackMode   string `gorm:"size:16;not null;default:none;check:chk_egress_pools_fallback_mode,fallback_mode IN ('none','pool','direct')"`
+	FallbackPoolID uint64 `gorm:"not null;default:0;check:chk_egress_pools_fallback_pool,(fallback_mode <> 'pool' AND fallback_pool_id = 0) OR (fallback_mode = 'pool' AND fallback_pool_id > 0)"`
+	// RotationCursorNodeID 持久化顺位轮换的游标节点，重启不归位。
+	RotationCursorNodeID uint64    `gorm:"not null;default:0"`
+	CreatedAt            time.Time `gorm:"not null"`
+	UpdatedAt            time.Time `gorm:"not null"`
+}
+
+func (egressPoolModel) TableName() string { return "egress_pools" }
+
+// egressPoolMemberModel is the many-to-many membership between pools and
+// nodes: pools select nodes, one node may serve several pools.
+type egressPoolMemberModel struct {
+	PoolID uint64 `gorm:"primaryKey;autoIncrement:false"`
+	NodeID uint64 `gorm:"primaryKey;autoIncrement:false;index:idx_egress_pool_members_node"`
+	// Priority 是池内首选顺序（小者先）；0 = 未指定，按节点 ID 兑底。
+	// 固定首选/顺位轮换的"首"由此决定，管理员可在节点管理里指定。
+	Priority int64 `gorm:"not null;default:0"`
+}
+
+func (egressPoolMemberModel) TableName() string { return "egress_pool_members" }
+
 type egressOperationsConfigModel struct {
-	ID                                  uint64    `gorm:"primaryKey;check:chk_egress_operations_config_id,id = 1"`
-	ProbeProvider                       string    `gorm:"size:16;not null;default:cloudflare;check:chk_egress_operations_config_probe_provider,probe_provider IN ('ipinfo','cloudflare')"`
-	ProbeIntervalSeconds                int       `gorm:"not null;default:900;check:chk_egress_operations_config_probe_interval,probe_interval_seconds BETWEEN 60 AND 86400"`
-	AutoAssignEnabled                   bool      `gorm:"not null;default:false"`
-	AutoBalanceEnabled                  bool      `gorm:"not null;default:false"`
-	AssignmentIntervalSeconds           int       `gorm:"not null;default:300;check:chk_egress_operations_config_assignment_interval,assignment_interval_seconds BETWEEN 60 AND 86400"`
-	SubscriptionProxyMigrationCompleted bool      `gorm:"not null;default:false"`
-	ProxyProfileMigrationCompleted      bool      `gorm:"not null;default:false"`
-	BuildFallbackMode                   string    `gorm:"size:16;not null;default:none"`
-	BuildFallbackNodeID                 uint64    `gorm:"not null;default:0"`
-	WebFallbackMode                     string    `gorm:"size:16;not null;default:none"`
-	WebFallbackNodeID                   uint64    `gorm:"not null;default:0"`
-	ConsoleFallbackMode                 string    `gorm:"size:16;not null;default:none"`
-	ConsoleFallbackNodeID               uint64    `gorm:"not null;default:0"`
-	WebAssetFallbackMode                string    `gorm:"size:16;not null;default:none"`
-	WebAssetFallbackNodeID              uint64    `gorm:"not null;default:0"`
-	ConsoleAssetFallbackMode            string    `gorm:"size:16;not null;default:none"`
-	ConsoleAssetFallbackNodeID          uint64    `gorm:"not null;default:0"`
-	RouteRules                          string    `gorm:"type:text;not null;default:''"`
-	UpdatedAt                           time.Time `gorm:"not null"`
+	ID                   uint64    `gorm:"primaryKey;check:chk_egress_operations_config_id,id = 1"`
+	ProbeProvider        string    `gorm:"size:16;not null;default:cloudflare;check:chk_egress_operations_config_probe_provider,probe_provider IN ('ipinfo','cloudflare')"`
+	ProbeIntervalSeconds int       `gorm:"not null;default:900;check:chk_egress_operations_config_probe_interval,probe_interval_seconds BETWEEN 60 AND 86400"`
+	Routing              string    `gorm:"type:text;not null;default:''"`
+	UpdatedAt            time.Time `gorm:"not null"`
 }
 
 func (egressOperationsConfigModel) TableName() string { return "egress_operations_config" }

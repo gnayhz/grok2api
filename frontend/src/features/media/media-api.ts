@@ -66,10 +66,10 @@ const decodeVideoStats = createObjectDecoder<VideoStatsDTO>("video stats", {
   queued: isNumber,
 });
 
-export function listImages(input: ListImagesInput): Promise<PaginatedDTO<MediaAssetDTO>> {
+export function listImages(input: ListImagesInput, signal?: AbortSignal): Promise<PaginatedDTO<MediaAssetDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
   if (input.search) query.set("search", input.search);
-  return apiRequest(`/api/admin/v1/media/images?${query}`, {}, createPaginatedDecoder(hasShape(mediaAssetShape)));
+  return apiRequest(`/api/admin/v1/media/images?${query}`, { signal }, createPaginatedDecoder(hasShape(mediaAssetShape)));
 }
 
 export function getImageStats(): Promise<ImageStatsDTO> {
@@ -80,7 +80,7 @@ export function deleteImages(ids: string[]): Promise<{ deleted: number }> {
   return apiRequest("/api/admin/v1/media/images", { method: "DELETE", body: { ids } }, decodeCountResult<{ deleted: number }>("deleted"));
 }
 
-export function listVideos(input: ListVideosInput): Promise<PaginatedDTO<MediaJobDTO>> {
+export function listVideos(input: ListVideosInput, signal?: AbortSignal): Promise<PaginatedDTO<MediaJobDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
   if (input.status) query.set("status", input.status);
   if (input.search) query.set("search", input.search);
@@ -88,7 +88,7 @@ export function listVideos(input: ListVideosInput): Promise<PaginatedDTO<MediaJo
     query.set("sortBy", input.sortBy);
     query.set("sortOrder", input.sortOrder);
   }
-  return apiRequest(`/api/admin/v1/media/videos?${query}`, {}, createPaginatedDecoder(hasShape(mediaJobShape)));
+  return apiRequest(`/api/admin/v1/media/videos?${query}`, { signal }, createPaginatedDecoder(hasShape(mediaJobShape)));
 }
 
 export function getVideoStats(): Promise<VideoStatsDTO> {

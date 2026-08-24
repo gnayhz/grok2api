@@ -397,6 +397,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	// only after capture wrapping has completed.
 	if isHTTPSuccess(resp.StatusCode) {
 		if err := filterBuildPromptCacheResponse(resp, request.Streaming, cacheRoute); err != nil {
+			// 过滤失败也要归还连接:body 可能仍是被包装的裸上游流。
+			_ = resp.Body.Close()
 			return nil, err
 		}
 	}

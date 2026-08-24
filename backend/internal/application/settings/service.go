@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -177,11 +178,16 @@ type Snapshot struct {
 
 // Service 管理允许在线修改的配置，并向后台任务广播配置变更。
 type Service struct {
-	mu                     sync.RWMutex
-	updateMu               sync.Mutex
-	cfg                    config.Config
-	updatedAt              time.Time
-	revision               uint64
+	mu        sync.RWMutex
+	updateMu  sync.Mutex
+	cfg       config.Config
+	updatedAt time.Time
+	revision  uint64
+	// lastAppliedRevision 记录 apply 回调链成功应用到进程态的最新版本。
+	// apply 链(25+ 个子调用)非原子:中途 panic 或进程被杀只应用了部分回调,
+	// 而 revision 已推进——此后 ReloadPersisted 因 revision 未变直接返回, 运行
+	// 态与持久化配置长期不一致。记录已应用版本让重载/周期同步能重放差距。
+	lastAppliedRevision    uint64
 	activeBufferSize       int
 	activeMediaConcurrency int
 	repository             repository.RuntimeSettingsRepository
@@ -189,11 +195,16 @@ type Service struct {
 	apply                  func(config.Config)
 }
 
+// markStartupApplied 在构造后调用:启动配置经装配层一次性应用, 视为已应用
+// 到构造时的 revision。此后的差距才代表 apply 链中断需要重放。
+
 func NewService(cfg config.Config, updatedAt time.Time, revision uint64, repository repository.RuntimeSettingsRepository, notify func(context.Context), apply func(config.Config)) *Service {
 	if updatedAt.IsZero() {
 		updatedAt = time.Now().UTC()
 	}
-	return &Service{cfg: cfg, updatedAt: updatedAt, revision: revision, activeBufferSize: cfg.Audit.BufferSize, activeMediaConcurrency: cfg.Provider.Web.MediaConcurrency, repository: repository, notify: notify, apply: apply}
+	// 启动配置经装配层一次性应用, 构造时视为已应用到该 revision; 此后的
+	// 差距才代表 apply 链中断、需要 ReloadPersisted 重放。
+	return &Service{cfg: cfg, updatedAt: updatedAt, revision: revision, lastAppliedRevision: revision, activeBufferSize: cfg.Audit.BufferSize, activeMediaConcurrency: cfg.Provider.Web.MediaConcurrency, repository: repository, notify: notify, apply: apply}
 }
 
 // LoadPersisted 将数据库运行设置覆盖到代码默认配置，并执行完整边界校验。
@@ -227,6 +238,29 @@ func (s *Service) PublicAPIBaseURL() string {
 	return s.cfg.Frontend.EffectivePublicAPIBaseURL()
 }
 
+// runApply 在 recover 保护下执行 apply 回调链并记录已应用版本。apply 中途
+// panic 不会传染调用方(设置保存/重载仍成功返回), 下一次 ReloadPersisted 会
+// 因 lastAppliedRevision 落后而重放, 运行态最终收敛。
+func (s *Service) runApply(cfg config.Config, revision uint64) {
+	apply := s.apply
+	if apply == nil {
+		s.mu.Lock()
+		s.lastAppliedRevision = revision
+		s.mu.Unlock()
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// 不推进 lastAppliedRevision:下次重载重放。
+			slog.Default().Error("settings_apply_panicked", "revision", revision, "panic", recovered)
+		}
+	}()
+	apply(cfg)
+	s.mu.Lock()
+	s.lastAppliedRevision = revision
+	s.mu.Unlock()
+}
+
 // Update 校验并持久化运行设置，再原子替换进程内配置。
 func (s *Service) Update(ctx context.Context, expectedRevision uint64, input EditableConfig) (Snapshot, error) {
 	s.updateMu.Lock()
@@ -256,12 +290,9 @@ func (s *Service) Update(ctx context.Context, expectedRevision uint64, input Edi
 	s.updatedAt = updatedAt
 	s.revision = revision
 	result := s.snapshotLocked()
-	apply := s.apply
 	s.mu.Unlock()
 
-	if apply != nil {
-		apply(next)
-	}
+	s.runApply(next, revision)
 	if s.notify != nil {
 		s.notify(ctx)
 	}
@@ -279,8 +310,14 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 	s.mu.RLock()
 	current := s.cfg
 	currentRevision := s.revision
+	appliedRevision := s.lastAppliedRevision
 	s.mu.RUnlock()
 	if revision <= currentRevision {
+		// revision 未变但 apply 曾中断(panic/进程重启窗口):重放当前配置,
+		// 让运行态收敛到持久化状态。
+		if appliedRevision < currentRevision {
+			s.runApply(current, currentRevision)
+		}
 		return nil
 	}
 	next := applyDomainConfig(current, value)
@@ -291,11 +328,8 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 	s.cfg = next
 	s.updatedAt = updatedAt
 	s.revision = revision
-	apply := s.apply
 	s.mu.Unlock()
-	if apply != nil {
-		apply(next)
-	}
+	s.runApply(next, revision)
 	return nil
 }
 

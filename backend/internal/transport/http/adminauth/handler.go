@@ -65,7 +65,7 @@ type adminResponse struct {
 func (h *Handler) login(c *gin.Context) {
 	var request loginRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + err.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
 	adminValue, tokens, err := h.service.Login(c.Request.Context(), request.Username, request.Password, remoteAddress(c.Request))
@@ -97,7 +97,7 @@ func remoteAddress(request *http.Request) string {
 func (h *Handler) refresh(c *gin.Context) {
 	var request refreshRequest
 	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + err.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
 	if request.RefreshToken == "" {
@@ -123,7 +123,7 @@ func (h *Handler) refresh(c *gin.Context) {
 func (h *Handler) logout(c *gin.Context) {
 	var request refreshRequest
 	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + err.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
 	if request.RefreshToken == "" {
@@ -151,7 +151,7 @@ func (h *Handler) me(c *gin.Context) {
 func (h *Handler) changePassword(c *gin.Context) {
 	var request changePasswordRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + err.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
 	value, ok := c.Get(middleware.AdminKey)

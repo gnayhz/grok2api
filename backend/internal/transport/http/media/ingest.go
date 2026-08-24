@@ -262,7 +262,7 @@ func (h *Handler) importInputImageFromURL(c *gin.Context) {
 	defer h.releaseIngest()
 	var request importImageRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
 	rawURL := strings.TrimSpace(request.URL)
