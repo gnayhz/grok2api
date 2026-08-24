@@ -20,6 +20,9 @@ server:
   requestTimeout: 2h
   # [按需修改] 仅在本地或受信任环境开启，生产环境保持 false。
   swaggerEnabled: false
+  # [按需修改] 启动与每 24h 出网访问 api.github.com 检查新版本（User-Agent 不含版本号）。
+  # 内网/离线/合规敏感部署设为 false 关闭；留空（不配置）默认开启。
+  # updateCheckEnabled: true
 
 auth:
   # [通常不要修改] 管理端访问与刷新令牌有效期。
@@ -119,14 +122,6 @@ routing:
   segmentedSelectorEnabled: true
   segmentedSelectorMinCandidates: 3000
   segmentedSelectorWindowSize: 64
-  # [按需修改] 大账号池才需要打开。0 保持历史行为：不健康节点上的 auto 账号会一次性迁走。
-  # 0.05–1 表示每个健康节点最多吸收该比例的活跃账号。环境变量
-  # GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE 可覆盖。
-  autoAssignMaxNodeShare: 0
-  # [按需修改] 大账号池才需要打开。0 保持历史行为：首轮疏散不限额，容量/再均衡仍最多 200 次。
-  # 0.05–1 限制单轮已绑定账号迁移比例。环境变量
-  # GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE 可覆盖。
-  autoAssignMaxMigrationShare: 0
 
 audit:
   # [通常不要修改] 审计批量写入参数；bufferSize 的修改需重启生效。
@@ -188,7 +183,7 @@ requestRetry:
   accountCooldown: 12h
   # 空流/静默超时（0 token 或 2min 无数据）的账号冷却，独立于上面的
   # missing-thinking 冷却（空流常与出口 IP 相关而非账号本身，冷却时长
-  # 可独立调整）。0 = 默认 24h；非零须在 1m-168h。冷却中的账号可在
+  # 可独立调整）。0 = 默认 15m；非零须在 1m-168h。冷却中的账号可在
   # 管理页「冷却」徽标上一键解除（人工逃生门）。空流多与出口 IP/瞬态
   # 相关（RSC clean 自动解除），默认短冷却即可。
   idleAccountCooldown: 15m
@@ -209,3 +204,43 @@ accountRisk:
     patrol:
       enabled: false      # clean 账号低频巡检（每 15 分钟一批 50 个）
       bucketDays: 30      # clean 结论的有效期（7-90 天）
+# 出口 IP 质量守卫与自动换 IP（应对"IP 被标记后路由到降智模型"）。
+# 触发链：请求降智 → 账号 RSC 归因 CLEAN → 该出口节点隔离（后续请求由路由层自动落到其他可用出口）
+# → POST 节点的换 IP webhook（如重启 MicroWARP）→ 探活 + 校验出口 IP 已变化
+# → 一次性 canary 验证（极小推理请求，首事件延迟判定）→ 通过回池 / 失败再换。
+egress:
+  qualityGuard:
+    # 隔离时长：坏出口在轮换+验证完成前不参与调度（验证通过会提前解除）。
+    quarantineCooldown: 24h
+    # 跨账号确认兜底：RSC 归因关闭/未链接/进行中时，同一节点在窗口内有
+    # N 个不同账号降智即隔离（账号去重）。<2 关闭该兜底。
+    crossAccountThreshold: 2
+    crossAccountWindow: 30m
+    # canary 无法执行（未配置模型/无可用账号）时的暂定放行冷却：
+    # 降智证据软冷却(L2):证据出现即让全池账号避开该出口,不等 RSC 归因;
+    # 重复证据指数翻倍,封顶 softCooldownMax。RSC 判 RISK(账号有罪)时立即解除。
+    softCooldownBase: 5m
+    softCooldownMax: 1h
+    # 回池但保留短冷却，被动守卫兜底。
+    tentativeReleaseCooldown: 30m
+  rotation:
+    enabled: true
+    # 单次隔离周期内每节点最多换 IP 尝试次数（耗尽后保持隔离并告警）。
+    maxAttemptsPerQuarantine: 3
+    # 同一节点两次换 IP 的最小间隔。
+    minNodeInterval: 10m
+    # 全局每小时换 IP 次数上限（所有节点合计）。
+    maxGlobalPerHour: 6
+    webhookTimeout: 15s
+    webhookRetries: 2
+    # 触发 webhook 后等待隧道重建的静默期。
+    settleDelay: 20s
+    # 轮换后连通探活的窗口与间隔。
+    probeTimeout: 2m
+    probeInterval: 5s
+    # canary 验证用的模型 public ID（在「模型路由」里查）。留空 = 关闭
+    # 主动验证（换 IP 后暂定放行，靠被动守卫兜底）。
+    canaryModelPublicId: ""
+    # canary 首事件预算：健康出口实测 0.8-2.2s；降智排队 68-125s。
+    canaryCreatedTimeout: 10s
+
