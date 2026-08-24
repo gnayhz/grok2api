@@ -16,6 +16,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
@@ -271,6 +272,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
+	// 视频生成按视频语义路由;缺标默认推理类,会把视频任务的调度计数
+	// 灌进推理请求徽标。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassVideo)
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, request.Credential)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
@@ -322,6 +326,8 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	}
 	// 视频生成与成品下载必须复用同一账号身份；否则 Resin 会为 WebAsset
 	// 重新分配租约，账号级 Cloudflare clearance 也不会进入下载请求。
+	// 资产下载跟随所属族:视频成品下载同样按视频语义路由。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassVideo)
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWebAsset, credential)
 	if err != nil {
 		return nil, "", 0, err

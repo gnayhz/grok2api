@@ -591,6 +591,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
+	// 视频生成按视频语义路由(与 Web 视频路径一致);缺标默认推理类,
+	// 会把视频任务的调度计数灌进推理请求徽标。
+	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassVideo)
 	lease, err := a.egress.AcquireCredential(ctx, egressdomain.ScopeConsole, request.Credential)
 	if err != nil {
 		return provider.VideoResult{}, err
@@ -683,6 +686,8 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !trustedConsoleVideoHost(parsed.Hostname()) {
 		return nil, "", 0, errors.New("Console 视频内容 URL 不受信任")
 	}
+	// 资产下载跟随所属族:视频成品下载按视频语义路由。
+	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassVideo)
 	lease, err := a.egress.AcquireCredential(ctx, egressdomain.ScopeConsoleAsset, credential)
 	if err != nil {
 		return nil, "", 0, err

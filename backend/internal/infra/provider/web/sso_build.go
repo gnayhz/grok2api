@@ -53,6 +53,8 @@ func (a *Adapter) ConvertToBuild(ctx context.Context, credential accountdomain.C
 	if token == "" {
 		return provider.CredentialSeed{}, provider.ErrUnauthorized
 	}
+	// SSO→Build 是凭据交换,按凭据语义路由;缺标默认推理类会污染推理徽标。
+	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassCredential)
 	lease, err := a.egress.AcquireCredential(ctx, egressdomain.ScopeWeb, credential)
 	if err != nil {
 		return provider.CredentialSeed{}, err
