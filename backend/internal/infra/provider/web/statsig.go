@@ -462,6 +462,9 @@ func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential
 	if err != nil {
 		return 0, err
 	}
+	// 预热打的是 /rest/rate-limits 等平台状态接口,按账单语义路由;
+	// 缺标默认推理类,会让周期性预热持续污染推理请求徽标。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassBilling)
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, credential)
 	if err != nil {
 		return 0, err
