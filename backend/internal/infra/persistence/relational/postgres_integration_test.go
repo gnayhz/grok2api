@@ -478,19 +478,14 @@ func TestPostgresUnhealthyEgressCleanupUsesBothAddressFamilies(t *testing.T) {
 	testDatabase := &Database{db: tx, dialect: database.dialect}
 
 	nodes := NewEgressRepository(testDatabase)
-	accounts := NewAccountRepository(testDatabase)
 	cipher := egressOperationsCipher(t)
 	prefix := "postgres-cleanup-" + strconv.FormatInt(time.Now().UTC().UnixNano(), 10)
-	dualStackFailure := createHealthyEgressNode(t, ctx, nodes, cipher, prefix+"-dual", 0)
-	singleStackAvailable := createHealthyEgressNode(t, ctx, nodes, cipher, prefix+"-single", 0)
+	dualStackFailure := createHealthyEgressNode(t, ctx, nodes, cipher, prefix+"-dual")
+	singleStackAvailable := createHealthyEgressNode(t, ctx, nodes, cipher, prefix+"-single")
 	setEgressProbeFamilies(t, ctx, nodes, dualStackFailure, egressdomain.ProbeStatusUnhealthy, egressdomain.ProbeStatusUnhealthy)
 	setEgressProbeFamilies(t, ctx, nodes, singleStackAvailable, egressdomain.ProbeStatusHealthy, egressdomain.ProbeStatusUnhealthy)
 
-	credential := createEgressOperationsAccount(t, ctx, accounts, prefix+"-account")
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{credential.ID}, &dualStackFailure.ID, account.EgressAssignmentManual, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
+	service := egressapp.NewService(nodes, cipher)
 	deleted, err := service.DeleteUnhealthy(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -503,13 +498,6 @@ func TestPostgresUnhealthyEgressCleanupUsesBothAddressFamilies(t *testing.T) {
 	}
 	if _, err := nodes.GetEgressNode(ctx, singleStackAvailable.ID); err != nil {
 		t.Fatalf("single-stack available node was deleted: %v", err)
-	}
-	stored, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.EgressNodeID != 0 || stored.EgressAssignmentMode != "" || stored.EgressAssignedAt != nil {
-		t.Fatalf("account binding not cleared: %#v", stored)
 	}
 }
 
@@ -1026,7 +1014,11 @@ func TestPostgresRoutingProjectionAndCredentialHydration(t *testing.T) {
 		t.Fatalf("cross-provider credential error = %v, want ErrNotFound", err)
 	}
 	disabled := false
-	if _, err := accounts.UpdateMany(ctx, account.ProviderBuild, []uint64{created.ID}, repository.AccountUpdates{Enabled: &disabled}); err != nil {
+	// 跨 Provider 批量更新自 2a336686 起按 ErrAccountPoolMismatch 拒绝。
+	if _, err := accounts.UpdateMany(ctx, account.ProviderBuild, []uint64{created.ID}, repository.AccountUpdates{Enabled: &disabled}); !errors.Is(err, repository.ErrAccountPoolMismatch) {
+		t.Fatalf("cross-provider update error = %v, want ErrAccountPoolMismatch", err)
+	}
+	if _, err := accounts.UpdateMany(ctx, account.ProviderWeb, []uint64{created.ID}, repository.AccountUpdates{Enabled: &disabled}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := accounts.GetCredentialMaterial(ctx, created.ID, account.ProviderWeb); !errors.Is(err, repository.ErrNotFound) {

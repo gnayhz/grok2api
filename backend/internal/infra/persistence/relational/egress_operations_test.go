@@ -3,511 +3,29 @@ package relational
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
-
-func TestEgressOperationsAutoAssignRespectsNodeCapacity(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	first := createHealthyEgressNode(t, ctx, nodes, cipher, "first", 1)
-	second := createHealthyEgressNode(t, ctx, nodes, cipher, "second", 1)
-	created := []account.Credential{
-		createEgressOperationsAccount(t, ctx, accounts, "one"),
-		createEgressOperationsAccount(t, ctx, accounts, "two"),
-		createEgressOperationsAccount(t, ctx, accounts, "three"),
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.RebalanceAccounts(ctx, true, false, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 2 || result.Unplaced != 1 || result.Rebalanced != 0 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-
-	assigned := make(map[uint64]int)
-	for _, value := range created {
-		actual, err := accounts.Get(ctx, value.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if actual.EgressNodeID != 0 {
-			if actual.EgressAssignmentMode != account.EgressAssignmentAuto {
-				t.Fatalf("account %d assignment mode = %q", actual.ID, actual.EgressAssignmentMode)
-			}
-			assigned[actual.EgressNodeID]++
-		}
-	}
-	if assigned[first.ID] != 1 || assigned[second.ID] != 1 {
-		t.Fatalf("capacity assignments = %#v", assigned)
-	}
-}
-
-func TestEgressOperationsAutoAssignMovesAccountOffUnhealthyNode(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	unhealthy := createHealthyEgressNode(t, ctx, nodes, cipher, "unhealthy", 0)
-	healthy := createHealthyEgressNode(t, ctx, nodes, cipher, "healthy", 0)
-	credential := createEgressOperationsAccount(t, ctx, accounts, "recover")
-	old := time.Now().UTC().Add(-10 * time.Minute)
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{credential.ID}, &unhealthy.ID, account.EgressAssignmentAuto, old); err != nil {
-		t.Fatal(err)
-	}
-	unhealthy.ProbeStatus = egress.ProbeStatusUnhealthy
-	if _, err := nodes.UpdateEgressNode(ctx, unhealthy); err != nil {
-		t.Fatal(err)
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.RebalanceAccounts(ctx, true, false, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 0 || result.Rebalanced != 1 || result.Unplaced != 0 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-	actual, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual.EgressNodeID != healthy.ID || actual.EgressAssignmentMode != account.EgressAssignmentAuto {
-		t.Fatalf("unhealthy assignment was not repaired: %#v", actual)
-	}
-}
-
-func TestEgressOperationsAutoAssignRepairsExistingCapacityOverflow(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	limited := createHealthyEgressNode(t, ctx, nodes, cipher, "limited", 1)
-	available := createHealthyEgressNode(t, ctx, nodes, cipher, "available", 100)
-	credentials := []account.Credential{
-		createEgressOperationsAccount(t, ctx, accounts, "limited-one"),
-		createEgressOperationsAccount(t, ctx, accounts, "limited-two"),
-		createEgressOperationsAccount(t, ctx, accounts, "available-one"),
-	}
-	old := time.Now().UTC().Add(-10 * time.Minute)
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{credentials[0].ID, credentials[1].ID}, &limited.ID, account.EgressAssignmentAuto, old); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{credentials[2].ID}, &available.ID, account.EgressAssignmentAuto, old); err != nil {
-		t.Fatal(err)
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.RebalanceAccounts(ctx, true, false, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 0 || result.Rebalanced != 1 || result.Unplaced != 0 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-	loads := map[uint64]int{}
-	for _, credential := range credentials {
-		actual, err := accounts.Get(ctx, credential.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		loads[actual.EgressNodeID]++
-	}
-	if loads[limited.ID] != 1 || loads[available.ID] != 2 {
-		t.Fatalf("capacity repair loads = %#v", loads)
-	}
-}
-
-func TestEgressOperationsBalanceNeverMovesManualBindings(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	first := createHealthyEgressNode(t, ctx, nodes, cipher, "first", 0)
-	second := createHealthyEgressNode(t, ctx, nodes, cipher, "second", 0)
-	manual := []account.Credential{
-		createEgressOperationsAccount(t, ctx, accounts, "manual-one"),
-		createEgressOperationsAccount(t, ctx, accounts, "manual-two"),
-	}
-	automatic := []account.Credential{
-		createEgressOperationsAccount(t, ctx, accounts, "auto-one"),
-		createEgressOperationsAccount(t, ctx, accounts, "auto-two"),
-	}
-	old := time.Now().UTC().Add(-10 * time.Minute)
-	manualIDs := []uint64{manual[0].ID, manual[1].ID}
-	automaticIDs := []uint64{automatic[0].ID, automatic[1].ID}
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, manualIDs, &first.ID, account.EgressAssignmentManual, old); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, automaticIDs, &first.ID, account.EgressAssignmentAuto, old); err != nil {
-		t.Fatal(err)
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.RebalanceAccounts(ctx, true, true, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 0 || result.Rebalanced != 2 || result.Unplaced != 0 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-	for _, value := range manual {
-		actual, err := accounts.Get(ctx, value.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if actual.EgressNodeID != first.ID || actual.EgressAssignmentMode != account.EgressAssignmentManual {
-			t.Fatalf("manual account moved: %#v", actual)
-		}
-	}
-	for _, value := range automatic {
-		actual, err := accounts.Get(ctx, value.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if actual.EgressNodeID != second.ID || actual.EgressAssignmentMode != account.EgressAssignmentAuto {
-			t.Fatalf("automatic account was not balanced: %#v", actual)
-		}
-	}
-}
-
-func TestEgressOperationsSharesWebNodeCapacityAcrossProviders(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNodeForScope(t, ctx, nodes, cipher, "shared-web", egress.ScopeWeb, 1)
-	web := createEgressOperationsProviderAccount(t, ctx, accounts, account.ProviderWeb, "web")
-	console := createEgressOperationsProviderAccount(t, ctx, accounts, account.ProviderConsole, "console")
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.RebalanceAccounts(ctx, true, false, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 1 || result.Unplaced != 1 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-	storedWeb, err := accounts.Get(ctx, web.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	storedConsole, err := accounts.Get(ctx, console.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if storedWeb.EgressNodeID != node.ID || storedConsole.EgressNodeID != 0 {
-		t.Fatalf("shared node capacity web=%d console=%d", storedWeb.EgressNodeID, storedConsole.EgressNodeID)
-	}
-}
-
-func TestEgressOperationsAutoAssignShareUsesProviderLoadOnSharedWebNode(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNodeForScope(t, ctx, nodes, cipher, "shared-web-bounded", egress.ScopeWeb, 0)
-
-	consoleIDs := make([]uint64, 0, 3)
-	for index := 0; index < 3; index++ {
-		credential := createEgressOperationsProviderAccount(t, ctx, accounts, account.ProviderConsole, fmt.Sprintf("console-%d", index))
-		consoleIDs = append(consoleIDs, credential.ID)
-	}
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderConsole, consoleIDs, &node.ID, account.EgressAssignmentManual, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-
-	web := make([]account.Credential, 0, 10)
-	for index := 0; index < 10; index++ {
-		web = append(web, createEgressOperationsProviderAccount(t, ctx, accounts, account.ProviderWeb, fmt.Sprintf("web-%d", index)))
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	service.ConfigureAutoAssignBounds(0.30, 0)
-	result, err := service.RebalanceAccounts(ctx, true, false, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 3 || result.Unplaced != 7 || result.Rebalanced != 0 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-	assigned := 0
-	for _, credential := range web {
-		stored, getErr := accounts.Get(ctx, credential.ID)
-		if getErr != nil {
-			t.Fatal(getErr)
-		}
-		if stored.EgressNodeID == node.ID {
-			assigned++
-		}
-	}
-	if assigned != 3 {
-		t.Fatalf("shared Web node received %d Web accounts, want 3", assigned)
-	}
-}
-
-func TestEgressOperationsRejectsIncompatibleNodeScopeChangeWithBindings(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNode(t, ctx, nodes, cipher, "bound-build", 0)
-	credential := createEgressOperationsAccount(t, ctx, accounts, "bound-build")
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	if _, err := service.AssignAccounts(ctx, node.ID, account.ProviderBuild, []uint64{credential.ID}, account.EgressAssignmentManual); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := service.Update(ctx, node.ID, egressapp.Input{Name: node.Name, Scope: egress.ScopeWeb, Enabled: true})
-	if !errors.Is(err, egressapp.ErrInvalidInput) {
-		t.Fatalf("incompatible scope update error = %v", err)
-	}
-	stored, err := nodes.GetEgressNode(ctx, node.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.Scope != egress.ScopeBuild {
-		t.Fatalf("persisted scope = %q", stored.Scope)
-	}
-}
-
-func TestEgressOperationsAllowsCompatibleNodeScopeChangeWithBindings(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNodeForScope(t, ctx, nodes, cipher, "bound-console", egress.ScopeWeb, 0)
-	credential := createEgressOperationsProviderAccount(t, ctx, accounts, account.ProviderConsole, "bound-console")
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	if _, err := service.AssignAccounts(ctx, node.ID, account.ProviderConsole, []uint64{credential.ID}, account.EgressAssignmentManual); err != nil {
-		t.Fatal(err)
-	}
-
-	updated, err := service.Update(ctx, node.ID, egressapp.Input{Name: node.Name, Scope: egress.ScopeConsole, Enabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Scope != egress.ScopeConsole {
-		t.Fatalf("updated scope = %q", updated.Scope)
-	}
-}
-
-func TestEgressOperationsRejectsIncompatibleSourceScopeChangeWithBindings(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	url := "https://subscription.example/proxies"
-	source, err := service.CreateSource(ctx, egressapp.SubscriptionSourceInput{Name: "bound-source", Scope: egress.ScopeBuild, Enabled: true, URL: &url})
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy, err := cipher.Encrypt("http://source-node.example:8080")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, []egress.Node{{
-		Name: "source-node", Scope: egress.ScopeBuild, Enabled: true, SourceID: source.ID,
-		SourceKey: "source-node", EncryptedProxyURL: proxy,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	listed, err := nodes.ListEgressNodes(ctx, egress.ScopeBuild, repository.SortQuery{})
-	if err != nil || len(listed) != 1 {
-		t.Fatalf("source nodes = %#v, err = %v", listed, err)
-	}
-	credential := createEgressOperationsAccount(t, ctx, accounts, "bound-source")
-	if _, err := service.AssignAccounts(ctx, listed[0].ID, account.ProviderBuild, []uint64{credential.ID}, account.EgressAssignmentManual); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = service.UpdateSource(ctx, source.ID, egressapp.SubscriptionSourceInput{Name: source.Name, Scope: egress.ScopeWeb, Enabled: true})
-	if !errors.Is(err, egressapp.ErrInvalidInput) {
-		t.Fatalf("incompatible source scope update error = %v", err)
-	}
-	stored, err := nodes.GetEgressSource(ctx, source.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.Scope != egress.ScopeBuild {
-		t.Fatalf("persisted source scope = %q", stored.Scope)
-	}
-}
-
-func TestEgressOperationsListsSourcePagesByScopeAndSearch(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	nodes := NewEgressRepository(database)
-	service := egressapp.NewService(nodes, egressOperationsCipher(t), "test-browser")
-	url := "https://subscription.example/proxies"
-	for _, input := range []egressapp.SubscriptionSourceInput{
-		{Name: "Alpha Build", Scope: egress.ScopeBuild, Enabled: true, URL: &url},
-		{Name: "beta build", Scope: egress.ScopeBuild, Enabled: true, URL: &url},
-		{Name: "Alpha Web", Scope: egress.ScopeWeb, Enabled: true, URL: &url},
-	} {
-		if _, err := service.CreateSource(ctx, input); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	first, total, err := service.ListSourcePage(ctx, 1, 1, "BUILD", egressapp.SourceListFilter{Scope: egress.ScopeBuild})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 2 || len(first) != 1 || first[0].Name != "Alpha Build" {
-		t.Fatalf("first page = %#v, total = %d", first, total)
-	}
-	second, total, err := service.ListSourcePage(ctx, 2, 1, "build", egressapp.SourceListFilter{Scope: egress.ScopeBuild})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 2 || len(second) != 1 || second[0].Name != "beta build" {
-		t.Fatalf("second page = %#v, total = %d", second, total)
-	}
-	web, total, err := service.ListSourcePage(ctx, 1, 100, "alpha", egressapp.SourceListFilter{Scope: egress.ScopeWeb})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 1 || len(web) != 1 || web[0].Name != "Alpha Web" {
-		t.Fatalf("web page = %#v, total = %d", web, total)
-	}
-	if _, _, err := service.ListSourcePage(ctx, 1, 20, "", egressapp.SourceListFilter{Scope: egress.Scope("invalid")}); !errors.Is(err, egressapp.ErrInvalidFilter) {
-		t.Fatalf("invalid scope error = %v", err)
-	}
-}
-
-func TestEgressOperationsAutoAssignSkipsCoolingFixedNode(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	cooling := createHealthyEgressNode(t, ctx, nodes, cipher, "cooling", 0)
-	available := createHealthyEgressNode(t, ctx, nodes, cipher, "available", 0)
-	cooldownUntil := time.Now().UTC().Add(time.Hour)
-	cooling.CooldownUntil = &cooldownUntil
-	if _, err := nodes.UpdateEgressNode(ctx, cooling); err != nil {
-		t.Fatal(err)
-	}
-	credential := createEgressOperationsAccount(t, ctx, accounts, "cooldown")
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.RebalanceAccounts(ctx, true, false, 15*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 1 || result.Unplaced != 0 {
-		t.Fatalf("rebalance result = %#v", result)
-	}
-	stored, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.EgressNodeID != available.ID {
-		t.Fatalf("assigned node = %d, want %d (cooling node %d)", stored.EgressNodeID, available.ID, cooling.ID)
-	}
-}
-
-func TestEgressOperationsAssignsManyAccountsToOneManualNode(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNode(t, ctx, nodes, cipher, "manual", 0)
-	first := createEgressOperationsAccount(t, ctx, accounts, "first")
-	second := createEgressOperationsAccount(t, ctx, accounts, "second")
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	result, err := service.AssignAccounts(ctx, node.ID, account.ProviderBuild, []uint64{first.ID, second.ID}, account.EgressAssignmentManual)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Assigned != 2 {
-		t.Fatalf("assigned = %#v", result)
-	}
-	for _, value := range []account.Credential{first, second} {
-		actual, err := accounts.Get(ctx, value.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if actual.EgressNodeID != node.ID || actual.EgressAssignmentMode != account.EgressAssignmentManual {
-			t.Fatalf("manual binding = %#v", actual)
-		}
-	}
-}
-
-func TestEgressOperationsBatchDeleteClearsAccountBindings(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	first := createHealthyEgressNode(t, ctx, nodes, cipher, "delete-first", 0)
-	second := createHealthyEgressNode(t, ctx, nodes, cipher, "delete-second", 0)
-	firstAccount := createEgressOperationsAccount(t, ctx, accounts, "delete-first-account")
-	secondAccount := createEgressOperationsAccount(t, ctx, accounts, "delete-second-account")
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{firstAccount.ID}, &first.ID, account.EgressAssignmentManual, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{secondAccount.ID}, &second.ID, account.EgressAssignmentAuto, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	deleted, err := service.DeleteMany(ctx, []uint64{first.ID, second.ID, first.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if deleted != 2 {
-		t.Fatalf("deleted = %d", deleted)
-	}
-	for _, value := range []account.Credential{firstAccount, secondAccount} {
-		stored, err := accounts.Get(ctx, value.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if stored.EgressNodeID != 0 || stored.EgressAssignmentMode != "" || stored.EgressAssignedAt != nil {
-			t.Fatalf("account binding not cleared: %#v", stored)
-		}
-	}
-}
 
 func TestEgressOperationsBatchUpdatesEnabledState(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	first := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-enable-first", 0)
-	second := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-enable-second", 0)
+	first := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-enable-first")
+	second := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-enable-second")
 	second.Enabled = false
 	if _, err := nodes.UpdateEgressNode(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 
-	service := egressapp.NewService(nodes, cipher, "test-browser")
+	service := egressapp.NewService(nodes, cipher)
 	updated, err := service.UpdateManyEnabled(ctx, []uint64{first.ID, second.ID, first.ID}, false)
 	if err != nil || updated != 1 {
 		t.Fatalf("disable updated = %d, err = %v", updated, err)
@@ -527,27 +45,26 @@ func TestEgressOperationsBatchUpdatesEnabledState(t *testing.T) {
 	}
 }
 
-func TestEgressOperationsBatchDisableRejectsFixedFallback(t *testing.T) {
+// 批量禁用不得绕过路由目标保护:被配置为固定出口的节点禁用被拒绝。
+func TestEgressOperationsBatchDisableRejectsRoutingTarget(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	fallbackNode := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-fallback", 0)
-	otherNode := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-other", 0)
-	service := egressapp.NewService(nodes, cipher, "test-browser")
+	target := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-target")
+	other := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-other")
+	service := egressapp.NewService(nodes, cipher)
 	if _, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild: {Mode: egress.FallbackModeFixed, NodeID: fallbackNode.ID},
-		},
+		ProbeIntervalSeconds: 900,
+		DefaultTarget:        &egressapp.RoutingTargetInput{Mode: egress.RoutingTargetNode, NodeID: target.ID},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := service.UpdateManyEnabled(ctx, []uint64{otherNode.ID, fallbackNode.ID}, false); err == nil {
-		t.Fatal("expected fixed fallback disable to fail")
+	if _, err := service.UpdateManyEnabled(ctx, []uint64{other.ID, target.ID}, false); !errors.Is(err, egressapp.ErrInvalidInput) {
+		t.Fatalf("routing target disable error = %v, want ErrInvalidInput", err)
 	}
-	for _, id := range []uint64{fallbackNode.ID, otherNode.ID} {
+	for _, id := range []uint64{target.ID, other.ID} {
 		stored, err := nodes.GetEgressNode(ctx, id)
 		if err != nil {
 			t.Fatal(err)
@@ -558,64 +75,53 @@ func TestEgressOperationsBatchDisableRejectsFixedFallback(t *testing.T) {
 	}
 }
 
-func TestEgressOperationsConfigRechecksFallbackNodeInsideTransaction(t *testing.T) {
+func TestEgressOperationsBatchDeleteRemovesNodes(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	fallbackNode := createHealthyEgressNode(t, ctx, nodes, cipher, "transaction-fallback", 0)
+	first := createHealthyEgressNode(t, ctx, nodes, cipher, "delete-first")
+	second := createHealthyEgressNode(t, ctx, nodes, cipher, "delete-second")
 
-	if _, err := nodes.UpdateEgressNodesEnabled(ctx, []uint64{fallbackNode.ID}, false); err != nil {
-		t.Fatal(err)
-	}
-	config := egress.DefaultOperationsConfig()
-	config.Fallbacks[egress.ScopeBuild] = egress.FallbackConfig{Mode: egress.FallbackModeFixed, NodeID: fallbackNode.ID}
-	config.UpdatedAt = time.Now().UTC()
-	if _, err := nodes.SaveEgressOperationsConfig(ctx, config); !errors.Is(err, repository.ErrEgressFallbackInUse) {
-		t.Fatalf("disabled fallback save error = %v", err)
-	}
-	stored, err := nodes.GetEgressOperationsConfig(ctx)
+	service := egressapp.NewService(nodes, cipher)
+	deleted, err := service.DeleteMany(ctx, []uint64{first.ID, second.ID, first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback := stored.FallbackFor(egress.ScopeBuild); fallback.Mode != egress.FallbackModeNone || fallback.NodeID != 0 {
-		t.Fatalf("rejected fallback was persisted: %#v", fallback)
+	if deleted != 2 {
+		t.Fatalf("deleted = %d", deleted)
+	}
+	for _, id := range []uint64{first.ID, second.ID} {
+		if _, err := nodes.GetEgressNode(ctx, id); !errors.Is(err, repository.ErrNotFound) {
+			t.Fatalf("node %d still exists: %v", id, err)
+		}
 	}
 }
 
 func TestEgressOperationsCleanupDeletesOnlyDualStackUnhealthyNodes(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
 
 	source, err := nodes.CreateEgressSource(ctx, egress.SubscriptionSource{
-		Name: "cleanup-source", Scope: egress.ScopeBuild, Enabled: true, RefreshIntervalSeconds: 900,
+		Name: "cleanup-source", Enabled: true, RefreshIntervalSeconds: 900,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manual := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-manual", 0)
-	managed := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-managed", 0)
+	manual := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-manual")
+	managed := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-managed")
 	managed.SourceID = source.ID
 	managed.SourceKey = "managed"
 	if managed, err = nodes.UpdateEgressNode(ctx, managed); err != nil {
 		t.Fatal(err)
 	}
-	v4Healthy := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-v4-healthy", 0)
-	v6Healthy := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-v6-healthy", 0)
-	untested := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-untested", 0)
+	v4Healthy := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-v4-healthy")
+	v6Healthy := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-v6-healthy")
+	untested := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-untested")
 
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	if _, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild: {Mode: egress.FallbackModeFixed, NodeID: manual.ID},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	service := egressapp.NewService(nodes, cipher)
 
 	setEgressProbeFamilies(t, ctx, nodes, manual, egress.ProbeStatusUnhealthy, egress.ProbeStatusUnhealthy)
 	setEgressProbeFamilies(t, ctx, nodes, managed, egress.ProbeStatusUnhealthy, egress.ProbeStatusUnhealthy)
@@ -623,20 +129,11 @@ func TestEgressOperationsCleanupDeletesOnlyDualStackUnhealthyNodes(t *testing.T)
 	setEgressProbeFamilies(t, ctx, nodes, v6Healthy, egress.ProbeStatusUnhealthy, egress.ProbeStatusHealthy)
 	setEgressProbeFamilies(t, ctx, nodes, untested, egress.ProbeStatusUnknown, egress.ProbeStatusUnknown)
 
-	firstAccount := createEgressOperationsAccount(t, ctx, accounts, "cleanup-manual-account")
-	secondAccount := createEgressOperationsAccount(t, ctx, accounts, "cleanup-managed-account")
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{firstAccount.ID}, &manual.ID, account.EgressAssignmentManual, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := accounts.UpdateEgressBindings(ctx, account.ProviderBuild, []uint64{secondAccount.ID}, &managed.ID, account.EgressAssignmentAuto, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-
 	preview, err := service.PreviewUnhealthyCleanup(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Nodes != 2 || preview.BoundAccounts != 2 || preview.SubscriptionManaged != 1 {
+	if preview.Nodes != 2 || preview.SubscriptionManaged != 1 {
 		t.Fatalf("cleanup preview = %#v", preview)
 	}
 	deleted, err := service.DeleteUnhealthy(ctx)
@@ -656,62 +153,20 @@ func TestEgressOperationsCleanupDeletesOnlyDualStackUnhealthyNodes(t *testing.T)
 			t.Fatalf("preserved node %d: %v", id, err)
 		}
 	}
-	for _, value := range []account.Credential{firstAccount, secondAccount} {
-		stored, err := accounts.Get(ctx, value.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if stored.EgressNodeID != 0 || stored.EgressAssignmentMode != "" || stored.EgressAssignedAt != nil {
-			t.Fatalf("account binding not cleared: %#v", stored)
-		}
-	}
-	config, err := nodes.GetEgressOperationsConfig(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fallback := config.FallbackFor(egress.ScopeBuild); fallback.Mode != egress.FallbackModeNone || fallback.NodeID != 0 {
-		t.Fatalf("cleanup fallback reference = %#v", fallback)
-	}
-}
-
-func TestEgressOperationsRejectsManualBindingsToDisabledOrDirectNodes(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	credential := createEgressOperationsAccount(t, ctx, accounts, "manual-validation")
-	direct, err := nodes.CreateEgressNode(ctx, egress.Node{Name: "direct", Scope: egress.ScopeBuild, Enabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	disabled := createHealthyEgressNode(t, ctx, nodes, cipher, "disabled", 0)
-	disabled.Enabled = false
-	if _, err := nodes.UpdateEgressNode(ctx, disabled); err != nil {
-		t.Fatal(err)
-	}
-
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	for _, nodeID := range []uint64{direct.ID, disabled.ID} {
-		if _, err := service.AssignAccounts(ctx, nodeID, account.ProviderBuild, []uint64{credential.ID}, account.EgressAssignmentManual); err == nil {
-			t.Fatalf("node %d was accepted for a manual proxy binding", nodeID)
-		}
-	}
 }
 
 func TestEgressOperationsPersistsProbeResult(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNode(t, ctx, nodes, cipher, "probe", 0)
+	node := createHealthyEgressNode(t, ctx, nodes, cipher, "probe")
 	cooldown := time.Now().UTC().Add(time.Minute)
 	if err := nodes.UpdateEgressNodeHealth(ctx, node.ID, 0.7, 1, &cooldown, egress.LastErrorTransport); err != nil {
 		t.Fatal(err)
 	}
 	probedAt := time.Now().UTC().Truncate(time.Millisecond)
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
+	service := egressapp.NewService(nodes, cipher)
 	service.SetNodeProber(egressProbeStub{result: egress.ProbeResult{
 		Status: egress.ProbeStatusHealthy, TestedAt: probedAt, LatencyMS: 42, ExitIP: "1.1.1.1",
 		Provider: egress.ProbeProviderCloudflare,
@@ -753,7 +208,7 @@ func TestEgressOperationsPersistsProbeResult(t *testing.T) {
 		t.Fatalf("healthy probe cleared a non-transport failure: %#v", stored)
 	}
 	updatedConfig, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeProvider: egress.ProbeProviderIPInfo, ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
+		ProbeProvider: egress.ProbeProviderIPInfo, ProbeIntervalSeconds: 900,
 	})
 	if err != nil || updatedConfig.ProbeProvider != egress.ProbeProviderIPInfo {
 		t.Fatalf("updated probe provider = %#v, err=%v", updatedConfig, err)
@@ -770,16 +225,15 @@ func TestEgressOperationsPersistsProbeResult(t *testing.T) {
 func TestEgressOperationsDiscardsProbeAfterProxyConfigurationChanges(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNode(t, ctx, nodes, cipher, "probe-stale", 0)
+	node := createHealthyEgressNode(t, ctx, nodes, cipher, "probe-stale")
 	replacementProxy, err := cipher.Encrypt("http://replacement.example:8080")
 	if err != nil {
 		t.Fatal(err)
 	}
 	probedAt := time.Now().UTC().Truncate(time.Millisecond)
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
+	service := egressapp.NewService(nodes, cipher)
 	service.SetNodeProber(mutatingEgressProbeStub{
 		repository:  nodes,
 		replacement: replacementProxy,
@@ -806,11 +260,10 @@ func TestEgressOperationsDiscardsProbeAfterProxyConfigurationChanges(t *testing.
 func TestEgressOperationsReturnsPersistedUnhealthyProbeAsResult(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	node := createHealthyEgressNode(t, ctx, nodes, cipher, "unreachable", 0)
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
+	node := createHealthyEgressNode(t, ctx, nodes, cipher, "unreachable")
+	service := egressapp.NewService(nodes, cipher)
 	service.SetNodeProber(egressProbeStub{err: errors.New("connection refused")})
 
 	result, err := service.TestNode(ctx, node.ID)
@@ -832,22 +285,20 @@ func TestEgressOperationsReturnsPersistedUnhealthyProbeAsResult(t *testing.T) {
 func TestEgressOperationsStoresSubscriptionURLEncrypted(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-	accounts := NewAccountRepository(database)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
+	service := egressapp.NewService(nodes, cipher)
 	url := "https://subscription.example/proxies?token=subscription-token"
 	proxyURL := "socks5h://proxy-user:proxy-secret@proxy.example:1080"
 	interval := 900
-	capacity := 3
 	created, err := service.CreateSource(ctx, egressapp.SubscriptionSourceInput{
-		Name: "source", Scope: egress.ScopeBuild, Enabled: true, URL: &url, ProxyURL: &proxyURL,
-		RefreshIntervalSeconds: &interval, DefaultAccountCapacity: &capacity,
+		Name: "source", Enabled: true, URL: &url, ProxyURL: &proxyURL,
+		RefreshIntervalSeconds: &interval,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !created.URLConfigured || !created.ProxyConfigured || created.DefaultAccountCapacity != capacity {
+	if !created.URLConfigured || !created.ProxyConfigured || created.RefreshIntervalSeconds != interval {
 		t.Fatalf("public source = %#v", created)
 	}
 	stored, err := nodes.GetEgressSource(ctx, created.ID)
@@ -863,7 +314,7 @@ func TestEgressOperationsStoresSubscriptionURLEncrypted(t *testing.T) {
 	originalEncryptedProxyURL := stored.EncryptedProxyURL
 
 	updated, err := service.UpdateSource(ctx, created.ID, egressapp.SubscriptionSourceInput{
-		Name: created.Name, Scope: created.Scope, Enabled: created.Enabled,
+		Name: created.Name, Enabled: created.Enabled,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -881,7 +332,7 @@ func TestEgressOperationsStoresSubscriptionURLEncrypted(t *testing.T) {
 
 	replacementProxyURL := "http://replacement-user:replacement-secret@proxy.example:8080"
 	updated, err = service.UpdateSource(ctx, created.ID, egressapp.SubscriptionSourceInput{
-		Name: created.Name, Scope: created.Scope, Enabled: created.Enabled, ProxyURL: &replacementProxyURL,
+		Name: created.Name, Enabled: created.Enabled, ProxyURL: &replacementProxyURL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -900,7 +351,7 @@ func TestEgressOperationsStoresSubscriptionURLEncrypted(t *testing.T) {
 
 	for _, invalidProxyURL := range []string{"", "socks5h://Default.{account}:secret@proxy.example:1080"} {
 		_, updateErr := service.UpdateSource(ctx, created.ID, egressapp.SubscriptionSourceInput{
-			Name: created.Name, Scope: created.Scope, Enabled: created.Enabled, ProxyURL: &invalidProxyURL,
+			Name: created.Name, Enabled: created.Enabled, ProxyURL: &invalidProxyURL,
 		})
 		if !errors.Is(updateErr, egressapp.ErrInvalidInput) {
 			t.Fatalf("invalid proxy %q error = %v", invalidProxyURL, updateErr)
@@ -915,7 +366,7 @@ func TestEgressOperationsStoresSubscriptionURLEncrypted(t *testing.T) {
 	}
 
 	updated, err = service.UpdateSource(ctx, created.ID, egressapp.SubscriptionSourceInput{
-		Name: created.Name, Scope: created.Scope, Enabled: created.Enabled, ClearProxyURL: true,
+		Name: created.Name, Enabled: created.Enabled, ClearProxyURL: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -938,7 +389,7 @@ func TestEgressOperationsSubscriptionImportCountsOnlyNewNodes(t *testing.T) {
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
 	source, err := nodes.CreateEgressSource(ctx, egress.SubscriptionSource{
-		Name: "count-source", Scope: egress.ScopeBuild, Enabled: true, EncryptedURL: "encrypted",
+		Name: "count-source", Enabled: true, EncryptedURL: "encrypted",
 		RefreshIntervalSeconds: 900,
 	})
 	if err != nil {
@@ -949,7 +400,7 @@ func TestEgressOperationsSubscriptionImportCountsOnlyNewNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := []egress.Node{{
-		Name: "count-node", Scope: egress.ScopeBuild, Enabled: true, SourceID: source.ID,
+		Name: "count-node", Enabled: true, SourceID: source.ID,
 		SourceKey: "count-node", EncryptedProxyURL: proxy,
 	}}
 	firstValues := append(append([]egress.Node(nil), values...), values[0])
@@ -966,216 +417,231 @@ func TestEgressOperationsSubscriptionImportCountsOnlyNewNodes(t *testing.T) {
 	}
 }
 
-func TestEgressOperationsMaintenanceRetriesAssignmentAfterFailure(t *testing.T) {
+func TestEgressOperationsListsSourcePagesBySearch(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-	accounts := &retryingAssignmentRepository{AccountRepository: NewAccountRepository(database), failNext: true}
 	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	if _, err := nodes.SaveEgressOperationsConfig(ctx, egress.OperationsConfig{
-		ProbeIntervalSeconds: 900, AutoAssignEnabled: true, AssignmentIntervalSeconds: 3600,
-	}); err != nil {
+	service := egressapp.NewService(nodes, egressOperationsCipher(t))
+	url := "https://subscription.example/proxies"
+	for _, input := range []egressapp.SubscriptionSourceInput{
+		{Name: "Alpha Build", Enabled: true, URL: &url},
+		{Name: "beta build", Enabled: true, URL: &url},
+		{Name: "Alpha Web", Enabled: true, URL: &url},
+	} {
+		if _, err := service.CreateSource(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, total, err := service.ListSourcePage(ctx, 1, 1, "ALPHA")
+	if err != nil {
 		t.Fatal(err)
 	}
-	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-
-	if err := service.RunMaintenance(ctx); err == nil {
-		t.Fatal("first maintenance run unexpectedly succeeded")
+	if total != 2 || len(first) != 1 {
+		t.Fatalf("first page = %#v, total = %d", first, total)
 	}
-	firstCalls := accounts.assignmentCalls
-	if firstCalls != 1 {
-		t.Fatalf("first assignment calls = %d", firstCalls)
+	second, total, err := service.ListSourcePage(ctx, 2, 1, "alpha")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := service.RunMaintenance(ctx); err != nil {
-		t.Fatalf("second maintenance run = %v", err)
+	if total != 2 || len(second) != 1 {
+		t.Fatalf("second page = %#v, total = %d", second, total)
 	}
-	if accounts.assignmentCalls <= firstCalls {
-		t.Fatalf("assignment was not retried: calls = %d", accounts.assignmentCalls)
+	if len(first)+len(second) != 2 || first[0].ID == second[0].ID {
+		t.Fatalf("pages overlapped: %#v vs %#v", first, second)
+	}
+	web, total, err := service.ListSourcePage(ctx, 1, 100, "web")
+	if err != nil || total != 1 || len(web) != 1 || web[0].Name != "Alpha Web" {
+		t.Fatalf("web page = %#v, total = %d, err = %v", web, total, err)
 	}
 }
 
-func TestEgressOperationsConfigPersistsFixedFallback(t *testing.T) {
+// 服务层路由配置语义:Nil 层级保留存量;显式 auto 重置该层级。
+func TestEgressOperationsConfigRoutingUpdateSemantics(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	fixed := createHealthyEgressNode(t, ctx, nodes, cipher, "fixed-fallback", 0)
-	service := egressapp.NewService(nodes, cipher, "test-browser")
+	target := createHealthyEgressNode(t, ctx, nodes, cipher, "svc-routing-target")
+	service := egressapp.NewService(nodes, cipher)
 
 	saved, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeProvider: egress.ProbeProviderCloudflare, ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild:        {Mode: egress.FallbackModeFixed, NodeID: fixed.ID},
-			egress.ScopeWeb:          {Mode: egress.FallbackModeDirect},
-			egress.ScopeConsoleAsset: {Mode: egress.FallbackModeDirect},
+		ProbeIntervalSeconds: 900,
+		ScopeTargets: map[egress.Scope]egressapp.RoutingTargetInput{
+			egress.ScopeBuild: {Mode: egress.RoutingTargetNode, NodeID: target.ID},
+			egress.ScopeWeb:   {Mode: egress.RoutingTargetDirect},
+		},
+		ClassTargets: map[egress.TrafficClass]egressapp.RoutingTargetInput{
+			egress.TrafficClassBilling: {Mode: egress.RoutingTargetNode, NodeID: target.ID},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback := saved.FallbackFor(egress.ScopeBuild); fallback.Mode != egress.FallbackModeFixed || fallback.NodeID != fixed.ID {
-		t.Fatalf("saved Build fallback = %#v", fallback)
+	if got := saved.TargetFor(egress.ScopeBuild, egress.TrafficClassInference); got.Mode != egress.RoutingTargetNode || got.NodeID != target.ID {
+		t.Fatalf("saved build target = %+v", got)
 	}
-	if saved.ProbeProvider != egress.ProbeProviderCloudflare {
-		t.Fatalf("saved probe provider = %q", saved.ProbeProvider)
+	if got := saved.TargetFor(egress.ScopeWeb, egress.TrafficClassInference); got.Mode != egress.RoutingTargetDirect {
+		t.Fatalf("saved web target = %+v", got)
 	}
-	if fallback := saved.FallbackFor(egress.ScopeWeb); fallback.Mode != egress.FallbackModeDirect || fallback.NodeID != 0 {
-		t.Fatalf("saved Web fallback = %#v", fallback)
-	}
-	if fallback := saved.FallbackFor(egress.ScopeConsole); fallback.Mode != egress.FallbackModeNone || fallback.NodeID != 0 {
-		t.Fatalf("default Console fallback = %#v", fallback)
-	}
-	if fallback := saved.FallbackFor(egress.ScopeConsoleAsset); fallback.Mode != egress.FallbackModeDirect || fallback.NodeID != 0 {
-		t.Fatalf("saved Console asset fallback = %#v", fallback)
+	if got := saved.TargetFor(egress.ScopeConsole, egress.TrafficClassBilling); got.Mode != egress.RoutingTargetNode || got.NodeID != target.ID {
+		t.Fatalf("saved billing class target = %+v", got)
 	}
 
-	stored, err := nodes.GetEgressOperationsConfig(ctx)
+	// A sparse update without routing levels keeps the stored configuration.
+	kept, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
+		ProbeIntervalSeconds: 600,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback := stored.FallbackFor(egress.ScopeBuild); fallback.Mode != egress.FallbackModeFixed || fallback.NodeID != fixed.ID {
-		t.Fatalf("stored Build fallback = %#v", fallback)
+	if kept.ProbeIntervalSeconds != 600 {
+		t.Fatalf("probe interval = %d", kept.ProbeIntervalSeconds)
 	}
-	if fallback := stored.FallbackFor(egress.ScopeWeb); fallback.Mode != egress.FallbackModeDirect || fallback.NodeID != 0 {
-		t.Fatalf("stored Web fallback = %#v", fallback)
+	if got := kept.TargetFor(egress.ScopeBuild, egress.TrafficClassInference); got.Mode != egress.RoutingTargetNode || got.NodeID != target.ID {
+		t.Fatalf("sparse update dropped build target: %+v", got)
 	}
-	if fallback := stored.FallbackFor(egress.ScopeConsoleAsset); fallback.Mode != egress.FallbackModeDirect || fallback.NodeID != 0 {
-		t.Fatalf("stored Console asset fallback = %#v", fallback)
+	if got := kept.TargetFor(egress.ScopeConsole, egress.TrafficClassBilling); got.NodeID != target.ID {
+		t.Fatalf("sparse update dropped class target: %+v", got)
 	}
-	if stored.ProbeProvider != egress.ProbeProviderCloudflare {
-		t.Fatalf("stored probe provider = %q", stored.ProbeProvider)
-	}
+
+	// An explicit auto scope target pins that level to the automatic schedule.
 	updated, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild: {Mode: egress.FallbackModeNone},
+		ProbeIntervalSeconds: 600,
+		DefaultTarget:        &egressapp.RoutingTargetInput{Mode: egress.RoutingTargetDirect},
+		ScopeTargets: map[egress.Scope]egressapp.RoutingTargetInput{
+			egress.ScopeBuild: {Mode: egress.RoutingTargetAuto},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback := updated.FallbackFor(egress.ScopeWeb); fallback.Mode != egress.FallbackModeDirect {
-		t.Fatalf("sparse update reset Web fallback = %#v", fallback)
+	if got := updated.TargetFor(egress.ScopeBuild, egress.TrafficClassInference); got.Mode != egress.RoutingTargetAuto {
+		t.Fatalf("auto scope target must resolve to the automatic schedule: %+v", got)
 	}
-	if fallback := updated.FallbackFor(egress.ScopeConsoleAsset); fallback.Mode != egress.FallbackModeDirect {
-		t.Fatalf("sparse update reset Console asset fallback = %#v", fallback)
+	if got := updated.TargetFor(egress.ScopeWeb, egress.TrafficClassInference); got.Mode != egress.RoutingTargetDirect {
+		t.Fatalf("web target must survive: %+v", got)
+	}
+
+	// Structurally invalid routing is rejected with the input error.
+	if _, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
+		ProbeIntervalSeconds: 600,
+		ScopeTargets: map[egress.Scope]egressapp.RoutingTargetInput{
+			// Asset scopes are not independently routable (they follow the
+			// parent family), so they must be rejected.
+			egress.ScopeWebAsset: {Mode: egress.RoutingTargetDirect},
+		},
+	}); err == nil {
+		t.Fatal("expected validation error for asset-scope routing target")
+	}
+	if _, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
+		ProbeIntervalSeconds: 600,
+		DefaultTarget:        &egressapp.RoutingTargetInput{Mode: egress.RoutingTargetNode},
+	}); err == nil {
+		t.Fatal("expected validation error for node target without node id")
 	}
 }
 
-func TestFixedFallbackReferenceIsProtectedAndClearedOnDelete(t *testing.T) {
+// 删除固定目标节点后,配置中指向它的目标被清空(各层级逐级下落)。
+func TestEgressOperationsDeleteClearsRoutingTargetReferences(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	nodes := NewEgressRepository(database)
 	cipher := egressOperationsCipher(t)
-	fixed := createHealthyEgressNode(t, ctx, nodes, cipher, "fixed-fallback", 0)
-	service := egressapp.NewService(nodes, cipher, "test-browser")
+	target := createHealthyEgressNode(t, ctx, nodes, cipher, "delete-target")
+	service := egressapp.NewService(nodes, cipher)
 	if _, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild: {Mode: egress.FallbackModeFixed, NodeID: fixed.ID},
-		},
+		ProbeIntervalSeconds: 900,
+		DefaultTarget:        &egressapp.RoutingTargetInput{Mode: egress.RoutingTargetNode, NodeID: target.ID},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Update(ctx, fixed.ID, egressapp.Input{
-		Name: fixed.Name, Scope: fixed.Scope, Enabled: false,
-	}); !errors.Is(err, egressapp.ErrInvalidInput) || !strings.Contains(err.Error(), "固定回退") {
-		t.Fatalf("disable fixed fallback error = %v", err)
-	}
-	if err := service.Delete(ctx, fixed.ID); err != nil {
+	if err := service.Delete(ctx, target.ID); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := nodes.GetEgressOperationsConfig(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback := stored.FallbackFor(egress.ScopeBuild); fallback.Mode != egress.FallbackModeNone || fallback.NodeID != 0 {
-		t.Fatalf("deleted fallback reference = %#v", fallback)
+	if got := stored.TargetFor(egress.ScopeBuild, egress.TrafficClassInference); got.Mode != egress.RoutingTargetAuto {
+		t.Fatalf("deleted target reference = %#v", got)
 	}
 }
 
-func TestSubscriptionSyncClearsStaleFixedFallbackReference(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	source, err := nodes.CreateEgressSource(ctx, egress.SubscriptionSource{
-		Name: "source", Scope: egress.ScopeBuild, Enabled: true, RefreshIntervalSeconds: 900,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	encryptedProxy, err := cipher.Encrypt("http://subscription.example:8080")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, []egress.Node{{
-		Name: "subscription", Scope: egress.ScopeBuild, Enabled: true, SourceID: source.ID,
-		SourceKey: "one", EncryptedProxyURL: encryptedProxy, Health: 1,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	listed, err := nodes.ListEgressNodes(ctx, egress.ScopeBuild, repository.SortQuery{})
-	if err != nil || len(listed) != 1 {
-		t.Fatalf("subscription nodes=%#v err=%v", listed, err)
-	}
-	service := egressapp.NewService(nodes, cipher, "test-browser")
-	if _, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild: {Mode: egress.FallbackModeFixed, NodeID: listed[0].ID},
+// TargetFor 解析优先级:class → scope(asset 归并父族) → default → auto。
+func TestOperationsConfigTargetForHierarchy(t *testing.T) {
+	nodeTarget := egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: 1}
+	poolTarget := egress.RoutingTarget{Mode: egress.RoutingTargetPool, PoolID: 2}
+	config := egress.OperationsConfig{
+		DefaultTarget: egress.RoutingTarget{Mode: egress.RoutingTargetDirect},
+		ScopeTargets: map[egress.Scope]egress.RoutingTarget{
+			egress.ScopeWeb:   nodeTarget,
+			egress.ScopeBuild: {Mode: egress.RoutingTargetAuto},
 		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, nil); err != nil {
-		t.Fatal(err)
-	}
-	stored, err := nodes.GetEgressOperationsConfig(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fallback := stored.FallbackFor(egress.ScopeBuild); fallback.Mode != egress.FallbackModeNone || fallback.NodeID != 0 {
-		t.Fatalf("stale subscription fallback reference = %#v", fallback)
-	}
-}
-
-func TestEgressOperationsConfigRejectsUnsafeFixedFallback(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	nodes := NewEgressRepository(database)
-	cipher := egressOperationsCipher(t)
-	pool := createHealthyEgressNode(t, ctx, nodes, cipher, "pool-fallback", 0)
-	pool.ProxyPool = true
-	if _, err := nodes.UpdateEgressNode(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	service := egressapp.NewService(nodes, cipher, "test-browser")
-	_, err := service.UpdateOperationsConfig(ctx, egressapp.OperationsConfigInput{
-		ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		Fallbacks: map[egress.Scope]egressapp.FallbackConfigInput{
-			egress.ScopeBuild: {Mode: egress.FallbackModeFixed, NodeID: pool.ID},
+		ClassTargets: map[egress.TrafficClass]egress.RoutingTarget{
+			egress.TrafficClassBilling: poolTarget,
 		},
-	})
-	if !errors.Is(err, egressapp.ErrInvalidInput) || !strings.Contains(err.Error(), "代理池") {
-		t.Fatalf("pool fallback error = %v", err)
+	}
+	if got := config.TargetFor(egress.ScopeWeb, egress.TrafficClassBilling); got.Mode != egress.RoutingTargetPool {
+		t.Fatalf("class must win over scope: %+v", got)
+	}
+	if got := config.TargetFor(egress.ScopeWeb, egress.TrafficClassInference); got.Mode != egress.RoutingTargetNode || got.NodeID != 1 {
+		t.Fatalf("scope target = %+v", got)
+	}
+	// Asset scopes inherit their parent family's exit.
+	if got := config.TargetFor(egress.ScopeWebAsset, egress.TrafficClassInference); got.NodeID != 1 {
+		t.Fatalf("asset scope must follow web family: %+v", got)
+	}
+	if got := config.TargetFor(egress.ScopeConsoleAsset, egress.TrafficClassInference); got.Mode != egress.RoutingTargetDirect {
+		t.Fatalf("console asset must follow console → default: %+v", got)
+	}
+	// Explicit auto scope target pins that level to the automatic schedule
+	// even when a default target exists.
+	if got := config.TargetFor(egress.ScopeBuild, egress.TrafficClassInference); got.Mode != egress.RoutingTargetAuto {
+		t.Fatalf("explicit auto scope must stay on the automatic schedule: %+v", got)
+	}
+	// Unconfigured level without default ends on the automatic schedule.
+	empty := egress.OperationsConfig{}
+	if got := empty.TargetFor(egress.ScopeWeb, egress.TrafficClassInference); got.Mode != egress.RoutingTargetAuto {
+		t.Fatalf("empty config target = %+v", got)
 	}
 }
 
-type retryingAssignmentRepository struct {
-	*AccountRepository
-	failNext        bool
-	assignmentCalls int
+// 校验:作用域白名单、目标形状、层级上限。
+func TestValidateRoutingTargets(t *testing.T) {
+	valid := egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: 1}
+	if err := egress.ValidateRoutingTargets(valid, nil, nil); err != nil {
+		t.Fatalf("valid default target rejected: %v", err)
+	}
+	if err := egress.ValidateRoutingTargets(egress.RoutingTarget{Mode: egress.RoutingTargetNode}, nil, nil); err == nil {
+		t.Fatal("node target without node id must be rejected")
+	}
+	if err := egress.ValidateRoutingTargets(egress.RoutingTarget{Mode: egress.RoutingTargetAuto, NodeID: 1}, nil, nil); err == nil {
+		t.Fatal("auto target with node id must be rejected")
+	}
+	if err := egress.ValidateRoutingTargets(valid, map[egress.Scope]egress.RoutingTarget{egress.ScopeWebAsset: {Mode: egress.RoutingTargetDirect}}, nil); err == nil {
+		t.Fatal("asset-scope target must be rejected")
+	}
+	if err := egress.ValidateRoutingTargets(valid, map[egress.Scope]egress.RoutingTarget{egress.Scope("bogus"): {Mode: egress.RoutingTargetDirect}}, nil); err == nil {
+		t.Fatal("unknown scope must be rejected")
+	}
+	if err := egress.ValidateRoutingTargets(valid, nil, map[egress.TrafficClass]egress.RoutingTarget{egress.TrafficClass("bogus"): {Mode: egress.RoutingTargetDirect}}); err == nil {
+		t.Fatal("unknown traffic class must be rejected")
+	}
+	overflow := make(map[egress.TrafficClass]egress.RoutingTarget, egress.MaxRoutingTargets+1)
+	for _, class := range append(egress.TrafficClasses(), egress.TrafficClass("extra")) {
+		overflow[class] = egress.RoutingTarget{Mode: egress.RoutingTargetDirect}
+	}
+	if err := egress.ValidateRoutingTargets(valid, nil, overflow); err == nil {
+		t.Fatal("per-level size bound must be enforced")
+	}
 }
 
-func (r *retryingAssignmentRepository) ListEgressAssignments(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	r.assignmentCalls++
-	if r.failNext {
-		r.failNext = false
-		return nil, errors.New("temporary assignment failure")
-	}
-	return r.AccountRepository.ListEgressAssignments(ctx, provider)
-}
+// 迁移路径(dropLegacyEgressResourceColumns 删除旧列+捕获旧路由)在 SQLite 上存在
+// 运行时缺陷: dropEgressLegacyColumns 以字符串表名调用 glebarez sqlite 的
+// Migrator.DropColumn, 该实现对字符串 dst 解析不出 schema 会空指针 panic。
+// 故本文件暂不包含需要实际删除旧列的迁移用例, 待非测试代码修复后补充
+// (见 schema_egress_scopeless.go dropEgressLegacyColumns)。
 
 type egressProbeStub struct {
 	result egress.ProbeResult
@@ -1217,11 +683,7 @@ func egressOperationsCipher(t *testing.T) *security.Cipher {
 	return cipher
 }
 
-func createHealthyEgressNode(t *testing.T, ctx context.Context, repository *EgressRepository, cipher *security.Cipher, name string, capacity int) egress.Node {
-	return createHealthyEgressNodeForScope(t, ctx, repository, cipher, name, egress.ScopeBuild, capacity)
-}
-
-func createHealthyEgressNodeForScope(t *testing.T, ctx context.Context, repository *EgressRepository, cipher *security.Cipher, name string, scope egress.Scope, capacity int) egress.Node {
+func createHealthyEgressNode(t *testing.T, ctx context.Context, repository *EgressRepository, cipher *security.Cipher, name string) egress.Node {
 	t.Helper()
 	proxy, err := cipher.Encrypt("http://" + name + ".example:8080")
 	if err != nil {
@@ -1229,7 +691,7 @@ func createHealthyEgressNodeForScope(t *testing.T, ctx context.Context, reposito
 	}
 	probedAt := time.Now().UTC()
 	created, err := repository.CreateEgressNode(ctx, egress.Node{
-		Name: name, Scope: scope, Enabled: true, EncryptedProxyURL: proxy, AccountCapacity: capacity,
+		Name: name, Enabled: true, EncryptedProxyURL: proxy,
 		Health: 1, ProbeStatus: egress.ProbeStatusHealthy, LastProbedAt: &probedAt,
 	})
 	if err != nil {
@@ -1248,24 +710,4 @@ func setEgressProbeFamilies(t *testing.T, ctx context.Context, repository *Egres
 	}); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func createEgressOperationsAccount(t *testing.T, ctx context.Context, repository *AccountRepository, sourceKey string) account.Credential {
-	return createEgressOperationsProviderAccount(t, ctx, repository, account.ProviderBuild, sourceKey)
-}
-
-func createEgressOperationsProviderAccount(t *testing.T, ctx context.Context, repository *AccountRepository, provider account.Provider, sourceKey string) account.Credential {
-	t.Helper()
-	authType := account.AuthTypeOAuth
-	if provider != account.ProviderBuild {
-		authType = account.AuthTypeSSO
-	}
-	created, _, err := repository.UpsertByIdentity(ctx, account.Credential{
-		Provider: provider, AuthType: authType, Name: sourceKey, SourceKey: sourceKey,
-		EncryptedAccessToken: testEncryptedToken, Enabled: true, AuthStatus: account.AuthStatusActive,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return created
 }

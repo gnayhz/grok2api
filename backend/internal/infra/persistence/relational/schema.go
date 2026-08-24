@@ -7,25 +7,25 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const mediaJobInputMetadataPendingIndex = "CREATE INDEX IF NOT EXISTS idx_media_jobs_input_metadata_pending ON media_jobs(id) WHERE input_image_count IS NULL"
 
 const postgresSchemaMigrationLockID int64 = 0x47524f4b32415049
 
-const standaloneProxyProfileMigrationBatchSize = 100
-
 var schemaModels = []any{
 	&adminModel{},
 	&adminSessionModel{},
+	&schemaMigrationMarkerModel{},
 	&egressSubscriptionSourceModel{},
-	&egressProxyProfileModel{},
+	&egressPoolModel{},
+	&egressPoolMemberModel{},
 	&egressNodeModel{},
 	&egressOperationsConfigModel{},
 	&accountRiskVerdictModel{},
@@ -62,6 +62,8 @@ var schemaIndexes = []string{
 	// SQLite 通过重建表修改 CHECK 约束，重建会删除独立存储的 GORM 唯一索引；
 	// 在统一索引阶段显式恢复这些数据完整性约束。
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_accounts_identity_key ON provider_accounts(identity_key)",
+	// egress_pools 同样会因 legacy 列删除与策略 CHECK 升级被 SQLite 重建,池名唯一索引需显式恢复。
+	"CREATE UNIQUE INDEX IF NOT EXISTS uidx_egress_pools_name ON egress_pools(name)",
 	"CREATE INDEX IF NOT EXISTS idx_accounts_routing ON provider_accounts(provider, enabled, auth_status, priority DESC, id ASC)",
 	"CREATE INDEX IF NOT EXISTS idx_accounts_created_id ON provider_accounts(created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_accounts_auto_clean_reauth ON provider_accounts(auth_status, reauth_marked_at, id)",
@@ -86,10 +88,9 @@ var schemaIndexes = []string{
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_client_keys_internal_kind ON client_keys(internal_kind) WHERE internal_kind IS NOT NULL",
 	"CREATE INDEX IF NOT EXISTS idx_client_key_models_route_key ON client_key_models(model_route_id, client_key_id)",
 	"CREATE INDEX IF NOT EXISTS idx_billing_reservations_expiry ON billing_reservations(expires_at, client_key_id)",
-	"CREATE INDEX IF NOT EXISTS idx_egress_nodes_scope_health ON egress_nodes(scope, enabled, health DESC, id ASC)",
+	"CREATE INDEX IF NOT EXISTS idx_egress_nodes_enabled_health ON egress_nodes(enabled, health DESC, id ASC)",
 	"CREATE INDEX IF NOT EXISTS idx_egress_nodes_probe_due ON egress_nodes(enabled, last_probed_at, id)",
-	"CREATE INDEX IF NOT EXISTS idx_egress_nodes_proxy_profile ON egress_nodes(proxy_profile_id, id)",
-	"CREATE INDEX IF NOT EXISTS idx_egress_sources_scope_name ON egress_subscription_sources(scope, LOWER(name), id)",
+	"CREATE INDEX IF NOT EXISTS idx_egress_sources_name ON egress_subscription_sources(LOWER(name), id)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_created_id ON request_audits(created_at DESC, id DESC)",
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_audits_event_id ON request_audits(event_id) WHERE event_id <> ''",
 	"CREATE INDEX IF NOT EXISTS idx_audits_account_created_id ON request_audits(account_id, created_at DESC, id DESC)",
@@ -120,13 +121,25 @@ var schemaIndexes = []string{
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。
 func (d *Database) InitializeSchema(ctx context.Context) error {
-	if d.dialect == "postgres" {
+	switch d.dialect {
+	case "postgres":
 		return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", postgresSchemaMigrationLockID).Error; err != nil {
 				return fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
 			}
 			locked := &Database{db: tx, dialect: d.dialect}
 			return locked.initializeSchema(ctx)
+		})
+	case "sqlite":
+		// SQLite 支持事务性 DDL:整个初始化(删旧列/重建表/路由恢复/回填)包进
+		// 单事务并配合外键暂停会话——中途失败或被 kill 时整体回滚, 不会留下
+		// "旧列已删而路由配置未恢复"的不可重试中间态(与 postgres 语义对齐)。
+		// 捕获的旧路由也不再只靠 Go 局部变量过桥。
+		return d.withSQLiteForeignKeysDisabled(ctx, func() error {
+			return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				locked := &Database{db: tx, dialect: d.dialect}
+				return locked.initializeSchema(ctx)
+			})
 		})
 	}
 	return d.initializeSchema(ctx)
@@ -138,34 +151,30 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 	hadProviderScope := hadClientKeys && db.Migrator().HasColumn(&clientKeyModel{}, "ProviderScopeMask")
 	hadTierScope := hadClientKeys && db.Migrator().HasColumn(&clientKeyModel{}, "TierScopeMask")
 	hadLegacyAccountPool := hadClientKeys && db.Migrator().HasColumn("client_keys", "account_pool")
-	hadGlobalSubscriptionProxy := db.Migrator().HasTable("egress_operations_config") && db.Migrator().HasColumn("egress_operations_config", "encrypted_subscription_proxy_url")
-	// all 作用域会让 Build 与 Web 共用 UA、健康度和冷却状态，升级时直接移除旧节点。
-	if db.Migrator().HasTable(&egressNodeModel{}) {
-		if err := db.Where("scope = ?", "all").Delete(&egressNodeModel{}).Error; err != nil {
-			return fmt.Errorf("清理旧版所有域出口节点: %w", err)
-		}
-	}
 	autoMigrate := func() error {
 		return d.db.WithContext(ctx).AutoMigrate(schemaModels...)
 	}
+	// 出口资源模型重构（去作用域/去账号绑定/统一路由）必须在 AutoMigrate 之前
+	// 删除旧列并捕获旧路由配置；列删除会重建表，与 AutoMigrate 共用外键暂停会话。
+	legacyRouting := legacyEgressRouting{}
+	preMigrate := func() error {
+		captured, err := d.dropLegacyEgressResourceColumns(ctx)
+		legacyRouting = captured
+		return err
+	}
+	// SQLite 修改 CHECK 等表级约束时会重建表, 外键暂停会话由 InitializeSchema
+	// 在整个初始化外层提供(单连接 + PRAGMA foreign_keys=OFF + 单事务)。
 	var migrateErr error
-	if d.dialect == "sqlite" {
-		// SQLite 修改 CHECK 等表级约束时会重建表。provider_accounts 等父表已被多个
-		// 子表引用，必须在固定连接上暂停外键，否则 DROP 旧父表会直接失败。
-		migrateErr = d.withSQLiteForeignKeysDisabled(ctx, autoMigrate)
+	if err := preMigrate(); err != nil {
+		migrateErr = err
 	} else {
 		migrateErr = autoMigrate()
 	}
 	if migrateErr != nil {
 		return fmt.Errorf("初始化数据库表: %w", migrateErr)
 	}
-	if hadGlobalSubscriptionProxy {
-		if err := d.migratePerSourceSubscriptionProxy(ctx); err != nil {
-			return fmt.Errorf("迁移代理订阅拉取代理: %w", err)
-		}
-	}
-	if err := d.migrateStandaloneEgressProxyProfiles(ctx); err != nil {
-		return fmt.Errorf("迁移独立出口代理配置: %w", err)
+	if err := d.restoreLegacyEgressRouting(ctx, legacyRouting); err != nil {
+		return fmt.Errorf("迁移出口路由配置: %w", err)
 	}
 	if err := d.migrateClientKeyAccountScopes(ctx, hadLegacyAccountPool, !hadProviderScope, !hadTierScope); err != nil {
 		return fmt.Errorf("迁移客户端 Key 调用范围: %w", err)
@@ -179,11 +188,11 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 	if err := d.ensureConsoleConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移 Console 数据库约束: %w", err)
 	}
-	if err := d.ensureEgressAssetScopeConstraints(ctx); err != nil {
-		return fmt.Errorf("迁移资源出口数据库约束: %w", err)
-	}
 	if err := d.ensureAuditOperationConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移请求审计操作约束: %w", err)
+	}
+	if err := d.ensureEgressPoolStrategyConstraint(ctx); err != nil {
+		return fmt.Errorf("迁移代理池策略约束: %w", err)
 	}
 	if err := d.ensureModelRouteCapabilityConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移模型路由能力约束: %w", err)
@@ -220,6 +229,17 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 	if err := d.backfillReauthMarkedAt(ctx); err != nil {
 		return fmt.Errorf("迁移 reauth_marked_at: %w", err)
 	}
+	runRotationBackfill, markerErr := d.migrationOnce(ctx, "egress_rotation_enabled_backfill")
+	if markerErr != nil {
+		return fmt.Errorf("迁移换IP开关标记: %w", markerErr)
+	}
+	if runRotationBackfill {
+		// 一次性回填:仅为存量(开发期)库中已有 webhook 的节点补启用状态;
+		// 此后启用开关只随节点编辑/批量设置写入, 手动暂停不再被重启翻转。
+		if err := d.backfillEgressRotationEnabled(ctx); err != nil {
+			return fmt.Errorf("迁移换IP开关: %w", err)
+		}
+	}
 	if err := d.dropRedundantResponseExpiryIndexes(ctx); err != nil {
 		return fmt.Errorf("迁移响应过期索引: %w", err)
 	}
@@ -238,121 +258,6 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 		return fmt.Errorf("迁移模型 Provider 命名空间: %w", err)
 	}
 	return nil
-}
-
-// migrateStandaloneEgressProxyProfiles promotes existing manually managed
-// node proxies to reusable configurations exactly once. Subscription-managed
-// nodes keep their source-owned proxy lifecycle.
-func (d *Database) migrateStandaloneEgressProxyProfiles(ctx context.Context) error {
-	for {
-		completed, err := d.migrateStandaloneEgressProxyProfileBatch(ctx)
-		if err != nil {
-			return err
-		}
-		if completed {
-			return nil
-		}
-	}
-}
-
-// migrateStandaloneEgressProxyProfileBatch keeps each resumable unit bounded.
-// Already-bound rows are excluded by the predicate, so a process restart can
-// safely continue without duplicating completed work.
-func (d *Database) migrateStandaloneEgressProxyProfileBatch(ctx context.Context) (bool, error) {
-	completed := false
-	err := d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		config, err := lockEgressOperationsConfig(tx)
-		if err != nil {
-			return err
-		}
-		if config.ProxyProfileMigrationCompleted {
-			completed = true
-			return nil
-		}
-		var nodes []egressNodeModel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("source_id IS NULL AND proxy_profile_id IS NULL AND encrypted_proxy_url <> ''").
-			Order("id ASC").Limit(standaloneProxyProfileMigrationBatchSize).Find(&nodes).Error; err != nil {
-			return err
-		}
-		if len(nodes) == 0 {
-			completed = true
-			return tx.Model(&egressOperationsConfigModel{}).Where("id = ?", config.ID).
-				Update("proxy_profile_migration_completed", true).Error
-		}
-		for _, node := range nodes {
-			suffix := fmt.Sprintf(" · %s #%d", migratedProxyProfileScopeName(node.Scope), node.ID)
-			name := truncate(strings.TrimSpace(node.Name), max(1, 160-len([]rune(suffix)))) + suffix
-			profile := egressProxyProfileModel{Name: name, EncryptedProxyURL: node.EncryptedProxyURL}
-			if err := tx.Create(&profile).Error; err != nil {
-				return err
-			}
-			result := tx.Model(&egressNodeModel{}).Where("id = ? AND proxy_profile_id IS NULL", node.ID).
-				Update("proxy_profile_id", profile.ID)
-			if result.Error != nil {
-				return result.Error
-			}
-			if result.RowsAffected != 1 {
-				return fmt.Errorf("bind migrated proxy profile for egress node %d: row changed concurrently", node.ID)
-			}
-		}
-		return nil
-	})
-	return completed, err
-}
-
-func migratedProxyProfileScopeName(scope string) string {
-	switch scope {
-	case "grok_build":
-		return "Grok Build"
-	case "grok_web":
-		return "Grok Web"
-	case "grok_console":
-		return "Grok Console"
-	case "grok_web_asset":
-		return "Grok Web Assets"
-	case "grok_console_asset":
-		return "Grok Console Assets"
-	default:
-		return scope
-	}
-}
-
-func (d *Database) migratePerSourceSubscriptionProxy(ctx context.Context) error {
-	return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var legacy struct {
-			EncryptedProxyURL  string `gorm:"column:encrypted_subscription_proxy_url"`
-			MigrationCompleted bool   `gorm:"column:subscription_proxy_migration_completed"`
-		}
-		err := tx.Table("egress_operations_config").
-			Select("encrypted_subscription_proxy_url", "subscription_proxy_migration_completed").
-			Where("id = ?", 1).
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Take(&legacy).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if legacy.MigrationCompleted {
-			return nil
-		}
-		if strings.TrimSpace(legacy.EncryptedProxyURL) != "" {
-			if err := tx.Model(&egressSubscriptionSourceModel{}).Where("encrypted_proxy_url = ''").Updates(map[string]any{
-				"encrypted_proxy_url": legacy.EncryptedProxyURL,
-				"next_sync_at":        nil,
-				"last_sync_error":     "",
-			}).Error; err != nil {
-				return err
-			}
-		}
-		// Keep the encrypted legacy value for still-running old replicas and a
-		// rollback window. The marker prevents subsequent startups from applying
-		// it to sources that were later configured for direct fetching.
-		return tx.Table("egress_operations_config").Where("id = ?", 1).
-			Update("subscription_proxy_migration_completed", true).Error
-	})
 }
 
 // migrateClientKeyAccountScopes translates the short-lived account_pool
@@ -504,29 +409,61 @@ type consoleConstraint struct {
 	name  string
 }
 
+// migrationOnce 是一次性迁移守卫:首次执行返回 true 并落下标记, 此后启动
+// 直接跳过。调用点位于 InitializeSchema 的单事务内, 标记与迁移同事务提交。
+// 背景:无守卫的"每次启动回填"会在重启时翻转运维刚手动暂停的节点。
+func (d *Database) migrationOnce(ctx context.Context, name string) (bool, error) {
+	db := d.db.WithContext(ctx)
+	var marker schemaMigrationMarkerModel
+	err := db.Where("name = ?", name).First(&marker).Error
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, err
+	}
+	return true, db.Create(&schemaMigrationMarkerModel{Name: name, AppliedAt: time.Now().UTC()}).Error
+}
+
+// backfillEgressRotationEnabled 为已有换IP Webhook 的节点补默认启用状态。
+func (d *Database) backfillEgressRotationEnabled(ctx context.Context) error {
+	// TRUE/NOT 在 SQLite(布尔存 0/1, TRUE 即 1)与 PostgreSQL(boolean)都合法;
+	// 整数字面量 `= 1/0` 在 PG 上是 boolean = integer 解析错误, 全新库初始化
+	// 直接失败(实测 SQLSTATE 42883)。
+	return d.db.WithContext(ctx).Exec(`
+UPDATE egress_nodes
+SET rotation_enabled = TRUE
+WHERE encrypted_rotation_url <> '' AND NOT rotation_enabled
+`).Error
+}
+
 func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 	return d.ensureNamedConstraints(ctx, []consoleConstraint{
 		{model: &accountModel{}, table: "provider_accounts", name: "chk_accounts_provider"},
 		{model: &modelRouteModel{}, table: "model_routes", name: "chk_model_routes_provider"},
 		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_provider"},
 		{model: &responseOwnershipModel{}, table: "response_ownership", name: "chk_response_ownership_provider"},
-		{model: &egressNodeModel{}, table: "egress_nodes", name: "chk_egress_nodes_specific_scope"},
 	}, "grok_console")
 }
 
-// ensureEgressAssetScopeConstraints upgrades existing SQLite/PostgreSQL CHECK
-// definitions so Console CDN traffic can use an independently managed scope.
-func (d *Database) ensureEgressAssetScopeConstraints(ctx context.Context) error {
+// ensureEgressPoolStrategyConstraint 将代理池策略 CHECK 升级到包含 rotation。
+// AutoMigrate 不会可靠替换已有 CHECK，启动时幂等检测并重建。
+func (d *Database) ensureEgressPoolStrategyConstraint(ctx context.Context) error {
 	return d.ensureNamedConstraints(ctx, []consoleConstraint{
-		{model: &egressNodeModel{}, table: "egress_nodes", name: "chk_egress_nodes_specific_scope"},
-		{model: &egressSubscriptionSourceModel{}, table: "egress_subscription_sources", name: "chk_egress_subscription_sources_scope"},
-		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_egress_scope"},
-	}, "grok_console_asset")
+		{model: &egressPoolModel{}, table: "egress_pools", name: "chk_egress_pools_strategy"},
+	}, "rotation")
 }
 
 // ensureAuditOperationConstraints upgrades existing databases so Codex remote
-// compaction and Console voice operations can be recorded separately.
+// compaction and Console voice operations can be recorded separately. The
+// egress-scope CHECK also needs the console_asset widening on upgraded
+// databases: request scopes outlive the retired resource-scope model.
 func (d *Database) ensureAuditOperationConstraints(ctx context.Context) error {
+	if err := d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_egress_scope"},
+	}, "grok_console_asset"); err != nil {
+		return err
+	}
 	return d.ensureNamedConstraints(ctx, []consoleConstraint{
 		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_operation"},
 	}, "tts")
