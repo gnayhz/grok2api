@@ -371,6 +371,12 @@ func auditOutputTokensPerSecond(value auditdomain.Record) *float64 {
 	if !value.Streaming || value.StatusCode < 200 || value.StatusCode >= 300 || value.ErrorCode != "" || value.FirstTokenMS == nil || value.OutputTokens <= 0 || value.DurationMS <= *value.FirstTokenMS {
 		return nil
 	}
+	// 生成窗口不足最小窗口(默认 1s)时,"速率"是把整包末尾爆发除以几毫秒的
+	// 数学假象(实测 70 token / 2ms = 35000 tok/s),不是物理吞吐。展示为空;
+	// 降智汇总面板按原始列独立计算 buffered_burst,不受此影响。
+	if auditdomain.GenerationWindowMS(*value.FirstTokenMS, value.DurationMS, value.ReasoningTokens) < auditdomain.DefaultDegradeMinGenMS {
+		return nil
+	}
 	throughput := auditdomain.OutputTokensPerSecond(value.OutputTokens, value.ReasoningTokens, *value.FirstTokenMS, value.DurationMS)
 	if throughput <= 0 {
 		return nil

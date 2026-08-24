@@ -100,8 +100,10 @@ func TestAuditResponseDerivesOutputThroughput(t *testing.T) {
 	}
 	burstFirst := int64(10000)
 	burst := newAuditResponse(auditdomain.Record{StatusCode: http.StatusOK, Streaming: true, FirstTokenMS: &burstFirst, DurationMS: 10100, OutputTokens: 2000})
-	if burst.OutputTokensPerSecond == nil || *burst.OutputTokensPerSecond != 20000 {
-		t.Fatalf("no-reasoning burst throughput = %#v", burst)
+	// 亚秒窗口的"速率"是末尾整包爆发除以毫秒的假象,不再作为吞吐展示;
+	// 爆发本身由降智汇总面板(buffered_burst)负责告警。
+	if burst.OutputTokensPerSecond != nil {
+		t.Fatalf("sub-second burst window must not render a rate = %#v", burst)
 	}
 }
 
