@@ -25,6 +25,7 @@ import (
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
@@ -137,18 +138,23 @@ func (l *Lease) Release() {
 }
 
 type Manager struct {
-	repository             repository.EgressRepository
-	cipher                 *security.Cipher
-	logger                 *slog.Logger
-	nodeMu                 sync.RWMutex
-	clientMu               sync.RWMutex
-	clearanceMu            sync.Mutex
-	operationsMu           sync.RWMutex
-	clients                map[clientCacheKey]cachedClient
-	inflight               sync.Map
-	nodes                  map[domain.Scope]cachedNodeSnapshot
-	healthyNodes           map[uint64]time.Time
-	nodeVersions           map[domain.Scope]uint64
+	repository   repository.EgressRepository
+	cipher       *security.Cipher
+	logger       *slog.Logger
+	nodeMu       sync.RWMutex
+	clientMu     sync.RWMutex
+	clearanceMu  sync.Mutex
+	operationsMu sync.RWMutex
+	clients      map[clientCacheKey]cachedClient
+	inflight     sync.Map
+	nodes        map[string]cachedNodeSnapshot
+	healthyNodes map[uint64]time.Time
+	// proxyFlagMemo 按节点 ID 记忆 {account} 粘性判定, 键含密文:
+	// 代理 URL 变更(轮换/编辑)自然失效。池路由路径的成员来自独立的
+	// 池缓存, 不经过全量节点快照, 没有这层记忆则每个请求都要对每个
+	// 成员做一次 AES-GCM 解密。由 nodeMu 保护。
+	proxyFlagMemo          map[uint64]proxyFlagMemoEntry
+	nodeVersions           map[string]uint64
 	nodeLoads              singleflight.Group
 	clientLoads            singleflight.Group
 	clientVersions         map[uint64]uint64
@@ -160,7 +166,7 @@ type Manager struct {
 	operationsConfigLoad   singleflight.Group
 	operationsConfigVer    uint64
 	routeRuleNodeMu        sync.Mutex
-	routeRuleNodeCache     map[uint64]cachedRouteRuleNode
+	routeRuleNodeCache     map[uint64]cachedRoutingTargetNode
 	failureProbeMu         sync.Mutex
 	failureProber          FailureProber
 	failureProbes          map[uint64]failureProbeState
@@ -175,8 +181,27 @@ type Manager struct {
 	newBuildClient         func(string, time.Duration) (requestClient, error)
 	newBuildEnvClient      func(time.Duration) (requestClient, error)
 	newBrowserClient       func(string, string) (*browserClient, error)
+	// softMu 保护 softCooldowns:降智证据的未决软冷却(进程内,分钟级)。
+	softMu          sync.RWMutex
+	softCooldowns   map[uint64]softCooldown
+	softBase        time.Duration
+	softMax         time.Duration
+	fallbackMu      sync.Mutex
+	poolFallbacks   map[uint64]cachedPoolFallback
+	rotationMu      sync.Mutex
+	rotationCursors map[uint64]uint64
+	// rotationPersists 去抖游标持久化:last 记录最近成功写入 DB 的游标,
+	// writing/pending 把并发推进合并为一次异步写,避免选路热路径被
+	// 同步 DB 写阻塞。
+	rotationPersists map[uint64]*rotationPersistState
 }
 
+// rotationPersistState 由 rotationMu 保护。
+type rotationPersistState struct {
+	last    uint64
+	pending uint64
+	writing bool
+}
 type clearanceState struct {
 	cookies            string
 	userAgent          string
@@ -195,9 +220,31 @@ type egressStateRepository interface {
 	UpdateEgressNodeLastError(context.Context, uint64, string) error
 }
 
+// egressQualityStateRepository persists exit-IP quality quarantine state. It
+// is deliberately separate from egressStateRepository so lightweight test and
+// routing repositories keep their narrow contracts.
+type egressQualityStateRepository interface {
+	UpdateEgressNodeQualityState(context.Context, uint64, float64, int, *time.Time, string, int, *time.Time) error
+}
+
 // operationsConfigRepository is optional so lightweight routing repositories
 // retain their narrow contract. The relational implementation supplies it,
 // allowing fallback policy to be read only when primary selection fails.
+
+// egressPoolStore supplies dedicated-pool lookups. The relational repository
+// implements it; lightweight test repositories keep their narrow contracts.
+type egressPoolStore interface {
+	GetEgressPool(ctx context.Context, id uint64) (domain.Pool, error)
+	ListEgressNodesByPool(ctx context.Context, poolID uint64) ([]domain.Node, error)
+}
+
+// softCooldown carries pending degrade-evidence isolation for one node:
+// evidence arrived but attribution has not confirmed (or cannot run). All
+// accounts avoid the node until the deadline; repeats escalate exponentially.
+type softCooldown struct {
+	count int
+	until time.Time
+}
 type operationsConfigRepository interface {
 	GetEgressOperationsConfig(context.Context) (domain.OperationsConfig, error)
 }
@@ -216,7 +263,10 @@ type clientCacheKey struct {
 }
 
 type cachedNodeSnapshot struct {
-	values    []domain.Node
+	values []domain.Node
+	// poolFlags 缓存每个节点的"代理池模式"判定(ProxyPool 列位或 {account}
+	// 模板)。判定需要解密代理地址,装快照时算一次,请求热路径只查表。
+	poolFlags map[uint64]bool
 	expiresAt time.Time
 }
 
@@ -229,11 +279,16 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 	manager := &Manager{
 		repository: repository, cipher: cipher,
 		clients: make(map[clientCacheKey]cachedClient),
-		nodes:   make(map[domain.Scope]cachedNodeSnapshot), healthyNodes: make(map[uint64]time.Time),
-		nodeVersions: make(map[domain.Scope]uint64), clientVersions: make(map[uint64]uint64), clearances: make(map[string]clearanceState),
-		routeRuleNodeCache: make(map[uint64]cachedRouteRuleNode),
-		failureProbes:      make(map[uint64]failureProbeState),
-		newBuildClient:     newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
+		nodes:   make(map[string]cachedNodeSnapshot), healthyNodes: make(map[uint64]time.Time), proxyFlagMemo: make(map[uint64]proxyFlagMemoEntry),
+		nodeVersions: make(map[string]uint64), clientVersions: make(map[uint64]uint64), clearances: make(map[string]clearanceState),
+		routeRuleNodeCache: make(map[uint64]cachedRoutingTargetNode),
+		softCooldowns:      make(map[uint64]softCooldown),
+		poolFallbacks:      make(map[uint64]cachedPoolFallback),
+		rotationCursors:    make(map[uint64]uint64),
+		rotationPersists:   make(map[uint64]*rotationPersistState),
+		softBase:           5 * time.Minute, softMax: time.Hour,
+		failureProbes:  make(map[uint64]failureProbeState),
+		newBuildClient: newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
 		solver:          flaresolverrSolver{},
 		clearanceConfig: ClearanceConfig{Mode: "manual", TargetURL: "https://grok.com", Timeout: time.Minute, RefreshInterval: 10 * time.Minute},
 	}
@@ -282,11 +337,24 @@ func (m *Manager) scheduleFailureProbe(node domain.Node) {
 	done := state.done
 	m.failureProbeMu.Unlock()
 
-	m.log().Info("egress_failure_probe_scheduled", "node_id", node.ID, "node_name", node.Name, "scope", node.Scope)
+	m.log().Info("egress_failure_probe_scheduled", "node_id", node.ID, "node_name", node.Name)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), failureProbeTimeout)
-		result, err := prober(ctx, node.ID)
-		cancel()
+		// 探针回调走 repo/probe 全链路, panic 不得击穿进程:batch.Do 转 PanicError。
+		var (
+			result domain.ProbeResult
+			err    error
+		)
+		if probeErr := batch.Do(context.Background(), func(taskCtx context.Context) error {
+			taskCtx, probeCancel := context.WithTimeout(taskCtx, failureProbeTimeout)
+			defer probeCancel()
+			result, err = prober(taskCtx, node.ID)
+			return nil
+		}); probeErr != nil {
+			var panicErr *batch.PanicError
+			if errors.As(probeErr, &panicErr) {
+				err = panicErr
+			}
+		}
 
 		m.failureProbeMu.Lock()
 		state := m.failureProbes[node.ID]
@@ -299,13 +367,13 @@ func (m *Manager) scheduleFailureProbe(node domain.Node) {
 		m.failureProbeMu.Unlock()
 
 		if err != nil {
-			m.log().Warn("egress_failure_probe_failed", "node_id", node.ID, "node_name", node.Name, "scope", node.Scope, "error", err)
+			m.log().Warn("egress_failure_probe_failed", "node_id", node.ID, "node_name", node.Name, "error", err)
 			return
 		}
 		if result.Status == domain.ProbeStatusHealthy {
-			m.invalidateNodes(node.Scope)
+			m.invalidateNodes()
 		}
-		m.log().Info("egress_failure_probe_completed", "node_id", node.ID, "node_name", node.Name, "scope", node.Scope, "probe_status", result.Status, "latency_ms", result.LatencyMS)
+		m.log().Info("egress_failure_probe_completed", "node_id", node.ID, "node_name", node.Name, "probe_status", result.Status, "latency_ms", result.LatencyMS)
 	}()
 }
 
@@ -439,7 +507,7 @@ func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 }
 
 func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
-	lease, _, err := m.acquire(ctx, scope, affinity, true, "", egressNodeFromContext(ctx))
+	lease, _, err := m.acquire(ctx, scope, affinity, true, "")
 	return lease, err
 }
 
@@ -448,7 +516,7 @@ func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity stri
 // semantics. The bool is false when isolation was disabled before the lease was
 // acquired, allowing the caller to retain its original fallback transport.
 func (m *Manager) AcquireBuildEnvironmentDirectIfIsolated(ctx context.Context, affinity string) (*Lease, bool, error) {
-	selected := domain.Node{ID: 0, Name: "direct", Scope: domain.ScopeBuild, Enabled: true, Health: 1}
+	selected := domain.Node{ID: 0, Name: "direct", Enabled: true, Health: 1}
 	lease, _, err := m.leaseForNodeWithOptions(ctx, domain.ScopeBuild, affinity, "", false, selected, clientOptions{
 		buildEnvironmentProxy:   true,
 		requireAccountIsolation: true,
@@ -479,20 +547,18 @@ func (m *Manager) AcquireCredential(ctx context.Context, scope domain.Scope, cre
 		identity = "sso_" + security.HashToken(token)[:32]
 	}
 	ctx = WithAccountIdentity(ctx, identity)
-	ctx = WithEgressNode(ctx, credential.EgressNodeID)
-	lease, _, err := m.acquire(ctx, scope, strconv.FormatUint(credential.ID, 10), true, credential.EncryptedCloudflareCookie, credential.EgressNodeID)
+	lease, _, err := m.acquire(ctx, scope, strconv.FormatUint(credential.ID, 10), true, credential.EncryptedCloudflareCookie)
 	return lease, err
 }
 
 func (m *Manager) AcquireIfConfigured(ctx context.Context, scope domain.Scope, affinity string) (*Lease, bool, error) {
-	return m.acquire(ctx, scope, affinity, false, "", egressNodeFromContext(ctx))
+	return m.acquire(ctx, scope, affinity, false, "")
 }
 
 type preparedEgressProbe struct {
-	nodeID    uint64
-	nodeName  string
-	nodeScope domain.Scope
-	proxyURL  string
+	nodeID   uint64
+	nodeName string
+	proxyURL string
 }
 
 // ProbeEgressNode verifies IPv4 and IPv6 independently through fixed provider
@@ -567,7 +633,7 @@ func (m *Manager) ProbeEgressNode(ctx context.Context, node domain.Node) (domain
 }
 
 func (m *Manager) prepareEgressProbe(node domain.Node) (preparedEgressProbe, string, string, error) {
-	target := preparedEgressProbe{nodeID: node.ID, nodeName: node.Name, nodeScope: node.Scope}
+	target := preparedEgressProbe{nodeID: node.ID, nodeName: node.Name}
 	if node.ID == 0 {
 		message := "代理节点 ID 无效"
 		return target, "validate_node", message, errors.New(message)
@@ -584,7 +650,7 @@ func (m *Manager) prepareEgressProbe(node domain.Node) (preparedEgressProbe, str
 		message := "未配置代理地址"
 		return target, "normalize_proxy", message, errors.New(message)
 	}
-	if strings.Contains(proxyURL, application.ProxyAccountPlaceholder) {
+	if domain.IsAccountTemplateProxy(proxyURL) {
 		proxyURL, err = renderAccountProxyURL(proxyURL, "egress_probe")
 		if err != nil {
 			return target, "render_proxy_identity", "账号代理模板无效", err
@@ -608,7 +674,7 @@ func failedEgressProbeResult(provider domain.ProbeProvider, message string, star
 
 func (m *Manager) logProbeSetupFailure(ctx context.Context, node domain.Node, provider domain.ProbeProvider, stage, message string, err error, durationMS int) {
 	attributes := []any{
-		"node_id", node.ID, "node_name", node.Name, "scope", node.Scope,
+		"node_id", node.ID, "node_name", node.Name,
 		"probe_provider", provider, "address_family", "all", "endpoint", "",
 		"stage", stage, "status_code", 0, "duration_ms", durationMS,
 		"connect_ms", 0, "tls_ms", 0, "first_byte_ms", 0,
@@ -660,7 +726,6 @@ func (m *Manager) probeEgressEndpoint(ctx context.Context, target preparedEgress
 		attributes := []any{
 			"node_id", target.nodeID,
 			"node_name", target.nodeName,
-			"scope", target.nodeScope,
 			"probe_provider", provider,
 			"address_family", family,
 			"endpoint", targetURL,
@@ -813,180 +878,219 @@ func decodeProbeIP(body []byte) (string, error) {
 	return "", errors.New("probe response does not contain an IP address")
 }
 
-func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, encryptedCredentialCookies string, boundNodeID uint64) (*Lease, bool, error) {
+// managedClearanceMode 报告当前 Clearance 是否为托管模式(flaresolverr/
+// on_demand)。池路由与固定目标路由共用这一判定,保证同一作用域的
+// Clearance 行为不因出口形态不同而分叉。
+func (m *Manager) managedClearanceMode() bool {
+	mode := m.clearanceMode()
+	return mode == "flaresolverr" || mode == "on_demand"
+}
+
+func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, encryptedCredentialCookies string) (*Lease, bool, error) {
 	now := time.Now().UTC()
-	clearanceMode := m.clearanceMode()
-	managedClearance := isGrokWebScope(scope) && (clearanceMode == "flaresolverr" || clearanceMode == "on_demand")
-	configured := false
-	var available []domain.Node
-	if boundNodeID != 0 {
-		waitedForProbe := false
-		for {
-			now = time.Now().UTC()
-			selected, err := m.repository.GetEgressNode(ctx, boundNodeID)
-			if err != nil {
-				primaryErr := fmt.Errorf("读取绑定出口节点: %w", err)
-				if !errors.Is(err, repository.ErrNotFound) {
-					return nil, true, primaryErr
-				}
-				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, primaryErr)
-			}
-			if !domain.SupportsScope(selected.Scope, scope) {
-				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 与 %s 作用域不兼容", boundNodeID, scope))
-			}
-			if !selected.Enabled {
-				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 已禁用", boundNodeID))
-			}
-			if strings.TrimSpace(selected.EncryptedProxyURL) == "" {
-				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 未配置代理地址", boundNodeID))
-			}
-			proxyPool := m.isProxyPoolNode(selected)
-			if !proxyPool && selected.CooldownUntil != nil && now.Before(*selected.CooldownUntil) {
-				if !waitedForProbe && selected.LastError == domain.LastErrorTransport {
-					completed, waitErr := m.waitForFailureProbe(ctx, boundNodeID)
-					if waitErr != nil {
-						return nil, true, waitErr
-					}
-					if completed {
-						waitedForProbe = true
-						continue
-					}
-				}
-				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 正在冷却", boundNodeID))
-			}
-			return m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
-		}
-	}
-	fallbackConfig, fallbackSupported, fallbackConfigErr := m.loadOperationsConfig(ctx, now)
-	fallback := domain.FallbackConfig{Mode: domain.FallbackModeNone}
-	reservedFallbackNodes := make(map[uint64]struct{}, len(allEgressScopes()))
-	if fallbackConfigErr == nil && fallbackSupported {
-		fallback = fallbackConfig.FallbackFor(scope)
-		for _, fallbackScope := range allEgressScopes() {
-			configuredFallback := fallbackConfig.FallbackFor(fallbackScope)
-			if configuredFallback.Mode == domain.FallbackModeFixed && configuredFallback.NodeID != 0 {
-				reservedFallbackNodes[configuredFallback.NodeID] = struct{}{}
-			}
-		}
-	}
-	for _, candidateScope := range fallbackScopes(scope) {
-		nodes, err := m.listNodes(ctx, candidateScope, now)
+	managedClearance := usesBrowserClearance(scope) && m.managedClearanceMode()
+	// 质量验证(canary)钉住受检节点:绕过路由层, 且由 acquireFixedTarget 的
+	// verification 分支绕过冷却/排除守卫(见其注释)。
+	if verificationNode := qualityVerificationNodeFromContext(ctx); verificationNode != 0 {
+		lease, err := m.acquireFixedTarget(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, verificationNode, true)
 		if err != nil {
-			return nil, false, err
+			return nil, true, err
 		}
-		candidateAvailable := make([]domain.Node, 0, len(nodes))
-		for _, node := range nodes {
-			if !node.Enabled {
-				continue
+		return lease, true, nil
+	}
+	if pinned := pinnedNodeFromContext(ctx); pinned != 0 {
+		lease, err := m.acquireFixedTarget(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, pinned, false)
+		if err != nil {
+			return nil, true, err
+		}
+		return lease, true, nil
+	}
+	config, supported, configErr := m.loadOperationsConfig(ctx, now)
+	if configErr != nil {
+		return nil, false, fmt.Errorf("读取出口路由配置: %w", configErr)
+	}
+	target := domain.RoutingTarget{Mode: domain.RoutingTargetAuto}
+	if supported {
+		target = config.TargetFor(scope, TrafficClassFromContext(ctx))
+	}
+	// 统计按"实际作出决策的层级"归因:类别规则命中记 class:*,否则作用域
+	// 规则命中记 scope:*,再否则记 default。未配置任何规则时走自动调度,
+	// 不产生统计(徽标本身已说明)。
+	level := "default"
+	ruleConfigured := false
+	if supported {
+		level, ruleConfigured = decidingRoutingLevel(config, scope, TrafficClassFromContext(ctx))
+	}
+	// 路由层级解析：语义(流量类别) → 作用域 → 总出口 → 自动调度。目标不可
+	// 用时逐级退回自动调度，绝不因配置失效而失败请求。
+	switch target.Mode.Normalized() {
+	case domain.RoutingTargetDirect:
+		// 直连是显式路由决策，无需 allowDirect —— 与旧版直连路由规则一致。
+		lease, _, err := m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, domain.Node{ID: 0, Name: "route-direct", Enabled: true, Health: 1})
+		if err != nil {
+			return nil, true, fmt.Errorf("获取直连出口: %w", err)
+		}
+		if ruleConfigured {
+			RecordRoutingOutcome(level, target, RoutingOutcomeHit)
+		}
+		return lease, true, nil
+	case domain.RoutingTargetNode:
+		lease, err := m.acquireFixedTarget(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, target.NodeID, false)
+		if err == nil {
+			if ruleConfigured {
+				RecordRoutingOutcome(level, target, RoutingOutcomeHit)
 			}
-			// A fixed fallback is a reserved last resort, not another member of
-			// the primary pool. It is validated again immediately before use.
-			if _, reserved := reservedFallbackNodes[node.ID]; reserved {
-				continue
+			return lease, true, nil
+		}
+		if !errors.Is(err, ErrRoutingTargetUnavailable) {
+			return nil, true, err
+		}
+		if ruleConfigured {
+			RecordRoutingOutcome(level, target, RoutingOutcomeFallback)
+		}
+	case domain.RoutingTargetPool:
+		// 池的 direct 回退是降级而非主路由决策(与显式 direct 路由不同),
+		// 必须遵守调用方的 allowDirect 契约:AcquireIfConfigured 不接受
+		// manager 直连租约,否则会绕过调用方 fallback transport 的
+		// HTTP_PROXY 语义。
+		lease, outcome, err := m.AcquirePoolRouted(ctx, scope, affinity, target.PoolID, allowDirect, encryptedCredentialCookies)
+		if err != nil {
+			if ctx.Err() != nil {
+				// 请求已取消:不得继续走自动调度为死请求租约节点、
+				// 抬高 inflight 计数并触发无意义的健康反馈。
+				return nil, true, ctx.Err()
 			}
-			configured = true
-			proxyPool := m.isProxyPoolNode(node)
-			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) || proxyPool {
-				if proxyPool {
-					node.Health, node.FailureCount, node.CooldownUntil, node.LastError = 1, 0, nil, ""
+			// 池读失败(DB 抖动)不 fail 请求:记 Fallback 退回自动调度,与固定目标不可用同口径。
+			// 与固定节点目标的差异是有意的:固定节点绑定精确出口 IP,读失败若静默
+			// 降级等于流量无声绕开管理员配置的出口;池本身是 any-of 契约且自带
+			// 回退链,读失败退回自动调度不改变"避开直连"的底线。
+			if !errors.Is(err, context.Canceled) {
+				m.log().Warn("egress_pool_route_failed", "pool_id", target.PoolID, "error", err.Error())
+			}
+		}
+		if err == nil && lease != nil && outcome != PoolRouteNone {
+			// 只有目标池自身选出成员才算命中;链式回退池/回退直连是降级,
+			// 记 Fallback 让行内统计如实反映"配置的出口没有接住流量"。
+			if ruleConfigured {
+				outcomeKind := RoutingOutcomeFallback
+				if outcome == PoolRouteMember {
+					outcomeKind = RoutingOutcomeHit
 				}
-				candidateAvailable = append(candidateAvailable, node)
+				RecordRoutingOutcome(level, target, outcomeKind)
 			}
+			return lease, true, nil
 		}
-		if len(candidateAvailable) > 0 {
-			available = candidateAvailable
-			break
+		if ruleConfigured {
+			RecordRoutingOutcome(level, target, RoutingOutcomeFallback)
+		}
+	}
+	// 自动调度：所有未入池的启用节点按健康度与调用方亲和选择。
+	nodes, err := m.listNodes(ctx, now)
+	if err != nil {
+		return nil, false, err
+	}
+	available := make([]domain.Node, 0, len(nodes))
+	hasNodes := false
+	for _, node := range nodes {
+		if !node.Enabled {
+			continue
+		}
+		if nodeExcluded(ctx, node.ID) {
+			continue
+		}
+		proxyPool := m.snapshotProxyPoolFlag(node)
+		// 代理池模式成员豁免 L2 软冷却:旋转端点的单次降智不代表端点坏,
+		// 仅保留请求内排除(L1)与既有硬冷却豁免。
+		if !proxyPool && m.nodeSoftCooled(node.ID, now) {
+			continue
+		}
+		// 自动调度是全量兜底池:节点是纯资源,入池只是分组,
+		// 不把节点从自动调度里"消费"掉——否则建池会让兜底容量缩水。
+		hasNodes = true
+		if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) || proxyPool {
+			if proxyPool {
+				node.Health, node.FailureCount, node.CooldownUntil, node.LastError = 1, 0, nil, ""
+			}
+			available = append(available, node)
 		}
 	}
 	if len(available) == 0 {
-		primaryErr := error(nil)
-		if configured {
-			primaryErr = fmt.Errorf("当前没有可用的 %s 出口节点", scope)
-		}
-		lease, fallbackConfigured, applied, err := m.applyFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, primaryErr, fallback, fallbackSupported, fallbackConfigErr)
-		if err != nil {
-			return nil, fallbackConfigured, err
-		}
-		if applied {
-			return lease, fallbackConfigured, nil
-		}
-		if primaryErr != nil {
-			return nil, false, primaryErr
+		if hasNodes {
+			return nil, false, fmt.Errorf("当前没有可用的出口节点")
 		}
 		if !allowDirect {
 			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
 			return nil, false, nil
 		}
-		available = []domain.Node{{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}}
+		available = []domain.Node{{ID: 0, Name: "direct", Enabled: true, Health: 1}}
 	}
 	sort.SliceStable(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	selected := m.selectNode(available, affinity)
 	return m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
 }
 
-// acquireUnavailableFallback keeps the primary selection error when fallback
-// is disabled. A fixed fallback is never silently replaced with direct traffic
-// when it is invalid or unavailable.
-func (m *Manager) acquireUnavailableFallback(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, encryptedCredentialCookies string, managedClearance bool, primaryErr error) (*Lease, bool, error) {
-	lease, configured, applied, err := m.acquireFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, primaryErr)
-	if err != nil {
-		return nil, configured, err
-	}
-	if applied {
-		return lease, configured, nil
-	}
-	return nil, true, primaryErr
-}
+// ErrRoutingTargetUnavailable reports that a configured fixed routing
+// target cannot currently serve the request. Callers fall back to the
+// automatic schedule instead of failing the request.
+var ErrRoutingTargetUnavailable = errors.New("egress routing target unavailable")
 
-// acquireFallback is called before an upstream request is written. Transport
-// failures are intentionally not retried through this path because replaying
-// a non-idempotent upstream request on a different IP can duplicate work.
-func (m *Manager) acquireFallback(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, encryptedCredentialCookies string, managedClearance bool, primaryErr error) (*Lease, bool, bool, error) {
-	fallback, supported, err := m.fallbackFor(ctx, scope, time.Now().UTC())
-	return m.applyFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, primaryErr, fallback, supported, err)
-}
-
-func (m *Manager) applyFallback(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, encryptedCredentialCookies string, managedClearance bool, primaryErr error, fallback domain.FallbackConfig, supported bool, configErr error) (*Lease, bool, bool, error) {
-	if configErr != nil {
-		return nil, false, false, fallbackError(primaryErr, fmt.Errorf("读取出口回退配置: %w", configErr))
-	}
-	if !supported {
-		return nil, false, false, nil
-	}
-	switch fallback.Mode {
-	case domain.FallbackModeNone:
-		return nil, false, false, nil
-	case domain.FallbackModeDirect:
-		if !allowDirect {
-			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
-			return nil, false, true, nil
-		}
-		lease, _, err := m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, domain.Node{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1})
+// acquireFixedTarget leases one fixed routing-target node. It uses the
+// cached target lookup so rule hits do not turn into a DB round trip per
+// request, and waits for an in-flight failure probe like the automatic
+// path so a transport hiccup does not immediately degrade the route.
+func (m *Manager) acquireFixedTarget(ctx context.Context, scope domain.Scope, affinity, encryptedCredentialCookies string, managedClearance bool, nodeID uint64, verification bool) (*Lease, error) {
+	waitedForProbe := false
+	for {
+		selected, ok, err := m.cachedRoutingTargetNode(ctx, nodeID)
 		if err != nil {
-			return nil, false, false, fallbackError(primaryErr, fmt.Errorf("获取本地直连回退: %w", err))
+			return nil, err
 		}
-		return lease, false, true, nil
-	case domain.FallbackModeFixed:
-		selected, err := m.fixedFallbackNode(ctx, scope, fallback.NodeID)
-		if err != nil {
-			return nil, false, false, fallbackError(primaryErr, err)
+		if !ok {
+			return nil, fmt.Errorf("%w: node %d not found", ErrRoutingTargetUnavailable, nodeID)
+		}
+		if !domain.CanNodeServeFixedTarget(selected) {
+			return nil, fmt.Errorf("%w: node %d not schedulable", ErrRoutingTargetUnavailable, selected.ID)
+		}
+		// 质量验证模式(canary 钉住):被验证节点必然处于质量隔离冷却中,
+		// L2 软冷却也可能仍在生效(它们在验证通过/暂定放行时才被清除);
+		// 跳过排除与冷却检查直接取租约, 否则"验证通过→解除隔离"的回池
+		// 链路整体失效。非验证路径(路由固定目标/降智同号重试)不受影响。
+		if verification {
+			lease, _, err := m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrRoutingTargetUnavailable, err)
+			}
+			return lease, nil
+		}
+		// 请求内排除(降智守卫)对固定目标同样生效:重试必须离开坏出口,
+		// 否则守卫对固定路由配置完全失效。回退自动调度,不 fail 请求。
+		if nodeExcluded(ctx, selected.ID) {
+			return nil, fmt.Errorf("%w: node %d excluded by degrade guard", ErrRoutingTargetUnavailable, nodeID)
+		}
+		if !m.isProxyPoolNode(selected) && selected.CooldownUntil != nil && time.Now().UTC().Before(*selected.CooldownUntil) {
+			if !waitedForProbe && selected.LastError == domain.LastErrorTransport {
+				completed, waitErr := m.waitForFailureProbe(ctx, nodeID)
+				if waitErr != nil {
+					return nil, waitErr
+				}
+				if completed {
+					waitedForProbe = true
+					continue
+				}
+			}
+			return nil, fmt.Errorf("%w: node %d cooling down", ErrRoutingTargetUnavailable, nodeID)
+		}
+		// L2 未决软冷却同样使固定目标不可用:降智证据尚未归因,继续命中只会
+		// 重复撞坏出口;退回自动调度。
+		if m.nodeSoftCooled(nodeID, time.Now().UTC()) {
+			return nil, fmt.Errorf("%w: node %d pending degrade evidence", ErrRoutingTargetUnavailable, nodeID)
 		}
 		lease, _, err := m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
 		if err != nil {
-			return nil, false, false, fallbackError(primaryErr, fmt.Errorf("获取固定回退节点 %d: %w", selected.ID, err))
+			return nil, fmt.Errorf("%w: %v", ErrRoutingTargetUnavailable, err)
 		}
-		return lease, true, true, nil
-	default:
-		return nil, false, false, fallbackError(primaryErr, fmt.Errorf("出口回退模式 %q 无效", fallback.Mode))
+		return lease, nil
 	}
-}
-
-func (m *Manager) fallbackFor(ctx context.Context, scope domain.Scope, now time.Time) (domain.FallbackConfig, bool, error) {
-	config, supported, err := m.loadOperationsConfig(ctx, now)
-	if err != nil || !supported {
-		return domain.FallbackConfig{Mode: domain.FallbackModeNone}, supported, err
-	}
-	return config.FallbackFor(scope), true, nil
 }
 
 func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (domain.OperationsConfig, bool, error) {
@@ -1011,7 +1115,10 @@ func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (doma
 		m.operationsMu.RLock()
 		version := m.operationsConfigVer
 		m.operationsMu.RUnlock()
-		value, err := configRepository.GetEgressOperationsConfig(ctx)
+		// 同 listNodes:脱离领头调用方生命周期, 避免取消连坐合并等待者。
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		value, err := configRepository.GetEgressOperationsConfig(loadCtx)
 		if err != nil {
 			return domain.OperationsConfig{}, err
 		}
@@ -1026,50 +1133,6 @@ func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (doma
 		return domain.OperationsConfig{}, true, err
 	}
 	return loaded.(domain.OperationsConfig), true, nil
-}
-
-func (m *Manager) fixedFallbackNode(ctx context.Context, scope domain.Scope, nodeID uint64) (domain.Node, error) {
-	if nodeID == 0 {
-		return domain.Node{}, errors.New("固定回退节点未指定")
-	}
-	selected, err := m.repository.GetEgressNode(ctx, nodeID)
-	if err != nil {
-		return domain.Node{}, fmt.Errorf("读取固定回退节点 %d: %w", nodeID, err)
-	}
-	if !domain.SupportsScope(selected.Scope, scope) {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 与 %s 作用域不兼容", nodeID, scope)
-	}
-	if !selected.Enabled {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 已禁用", nodeID)
-	}
-	if selected.ProxyPool {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 使用代理池模式", nodeID)
-	}
-	if strings.TrimSpace(selected.EncryptedProxyURL) == "" {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 未配置代理地址", nodeID)
-	}
-	if selected.CooldownUntil != nil && time.Now().UTC().Before(*selected.CooldownUntil) {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 正在冷却", nodeID)
-	}
-	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
-	if err != nil {
-		return domain.Node{}, fmt.Errorf("读取固定回退节点 %d 代理配置: %w", nodeID, err)
-	}
-	proxyURL, err = application.NormalizeProxyURL(proxyURL)
-	if err != nil || proxyURL == "" {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 代理地址无效", nodeID)
-	}
-	if strings.Contains(proxyURL, application.ProxyAccountPlaceholder) {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 使用账号代理模板", nodeID)
-	}
-	return selected, nil
-}
-
-func fallbackError(primaryErr, fallbackErr error) error {
-	if primaryErr == nil {
-		return fallbackErr
-	}
-	return fmt.Errorf("%w；出口回退不可用: %v", primaryErr, fallbackErr)
 }
 
 type clientOptions struct {
@@ -1098,7 +1161,7 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 	if err != nil {
 		return nil, false, err
 	}
-	sticky := strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+	sticky := domain.IsAccountTemplateProxy(proxyURL)
 	proxyPool := selected.ProxyPool || sticky
 	freshTunnel := selected.ProxyPool && !sticky
 	if sticky {
@@ -1113,19 +1176,21 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 	}
 	cookies := ""
 	if usesBrowserClearance(scope) {
-		cookies, err = m.cipher.Decrypt(selected.EncryptedCloudflareCookie)
-		if err != nil {
-			// Managed mode can recover a damaged persisted cookie by asking the
-			// solver for a fresh one. Manual mode must still surface the storage
-			// error because it has no safe replacement source.
-			if !managedClearance {
-				return nil, false, err
-			}
-			cookies = ""
-		}
-		cookies = application.SanitizeCloudflareCookies(cookies)
 		if credentialCookies != "" {
+			// 账号自带 cookie 必然覆盖节点 cookie,不必先解密再丢弃。
 			cookies = credentialCookies
+		} else {
+			cookies, err = m.cipher.Decrypt(selected.EncryptedCloudflareCookie)
+			if err != nil {
+				// Managed mode can recover a damaged persisted cookie by asking the
+				// solver for a fresh one. Manual mode must still surface the storage
+				// error because it has no safe replacement source.
+				if !managedClearance {
+					return nil, false, err
+				}
+				cookies = ""
+			}
+			cookies = application.SanitizeCloudflareCookies(cookies)
 		}
 	}
 	userAgent := ""
@@ -1208,14 +1273,14 @@ func clearanceCacheKey(nodeID uint64, proxyURL string, sticky bool) string {
 }
 
 func renderAccountProxyURL(template, accountKey string) (string, error) {
-	if !strings.Contains(template, application.ProxyAccountPlaceholder) {
+	if !domain.IsAccountTemplateProxy(template) {
 		return template, nil
 	}
 	accountKey = normalizeProxyAccount(accountKey)
 	if accountKey == "" {
 		return "", errors.New("粘性代理需要有效的账号身份")
 	}
-	return strings.ReplaceAll(template, application.ProxyAccountPlaceholder, accountKey), nil
+	return strings.ReplaceAll(template, domain.ProxyAccountPlaceholder, accountKey), nil
 }
 
 func normalizeProxyAccount(value string) string {
@@ -1237,10 +1302,14 @@ func normalizeProxyAccount(value string) string {
 	return value[:95] + "_" + fmt.Sprintf("%x", digest[:16])
 }
 
-func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Time) ([]domain.Node, error) {
+// nodeSnapshotKey is the single global node-snapshot cache key: nodes are
+// scope-free resources, so one snapshot serves every request family.
+const nodeSnapshotKey = "nodes"
+
+func (m *Manager) listNodes(ctx context.Context, now time.Time) ([]domain.Node, error) {
 	for {
 		m.nodeMu.RLock()
-		if snapshot, ok := m.nodes[scope]; ok && now.Before(snapshot.expiresAt) {
+		if snapshot, ok := m.nodes[nodeSnapshotKey]; ok && now.Before(snapshot.expiresAt) {
 			// Node snapshots are replaced with a copied slice and treated as immutable
 			// by callers. Returning the shared read-only slice avoids a per-request copy.
 			values := snapshot.values
@@ -1248,27 +1317,32 @@ func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Ti
 			return values, nil
 		}
 		m.nodeMu.RUnlock()
-		loaded, err, _ := m.nodeLoads.Do(string(scope), func() (any, error) {
+		loaded, err, _ := m.nodeLoads.Do(nodeSnapshotKey, func() (any, error) {
 			checkTime := time.Now().UTC()
 			m.nodeMu.RLock()
-			if snapshot, ok := m.nodes[scope]; ok && checkTime.Before(snapshot.expiresAt) {
+			if snapshot, ok := m.nodes[nodeSnapshotKey]; ok && checkTime.Before(snapshot.expiresAt) {
 				values := snapshot.values
 				m.nodeMu.RUnlock()
 				return values, nil
 			}
-			version := m.nodeVersions[scope]
+			version := m.nodeVersions[nodeSnapshotKey]
 			m.nodeMu.RUnlock()
-			values, err := m.repository.ListEgressNodes(ctx, scope, repository.SortQuery{})
+			// 脱离领头调用方的请求生命周期:singleflight 合并的所有等待者共享这次
+			// 回源, 领头者断开不应把 DB 读取消连坐给它们(等待者自身的取消仍由
+			// 各自的 select 处理)。5s 足够覆盖一次快照查询。
+			loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			values, err := m.repository.ListEgressNodes(loadCtx, repository.SortQuery{})
 			if err != nil {
 				return nil, err
 			}
 			m.nodeMu.Lock()
-			if m.nodeVersions[scope] != version {
+			if m.nodeVersions[nodeSnapshotKey] != version {
 				m.nodeMu.Unlock()
 				return nil, errNodeSnapshotInvalidated
 			}
-			m.replaceNodeSnapshotLocked(scope, values, checkTime.Add(nodeSnapshotTTL))
-			values = m.nodes[scope].values
+			m.replaceNodeSnapshotLocked(values, checkTime.Add(nodeSnapshotTTL))
+			values = m.nodes[nodeSnapshotKey].values
 			m.nodeMu.Unlock()
 			return values, nil
 		})
@@ -1283,37 +1357,68 @@ func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Ti
 	}
 }
 
-func (m *Manager) invalidateNodes(scope domain.Scope) {
+func (m *Manager) invalidateNodes() {
 	m.nodeMu.Lock()
-	m.nodeVersions[scope]++
-	snapshot, ok := m.nodes[scope]
+	m.nodeVersions[nodeSnapshotKey]++
+	snapshot, ok := m.nodes[nodeSnapshotKey]
 	if ok {
-		delete(m.nodes, scope)
+		delete(m.nodes, nodeSnapshotKey)
 	}
 	for _, node := range snapshot.values {
 		delete(m.healthyNodes, node.ID)
 	}
 	m.nodeMu.Unlock()
-	// Route-rule target caching lives outside the per-scope snapshots; drop it
+	// Routing-target node caching lives outside the node snapshot; drop it
 	// whenever node state changes so a disabled or deleted target stops
 	// serving immediately.
 	m.routeRuleNodeMu.Lock()
-	m.routeRuleNodeCache = make(map[uint64]cachedRouteRuleNode)
+	m.routeRuleNodeCache = make(map[uint64]cachedRoutingTargetNode)
 	m.routeRuleNodeMu.Unlock()
 }
 
-func (m *Manager) replaceNodeSnapshotLocked(scope domain.Scope, values []domain.Node, expiresAt time.Time) {
-	for _, node := range m.nodes[scope].values {
+func (m *Manager) replaceNodeSnapshotLocked(values []domain.Node, expiresAt time.Time) {
+	for _, node := range m.nodes[nodeSnapshotKey].values {
 		delete(m.healthyNodes, node.ID)
 	}
+	poolFlags := make(map[uint64]bool, len(values))
 	for _, node := range values {
 		if nodeIsHealthy(node) {
 			m.healthyNodes[node.ID] = expiresAt
 		} else {
 			delete(m.healthyNodes, node.ID)
 		}
+		poolFlags[node.ID] = m.isProxyPoolNodeDirect(node)
 	}
-	m.nodes[scope] = cachedNodeSnapshot{values: append([]domain.Node(nil), values...), expiresAt: expiresAt}
+	m.nodes[nodeSnapshotKey] = cachedNodeSnapshot{values: append([]domain.Node(nil), values...), poolFlags: poolFlags, expiresAt: expiresAt}
+	m.sweepDeletedInflightLocked(values)
+}
+
+// sweepDeletedInflightLocked 清理"已不存在且计数为零"的节点 inflight 计数
+// 条目。计数器永不删除是为避免 ABA(并发 release 对替换计数器递减), 但订阅
+// 换血会持续产生新节点 ID, 零散条目无界累积——与 poolNodeStats 容量逐出
+// 同类。只删 [快照中不存在 && count==0] 的条目:
+//   - count>0 说明仍有删除前创建的租约在途, 保留避免丢计数;
+//   - 对已删条目的迟来递减已被 decrementInflight 的 Load 守卫吞掉;
+//   - 节点 ID 不复用(autoincrement), 不存在 ABA 复活。
+func (m *Manager) sweepDeletedInflightLocked(values []domain.Node) {
+	live := make(map[uint64]struct{}, len(values))
+	for _, node := range values {
+		live[node.ID] = struct{}{}
+	}
+	m.inflight.Range(func(key, value any) bool {
+		nodeID, ok := key.(uint64)
+		if !ok {
+			return true
+		}
+		if _, exists := live[nodeID]; exists {
+			return true
+		}
+		if value.(*atomic.Int64).Load() != 0 {
+			return true
+		}
+		m.inflight.Delete(nodeID)
+		return true
+	})
 }
 
 func (m *Manager) InvalidateOperationsConfig() {
@@ -1321,22 +1426,6 @@ func (m *Manager) InvalidateOperationsConfig() {
 	m.operationsConfig = cachedOperationsConfig{}
 	m.operationsConfigVer++
 	m.operationsMu.Unlock()
-}
-
-func fallbackScopes(scope domain.Scope) []domain.Scope {
-	if scope == domain.ScopeWebAsset {
-		return []domain.Scope{domain.ScopeWebAsset, domain.ScopeWeb}
-	}
-	if scope == domain.ScopeConsoleAsset {
-		return []domain.Scope{domain.ScopeConsoleAsset, domain.ScopeConsole, domain.ScopeWeb}
-	}
-	if scope == domain.ScopeConsole {
-		// Console uses the same browser/clearance surface as Grok Web. A
-		// dedicated Console node is preferred, but a Web node is a safe and
-		// expected fallback for deployments that configure one shared pool.
-		return []domain.Scope{domain.ScopeConsole, domain.ScopeWeb}
-	}
-	return []domain.Scope{scope}
 }
 
 func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
@@ -1621,6 +1710,116 @@ func (m *Manager) invalidateAllClientVersionsLocked() {
 	clear(m.clientVersions)
 }
 
+// QuarantineNodeForQuality marks a fixed egress node's exit IP as
+// quality-degraded: the degraded account's RSC attribution came back clean, so
+// the exit IP is the suspect. The node is cooled out of rotation until the
+// given deadline (normally the quarantine cooldown, possibly shortened once a
+// rotation succeeded and verification passed). Pool nodes are skipped — their
+// exit IP is not fixed, so there is nothing to quarantine. The returned node
+// is the pre-quarantine snapshot so callers can compare the old ExitIP.
+func (m *Manager) QuarantineNodeForQuality(ctx context.Context, nodeID uint64, until time.Time) (domain.Node, error) {
+	if m == nil || nodeID == 0 {
+		return domain.Node{}, nil
+	}
+	value, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	previous := value
+	if m.isProxyPoolNode(value) {
+		return previous, nil
+	}
+	now := time.Now().UTC()
+	value.FailureCount++
+	RecordPoolNodeFailure(value.ID)
+	value.Health = max(0.05, value.Health*0.5)
+	cooldown := until
+	value.CooldownUntil = &cooldown
+	value.LastError = domain.LastErrorExitIPQuality
+	value.DegradeCount++
+	value.LastDegradedAt = &now
+	// 新隔离周期重置换 IP 尝试计数(保留 lastRotatedAt 以维持最小间隔护栏):
+	// 否则上一周期耗尽(attempts==max)的节点再次被隔离时永远不会轮换。
+	if rotationRepo, ok := m.repository.(interface {
+		UpdateEgressNodeRotationState(context.Context, uint64, *time.Time, int, string) error
+	}); ok {
+		_ = rotationRepo.UpdateEgressNodeRotationState(ctx, value.ID, value.LastRotatedAt, 0, "")
+	} else if stateRepo, ok := m.repository.(egressStateRepository); ok {
+		_ = stateRepo.UpdateEgressNodeLastError(ctx, value.ID, value.LastError)
+	}
+	if qualityRepo, ok := m.repository.(egressQualityStateRepository); ok {
+		if err := qualityRepo.UpdateEgressNodeQualityState(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError, value.DegradeCount, value.LastDegradedAt); err != nil {
+			return domain.Node{}, err
+		}
+	} else if _, err := m.repository.UpdateEgressNode(ctx, value); err != nil {
+		return domain.Node{}, err
+	}
+	m.invalidateNodes()
+	return previous, nil
+}
+
+// CooldownNodeForQuality applies a plain quality cooldown without touching
+// degrade counters or health. It backs tentative re-admission after an
+// inconclusive canary verification: the node serves traffic again soon, and
+// the passive guard can re-quarantine cheaply if the IP is still bad.
+func (m *Manager) CooldownNodeForQuality(ctx context.Context, nodeID uint64, until time.Time) error {
+	if m == nil || nodeID == 0 {
+		return nil
+	}
+	m.ClearDegradeEvidence(nodeID)
+	value, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	value.Health = 1
+	value.FailureCount = 0
+	cooldown := until
+	value.CooldownUntil = &cooldown
+	if value.LastError == domain.LastErrorExitIPQuality {
+		value.LastError = ""
+	}
+	if stateRepository, ok := m.repository.(egressStateRepository); ok {
+		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err != nil {
+			return err
+		}
+	} else if _, err := m.repository.UpdateEgressNode(ctx, value); err != nil {
+		return err
+	}
+	m.invalidateNodes()
+	return nil
+}
+
+// ReleaseQualityQuarantine re-admits a node whose rotated exit IP passed
+// verification: quality state resets so the node competes normally again.
+// A non-quality last error is preserved — it belongs to the transport layer.
+func (m *Manager) ReleaseQualityQuarantine(ctx context.Context, nodeID uint64) error {
+	if m == nil || nodeID == 0 {
+		return nil
+	}
+	// 回池即清未决软冷却:canary 已证明新出口健康,残留的指数冷却证据
+	// 只会无谓压低调度优先级。
+	m.ClearDegradeEvidence(nodeID)
+	value, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	value.Health = 1
+	value.FailureCount = 0
+	value.CooldownUntil = nil
+	if value.LastError == domain.LastErrorExitIPQuality {
+		value.LastError = ""
+	}
+	if stateRepository, ok := m.repository.(egressStateRepository); ok {
+		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err != nil {
+			return err
+		}
+	} else if _, err := m.repository.UpdateEgressNode(ctx, value); err != nil {
+		return err
+	}
+	m.invalidateNodes()
+	return nil
+}
+
 func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, transportErr error) {
 	m.FeedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr)
 }
@@ -1674,9 +1873,20 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		return
 	}
 	now := time.Now().UTC()
+	// 成功反馈不得终止出口质量隔离(exit_ip_quality):隔离可能晚于租约建立才
+	// 落地(在途请求/多实例),一次偶然成功的请求无权否定跨账号确认或轮换
+	// 中的坏 IP 判定——隔离解除只属于轮换验证/冷却到期/归因撤销三条显式
+	// 路径。传输类失败状态照常恢复(它们只描述链路抖动,与质量隔离正交)。
+	qualityQuarantined := value.LastError == domain.LastErrorExitIPQuality
 	var stale []requestClient
 	switch {
 	case succeeded:
+		if qualityQuarantined {
+			// 保留隔离语义:只恢复传输性健康指标,冷却与质量标记原样。
+			value.Health = min(1, value.Health+0.1)
+			value.FailureCount = 0
+			break
+		}
 		value.Health = min(1, value.Health+0.1)
 		value.FailureCount = 0
 		value.CooldownUntil = nil
@@ -1694,19 +1904,21 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	case status == http.StatusForbidden:
 		if m.isProxyPoolNode(value) {
 			// A request-level 403 does not prove that a shared proxy pool is unhealthy.
+			// 健康惩罚豁免,但统计照记:验证策略需要看到失败次数。
+			RecordPoolNodeFailure(value.ID)
 			return
 		}
 		value.FailureCount++
+		RecordPoolNodeFailure(value.ID)
 		value.Health = max(0.05, value.Health*0.7)
 		value.CooldownUntil = nil
 		value.LastError = "anti-bot rejection"
 		m.clearanceMu.Lock()
 		if isGrokWebScope(scope) && m.clearanceConfig.Mode == "flaresolverr" {
-			key := clearanceCacheKey(nodeID, "", false)
-			state := m.clearances[key]
-			state.invalid = true
-			state.used = true
-			m.clearances[key] = state
+			// 粘性租约的 Clearance 缓存在 node:N:account:<digest> 键下,
+			// 反馈时无法得知账号摘要,必须按节点前缀整体失效,否则 403
+			// 永远打不中 sticky 缓存,FlareSolverr 也不会触发刷新。
+			m.invalidateNodeClearancesLocked(nodeID)
 		}
 		m.clearanceMu.Unlock()
 		m.clientMu.Lock()
@@ -1714,9 +1926,12 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.clientMu.Unlock()
 	case transportErr != nil:
 		if m.isProxyPoolNode(value) {
+			// 同上:共享代理传输失败不冷却,但计入统计。
+			RecordPoolNodeFailure(value.ID)
 			return
 		}
 		value.FailureCount++
+		RecordPoolNodeFailure(value.ID)
 		value.Health = max(0.05, value.Health*0.7)
 		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))
 		until := now.Add(cooldown)
@@ -1733,7 +1948,7 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	closeRequestClients(stale)
 	if stateRepository, ok := m.repository.(egressStateRepository); ok {
 		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err == nil {
-			m.invalidateNodes(value.Scope)
+			m.invalidateNodes()
 			if transportErr != nil {
 				m.scheduleFailureProbe(value)
 			}
@@ -1741,7 +1956,7 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		return
 	}
 	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
-		m.invalidateNodes(value.Scope)
+		m.invalidateNodes()
 		if transportErr != nil {
 			m.scheduleFailureProbe(value)
 		}
@@ -1840,7 +2055,14 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 	m.clearanceMu.Unlock()
 
 	result, err, _ := m.clearanceLoads.Do(key, func() (any, error) {
-		return m.refreshNode(ctx, node, proxyURL, key, persist, forceRefresh, !fallbackAllowed, refreshAfter)
+		// FlareSolverr 求解最长 cfg.Timeout(默认 1m):领头调用方(某个 HTTP 请求)
+		// 断开时不能中止求解——所有合并等待者都会拿到 context canceled 类错误,
+		// 与真实负载无关。求解与分布式锁都在脱离请求生命周期的 ctx 上进行;
+		// 预算 = 求解超时 + 锁等待宽限。
+		solveTimeout := m.currentClearanceTimeout()
+		solveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), solveTimeout+clearanceLockGrace)
+		defer cancel()
+		return m.refreshNode(solveCtx, node, proxyURL, key, persist, forceRefresh, !fallbackAllowed, refreshAfter)
 	})
 	if err != nil {
 		if fallbackAllowed {
@@ -1850,6 +2072,18 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 	}
 	solution := result.(clearanceSolution)
 	return solution.Cookies, solution.UserAgent, nil
+}
+
+// currentClearanceTimeout 返回当前 Clearance 求解超时(零值时按默认 1m),
+// 供 singleflight 闭包预算派生 ctx 使用。
+func (m *Manager) currentClearanceTimeout() time.Duration {
+	m.clearanceMu.Lock()
+	cfg := m.clearanceConfig
+	m.clearanceMu.Unlock()
+	if cfg.Timeout > 0 {
+		return cfg.Timeout
+	}
+	return time.Minute
 }
 
 func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, key string, persist, force, waitForPeer bool, refreshAfter time.Time) (clearanceSolution, error) {
@@ -1933,7 +2167,7 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 				return clearanceSolution{}, updateErr
 			}
 		}
-		m.invalidateNodes(node.Scope)
+		m.invalidateNodes()
 	}
 	m.cacheClearance(key, solution, now, solveVersion, fingerprint, bindingFingerprint, interval)
 	return solution, nil
@@ -2061,7 +2295,7 @@ func (m *Manager) recordClearanceError(ctx context.Context, node domain.Node, pe
 	}
 	if stateRepository, ok := m.repository.(egressStateRepository); ok {
 		if err := stateRepository.UpdateEgressNodeLastError(ctx, node.ID, "clearance refresh failed"); err == nil {
-			m.invalidateNodes(node.Scope)
+			m.invalidateNodes()
 			return
 		}
 	}
@@ -2071,14 +2305,14 @@ func (m *Manager) recordClearanceError(ctx context.Context, node domain.Node, pe
 	}
 	latest.LastError = "clearance refresh failed"
 	if _, err := m.repository.UpdateEgressNode(ctx, latest); err == nil {
-		m.invalidateNodes(latest.Scope)
+		m.invalidateNodes()
 	}
 }
 
 func (m *Manager) RefreshClearance(ctx context.Context, nodeID uint64) error {
 	if nodeID == 0 {
 		_, err, _ := m.clearanceLoads.Do("direct", func() (any, error) {
-			return m.refreshNode(ctx, domain.Node{Name: "direct", Scope: domain.ScopeWeb, Enabled: true}, "", "direct", false, true, true, time.Time{})
+			return m.refreshNode(ctx, domain.Node{Name: "direct", Enabled: true}, "", "direct", false, true, true, time.Time{})
 		})
 		return err
 	}
@@ -2086,29 +2320,47 @@ func (m *Manager) RefreshClearance(ctx context.Context, nodeID uint64) error {
 	if err != nil {
 		return err
 	}
-	if !isGrokWebScope(node.Scope) {
-		return fmt.Errorf("出口节点 %q 不支持 Clearance 刷新", node.Name)
-	}
 	proxyURL, err := m.cipher.Decrypt(node.EncryptedProxyURL)
 	if err != nil {
 		return err
 	}
-	if strings.Contains(proxyURL, application.ProxyAccountPlaceholder) {
+	if domain.IsAccountTemplateProxy(proxyURL) {
 		return fmt.Errorf("出口节点 %q 使用账号粘性代理，将在账号请求时按租约自动刷新 Clearance", node.Name)
 	}
 	proxyURL, err = application.NormalizeProxyURL(proxyURL)
 	if err != nil {
 		return err
 	}
+	// 强制刷新只接受比入口读取时更新的世代:锁被对端持有时,等待路径复用
+	// 对端的新求解结果;对端超时未交付则如实报错。旧实现传零值,等待路径
+	// 在第一个 200ms tick 就把管理员明确要求替换的旧 cookie 当作刷新成功
+	// 返回并重新缓存为有效——与锁获取路径的 force 语义(2121 行:必求解
+	// 或复用严格更新世代)相矛盾。
+	refreshAfter := time.Time{}
+	if node.ClearanceRefreshedAt != nil {
+		refreshAfter = *node.ClearanceRefreshedAt
+	}
 	key := clearanceCacheKey(node.ID, proxyURL, false)
 	_, err, _ = m.clearanceLoads.Do(key, func() (any, error) {
-		return m.refreshNode(ctx, node, proxyURL, key, true, true, true, time.Time{})
+		return m.refreshNode(ctx, node, proxyURL, key, true, true, true, refreshAfter)
 	})
 	return err
 }
 
 func (m *Manager) InvalidateClearance(nodeID uint64) {
 	m.clearanceMu.Lock()
+	m.invalidateNodeClearancesLocked(nodeID)
+	m.clearanceMu.Unlock()
+	m.clientMu.Lock()
+	stale := m.invalidateClientLocked(nodeID)
+	m.clientMu.Unlock()
+	closeRequestClients(stale)
+}
+
+// invalidateNodeClearancesLocked 把节点名下所有 Clearance 缓存标记为失效,
+// 覆盖节点级键(node:N)与粘性账号键(node:N:account:<digest>)。调用方
+// 必须持有 m.clearanceMu。
+func (m *Manager) invalidateNodeClearancesLocked(nodeID uint64) {
 	prefix := "node:" + strconv.FormatUint(nodeID, 10)
 	if nodeID == 0 {
 		prefix = "direct"
@@ -2120,11 +2372,6 @@ func (m *Manager) InvalidateClearance(nodeID uint64) {
 			m.clearances[key] = state
 		}
 	}
-	m.clearanceMu.Unlock()
-	m.clientMu.Lock()
-	stale := m.invalidateClientLocked(nodeID)
-	m.clientMu.Unlock()
-	closeRequestClients(stale)
 }
 
 // ForgetClearance evicts runtime state after an administrator changes or
@@ -2176,11 +2423,9 @@ func (m *Manager) ForgetClearances(nodeIDs []uint64) {
 	// one-second snapshots prevents a just-edited proxy from being used once
 	// more before its scope cache expires.
 	if m.nodeVersions == nil {
-		m.nodeVersions = make(map[domain.Scope]uint64)
+		m.nodeVersions = make(map[string]uint64)
 	}
-	for _, scope := range allEgressScopes() {
-		m.nodeVersions[scope]++
-	}
+	m.nodeVersions[nodeSnapshotKey]++
 	clear(m.nodes)
 	clear(m.healthyNodes)
 	var stale []requestClient
@@ -2224,14 +2469,19 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 	}
 	interval := clearanceRefreshInterval(cfg)
 	now := time.Now().UTC()
-	nodes, err := m.repository.ListEgressNodes(ctx, "", repository.SortQuery{})
+	// 走 1s 快照缓存而非直查仓储:本循环每分钟触发,直查会与请求路径的
+	// 快照装载形成重复回源。新鲜度语义安全:新鲜度判定窗口 ≥ 刷新间隔
+	// (默认 10m,可配置下限即分钟级),1s 快照滞后远小于判定粒度;
+	// Enabled/EncryptedProxyURL 过滤同样容忍 1s 滞后(启用/停用经失效器
+	// 即时失效快照,不存在长滞留)。
+	nodes, err := m.listNodes(ctx, now)
 	if err != nil {
 		return err
 	}
 	var refreshErrors []error
 	webNodeCount := 0
 	for _, node := range nodes {
-		if !node.Enabled || !isGrokWebScope(node.Scope) {
+		if !node.Enabled || node.EncryptedProxyURL == "" {
 			continue
 		}
 		webNodeCount++
@@ -2240,7 +2490,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 			refreshErrors = append(refreshErrors, decryptErr)
 			continue
 		}
-		if strings.Contains(proxyURL, application.ProxyAccountPlaceholder) {
+		if domain.IsAccountTemplateProxy(proxyURL) {
 			// Resin clearance is account/IP bound and has no safe node-wide value
 			// for a background task to solve or persist.
 			continue
@@ -2275,7 +2525,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 	shouldUseDirect := direct.used || force && webNodeCount == 0
 	if shouldUseDirect && (force || direct.invalid || direct.userAgent == "" || direct.version != version || now.Sub(direct.refreshedAt) >= interval) {
 		_, err, _ := m.clearanceLoads.Do("direct", func() (any, error) {
-			return m.refreshNode(ctx, domain.Node{Name: "direct", Scope: domain.ScopeWeb, Enabled: true}, "", "direct", false, force, false, time.Time{})
+			return m.refreshNode(ctx, domain.Node{Name: "direct", Enabled: true}, "", "direct", false, force, false, time.Time{})
 		})
 		if err != nil {
 			refreshErrors = append(refreshErrors, err)
@@ -2288,20 +2538,88 @@ func isGrokWebScope(scope domain.Scope) bool {
 	return scope == domain.ScopeWeb || scope == domain.ScopeWebAsset || scope == domain.ScopeConsole
 }
 
-func allEgressScopes() []domain.Scope {
-	return []domain.Scope{domain.ScopeBuild, domain.ScopeWeb, domain.ScopeConsole, domain.ScopeWebAsset, domain.ScopeConsoleAsset}
-}
-
 func (m *Manager) isStickyProxyNode(value domain.Node) bool {
 	if m == nil || m.cipher == nil || strings.TrimSpace(value.EncryptedProxyURL) == "" {
 		return false
 	}
-	proxyURL, err := m.cipher.Decrypt(value.EncryptedProxyURL)
-	return err == nil && strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+	return m.stickyFlagMemoized(value.ID, value.EncryptedProxyURL)
 }
 
+// stickyFlagDirect 不经记忆表直接解密判定。replaceNodeSnapshotLocked 在
+// 持有 nodeMu 写锁时构建 poolFlags, 不能走 stickyFlagMemoized(会对同一把
+// 锁再次加写锁, 自死锁); 快照按 TTL 重建, 每周期一次解密是预期成本。
+func (m *Manager) stickyFlagDirect(value domain.Node) bool {
+	if m == nil || m.cipher == nil || strings.TrimSpace(value.EncryptedProxyURL) == "" {
+		return false
+	}
+	proxyURL, err := m.cipher.Decrypt(value.EncryptedProxyURL)
+	return err == nil && domain.IsAccountTemplateProxy(proxyURL)
+}
+
+// proxyFlagMemoEntry 记忆一次粘性判定; ciphertext 参与相等性比较,
+// 变更后自然 miss 重算。
+type proxyFlagMemoEntry struct {
+	ciphertext string
+	sticky     bool
+}
+
+// proxyFlagMemoMax 是记忆表容量上限:节点 ID 会随订阅换血增长, 超限
+// 丢弃任意条目(下次解密重建), 保证内存有界。
+const proxyFlagMemoMax = 8192
+
+func (m *Manager) stickyFlagMemoized(nodeID uint64, ciphertext string) bool {
+	m.nodeMu.RLock()
+	entry, ok := m.proxyFlagMemo[nodeID]
+	m.nodeMu.RUnlock()
+	if ok && entry.ciphertext == ciphertext {
+		return entry.sticky
+	}
+	proxyURL, err := m.cipher.Decrypt(ciphertext)
+	sticky := err == nil && domain.IsAccountTemplateProxy(proxyURL)
+	m.nodeMu.Lock()
+	if len(m.proxyFlagMemo) >= proxyFlagMemoMax {
+		for id := range m.proxyFlagMemo {
+			delete(m.proxyFlagMemo, id)
+			break
+		}
+	}
+	m.proxyFlagMemo[nodeID] = proxyFlagMemoEntry{ciphertext: ciphertext, sticky: sticky}
+	m.nodeMu.Unlock()
+	return sticky
+}
+
+// isProxyPoolNode 委托 domain 的唯一判定(Node.IsPoolModeNode 的解密版)。
 func (m *Manager) isProxyPoolNode(value domain.Node) bool {
 	return value.ProxyPool || m.isStickyProxyNode(value)
+}
+
+// isProxyPoolNodeDirect 是持 nodeMu 时的版本(见 stickyFlagDirect)。
+func (m *Manager) isProxyPoolNodeDirect(value domain.Node) bool {
+	return value.ProxyPool || m.stickyFlagDirect(value)
+}
+
+// snapshotProxyPoolFlag 是 isProxyPoolNode 的热路径版本:先查快照里预算
+// 好的判定表,未命中(单节点查询路径,不在快照内)才回退到解密。
+func (m *Manager) snapshotProxyPoolFlag(value domain.Node) bool {
+	if value.ProxyPool {
+		return true
+	}
+	// 单次加锁依次查快照判定表与记忆表:池路由路径每个成员都会走到这里,
+	// 双重加锁在百成员池上是可测的热点。
+	m.nodeMu.RLock()
+	snapshot, ok := m.nodes[nodeSnapshotKey]
+	if ok {
+		if flag, found := snapshot.poolFlags[value.ID]; found {
+			m.nodeMu.RUnlock()
+			return flag
+		}
+	}
+	entry, memoized := m.proxyFlagMemo[value.ID]
+	m.nodeMu.RUnlock()
+	if memoized && entry.ciphertext == value.EncryptedProxyURL {
+		return entry.sticky
+	}
+	return m.stickyFlagMemoized(value.ID, value.EncryptedProxyURL)
 }
 
 func (m *Manager) invalidateClientLocked(nodeID uint64) []requestClient {

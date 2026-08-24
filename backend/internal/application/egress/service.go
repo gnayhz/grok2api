@@ -4,61 +4,52 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 var (
-	ErrInvalidInput            = errors.New("代理节点参数无效")
-	ErrInvalidFilter           = errors.New("出口代理筛选条件无效")
-	ErrInvalidSort             = errors.New("代理节点排序条件无效")
-	ErrNotFound                = errors.New("代理节点不存在")
-	ErrProbeStale              = errors.New("代理配置在探测期间已更新，请重新测试")
-	ErrClearanceUnavailable    = errors.New("Clearance 刷新不可用")
-	ErrProxyProfileUnavailable = errors.New("共享代理配置功能不可用")
-	ErrProxyProfileInUse       = errors.New("共享代理配置仍被节点使用")
-	ErrProxyProfileNotFound    = errors.New("共享代理配置不存在")
+	ErrInvalidInput         = errors.New("代理节点参数无效")
+	ErrInvalidFilter        = errors.New("出口代理筛选条件无效")
+	ErrInvalidSort          = errors.New("代理节点排序条件无效")
+	ErrNotFound             = errors.New("代理节点不存在")
+	ErrProbeStale           = errors.New("代理配置在探测期间已更新，请重新测试")
+	ErrClearanceUnavailable = errors.New("Clearance 刷新不可用")
 )
 
 const (
-	maxProxyURLBytes         = 8192
-	maxCloudflareCookieBytes = 16 << 10
-	ProxyAccountPlaceholder  = "{account}"
-	proxyAccountSentinel     = "grok2api_account_placeholder"
+	maxProxyURLBytes    = 8192
+	maxRotationURLBytes = 8192
+	// 代理账号模板占位符与判定收敛于 domain,此处仅做兼容别名。
+	ProxyAccountPlaceholder = domain.ProxyAccountPlaceholder
+	proxyAccountSentinel    = "grok2api_account_placeholder"
 )
 
+// Input is the create/update payload for one egress node. Nodes are pure
+// proxy resources: which traffic they serve is decided by routing only.
 type Input struct {
-	Name              string
-	Scope             domain.Scope
-	Enabled           bool
-	ProxyPool         *bool
-	AccountCapacity   *int
-	ProxyURL          *string
-	ProxyProfileID    *uint64
-	ClearProxyURL     bool
-	UserAgent         string
-	CloudflareCookies *string
-	ClearCookies      bool
-}
-
-type ProxyProfileInput struct {
-	Name     string
-	ProxyURL *string
+	Name             string
+	Enabled          bool
+	ProxyPool        *bool
+	ProxyURL         *string
+	ClearProxyURL    bool
+	RotationURL      *string
+	ClearRotationURL bool
+	// RotationEnabled pauses/resumes the stored webhook without wiping it.
+	RotationEnabled *bool
 }
 
 type ListFilter struct {
-	Scope       domain.Scope
 	Enabled     string
 	ProbeStatus string
-	Assignment  string
 	Sort        repository.SortQuery
 }
 
@@ -69,40 +60,29 @@ type ServiceRepository interface {
 
 type Service struct {
 	repository      ServiceRepository
-	proxyProfiles   repository.EgressProxyProfileRepository
-	accounts        AccountBindingRepository
 	operations      OperationsRepository
 	cipher          *security.Cipher
 	mu              sync.RWMutex
-	browserUA       string
 	clearance       ClearanceManager
 	prober          NodeProber
 	operationsCache OperationsConfigInvalidator
+	poolCache       PoolCacheInvalidator
 
-	assignmentMu                sync.Mutex
-	lastAssignmentRun           time.Time
-	assignmentRunning           bool
-	autoAssignMaxNodeShare      float64
-	autoAssignMaxMigrationShare float64
-}
+	// Exit-IP quality guard state (quality.go / rotation.go).
+	qualityQuarantiner QualityQuarantiner
+	qualityGuard       QualityGuardConfig
+	qualityLogger      *slog.Logger
+	qualityProber      EgressQualityProber
+	qualityMu          sync.Mutex
+	qualityEvidence    map[uint64][]degradeObservation
 
-// AccountBindingRepository is intentionally narrow so existing account
-// repository consumers do not gain egress concerns.
-type AccountBindingRepository interface {
-	CountProviderAccountsByIDs(context.Context, accountdomain.Provider, []uint64) (int64, error)
-	UpdateEgressBindings(context.Context, accountdomain.Provider, []uint64, *uint64, accountdomain.EgressAssignmentMode, time.Time) (int64, error)
-	ListEgressAssignments(context.Context, accountdomain.Provider) ([]accountdomain.Credential, error)
-	ListEgressBindingProviders(context.Context, uint64) ([]accountdomain.Provider, error)
-	ListEgressSourceBindingProviders(context.Context, uint64) ([]accountdomain.Provider, error)
-}
-
-type AssignmentResult struct {
-	Assigned int
+	rotationCfg    RotationConfig
+	rotation       *rotationScheduler
+	rotationLogger *slog.Logger
 }
 
 type UnhealthyCleanupPreview struct {
 	Nodes               int64
-	BoundAccounts       int64
 	SubscriptionManaged int64
 }
 
@@ -125,24 +105,14 @@ type BatchClearanceManager interface {
 	ForgetClearances([]uint64)
 }
 
-func NewService(storage ServiceRepository, cipher *security.Cipher, browserUA string, accounts ...AccountBindingRepository) *Service {
-	service := &Service{repository: storage, cipher: cipher, browserUA: strings.TrimSpace(browserUA)}
-	if profiles, ok := storage.(repository.EgressProxyProfileRepository); ok {
-		service.proxyProfiles = profiles
-	}
+func NewService(storage ServiceRepository, cipher *security.Cipher) *Service {
+	// qualityEvidence 必须在构造时初始化:OnEgressDegraded 首次写入时 map 为
+	// nil 会 panic, 生产(app.go)与测试直构 Service 字面量的行为从此一致。
+	service := &Service{repository: storage, cipher: cipher, qualityEvidence: map[uint64][]degradeObservation{}}
 	if operations, ok := storage.(OperationsRepository); ok {
 		service.operations = operations
 	}
-	if len(accounts) > 0 {
-		service.accounts = accounts[0]
-	}
 	return service
-}
-
-func (s *Service) UpdateDefaults(browserUA string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.browserUA = strings.TrimSpace(browserUA)
 }
 
 func (s *Service) SetClearanceManager(value ClearanceManager) {
@@ -151,23 +121,13 @@ func (s *Service) SetClearanceManager(value ClearanceManager) {
 	s.mu.Unlock()
 }
 
-func (s *Service) DefaultUserAgents() map[string]string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return map[string]string{
-		string(domain.ScopeBuild): "", string(domain.ScopeWeb): s.browserUA, string(domain.ScopeConsole): s.browserUA,
-		string(domain.ScopeWebAsset): s.browserUA, string(domain.ScopeConsoleAsset): s.browserUA,
-	}
-}
-
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]domain.PublicNode, int64, error) {
 	page, pageSize = repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
-	if !validListScope(filter.Scope) || !validListValue(filter.Enabled, "enabled", "disabled") ||
-		!validListValue(filter.ProbeStatus, string(domain.ProbeStatusHealthy), string(domain.ProbeStatusUnhealthy), string(domain.ProbeStatusUnknown)) ||
-		!validListValue(filter.Assignment, "bound", "unbound") {
+	if !validListValue(filter.Enabled, "enabled", "disabled") ||
+		!validListValue(filter.ProbeStatus, string(domain.ProbeStatusHealthy), string(domain.ProbeStatusUnhealthy), string(domain.ProbeStatusUnknown)) {
 		return nil, 0, ErrInvalidFilter
 	}
-	if !repository.IsValidSort(filter.Sort, "name", "scope", "proxy", "clearance", "health") {
+	if !repository.IsValidSort(filter.Sort, "name", "proxy", "health") {
 		return nil, 0, ErrInvalidSort
 	}
 	var enabled *bool
@@ -178,43 +138,33 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 	values, total, err := s.repository.ListEgressNodePage(ctx, repository.EgressNodeListQuery{
 		Page: repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: strings.TrimSpace(search), Sort: filter.Sort},
 		Filter: repository.EgressNodeListFilter{
-			Scope: filter.Scope, Enabled: enabled, ProbeStatus: domain.ProbeStatus(filter.ProbeStatus), Assignment: filter.Assignment,
+			Enabled: enabled, ProbeStatus: domain.ProbeStatus(filter.ProbeStatus),
 		},
 	})
 	if err != nil {
 		return nil, 0, err
 	}
-	return s.publicNodes(values), total, nil
+	return s.publicNodes(ctx, values), total, nil
 }
 
-func (s *Service) ListAll(ctx context.Context, scope domain.Scope, sort repository.SortQuery) ([]domain.PublicNode, error) {
-	if !validListScope(scope) {
-		return nil, ErrInvalidFilter
-	}
-	if !repository.IsValidSort(sort, "name", "scope", "proxy", "clearance", "health") {
+func (s *Service) ListAll(ctx context.Context, sort repository.SortQuery) ([]domain.PublicNode, error) {
+	if !repository.IsValidSort(sort, "name", "proxy", "health") {
 		return nil, ErrInvalidSort
 	}
-	values, err := s.repository.ListEgressNodes(ctx, scope, sort)
+	values, err := s.repository.ListEgressNodes(ctx, sort)
 	if err != nil {
 		return nil, err
 	}
-	return s.publicNodes(values), nil
+	return s.publicNodes(ctx, values), nil
 }
 
-func (s *Service) publicNodes(values []domain.Node) []domain.PublicNode {
+func (s *Service) publicNodes(ctx context.Context, values []domain.Node) []domain.PublicNode {
+	poolNames := s.egressPoolNameMap(ctx)
 	result := make([]domain.PublicNode, 0, len(values))
 	for _, value := range values {
-		result = append(result, s.publicNode(value))
+		result = append(result, s.publicNode(value, poolNames))
 	}
 	return result
-}
-
-func validListScope(scope domain.Scope) bool {
-	return scope == "" || scope == domain.ScopeBuild || scope == domain.ScopeWeb || scope == domain.ScopeConsole || scope == domain.ScopeWebAsset || scope == domain.ScopeConsoleAsset
-}
-
-func allServiceScopes() []domain.Scope {
-	return []domain.Scope{domain.ScopeBuild, domain.ScopeWeb, domain.ScopeConsole, domain.ScopeWebAsset, domain.ScopeConsoleAsset}
 }
 
 func validListValue(value string, allowed ...string) bool {
@@ -230,23 +180,15 @@ func validListValue(value string, allowed ...string) bool {
 }
 
 func (s *Service) Create(ctx context.Context, input Input) (domain.PublicNode, error) {
-	var err error
-	input, err = s.resolveProxyProfile(ctx, 0, input)
-	if err != nil {
-		return domain.PublicNode{}, err
-	}
 	value, err := s.applyInput(domain.Node{}, input, true)
 	if err != nil {
 		return domain.PublicNode{}, err
 	}
 	created, err := s.repository.CreateEgressNode(ctx, value)
-	if errors.Is(err, repository.ErrEgressProxyProfileNotFound) {
-		return domain.PublicNode{}, ErrProxyProfileNotFound
-	}
 	if err == nil {
 		s.forgetClearance(created.ID)
 	}
-	return s.publicNode(created), err
+	return s.publicNode(created, s.egressPoolNameMap(ctx)), err
 }
 
 func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.PublicNode, error) {
@@ -257,31 +199,18 @@ func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.Pu
 	if err != nil {
 		return domain.PublicNode{}, err
 	}
-	input, err = s.resolveProxyProfile(ctx, value.ProxyProfileID, input)
-	if err != nil {
-		return domain.PublicNode{}, err
-	}
-	previousScope := value.Scope
 	value, err = s.applyInput(value, input, false)
 	if err != nil {
 		return domain.PublicNode{}, err
 	}
-	if err := s.validateFallbackNodeUpdate(ctx, value); err != nil {
+	if err := s.validateRoutingTargetNodeUpdate(ctx, value); err != nil {
 		return domain.PublicNode{}, err
 	}
-	if previousScope != value.Scope {
-		if err := s.validateNodeBindingScope(ctx, value.ID, value.Scope); err != nil {
-			return domain.PublicNode{}, err
-		}
-	}
 	updated, err := s.repository.UpdateEgressNode(ctx, value)
-	if errors.Is(err, repository.ErrEgressProxyProfileNotFound) {
-		return domain.PublicNode{}, ErrProxyProfileNotFound
-	}
 	if err == nil {
 		s.forgetClearance(updated.ID)
 	}
-	return s.publicNode(updated), err
+	return s.publicNode(updated, s.egressPoolNameMap(ctx)), err
 }
 
 // ProxyURL returns one administrator-selected secret without placing it in
@@ -304,214 +233,31 @@ func (s *Service) ProxyURL(ctx context.Context, id uint64) (string, error) {
 	return NormalizeProxyURL(proxyURL)
 }
 
-func (s *Service) ListProxyProfiles(ctx context.Context, page, pageSize int, search string) ([]domain.PublicProxyProfile, int64, error) {
-	if s.proxyProfiles == nil {
-		return nil, 0, ErrProxyProfileUnavailable
-	}
-	page, pageSize = repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
-	values, total, err := s.proxyProfiles.ListEgressProxyProfiles(ctx, repository.PageQuery{
-		Offset: (page - 1) * pageSize,
-		Limit:  pageSize,
-		Search: strings.TrimSpace(search),
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-	result := make([]domain.PublicProxyProfile, 0, len(values))
-	for _, value := range values {
-		result = append(result, s.publicProxyProfile(value))
-	}
-	return result, total, nil
-}
-
-func (s *Service) CreateProxyProfile(ctx context.Context, input ProxyProfileInput) (domain.PublicProxyProfile, error) {
-	if s.proxyProfiles == nil {
-		return domain.PublicProxyProfile{}, ErrProxyProfileUnavailable
-	}
-	name, proxyURL, err := validateProxyProfileInput(input, true)
-	if err != nil {
-		return domain.PublicProxyProfile{}, err
-	}
-	encrypted, err := s.cipher.Encrypt(proxyURL)
-	if err != nil {
-		return domain.PublicProxyProfile{}, err
-	}
-	created, err := s.proxyProfiles.CreateEgressProxyProfile(ctx, domain.ProxyProfile{Name: name, EncryptedProxyURL: encrypted})
-	return s.publicProxyProfile(created), err
-}
-
-func (s *Service) GetProxyProfile(ctx context.Context, id uint64) (domain.PublicProxyProfile, error) {
-	if s.proxyProfiles == nil {
-		return domain.PublicProxyProfile{}, ErrProxyProfileUnavailable
-	}
-	value, err := s.proxyProfiles.GetEgressProxyProfile(ctx, id)
+// RotationURL reveals the stored rotation webhook so operators can edit or
+// clear it later; the list API only exposes a configured flag.
+func (s *Service) RotationURL(ctx context.Context, id uint64) (string, error) {
+	value, err := s.repository.GetEgressNode(ctx, id)
 	if errors.Is(err, repository.ErrNotFound) {
-		return domain.PublicProxyProfile{}, ErrProxyProfileNotFound
-	}
-	if err != nil {
-		return domain.PublicProxyProfile{}, err
-	}
-	return s.publicProxyProfile(value), nil
-}
-
-func (s *Service) UpdateProxyProfile(ctx context.Context, id uint64, input ProxyProfileInput) (domain.PublicProxyProfile, error) {
-	if s.proxyProfiles == nil {
-		return domain.PublicProxyProfile{}, ErrProxyProfileUnavailable
-	}
-	current, err := s.proxyProfiles.GetEgressProxyProfile(ctx, id)
-	if errors.Is(err, repository.ErrNotFound) {
-		return domain.PublicProxyProfile{}, ErrProxyProfileNotFound
-	}
-	if err != nil {
-		return domain.PublicProxyProfile{}, err
-	}
-	name, proxyURL, err := validateProxyProfileInput(input, false)
-	if err != nil {
-		return domain.PublicProxyProfile{}, err
-	}
-	current.Name = name
-	proxyChanged := false
-	if input.ProxyURL != nil {
-		previous, decryptErr := s.cipher.Decrypt(current.EncryptedProxyURL)
-		if decryptErr != nil {
-			return domain.PublicProxyProfile{}, decryptErr
-		}
-		previous, decryptErr = NormalizeProxyURL(previous)
-		if decryptErr != nil {
-			return domain.PublicProxyProfile{}, decryptErr
-		}
-		proxyChanged = previous != proxyURL
-		if proxyChanged {
-			current.EncryptedProxyURL, err = s.cipher.Encrypt(proxyURL)
-			if err != nil {
-				return domain.PublicProxyProfile{}, err
-			}
-		}
-	}
-	updated, nodeIDs, err := s.proxyProfiles.UpdateEgressProxyProfile(ctx, current, proxyChanged)
-	if errors.Is(err, repository.ErrNotFound) {
-		return domain.PublicProxyProfile{}, ErrProxyProfileNotFound
-	}
-	if err != nil {
-		return domain.PublicProxyProfile{}, err
-	}
-	if proxyChanged {
-		s.forgetClearances(nodeIDs)
-	}
-	return s.publicProxyProfile(updated), nil
-}
-
-func (s *Service) DeleteProxyProfile(ctx context.Context, id uint64) error {
-	if s.proxyProfiles == nil {
-		return ErrProxyProfileUnavailable
-	}
-	err := s.proxyProfiles.DeleteEgressProxyProfile(ctx, id)
-	if errors.Is(err, repository.ErrNotFound) {
-		return ErrProxyProfileNotFound
-	}
-	if errors.Is(err, repository.ErrEgressProxyProfileInUse) || errors.Is(err, repository.ErrConflict) {
-		return ErrProxyProfileInUse
-	}
-	return err
-}
-
-func (s *Service) ProxyProfileURL(ctx context.Context, id uint64) (string, error) {
-	if s.proxyProfiles == nil {
-		return "", ErrProxyProfileUnavailable
-	}
-	value, err := s.proxyProfiles.GetEgressProxyProfile(ctx, id)
-	if errors.Is(err, repository.ErrNotFound) {
-		return "", ErrProxyProfileNotFound
+		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", err
 	}
-	proxyURL, err := s.cipher.Decrypt(value.EncryptedProxyURL)
+	if strings.TrimSpace(value.EncryptedRotationURL) == "" {
+		return "", fmt.Errorf("%w: 节点未配置换 IP Webhook", ErrInvalidInput)
+	}
+	rotationURL, err := s.cipher.Decrypt(value.EncryptedRotationURL)
 	if err != nil {
 		return "", err
 	}
-	return NormalizeProxyURL(proxyURL)
+	return strings.TrimSpace(rotationURL), nil
 }
 
-func validateProxyProfileInput(input ProxyProfileInput, create bool) (string, string, error) {
-	name := strings.TrimSpace(input.Name)
-	if name == "" || len(name) > 160 {
-		return "", "", fmt.Errorf("%w: 共享代理配置名称必须在 1 到 160 个字符之间", ErrInvalidInput)
-	}
-	if input.ProxyURL == nil {
-		if create {
-			return "", "", fmt.Errorf("%w: 代理地址必填", ErrInvalidInput)
-		}
-		return name, "", nil
-	}
-	proxyURL, err := NormalizeProxyURL(*input.ProxyURL)
-	if err != nil || proxyURL == "" {
-		if err == nil {
-			err = errors.New("代理地址不能为空")
-		}
-		return "", "", fmt.Errorf("%w: %v", ErrInvalidInput, err)
-	}
-	return name, proxyURL, nil
-}
-
-func (s *Service) publicProxyProfile(value domain.ProxyProfile) domain.PublicProxyProfile {
-	result := domain.PublicProxyProfile{
-		ID: value.ID, Name: value.Name, BoundNodeCount: value.BoundNodeCount,
-		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
-	}
-	proxyURL, err := s.cipher.Decrypt(value.EncryptedProxyURL)
-	if err != nil {
-		return result
-	}
-	proxyURL, err = NormalizeProxyURL(proxyURL)
-	if err != nil || proxyURL == "" {
-		return result
-	}
-	result.ProxyDisplay = ProxyDisplay(proxyURL)
-	result.ProxyFingerprint = security.HashToken(proxyURL)[:12]
-	return result
-}
-
-func (s *Service) resolveProxyProfile(ctx context.Context, currentProfileID uint64, input Input) (Input, error) {
-	if input.ProxyProfileID == nil {
-		return input, nil
-	}
-	profileID := *input.ProxyProfileID
-	if profileID == 0 {
-		if input.ClearProxyURL {
-			return Input{}, fmt.Errorf("%w: 取消共享代理配置与清除代理不能同时操作", ErrInvalidInput)
-		}
-		return input, nil
-	}
-	if input.ProxyURL != nil || input.ClearProxyURL {
-		return Input{}, fmt.Errorf("%w: 使用共享代理配置时不能同时修改或清除代理地址", ErrInvalidInput)
-	}
-	if profileID == currentProfileID {
-		return input, nil
-	}
-	if s.proxyProfiles == nil {
-		return Input{}, ErrProxyProfileUnavailable
-	}
-	profile, err := s.proxyProfiles.GetEgressProxyProfile(ctx, profileID)
-	if errors.Is(err, repository.ErrNotFound) {
-		return Input{}, fmt.Errorf("%w: 共享代理配置不存在", ErrInvalidInput)
-	}
-	if err != nil {
-		return Input{}, err
-	}
-	proxyURL, err := s.cipher.Decrypt(profile.EncryptedProxyURL)
-	if err != nil {
-		return Input{}, err
-	}
-	proxyURL, err = NormalizeProxyURL(proxyURL)
-	if err != nil || proxyURL == "" {
-		return Input{}, fmt.Errorf("%w: 共享代理配置的代理地址无效", ErrInvalidInput)
-	}
-	input.ProxyURL = &proxyURL
-	return input, nil
-}
-
-func (s *Service) validateFallbackNodeUpdate(ctx context.Context, node domain.Node) error {
+// validateRoutingTargetNodeUpdate keeps a node serving as a fixed routing
+// target schedulable for that role after an edit. Disabling it or clearing
+// its proxy would otherwise silently degrade the routing decision to the
+// automatic schedule with no administrator-visible error.
+func (s *Service) validateRoutingTargetNodeUpdate(ctx context.Context, node domain.Node) error {
 	if s.operations == nil {
 		return nil
 	}
@@ -519,96 +265,58 @@ func (s *Service) validateFallbackNodeUpdate(ctx context.Context, node domain.No
 	if err != nil {
 		return err
 	}
-	return s.validateFallbackNodeUpdateWithConfig(node, config)
-}
-
-func (s *Service) validateFallbackNodeUpdateWithConfig(node domain.Node, config domain.OperationsConfig) error {
-	for _, scope := range allServiceScopes() {
-		fallback := config.FallbackFor(scope)
-		if fallback.Mode != domain.FallbackModeFixed || fallback.NodeID != node.ID {
-			continue
+	references := func(target domain.RoutingTarget) bool {
+		return target.Mode.Normalized() == domain.RoutingTargetNode && target.NodeID == node.ID
+	}
+	if references(config.DefaultTarget) {
+		if err := s.validateFixedTargetNode(node); err != nil {
+			return fmt.Errorf("节点已是总出口的固定目标，无法应用当前修改: %w", err)
 		}
-		if err := s.validateFixedFallbackNode(scope, node, false); err != nil {
-			return fmt.Errorf("节点已配置为 %s 固定回退，无法应用当前修改: %w", scope, err)
+		return nil
+	}
+	for scope, target := range config.ScopeTargets {
+		if references(target) {
+			if err := s.validateFixedTargetNode(node); err != nil {
+				return fmt.Errorf("节点已是 %s 作用域出口的固定目标，无法应用当前修改: %w", scope, err)
+			}
+			return nil
 		}
 	}
-	return s.validateRouteRuleNodeUpdateWithConfig(node, config)
-}
-
-// validateRouteRuleNodeUpdateWithConfig keeps a node serving as a fixed
-// route-rule target schedulable for that role after an edit. Disabling it,
-// switching its scope, or clearing its proxy would otherwise silently degrade
-// the rule to scope-pool fallback with no administrator-visible error.
-// Proxy-pool mode stays allowed: rules allocate traffic to a proxy resource,
-// not to a stable IP.
-func (s *Service) validateRouteRuleNodeUpdateWithConfig(node domain.Node, config domain.OperationsConfig) error {
-	for _, rule := range config.RouteRules {
-		if !rule.Enabled || rule.TargetMode.Normalized() != domain.RouteRuleTargetFixed || rule.TargetNodeID != node.ID {
-			continue
-		}
-		if !domain.CanNodeServeFixedRouteTarget(node, rule.Scope) {
-			return fmt.Errorf("节点已是 %s/%s 固定路由规则的目标，无法应用当前修改: %w", rule.Scope, rule.Class, ErrInvalidInput)
-		}
-		// Editing a target into a sticky per-account template would rotate the
-		// "fixed" exit per caller identity, bypassing the save-time rejection.
-		if proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL); err == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder) {
-			return fmt.Errorf("节点已是 %s/%s 固定路由规则的目标，不能改为账号代理模板: %w", rule.Scope, rule.Class, ErrInvalidInput)
+	for class, target := range config.ClassTargets {
+		if references(target) {
+			if err := s.validateFixedTargetNode(node); err != nil {
+				return fmt.Errorf("节点已是 %s 流量类别出口的固定目标，无法应用当前修改: %w", class, err)
+			}
+			return nil
 		}
 	}
 	return nil
 }
 
+// validateFixedTargetNode reports whether the node can keep serving as a
+// fixed routing target. Sticky per-account templates rotate their exit with
+// the caller identity, which contradicts the fixed-target contract.
+func (s *Service) validateFixedTargetNode(node domain.Node) error {
+	if !domain.CanNodeServeFixedTarget(node) {
+		return fmt.Errorf("%w: 固定出口目标必须启用、已配置代理地址且非代理池模式", ErrInvalidInput)
+	}
+	if proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL); err == nil && domain.IsAccountTemplateProxy(proxyURL) {
+		return fmt.Errorf("%w: 固定出口目标不能使用账号代理模板", ErrInvalidInput)
+	}
+	return nil
+}
+
 // UpdateManyEnabled changes only the scheduling state, leaving proxy secrets,
-// health, probes, and account bindings untouched.
+// health, and probes untouched.
 func (s *Service) UpdateManyEnabled(ctx context.Context, nodeIDs []uint64, enabled bool) (int, error) {
 	ids := uniqueIDs(nodeIDs)
 	if len(ids) == 0 {
 		return 0, fmt.Errorf("%w: 代理节点参数无效", ErrInvalidInput)
 	}
-
-	// Disabling a fixed fallback would make the persisted routing policy
-	// invalid. At most five fallback nodes need point lookups, regardless of
-	// the batch size.
-	if !enabled && s.operations != nil {
-		config, err := s.operations.GetEgressOperationsConfig(ctx)
-		if err != nil {
-			return 0, err
-		}
-		selected := make(map[uint64]struct{}, len(ids))
-		for _, id := range ids {
-			selected[id] = struct{}{}
-		}
-		fallbackNodeIDs := make(map[uint64]struct{}, len(allServiceScopes()))
-		for _, scope := range allServiceScopes() {
-			fallback := config.FallbackFor(scope)
-			if fallback.Mode == domain.FallbackModeFixed {
-				if _, exists := selected[fallback.NodeID]; exists {
-					fallbackNodeIDs[fallback.NodeID] = struct{}{}
-				}
-			}
-		}
-		for id := range fallbackNodeIDs {
-			node, err := s.repository.GetEgressNode(ctx, id)
-			if errors.Is(err, repository.ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return 0, err
-			}
-			node.Enabled = false
-			if err := s.validateFallbackNodeUpdateWithConfig(node, config); err != nil {
-				return 0, err
-			}
-		}
-	}
-
 	if batch, ok := s.repository.(BatchNodeEnabledUpdater); ok {
 		updated, err := batch.UpdateEgressNodesEnabled(ctx, ids, enabled)
-		if errors.Is(err, repository.ErrEgressFallbackInUse) {
-			return 0, fmt.Errorf("%w: 固定回退节点不能被批量禁用", ErrInvalidInput)
-		}
-		if errors.Is(err, repository.ErrEgressRouteRuleNodeInUse) {
-			return 0, fmt.Errorf("%w: 出口路由规则的目标节点不能被禁用", ErrInvalidInput)
+		if errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
+			return 0, fmt.Errorf("%w: 出口路由的固定目标节点不能被禁用", ErrInvalidInput)
 		}
 		if err != nil {
 			return 0, err
@@ -632,6 +340,11 @@ func (s *Service) UpdateManyEnabled(ctx context.Context, nodeIDs []uint64, enabl
 			continue
 		}
 		node.Enabled = enabled
+		if !enabled {
+			if err := s.validateRoutingTargetNodeUpdate(ctx, node); err != nil {
+				return updated, err
+			}
+		}
 		if _, err := s.repository.UpdateEgressNode(ctx, node); err != nil {
 			return updated, err
 		}
@@ -653,9 +366,7 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 	return err
 }
 
-// DeleteMany removes nodes in one repository operation when available. The
-// relational implementation also clears any account bindings in that same
-// transaction, so a deleted node can never remain referenced by an account.
+// DeleteMany removes nodes in one repository operation when available.
 func (s *Service) DeleteMany(ctx context.Context, nodeIDs []uint64) (int, error) {
 	ids := uniqueIDs(nodeIDs)
 	if len(ids) == 0 {
@@ -690,10 +401,10 @@ func (s *Service) PreviewUnhealthyCleanup(ctx context.Context) (UnhealthyCleanup
 	if cleaner, ok := s.repository.(repository.EgressNodeUnhealthyCleaner); ok {
 		value, err := cleaner.PreviewUnhealthyEgressNodes(ctx)
 		return UnhealthyCleanupPreview{
-			Nodes: value.Nodes, BoundAccounts: value.BoundAccounts, SubscriptionManaged: value.SubscriptionManaged,
+			Nodes: value.Nodes, SubscriptionManaged: value.SubscriptionManaged,
 		}, err
 	}
-	values, err := s.repository.ListEgressNodes(ctx, "", repository.SortQuery{})
+	values, err := s.repository.ListEgressNodes(ctx, repository.SortQuery{})
 	if err != nil {
 		return UnhealthyCleanupPreview{}, err
 	}
@@ -703,7 +414,6 @@ func (s *Service) PreviewUnhealthyCleanup(ctx context.Context) (UnhealthyCleanup
 			continue
 		}
 		result.Nodes++
-		result.BoundAccounts += int64(value.AssignedAccountCount)
 		if value.SourceID != 0 {
 			result.SubscriptionManaged++
 		}
@@ -725,7 +435,7 @@ func (s *Service) DeleteUnhealthy(ctx context.Context) (int, error) {
 		}
 		return len(ids), nil
 	}
-	values, err := s.repository.ListEgressNodes(ctx, "", repository.SortQuery{})
+	values, err := s.repository.ListEgressNodes(ctx, repository.SortQuery{})
 	if err != nil {
 		return 0, err
 	}
@@ -754,110 +464,6 @@ func (s *Service) RefreshClearance(ctx context.Context, id uint64) error {
 		return ErrClearanceUnavailable
 	}
 	return manager.RefreshClearance(ctx, id)
-}
-
-// AssignAccounts creates explicit many-to-one account bindings. A binding is
-// not a proxy-pool preference: runtime requests must use the selected node.
-func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider accountdomain.Provider, accountIDs []uint64, mode accountdomain.EgressAssignmentMode) (AssignmentResult, error) {
-	if s.accounts == nil {
-		return AssignmentResult{}, errors.New("账号出口绑定不可用")
-	}
-	if nodeID == 0 || !provider.IsValid() || !mode.IsValid() || len(accountIDs) == 0 {
-		return AssignmentResult{}, fmt.Errorf("%w: 账号出口绑定参数无效", ErrInvalidInput)
-	}
-	node, err := s.repository.GetEgressNode(ctx, nodeID)
-	if errors.Is(err, repository.ErrNotFound) {
-		return AssignmentResult{}, ErrNotFound
-	}
-	if err != nil {
-		return AssignmentResult{}, err
-	}
-	if !node.Enabled || strings.TrimSpace(node.EncryptedProxyURL) == "" {
-		return AssignmentResult{}, fmt.Errorf("%w: 只能绑定启用且已配置代理地址的节点", ErrInvalidInput)
-	}
-	if !scopeSupportsProvider(node.Scope, provider) {
-		return AssignmentResult{}, fmt.Errorf("%w: 代理节点作用域与账号来源不兼容", ErrInvalidInput)
-	}
-	unique := uniqueIDs(accountIDs)
-	count, err := s.accounts.CountProviderAccountsByIDs(ctx, provider, unique)
-	if err != nil {
-		return AssignmentResult{}, err
-	}
-	if count != int64(len(unique)) {
-		return AssignmentResult{}, fmt.Errorf("%w: 包含不属于当前账号池的账号", ErrInvalidInput)
-	}
-	assigned, err := s.accounts.UpdateEgressBindings(ctx, provider, unique, &nodeID, mode, time.Now().UTC())
-	if err != nil {
-		return AssignmentResult{}, err
-	}
-	return AssignmentResult{Assigned: int(assigned)}, nil
-}
-
-// UnassignAccounts removes an explicit binding and restores scope pool routing.
-func (s *Service) UnassignAccounts(ctx context.Context, provider accountdomain.Provider, accountIDs []uint64) (AssignmentResult, error) {
-	if s.accounts == nil {
-		return AssignmentResult{}, errors.New("账号出口绑定不可用")
-	}
-	if !provider.IsValid() || len(accountIDs) == 0 {
-		return AssignmentResult{}, fmt.Errorf("%w: 账号出口解绑参数无效", ErrInvalidInput)
-	}
-	unique := uniqueIDs(accountIDs)
-	count, err := s.accounts.CountProviderAccountsByIDs(ctx, provider, unique)
-	if err != nil {
-		return AssignmentResult{}, err
-	}
-	if count != int64(len(unique)) {
-		return AssignmentResult{}, fmt.Errorf("%w: 包含不属于当前账号池的账号", ErrInvalidInput)
-	}
-	updated, err := s.accounts.UpdateEgressBindings(ctx, provider, unique, nil, "", time.Time{})
-	if err != nil {
-		return AssignmentResult{}, err
-	}
-	return AssignmentResult{Assigned: int(updated)}, nil
-}
-
-func scopeSupportsProvider(scope domain.Scope, provider accountdomain.Provider) bool {
-	switch provider {
-	case accountdomain.ProviderBuild:
-		return scope == domain.ScopeBuild
-	case accountdomain.ProviderWeb:
-		return scope == domain.ScopeWeb
-	case accountdomain.ProviderConsole:
-		return domain.SupportsScope(scope, domain.ScopeConsole)
-	default:
-		return false
-	}
-}
-
-func (s *Service) validateNodeBindingScope(ctx context.Context, nodeID uint64, scope domain.Scope) error {
-	if s.accounts == nil {
-		return nil
-	}
-	providers, err := s.accounts.ListEgressBindingProviders(ctx, nodeID)
-	if err != nil {
-		return err
-	}
-	return validateBindingProviders(scope, providers)
-}
-
-func (s *Service) validateSourceBindingScope(ctx context.Context, sourceID uint64, scope domain.Scope) error {
-	if s.accounts == nil {
-		return nil
-	}
-	providers, err := s.accounts.ListEgressSourceBindingProviders(ctx, sourceID)
-	if err != nil {
-		return err
-	}
-	return validateBindingProviders(scope, providers)
-}
-
-func validateBindingProviders(scope domain.Scope, providers []accountdomain.Provider) error {
-	for _, provider := range providers {
-		if !scopeSupportsProvider(scope, provider) {
-			return fmt.Errorf("%w: 当前节点仍绑定 %s 账号，不能改为 %s 作用域", ErrInvalidInput, provider, scope)
-		}
-	}
-	return nil
 }
 
 func uniqueIDs(values []uint64) []uint64 {
@@ -906,44 +512,12 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	if input.ProxyPool != nil {
 		proxyPool = *input.ProxyPool
 	}
-	profileChanged := input.ProxyProfileID != nil && value.ProxyProfileID != *input.ProxyProfileID
-	configurationChanged := create || value.Scope != input.Scope || value.ProxyPool != proxyPool || (!value.Enabled && input.Enabled) || input.ClearProxyURL || input.ProxyURL != nil || profileChanged
+	configurationChanged := create || value.ProxyPool != proxyPool || (!value.Enabled && input.Enabled) || input.ClearProxyURL || input.ProxyURL != nil
 	name := strings.TrimSpace(input.Name)
 	if name == "" || len(name) > 160 {
 		return domain.Node{}, fmt.Errorf("%w: 名称必须在 1 到 160 个字符之间", ErrInvalidInput)
 	}
-	if !validListScope(input.Scope) || input.Scope == "" {
-		return domain.Node{}, fmt.Errorf("%w: scope 必须是 grok_build、grok_web、grok_console、grok_web_asset 或 grok_console_asset", ErrInvalidInput)
-	}
-	value.Name, value.Scope, value.Enabled, value.ProxyPool = name, input.Scope, input.Enabled, proxyPool
-	if input.AccountCapacity != nil {
-		if *input.AccountCapacity < 0 || *input.AccountCapacity > 100000 {
-			return domain.Node{}, fmt.Errorf("%w: 每个代理的账号容量必须在 0 到 100000 之间", ErrInvalidInput)
-		}
-		value.AccountCapacity = *input.AccountCapacity
-	}
-	if input.Scope == domain.ScopeBuild {
-		// Build 请求始终沿用 Provider 生成的 CLI User-Agent，出口节点不得覆盖协议身份。
-		value.UserAgent = ""
-	} else {
-		value.UserAgent = strings.TrimSpace(input.UserAgent)
-	}
-	if input.Scope != domain.ScopeBuild && value.UserAgent == "" {
-		s.mu.RLock()
-		value.UserAgent = s.browserUA
-		s.mu.RUnlock()
-	}
-	if len(value.UserAgent) > 512 {
-		return domain.Node{}, fmt.Errorf("%w: User-Agent 过长", ErrInvalidInput)
-	}
-	if input.ProxyProfileID != nil {
-		if value.SourceID != 0 && *input.ProxyProfileID != 0 {
-			return domain.Node{}, fmt.Errorf("%w: 订阅管理的节点不能绑定共享代理配置", ErrInvalidInput)
-		}
-		value.ProxyProfileID = *input.ProxyProfileID
-	} else if input.ClearProxyURL || input.ProxyURL != nil {
-		value.ProxyProfileID = 0
-	}
+	value.Name, value.Enabled, value.ProxyPool = name, input.Enabled, proxyPool
 	if input.ClearProxyURL {
 		value.EncryptedProxyURL = ""
 		value.ProxyPool = false
@@ -962,22 +536,36 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	if value.ProxyPool && strings.TrimSpace(value.EncryptedProxyURL) == "" {
 		return domain.Node{}, fmt.Errorf("%w: 代理池模式需要配置代理地址", ErrInvalidInput)
 	}
-	if input.Scope == domain.ScopeBuild || input.Scope == domain.ScopeConsoleAsset {
-		value.EncryptedCloudflareCookie = ""
-	} else if input.ClearCookies {
-		value.EncryptedCloudflareCookie = ""
-	} else if input.CloudflareCookies != nil {
-		if len(*input.CloudflareCookies) > maxCloudflareCookieBytes {
-			return domain.Node{}, fmt.Errorf("%w: Cloudflare Cookie 不能超过 16 KiB", ErrInvalidInput)
-		}
-		cookies := SanitizeCloudflareCookies(*input.CloudflareCookies)
-		if cookies != "" || create {
-			var err error
-			value.EncryptedCloudflareCookie, err = s.cipher.Encrypt(cookies)
-			if err != nil {
-				return domain.Node{}, err
+	// 换 IP webhook：完整 URL（含节点侧 token）加密存储，调用即重启隧道换出口。
+	// 先处理地址增删，再应用开关：同一次请求里 URL 与 enabled=true 同时到达时，
+	// 开关不能被"地址尚未写入"的守卫误复位。
+	if input.ClearRotationURL {
+		value.EncryptedRotationURL = ""
+	} else if input.RotationURL != nil {
+		normalized := strings.TrimSpace(*input.RotationURL)
+		if normalized != "" {
+			parsed, parseErr := url.Parse(normalized)
+			if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return domain.Node{}, fmt.Errorf("%w: 换 IP webhook 必须是 http(s) URL", ErrInvalidInput)
 			}
+			if len(normalized) > maxRotationURLBytes {
+				return domain.Node{}, fmt.Errorf("%w: 换 IP webhook 过长", ErrInvalidInput)
+			}
+			encrypted, encryptErr := s.cipher.Encrypt(normalized)
+			if encryptErr != nil {
+				return domain.Node{}, encryptErr
+			}
+			value.EncryptedRotationURL = encrypted
 		}
+	}
+	if input.RotationEnabled != nil {
+		if *input.RotationEnabled && strings.TrimSpace(value.EncryptedProxyURL) == "" && strings.TrimSpace(value.EncryptedRotationURL) == "" {
+			return domain.Node{}, fmt.Errorf("%w: 开启换 IP 前需要先填写 Webhook 地址", ErrInvalidInput)
+		}
+		value.RotationEnabled = *input.RotationEnabled
+	}
+	if value.EncryptedRotationURL == "" {
+		value.RotationEnabled = false
 	}
 	if configurationChanged {
 		value.Health = 1
@@ -1001,34 +589,63 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	return value, nil
 }
 
-func (s *Service) publicNode(value domain.Node) domain.PublicNode {
-	userAgent := value.UserAgent
-	if value.Scope == domain.ScopeBuild {
-		userAgent = ""
-	}
-	proxyDisplay, proxyFingerprint, accountBoundProxy := s.proxyMetadata(value.EncryptedProxyURL)
-	proxyPool := value.ProxyPool || accountBoundProxy
+func (s *Service) publicNode(value domain.Node, poolNames map[uint64]string) domain.PublicNode {
+	proxyDisplay, proxyFingerprint, accountTemplate := s.proxyMetadata(value.EncryptedProxyURL)
+	proxyPool := value.ProxyPool || accountTemplate
 	health, failureCount, cooldownUntil, lastError := value.Health, value.FailureCount, value.CooldownUntil, value.LastError
 	if proxyPool {
 		health, failureCount, cooldownUntil, lastError = 1, 0, nil, ""
 	}
 	return domain.PublicNode{
-		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Enabled: value.Enabled,
 		ProxyConfigured: value.EncryptedProxyURL != "", ProxyDisplay: proxyDisplay, ProxyFingerprint: proxyFingerprint,
-		UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
-		ProxyPool:         proxyPool,
+		ProxyPool:          proxyPool,
+		RotationConfigured: value.EncryptedRotationURL != "", RotationEnabled: value.EncryptedRotationURL != "" && value.RotationEnabled, LastRotatedAt: value.LastRotatedAt,
+		RotationAttempts: value.RotationAttempts, LastRotationError: value.LastRotationError,
+		DegradeCount: value.DegradeCount, LastDegradedAt: value.LastDegradedAt,
 		SourceID:          value.SourceID,
-		AccountCapacity:   value.AccountCapacity,
-		ProxyProfileID:    value.ProxyProfileID,
-		ProxyProfileName:  value.ProxyProfileName,
-		AccountBoundProxy: accountBoundProxy,
+		SourceName:        value.SourceName,
+		Pools:             nodePoolRefs(value.PoolIDs, poolNames),
+		AccountBoundProxy: accountTemplate,
 		Health:            health, FailureCount: failureCount, CooldownUntil: cooldownUntil, LastError: lastError,
 		ProbeStatus: value.ProbeStatus, LastProbedAt: value.LastProbedAt, ProbeLatencyMS: value.ProbeLatencyMS, ExitIP: value.ExitIP, ProbeError: value.ProbeError,
 		ProbeProvider: value.ProbeProvider,
 		IPv4Probe:     value.IPv4Probe, IPv6Probe: value.IPv6Probe,
-		AssignedAccountCount: value.AssignedAccountCount,
-		CreatedAt:            value.CreatedAt, UpdatedAt: value.UpdatedAt,
+		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
+}
+
+// egressPoolNameMap loads pool names once per listing call.
+func (s *Service) egressPoolNameMap(ctx context.Context) map[uint64]string {
+	names := map[uint64]string{}
+	store, err := s.poolStore()
+	if err != nil {
+		return names
+	}
+	pools, listErr := store.ListEgressPools(ctx)
+	if listErr != nil {
+		return names
+	}
+	for _, pool := range pools {
+		names[pool.ID] = pool.Name
+	}
+	return names
+}
+
+// nodePoolRefs maps pool ids onto {id,name} refs; names may be nil.
+func nodePoolRefs(ids []uint64, names map[uint64]string) []domain.NodePoolRef {
+	if len(ids) == 0 {
+		return nil
+	}
+	refs := make([]domain.NodePoolRef, 0, len(ids))
+	for _, id := range ids {
+		ref := domain.NodePoolRef{ID: id}
+		if names != nil {
+			ref.Name = names[id]
+		}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 func (s *Service) proxyMetadata(encrypted string) (string, string, bool) {
@@ -1043,7 +660,7 @@ func (s *Service) proxyMetadata(encrypted string) (string, string, bool) {
 	if err != nil || proxyURL == "" {
 		return "", "", false
 	}
-	return ProxyDisplay(proxyURL), security.HashToken(proxyURL)[:12], strings.Contains(proxyURL, ProxyAccountPlaceholder)
+	return ProxyDisplay(proxyURL), security.HashToken(proxyURL)[:12], domain.IsAccountTemplateProxy(proxyURL)
 }
 
 // ProxyDisplay preserves the routable endpoint and, for standard proxies, the
@@ -1077,12 +694,13 @@ func ProxyDisplay(proxyURL string) string {
 	return parsed.String()
 }
 
-func (s *Service) accountBoundProxy(value domain.Node) bool {
-	if s == nil || s.cipher == nil || strings.TrimSpace(value.EncryptedProxyURL) == "" {
-		return false
+func isASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 0x80 {
+			return false
+		}
 	}
-	proxyURL, err := s.cipher.Decrypt(value.EncryptedProxyURL)
-	return err == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder)
+	return true
 }
 
 func NormalizeProxyURL(value string) (string, error) {
@@ -1093,7 +711,13 @@ func NormalizeProxyURL(value string) (string, error) {
 	if len(value) > maxProxyURLBytes || strings.IndexFunc(value, func(character rune) bool { return character < 0x20 || character == 0x7f }) >= 0 {
 		return "", errors.New("代理地址过长或包含控制字符")
 	}
-	hasAccountPlaceholder := strings.Contains(value, ProxyAccountPlaceholder)
+	// 非 ASCII 主机在 url.String() 时被百分号编码膨胀(每字节×3):接近上限的
+	// 输入一次归一化通过、其输出再归一化被拒(非幂等), 且编码后主机是死地址。
+	// 先拒绝包含任何非 ASCII 字节的输入, 保证输出恒为纯 ASCII = 幂等。
+	if !isASCII(value) {
+		return "", errors.New("代理地址只能包含 ASCII 字符")
+	}
+	hasAccountPlaceholder := domain.IsAccountTemplateProxy(value)
 	if strings.Count(value, ProxyAccountPlaceholder) > 1 {
 		return "", errors.New("代理地址最多包含一个 {account} 占位符")
 	}
@@ -1136,28 +760,8 @@ func NormalizeProxyURL(value string) (string, error) {
 	return parsed.String(), nil
 }
 
+// SanitizeCloudflareCookies 委托 pkg/cfcookies:实现移至中立包, 账号层
+// 不再需要为净化 Cookie 导入出口应用包(业务与代理解耦)。
 func SanitizeCloudflareCookies(value string) string {
-	allowed := make([]string, 0, 4)
-	seen := make(map[string]struct{})
-	for part := range strings.SplitSeq(value, ";") {
-		name, cookieValue, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
-		}
-		name = strings.TrimSpace(name)
-		lower := strings.ToLower(name)
-		if lower != "cf_clearance" && lower != "__cf_bm" && lower != "_cfuvid" && !strings.HasPrefix(lower, "cf_chl_") {
-			continue
-		}
-		if _, exists := seen[lower]; exists {
-			continue
-		}
-		cookieValue = strings.TrimSpace(cookieValue)
-		if cookieValue == "" || len(cookieValue) > maxCloudflareCookieBytes || strings.IndexFunc(cookieValue, func(character rune) bool { return character < 0x20 || character == 0x7f }) >= 0 {
-			continue
-		}
-		seen[lower] = struct{}{}
-		allowed = append(allowed, lower+"="+cookieValue)
-	}
-	return strings.Join(allowed, "; ")
+	return cfcookies.Sanitize(value)
 }

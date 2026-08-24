@@ -20,8 +20,8 @@ type routeRuleRepository struct {
 	config domain.OperationsConfig
 }
 
-func (r *routeRuleRepository) GetEgressNode(context.Context, uint64) (domain.Node, error) {
-	if r.node.ID == 0 {
+func (r *routeRuleRepository) GetEgressNode(_ context.Context, id uint64) (domain.Node, error) {
+	if r.node.ID == 0 || r.node.ID != id {
 		return domain.Node{}, repository.ErrNotFound
 	}
 	return r.node, nil
@@ -58,16 +58,17 @@ func mustEncryptRouteRuleProxy(t *testing.T, cipher *security.Cipher, value stri
 	return encrypted
 }
 
-func TestAcquireRoutedFixedLease(t *testing.T) {
+// 流量类别路由:billing 类固定节点,由 acquire 内部的 target 解析命中。
+func TestAcquireUsesClassRoutingTargetNode(t *testing.T) {
+	node := domain.Node{ID: 11, Name: "cheap", Enabled: true}
 	config := domain.OperationsConfig{
-		RouteRules: []domain.RouteRule{
-			{Scope: domain.ScopeBuild, Class: domain.TrafficClassBilling, TargetMode: domain.RouteRuleTargetFixed, TargetNodeID: 11, Enabled: true},
+		ClassTargets: map[domain.TrafficClass]domain.RoutingTarget{
+			domain.TrafficClassBilling: {Mode: domain.RoutingTargetNode, NodeID: 11},
 		},
 	}
-	node := domain.Node{ID: 11, Name: "cheap", Scope: domain.ScopeBuild, Enabled: true}
 	manager := newRouteRuleTestManager(t, node, config)
 
-	lease, err := manager.AcquireRouted(context.Background(), domain.ScopeBuild, "acct", 11)
+	lease, err := manager.Acquire(WithTrafficClass(context.Background(), domain.TrafficClassBilling), domain.ScopeBuild, "acct")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,37 +76,86 @@ func TestAcquireRoutedFixedLease(t *testing.T) {
 	if lease.NodeID != 11 || lease.ProxyURL == "" {
 		t.Fatalf("lease = node %d proxy %q", lease.NodeID, lease.ProxyURL)
 	}
+	if stat := findRoutingStat("class:billing", "node"); stat == nil || stat.Hit < 1 {
+		t.Fatalf("class routing stat = %+v", stat)
+	}
 }
 
-func TestAcquireRoutedFixedUnavailableVariants(t *testing.T) {
+// 作用域路由:asset 作用域归并到父族(web),继承父族目标。
+func TestAcquireScopeTargetInheritsAssetScopes(t *testing.T) {
+	node := domain.Node{ID: 11, Name: "web-exit", Enabled: true}
+	config := domain.OperationsConfig{
+		ScopeTargets: map[domain.Scope]domain.RoutingTarget{
+			domain.ScopeWeb: {Mode: domain.RoutingTargetNode, NodeID: 11},
+		},
+	}
+	manager := newRouteRuleTestManager(t, node, config)
+
+	for _, scope := range []domain.Scope{domain.ScopeWeb, domain.ScopeWebAsset} {
+		lease, err := manager.Acquire(context.Background(), scope, "acct")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease.NodeID != 11 {
+			t.Fatalf("scope %q lease node = %d, want 11", scope, lease.NodeID)
+		}
+		lease.Release()
+	}
+}
+
+// 固定节点目标不可用时退回自动调度,请求绝不因配置失效而失败。
+func TestRoutingTargetNodeFallsBackToAutomaticSchedule(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	autoProxy, err := cipher.Encrypt("http://auto.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cooldown := time.Now().UTC().Add(5 * time.Minute)
 	variants := map[string]domain.Node{
 		"missing node": {ID: 0},
-		"disabled":     {ID: 11, Scope: domain.ScopeBuild, Enabled: false},
-		"no proxy":     {ID: 11, Scope: domain.ScopeBuild, Enabled: true, EncryptedProxyURL: "-"},
-		"wrong scope":  {ID: 11, Scope: domain.ScopeWeb, Enabled: true},
-		"cooling down": {ID: 11, Scope: domain.ScopeBuild, Enabled: true, CooldownUntil: &cooldown},
+		"disabled":     {ID: 11, Enabled: false},
+		"no proxy":     {ID: 11, Enabled: true, EncryptedProxyURL: "-"},
+		"proxy pool":   {ID: 11, Enabled: true, ProxyPool: true},
+		"cooling down": {ID: 11, Enabled: true, CooldownUntil: &cooldown},
+	}
+	config := domain.OperationsConfig{
+		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 11},
 	}
 	for name, node := range variants {
-		manager := newRouteRuleTestManager(t, node, domain.OperationsConfig{})
-		_, err := manager.AcquireRouted(context.Background(), domain.ScopeBuild, "acct", 11)
-		if !errors.Is(err, ErrRouteRuleNodeUnavailable) {
-			t.Errorf("%s: err = %v, want ErrRouteRuleNodeUnavailable", name, err)
+		fallback := domain.Node{ID: 22, Name: "auto", Enabled: true, Health: 1, EncryptedProxyURL: autoProxy}
+		manager := newRouteRuleTestManager(t, node, config)
+		manager.repository.(*routeRuleRepository).nodes = []domain.Node{fallback}
+		ctx := WithTrafficClass(context.Background(), domain.TrafficClassBilling)
+		lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, "acct")
+		if acquireErr != nil {
+			t.Errorf("%s: acquire failed: %v", name, acquireErr)
+			continue
+		}
+		if lease.NodeID != 22 {
+			t.Errorf("%s: lease node = %d, want fallback to automatic node 22", name, lease.NodeID)
+		}
+		lease.Release()
+		// 目标配置在总出口层:统计归因到 default 行,而不是请求的流量类别。
+		// (进程内计数器是全局的,不断言 class 行为零——前序用例可能已写入。)
+		if stat := findRoutingStat("default", "node"); stat == nil || stat.Fallback < 1 {
+			t.Errorf("%s: fallback outcome not recorded: %+v", name, stat)
 		}
 	}
 }
 
-// A failing operations-config read must fail open: the decision returns
-// not-applied and traffic keeps the ordinary pool path instead of erroring.
-func TestRouteRuleForFailsOpenOnConfigError(t *testing.T) {
+// 读取 operations config 失败时请求失败(fail closed at config layer),
+// 由外层重试决定是否降级。
+func TestAcquireFailsWhenOperationsConfigUnreadable(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fresh := NewManager(&failingRouteRuleConfigRepository{}, cipher)
-	decision := fresh.RouteRuleFor(context.Background(), domain.ScopeBuild, domain.TrafficClassBilling)
-	if decision.Applied {
-		t.Fatalf("config read failure must fail open, got %+v", decision)
+	if _, _, err := fresh.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "acct"); err == nil {
+		t.Fatal("config read failure must surface as an error")
 	}
 }
 
@@ -117,30 +167,16 @@ func (r *failingRouteRuleConfigRepository) GetEgressOperationsConfig(context.Con
 	return domain.OperationsConfig{}, errors.New("db down")
 }
 
-// Pool nodes are valid fixed targets; the lease is a proxy-pool lease whose
-// exit IP is decided by the gateway, not by the gateway's pool flag.
-func TestAcquireRoutedAcceptsProxyPoolNode(t *testing.T) {
-	node := domain.Node{ID: 12, Name: "rotating", Scope: domain.ScopeBuild, Enabled: true, ProxyPool: true}
-	config := domain.OperationsConfig{}
-	manager := newRouteRuleTestManager(t, node, config)
-
-	lease, err := manager.AcquireRouted(context.Background(), domain.ScopeBuild, "acct", 12)
-	if err != nil {
-		t.Fatalf("pool node must be routable: %v", err)
-	}
-	defer lease.Release()
-	if lease.NodeID != 12 || !lease.proxyPool {
-		t.Fatalf("lease = node %d proxyPool %v", lease.NodeID, lease.proxyPool)
-	}
-}
-
 // The 1s target cache must serve repeated rule hits without extra DB reads
 // and must stay per-manager so different managers never share entries.
-func TestAcquireRoutedTargetNodeCache(t *testing.T) {
-	node := domain.Node{ID: 21, Name: "cached", Scope: domain.ScopeBuild, Enabled: true}
-	manager := newRouteRuleTestManager(t, node, domain.OperationsConfig{})
+func TestRoutingTargetNodeCacheIsPerManager(t *testing.T) {
+	node := domain.Node{ID: 21, Name: "cached", Enabled: true}
+	config := domain.OperationsConfig{
+		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 21},
+	}
+	manager := newRouteRuleTestManager(t, node, config)
 
-	lease, err := manager.AcquireRouted(context.Background(), domain.ScopeBuild, "acct", 21)
+	lease, err := manager.Acquire(context.Background(), domain.ScopeBuild, "acct")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +190,7 @@ func TestAcquireRoutedTargetNodeCache(t *testing.T) {
 	}
 
 	// A second manager with the same node ID must not see the first cache.
-	other := newRouteRuleTestManager(t, node, domain.OperationsConfig{})
+	other := newRouteRuleTestManager(t, node, config)
 	other.routeRuleNodeMu.Lock()
 	_, shared := other.routeRuleNodeCache[21]
 	other.routeRuleNodeMu.Unlock()
@@ -163,14 +199,99 @@ func TestAcquireRoutedTargetNodeCache(t *testing.T) {
 	}
 }
 
-func TestAcquireRoutedDirectLease(t *testing.T) {
-	manager := newRouteRuleTestManager(t, domain.Node{}, domain.OperationsConfig{})
-	lease, err := manager.AcquireRoutedDirect(context.Background(), domain.ScopeBuild, "acct")
+func findRoutingStat(level, mode string) *RoutingStat {
+	for _, stat := range RoutingStatsSnapshot() {
+		if stat.Level == level && stat.Mode == mode {
+			copied := stat
+			return &copied
+		}
+	}
+	return nil
+}
+
+// 降智守卫的请求内排除必须对固定节点目标生效:否则守卫对固定路由
+// 配置完全失效,重试 100% 撞回同一坏出口。
+func TestFixedTargetHonorsNodeExclusions(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
-	if lease.NodeID != 0 || lease.ProxyURL != "" {
-		t.Fatalf("direct lease = node %d proxy %q, want node 0 and empty proxy", lease.NodeID, lease.ProxyURL)
+	targetProxy, err := cipher.Encrypt("http://target.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	autoProxy, err := cipher.Encrypt("http://auto.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := domain.Node{ID: 31, Name: "fixed", Enabled: true, Health: 1, EncryptedProxyURL: targetProxy}
+	fallback := domain.Node{ID: 32, Name: "auto", Enabled: true, Health: 1, EncryptedProxyURL: autoProxy}
+	config := domain.OperationsConfig{
+		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 31},
+	}
+	manager := newRouteRuleTestManager(t, target, config)
+	manager.repository.(*routeRuleRepository).nodes = []domain.Node{target, fallback}
+
+	// 正常路径:命中固定目标 31。
+	lease, err := manager.Acquire(context.Background(), domain.ScopeBuild, "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.NodeID != 31 {
+		t.Fatalf("expected fixed target 31, got %d", lease.NodeID)
+	}
+	lease.Release()
+
+	// 守卫排除 31 后:必须退回自动调度落 32,而不是再次命中 31。
+	ctx := WithNodeExclusions(context.Background(), map[uint64]struct{}{31: {}})
+	lease2, err := manager.Acquire(ctx, domain.ScopeBuild, "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease2.NodeID != 32 {
+		t.Fatalf("excluded fixed target must fall back to automatic schedule, got node %d", lease2.NodeID)
+	}
+	lease2.Release()
+}
+
+type routeRuleDbErrorRepo struct {
+	routeRuleRepository
+	dbErr error
+}
+
+func (r *routeRuleDbErrorRepo) GetEgressNode(context.Context, uint64) (domain.Node, error) {
+	return domain.Node{}, r.dbErr
+}
+
+// DB 抖动不得把固定目标静默降级为自动调度:GetEgressNode 的非 NotFound
+// 错误必须按读失败语义上抛(请求失败并留 Warn 日志),而不是当作
+// "节点不存在"退回自动调度让流量无声绕开配置的出口。
+func TestFixedTargetDbErrorFailsInsteadOfSilentFallback(t *testing.T) {
+	node := domain.Node{ID: 11, Name: "fixed", Enabled: true, Health: 1}
+	config := domain.OperationsConfig{
+		ClassTargets: map[domain.TrafficClass]domain.RoutingTarget{
+			domain.TrafficClassBilling: {Mode: domain.RoutingTargetNode, NodeID: 11},
+		},
+	}
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.EncryptedProxyURL = mustEncryptRouteRuleProxy(t, cipher, "http://proxy.example:8080")
+	dbErr := errors.New("db temporarily unavailable")
+	manager := NewManager(&routeRuleDbErrorRepo{routeRuleRepository{node: node, config: config}, dbErr}, cipher)
+
+	lease, err := manager.Acquire(WithTrafficClass(context.Background(), domain.TrafficClassBilling), domain.ScopeBuild, "acct")
+	if err == nil {
+		if lease != nil {
+			lease.Release()
+		}
+		t.Fatal("DB read failure must fail the request, not silently fall back to the automatic schedule")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("error must wrap the DB failure: %v", err)
+	}
+	if lease != nil {
+		t.Fatalf("no lease expected on failure, got %#v", lease)
 	}
 }
