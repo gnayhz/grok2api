@@ -927,7 +927,7 @@ func TestStreamInspectorMarksChatReasoningComment(t *testing.T) {
 }
 
 func TestInternalSSEMarkerFilterAcrossChunkBoundaries(t *testing.T) {
-	markers := reasoningStartSSEComment + "\n\n" + reasoningEvidenceSSEComment + "\n\n"
+	markers := reasoningStartSSEComment + "\n\n"
 	input := []byte("data: before\n\n" + markers + "data: after\n\n")
 	want := "data: before\n\ndata: after\n\n"
 	for split := 0; split <= len(input); split++ {
@@ -948,7 +948,6 @@ func TestCopyStreamConsumesInternalReasoningMarker(t *testing.T) {
 	context, _ := gin.CreateTestContext(recorder)
 	body := `data: {"choices":[{"delta":{"role":"assistant"}}]}` + "\n\n" +
 		": grok2api-reasoning-start\n\n" +
-		": grok2api-reasoning-evidence\n\n" +
 		`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	marked := 0
@@ -965,27 +964,6 @@ func TestCopyStreamConsumesInternalReasoningMarker(t *testing.T) {
 		t.Fatalf("visible Chat delta missing: %q", recorder.Body.String())
 	}
 }
-
-func TestCopyStreamConsumesAnthropicReasoningEvidenceMarker(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	body := ": grok2api-reasoning-evidence\n\n" +
-		"event: content_block_delta\n" +
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}` + "\n\n" +
-		"event: message_stop\n" +
-		`data: {"type":"message_stop"}` + "\n\n"
-	if _, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolAnthropic, nil); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(recorder.Body.String(), "grok2api-reasoning-evidence") {
-		t.Fatalf("internal Anthropic marker leaked to client: %q", recorder.Body.String())
-	}
-	if !strings.Contains(recorder.Body.String(), `"signature":"sig"`) {
-		t.Fatalf("Anthropic signature delta missing: %q", recorder.Body.String())
-	}
-}
-
 func TestCopyStreamPreservesBufferedTailOnReadError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

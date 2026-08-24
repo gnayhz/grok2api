@@ -1655,8 +1655,7 @@ type responseInspector struct {
 }
 
 const (
-	reasoningStartSSEComment    = ": grok2api-reasoning-start"
-	reasoningEvidenceSSEComment = ": grok2api-reasoning-evidence"
+	reasoningStartSSEComment = ": grok2api-reasoning-start"
 )
 
 // internalSSEMarkers 是发往客户端前必须剥除的内部 SSE 注释（转换器的
@@ -1664,7 +1663,6 @@ const (
 // 公协议。
 var internalSSEMarkers = [][]byte{
 	[]byte(reasoningStartSSEComment + "\n\n"),
-	[]byte(reasoningEvidenceSSEComment + "\n\n"),
 }
 
 func (i *responseInspector) Inspect(chunk []byte) {
