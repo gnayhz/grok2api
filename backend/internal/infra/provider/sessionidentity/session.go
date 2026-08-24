@@ -35,6 +35,8 @@ func Fetch(ctx context.Context, baseURL string, credential account.Credential, e
 	if strings.TrimSpace(token) == "" {
 		return provider.AccountIdentity{}, provider.ErrUnauthorized
 	}
+	// Session 身份读取属于凭据语义(会话验证),缺标默认推理类会污染推理徽标。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassCredential)
 	lease, err := egress.AcquireCredential(ctx, domainegress.ScopeWeb, credential)
 	if err != nil {
 		return provider.AccountIdentity{}, err

@@ -144,6 +144,8 @@ func (a *Adapter) runWebAccountSettings(ctx context.Context, credential account.
 	if strings.TrimSpace(token) == "" {
 		return provider.ErrUnauthorized
 	}
+	// 账号资料维护属于凭据/账号侧操作,缺标默认推理类会污染推理徽标。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassCredential)
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, credential)
 	if err != nil {
 		return err
