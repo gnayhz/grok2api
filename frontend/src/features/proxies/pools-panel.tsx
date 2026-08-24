@@ -67,7 +67,7 @@ export function PoolsPanel() {
   const strategyLabel = (strategy: EgressPoolStrategy) => strategy === "random" ? t("proxies.pools.strategyRandom") : strategy === "sticky" ? t("proxies.pools.strategySticky") : strategy === "rotation" ? t("proxies.pools.strategyRotation") : t("proxies.pools.strategyAffinity");
 
   // 当前出口,按策略取最准确的信号:
-  // 顺位轮换 = 持久化游标;固定首选 = 首选节点;其余 = 最近一次被调度选中的节点。
+  // 节点轮询 = 持久化游标;首选优先 = 首选节点;其余 = 最近一次被调度选中的节点。
   const nodeName = (id?: string) => nodes.find((node) => node.id === id)?.name;
   const currentNodeName = (pool: EgressPoolDTO): string | undefined => {
     const ordered = pool.memberIds ?? [];

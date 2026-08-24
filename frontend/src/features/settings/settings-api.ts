@@ -500,7 +500,7 @@ export function getEgressPoolStats(id: string): Promise<{ items: EgressPoolStatD
 export function resetEgressPoolStats(id: string): Promise<void> {
 	return apiRequest(`/api/admin/v1/egress-pools/${id}/stats`, { method: "DELETE" }, createObjectDecoder<{ reset: boolean }>("egress pool stats reset", { reset: isBoolean })).then(() => undefined);
 }
-/** 设置池内成员首选顺序（小者先；固定首选/顺位轮换的“首”）。 */
+/** 设置池内成员首选顺序（小者先；首选优先/节点轮询的“首”）。 */
 export function setEgressPoolMemberPriority(id: string, nodeId: string, priority: number): Promise<void> {
 	return apiRequest(`/api/admin/v1/egress-pools/${id}/members/${nodeId}/priority`, { method: "PUT", body: { priority } }, createObjectDecoder<{ updated: boolean }>("egress pool member priority", { updated: isBoolean })).then(() => undefined);
 }
