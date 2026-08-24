@@ -232,7 +232,9 @@ function FieldLabelWithHelp({ label, help, lines }: { label: string; help?: stri
 }
 
 /** 调度统计:每节点 选中/失败 计数,验证策略分布是否如预期。
- *  后端进程内存计数,前端与成员列表合并出零值行;开着弹窗每 3s 刷新。 */
+ *  后端进程内存计数,前端与成员列表合并出零值行;开着弹窗每 3s 刷新。
+ *  弹窗自身不滚动:标题/合计/按钮固定,表格走 viewportRows 内部滚动
+ *  (节点多的池表头跟随 sticky),短屏时由滚动容器收缩消化剩余空间。 */
 function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; onOpenChange: (open: boolean) => void }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -267,14 +269,14 @@ function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; o
   const currentNode = pool.strategy === "rotation" && pool.rotationCursorNodeId ? pool.rotationCursorNodeId : pool.strategy === "sticky" ? (pool.preferredNodeId ?? (pool.memberIds ?? [])[0]) : undefined;
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col overflow-hidden sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("proxies.pools.statsTitle", { name: pool.name })}</DialogTitle>
         </DialogHeader>
         {statsQuery.isPending ? <div className="flex h-20 items-center justify-center"><Spinner /></div> : rows.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">{t("proxies.pools.statsEmpty")}</p>
         ) : (
-          <Table className="table-fixed">
+          <Table className="table-fixed" viewportRows={10} rowHeight={40}>
             <TableHeader><TableRow className="hover:bg-transparent">
               <TableHead className="w-[180px] text-center">{t("settings.egress.name")}</TableHead>
               <TableHead className="w-[72px] text-center">{t("proxies.pools.statsStatus")}</TableHead>
@@ -371,7 +373,7 @@ function PoolMembersDialog({ pool, onOpenChange, onSaved }: { pool: EgressPoolDT
   });
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col overflow-hidden sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{t("proxies.pools.nodesTitle", { name: pool.name })}</DialogTitle>
         </DialogHeader>
@@ -388,7 +390,7 @@ function PoolMembersDialog({ pool, onOpenChange, onSaved }: { pool: EgressPoolDT
                 <Button type="button" size="sm" variant="secondary" disabled={draft.size === 0} onClick={() => setDraft(new Set())}>{t("proxies.pools.clearSelection")}</Button>
               </div>
             </div>
-            <div className="max-h-72 space-y-1 overflow-y-auto overscroll-contain rounded-md border p-1.5">
+            <div className="max-h-72 min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain rounded-md border p-1.5">
               {all.length === 0 ? <p className="p-4 text-center text-xs text-muted-foreground">{t("proxies.pools.noEligibleNodes")}</p> : null}
               {all.length > 0 && visible.length === 0 ? <p className="p-4 text-center text-xs text-muted-foreground">{t("settings.egress.noMatches")}</p> : null}
               {visible.map((node) => {
