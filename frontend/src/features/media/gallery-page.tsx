@@ -32,7 +32,7 @@ export function GalleryPage() {
 
   const imagesQuery = useQuery({
     queryKey: ["media", "images", page, pageSize, normalizedSearch],
-    queryFn: () => listImages({ page, pageSize, search: normalizedSearch || undefined }),
+    queryFn: ({ signal }) => listImages({ page, pageSize, search: normalizedSearch || undefined }, signal),
   });
   const statsQuery = useQuery({
     queryKey: ["media", "images", "stats"],

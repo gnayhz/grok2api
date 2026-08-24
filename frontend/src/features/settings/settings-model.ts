@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { EgressNodeDTO, SettingsConfigDTO } from "@/features/settings/settings-api";
+import type { SettingsConfigDTO } from "@/features/settings/settings-api";
 
 export type DurationUnit = "s" | "m" | "h" | "d";
 export type DurationValue = { value: number; unit: DurationUnit };
@@ -10,15 +10,6 @@ export type ByteSizeValue = { value: number; unit: ByteSizeUnit };
 export const MAX_ROUTING_ATTEMPTS = 65535;
 export const UNLIMITED_ROUTING_ATTEMPTS = -1;
 
-/**
- * Route-rule targets select a proxy resource for cost splitting, not a stable
- * IP, so proxy-pool gateways (rotating residential proxies) are valid
- * choices — unlike fixed-fallback candidates. Sticky per-account templates
- * stay excluded because they render a different exit per caller identity.
- */
-export function routeRuleNodeCandidates(nodes: EgressNodeDTO[]): EgressNodeDTO[] {
-  return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.accountBoundProxy && node.scope === "grok_build");
-}
 
 const durationSchema = z.object({ value: z.number().positive(), unit: z.enum(["s", "m", "h", "d"]) });
 const positiveInteger = z.number().int().positive();
@@ -508,6 +499,24 @@ function validJSONTunnelBoolean(value: unknown): boolean {
 /** Subscription fetch proxies must never use per-account lease placeholders. */
 export function validSubscriptionProxyURL(value: string): boolean {
   return !value.includes("{account}") && validProxyURL(value);
+}
+
+// 订阅地址与后端 normalizeSubscriptionURL 同口径:HTTP(S)、有主机名、无
+// 片段、无控制字符、长度 <= 8192。
+export function validSubscriptionURL(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 8192) return false;
+  // eslint-disable-next-line no-control-regex -- 与后端控制字符校验同口径 (0x00-0x1f, 0x7f)
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (!parsed.hostname) return false;
+  return !parsed.hash;
 }
 
 function internalSignerHostname(value: string): boolean {
