@@ -234,9 +234,7 @@ function FieldLabelWithHelp({ label, help, lines }: { label: string; help?: stri
 /** 调度统计:每节点 选中/失败 计数,验证策略分布是否如预期。
  *  后端进程内存计数,前端与成员列表合并出零值行;开着弹窗每 3s 刷新。
  *  弹窗自身不滚动:标题/合计/按钮固定,表格走 viewportRows 内部滚动
- *  (节点多的池表头跟随 sticky),短屏时由滚动容器收缩消化剩余空间。
- *  表格装在带边框的圆角盒内、表头行铺 muted 底色:行在盒子内部消失,
- *  不再与弹窗背景连成一片形成"标题下方有条缝"的观感。 */
+ *  (节点多的池表头跟随 sticky),短屏时由滚动容器收缩消化剩余空间。 */
 function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; onOpenChange: (open: boolean) => void }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -271,16 +269,15 @@ function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; o
   const currentNode = pool.strategy === "rotation" && pool.rotationCursorNodeId ? pool.rotationCursorNodeId : pool.strategy === "sticky" ? (pool.preferredNodeId ?? (pool.memberIds ?? [])[0]) : undefined;
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col gap-3 overflow-hidden sm:max-w-2xl">
+      <DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col overflow-hidden sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("proxies.pools.statsTitle", { name: pool.name })}</DialogTitle>
         </DialogHeader>
         {statsQuery.isPending ? <div className="flex h-20 items-center justify-center"><Spinner /></div> : rows.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">{t("proxies.pools.statsEmpty")}</p>
         ) : (
-          <div className="overflow-hidden rounded-md border">
           <Table className="table-fixed" viewportRows={10} rowHeight={40}>
-            <TableHeader><TableRow className="bg-muted/50 hover:bg-transparent">
+            <TableHeader><TableRow className="hover:bg-transparent">
               <TableHead className="w-[132px] text-center">{t("settings.egress.name")}</TableHead>
               <TableHead className="w-[72px] text-center">{t("proxies.pools.statsStatus")}</TableHead>
               <TableHead className="w-[64px] text-center">{t("proxies.pools.statsSelections")}</TableHead>
@@ -301,7 +298,6 @@ function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; o
               ))}
             </TableBody>
           </Table>
-          </div>
         )}
         <DialogFooter className="items-center sm:justify-between">
           <span className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">{t("proxies.pools.statsTotals", {
