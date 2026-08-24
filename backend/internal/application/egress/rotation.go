@@ -399,8 +399,7 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 	// 文档(EXIT-IP-GUARD §5)的端到端验证依赖此事件:webhook 已实际调用、
 	// 即将进入等待与探活阶段。此前全链路没有该事件, 按文档 grep 验收必失败。
 	logger.Info("egress_rotation_triggered", "node_id", nodeID, "node", node.Name)
-	previousExitIP := node.ExitIP
-	if previousExitIP != "" && probe.ExitIP == previousExitIP {
+	if node.ExitIP != "" && !exitIPRotationChanged(node, probe) {
 		s.failRotation(ctx, nodeID, &node, cfg, "exit ip unchanged after rotation", logger)
 		return
 	}
@@ -413,7 +412,7 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 			return
 		}
 		s.recordRotationState(ctx, nodeID, 0, "", true)
-		logger.Warn("egress_rotation_tentative_release", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "cooldown", qualityCfg.TentativeReleaseCooldown.String())
+		logger.Warn("egress_rotation_tentative_release", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP, "cooldown", qualityCfg.TentativeReleaseCooldown.String())
 		perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "tentative_release"})
 		return
 	}
@@ -427,7 +426,7 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 			return
 		}
 		s.recordRotationState(ctx, nodeID, 0, "", true)
-		logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP)
+		logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP)
 		perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "succeeded"})
 	case EgressQualityProbeDegraded:
 		s.failRotation(ctx, nodeID, &node, cfg, "canary degraded: "+result.Reason, logger)
@@ -516,6 +515,38 @@ func (s *Service) callRotationWebhook(ctx context.Context, rotationURL string, c
 		lastErr = fmt.Errorf("webhook HTTP %d", response.StatusCode)
 	}
 	return lastErr
+}
+
+// exitIPRotationChanged reports whether the node's exit identity actually
+// changed after a rotation, comparing per address family (IPv4 vs IPv4,
+// IPv6 vs IPv6). Some tunnel images (MicroWARP in particular) re-dial with a
+// stable IPv4 while the IPv6 egress rotates every restart, so the legacy
+// aggregate comparison (which prefers IPv4) would flag every rotation of
+// such nodes as "unchanged" and exhaust them into permanent quarantine.
+// Any family whose current ExitIP differs from its recorded predecessor
+// counts as rotated. When neither family has a comparable history (legacy
+// nodes carrying only the aggregate ExitIP), fall back to the aggregate
+// comparison so the anti-fake-webhook guarantee is preserved.
+func exitIPRotationChanged(node domain.Node, probe domain.ProbeResult) bool {
+	changed := false
+	comparable := false
+	for _, family := range [][2]string{
+		{node.IPv4Probe.ExitIP, probe.IPv4.ExitIP},
+		{node.IPv6Probe.ExitIP, probe.IPv6.ExitIP},
+	} {
+		previous, current := family[0], family[1]
+		if previous == "" || current == "" {
+			continue
+		}
+		comparable = true
+		if current != previous {
+			changed = true
+		}
+	}
+	if comparable {
+		return changed
+	}
+	return probe.ExitIP != node.ExitIP
 }
 
 func (s *Service) waitNodeHealthy(ctx context.Context, nodeID uint64, cfg RotationConfig) (domain.ProbeResult, error) {
