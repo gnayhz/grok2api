@@ -921,8 +921,12 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	if supported {
 		level, ruleConfigured = decidingRoutingLevel(config, scope, TrafficClassFromContext(ctx))
 	}
-	// 路由层级解析：语义(流量类别) → 作用域 → 总出口 → 自动调度。目标不可
-	// 用时逐级退回自动调度，绝不因配置失效而失败请求。
+	// 路由层级解析：语义(流量类别) → 作用域 → 总出口 → 自动调度。「回退」
+	// 只发生在配置阶梯的降级(更具体层级未配置时落到下一层级);一旦某层级
+	// 配置了明确目标,该目标就是强绑定:固定节点不可用或代理池整体失效时
+	// 快速失败,绝不静默改道到边界外的节点——账号出口 IP 的无声突变本身就是
+	// 风险。需要容错应配置代理池:池是 any-of 契约,成员轮换/链式池/池内
+	// 直连回退都在配置边界之内。
 	switch target.Mode.Normalized() {
 	case domain.RoutingTargetDirect:
 		// 直连是显式路由决策，无需 allowDirect —— 与旧版直连路由规则一致。
@@ -945,9 +949,13 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		if !errors.Is(err, ErrRoutingTargetUnavailable) {
 			return nil, true, err
 		}
+		// 固定节点目标=强绑定:节点被质量守卫隔离/冷却/停用而不可用时快速
+		// 失败,让操作者立即看到配置失效,而不是流量悄悄改道其它出口。回退
+		// 计数如实记录「配置的出口没有接住流量」。需要容错请配置代理池。
 		if ruleConfigured {
 			RecordRoutingOutcome(level, target, RoutingOutcomeFallback)
 		}
+		return nil, true, fmt.Errorf("路由固定出口不可用(严格绑定,不自动改道): %w", err)
 	case domain.RoutingTargetPool:
 		// 池的 direct 回退是降级而非主路由决策(与显式 direct 路由不同),
 		// 必须遵守调用方的 allowDirect 契约:AcquireIfConfigured 不接受
@@ -956,21 +964,25 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		lease, outcome, err := m.AcquirePoolRouted(ctx, scope, affinity, target.PoolID, allowDirect, encryptedCredentialCookies)
 		if err != nil {
 			if ctx.Err() != nil {
-				// 请求已取消:不得继续走自动调度为死请求租约节点、
-				// 抬高 inflight 计数并触发无意义的健康反馈。
+				// 请求已取消:不得为死请求租约节点、抬高 inflight 计数
+				// 并触发无意义的健康反馈。
 				return nil, true, ctx.Err()
 			}
-			// 池读失败(DB 抖动)不 fail 请求:记 Fallback 退回自动调度,与固定目标不可用同口径。
-			// 与固定节点目标的差异是有意的:固定节点绑定精确出口 IP,读失败若静默
-			// 降级等于流量无声绕开管理员配置的出口;池本身是 any-of 契约且自带
-			// 回退链,读失败退回自动调度不改变"避开直连"的底线。
+			// 池路由读失败(DB 抖动)同样严格失败:配置了池目标就是圈定了
+			// 出口边界,静默退回自动调度等于流量无声逃出边界(且 DB 故障时
+			// 自动调度的节点列表读取也会失败,回退并不能换来可用性)。
 			if !errors.Is(err, context.Canceled) {
 				m.log().Warn("egress_pool_route_failed", "pool_id", target.PoolID, "error", err.Error())
 			}
+			if ruleConfigured {
+				RecordRoutingOutcome(level, target, RoutingOutcomeFallback)
+			}
+			return nil, true, fmt.Errorf("%w 路由代理池不可用(严格绑定,不自动改道): %v", ErrRoutingTargetUnavailable, err)
 		}
-		if err == nil && lease != nil && outcome != PoolRouteNone {
-			// 只有目标池自身选出成员才算命中;链式回退池/回退直连是降级,
-			// 记 Fallback 让行内统计如实反映"配置的出口没有接住流量"。
+		if lease != nil && outcome != PoolRouteNone {
+			// 只有目标池自身选出成员才算命中;链式回退池/回退直连是配置边界
+			// 之内的降级,记 Fallback 让行内统计如实反映"目标池没有亲自接住
+			// 流量"。
 			if ruleConfigured {
 				outcomeKind := RoutingOutcomeFallback
 				if outcome == PoolRouteMember {
@@ -980,9 +992,13 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 			}
 			return lease, true, nil
 		}
+		// 池整体未产出租约(池被删除/停用、成员全部冷却且无可用的链式/直连
+		// 回退):严格失败。自动调度里的节点不在管理员圈定的边界内,静默改道
+		// 与固定节点不可用改道是同一种意外。
 		if ruleConfigured {
 			RecordRoutingOutcome(level, target, RoutingOutcomeFallback)
 		}
+		return nil, true, fmt.Errorf("%w 路由代理池 %d 未产出出口(严格绑定,不自动改道): 池不存在/停用或全部成员不可用", ErrRoutingTargetUnavailable, target.PoolID)
 	}
 	// 自动调度：所有未入池的启用节点按健康度与调用方亲和选择。
 	nodes, err := m.listNodes(ctx, now)
@@ -1030,8 +1046,8 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 }
 
 // ErrRoutingTargetUnavailable reports that a configured fixed routing
-// target cannot currently serve the request. Callers fall back to the
-// automatic schedule instead of failing the request.
+// target cannot currently serve the request. Callers fail fast: a configured
+// target is a strict binding, never silently rerouted to other exits.
 var ErrRoutingTargetUnavailable = errors.New("egress routing target unavailable")
 
 // acquireFixedTarget leases one fixed routing-target node. It uses the
@@ -1063,7 +1079,7 @@ func (m *Manager) acquireFixedTarget(ctx context.Context, scope domain.Scope, af
 			return lease, nil
 		}
 		// 请求内排除(降智守卫)对固定目标同样生效:重试必须离开坏出口,
-		// 否则守卫对固定路由配置完全失效。回退自动调度,不 fail 请求。
+		// 否则守卫对固定路由配置完全失效。以不可用告终,调用方快速失败。
 		if nodeExcluded(ctx, selected.ID) {
 			return nil, fmt.Errorf("%w: node %d excluded by degrade guard", ErrRoutingTargetUnavailable, nodeID)
 		}
@@ -1081,7 +1097,7 @@ func (m *Manager) acquireFixedTarget(ctx context.Context, scope domain.Scope, af
 			return nil, fmt.Errorf("%w: node %d cooling down", ErrRoutingTargetUnavailable, nodeID)
 		}
 		// L2 未决软冷却同样使固定目标不可用:降智证据尚未归因,继续命中只会
-		// 重复撞坏出口;退回自动调度。
+		// 重复撞坏出口;以不可用告终,由调用方快速失败。
 		if m.nodeSoftCooled(nodeID, time.Now().UTC()) {
 			return nil, fmt.Errorf("%w: node %d pending degrade evidence", ErrRoutingTargetUnavailable, nodeID)
 		}

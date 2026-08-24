@@ -209,8 +209,8 @@ func TestE2EPoolRouteRealProxyRoundTrip(t *testing.T) {
 	if err == nil {
 		t.Fatal("all exits down: routing must fail explicitly, not hand out a lease")
 	}
-	if configured {
-		t.Fatal("must not report a configured egress when every exit is cooling down")
+	if !configured {
+		t.Fatal("pool target is configured; exhaustion must surface as an explicit error, not as unconfigured")
 	}
 	// allowDirect=true 的调用方同样不得拿到直连:节点存在但全部冷却,
 	// 显式失败优先于未经授权的直连降级。

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -89,8 +90,9 @@ func TestPoolTargetRoutesThroughPoolMember(t *testing.T) {
 	}
 }
 
-// 验收链路:池耗尽(成员全隔离)时逐级退回——不再死守空池,落到自动调度。
-func TestPoolTargetExhaustedFallsBackToAutomaticSchedule(t *testing.T) {
+// 验收链路:池耗尽(成员全隔离)时严格失败——池目标是强绑定,绝不逃逸到
+// 自动调度里的其它出口。需要容错应配置带回退链的池。
+func TestPoolTargetExhaustedFailsStrict(t *testing.T) {
 	fallbackProxyURL, fallbackCalls, upstream := newRouteRuleProxyPair(t)
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -124,14 +126,15 @@ func TestPoolTargetExhaustedFallsBackToAutomaticSchedule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := transport.RoundTrip(request)
-	if err != nil {
-		t.Fatalf("roundtrip after pool exhaustion failed: %v", err)
+	_, err = transport.RoundTrip(request)
+	if err == nil {
+		t.Fatal("exhausted pool target must fail strict instead of silently rerouting")
 	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, response.Body)
-	if got := atomic.LoadInt64(fallbackCalls); got != 1 {
-		t.Fatalf("automatic-schedule fallback proxy calls = %d, want 1", got)
+	if !errors.Is(err, infraegress.ErrRoutingTargetUnavailable) {
+		t.Fatalf("err = %v, want ErrRoutingTargetUnavailable", err)
+	}
+	if got := atomic.LoadInt64(fallbackCalls); got != 0 {
+		t.Fatalf("no exit may serve a strictly-bound request: proxy calls = %d", got)
 	}
 }
 

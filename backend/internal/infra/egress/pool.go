@@ -190,7 +190,8 @@ func (m *Manager) AcquirePoolRouted(ctx context.Context, scope domain.Scope, aff
 		pool, members, err := m.cachedPoolMembers(ctx, current, now)
 		if err != nil {
 			if !errors.Is(err, repository.ErrNotFound) {
-				// 读失败向调用方报错,acquire 会退回自动调度(绝不能回退 direct)。
+				// 读失败向调用方报错:配置了池目标就是圈定出口边界,严格失败,
+				// 绝不退回自动调度、更不回退 direct。
 				return nil, PoolRouteNone, err
 			}
 			return nil, PoolRouteNone, nil

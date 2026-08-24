@@ -206,7 +206,7 @@ export function RoutingPanel() {
 	const poolsQuery = useQuery({ queryKey: ["egress-pools", "routing-options"], queryFn: () => listEgressPools() });
 	const statsQuery = useQuery({ queryKey: ["egress-routing-stats"], queryFn: () => getEgressRoutingStats(), refetchInterval: 10_000 });
 	const nodes = fixedTargetCandidates(nodesQuery.data?.items ?? []);
-	// 目标下拉列出全部池:已停用的池标注状态——运行时会回退自动调度,
+	// 目标下拉列出全部池:已停用的池标注状态——运行时严格失败(强绑定),
 	// 但配置值不能在界面上静默消失。
 	const pools = poolsQuery.data ?? [];
 	const allNodes = nodesQuery.data?.items ?? [];

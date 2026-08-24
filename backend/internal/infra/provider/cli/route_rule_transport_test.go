@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -242,9 +243,10 @@ func TestEgressTransportPinnedNodeBypassesRouting(t *testing.T) {
 	}
 }
 
-// A node target that became unavailable must not fail the request: the
-// transport falls back to the automatic schedule and records the outcome.
-func TestEgressTransportFallsBackWhenNodeTargetUnavailable(t *testing.T) {
+// A node target that became unavailable fails strict: configured targets are
+// bindings, the transport surfaces ErrRoutingTargetUnavailable instead of
+// silently rerouting to the automatic schedule or going direct.
+func TestEgressTransportFailsStrictWhenNodeTargetUnavailable(t *testing.T) {
 	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
 	transport := newRouteRuleTransport(t, proxyURL, classNodeTarget(domainegress.TrafficClassBilling, 404))
 	// The repository has no node 404, so the target misses.
@@ -256,19 +258,13 @@ func TestEgressTransportFallsBackWhenNodeTargetUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := transport.RoundTrip(request)
-	if err != nil {
-		t.Fatalf("unavailable node target must fall back, got error: %v", err)
+	_, err = transport.RoundTrip(request)
+	if !errors.Is(err, infraegress.ErrRoutingTargetUnavailable) {
+		t.Fatalf("unavailable node target must fail strict, got err=%v", err)
 	}
-	body, _ := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if string(body) != "upstream-body" {
-		t.Fatalf("body = %q", body)
-	}
-	// No automatic node is configured either, so the request went direct: the
-	// invariant is the request survived the dead target.
+	// No exit may serve a strictly-bound request: neither proxy nor direct.
 	if got := atomic.LoadInt64(proxyCalls); got != 0 {
-		t.Fatalf("proxy calls = %d, want 0 (target missing, pool empty)", got)
+		t.Fatalf("proxy calls = %d, want 0 (strict binding must not reroute)", got)
 	}
 }
 

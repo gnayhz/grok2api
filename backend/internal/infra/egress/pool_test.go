@@ -344,8 +344,9 @@ func (r *poolRoutingConfigRepo) GetEgressOperationsConfig(context.Context) (doma
 // 池的 direct 回退是降级而非主路由决策:经 acquire 走池时必须遵守
 // 调用方的 allowDirect 契约。AcquireIfConfigured(allowDirect=false)在
 // 池耗尽 + FallbackMode=direct 时不得拿到 manager 直连租约——那会绕过
-// 调用方 fallback transport 的 HTTP_PROXY 语义;应退回自动调度,无可用
-// 节点时返回"未配置",由调用方自己的直连兜底接管。
+// 调用方 fallback transport 的 HTTP_PROXY 语义;池目标是强绑定,耗尽且
+// 无法在边界内回退时快速失败(ErrRoutingTargetUnavailable),绝不逃逸到
+// 自动调度。allowDirect=true 的调用方仍拿池内直连回退租约。
 func TestPoolRouteDirectFallbackHonorsAllowDirect(t *testing.T) {
 	config := domain.DefaultOperationsConfig()
 	config.DefaultTarget = domain.RoutingTarget{Mode: domain.RoutingTargetPool, PoolID: 1}
@@ -362,8 +363,8 @@ func TestPoolRouteDirectFallbackHonorsAllowDirect(t *testing.T) {
 	}
 
 	acquired, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "acct")
-	if err != nil || configured || acquired != nil {
-		t.Fatalf("AcquireIfConfigured must not receive a direct lease from pool fallback: lease=%v configured=%v err=%v", acquired, configured, err)
+	if acquired != nil || !configured || !errors.Is(err, ErrRoutingTargetUnavailable) {
+		t.Fatalf("exhausted pool target must fail strict without a lease: lease=%v configured=%v err=%v", acquired, configured, err)
 	}
 
 	// allowDirect=true 的调用方(如 AcquireCredential)仍应拿到回退直连租约。
@@ -409,12 +410,12 @@ func TestAcquirePoolRouteCanceledContextStopsBeforeAutoSchedule(t *testing.T) {
 		lease.Release()
 		t.Fatal("canceled acquire must not produce a lease from the automatic schedule")
 	}
-	// 对照:同配置下未取消的请求仍可经自动调度正常取到节点。
-	healthy, _, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "acct")
-	if err != nil || healthy == nil {
-		t.Fatalf("uncanceled acquire must fall back to automatic schedule: lease=%v err=%v", healthy, err)
+	// 对照:同配置下未取消的请求不再落入自动调度——空池且无回退是配置
+	// 边界内的整体失效,严格失败并归因哨兵错误。
+	strictLease, _, strictErr := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "acct")
+	if strictLease != nil || !errors.Is(strictErr, ErrRoutingTargetUnavailable) {
+		t.Fatalf("uncanceled acquire must fail strict on an exhausted pool: lease=%v err=%v", strictLease, strictErr)
 	}
-	healthy.Release()
 }
 
 // 成员重写后,持久化簿记必须与游标一起重置:按旧成员序推进的滞留写协程
