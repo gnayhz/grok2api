@@ -977,7 +977,7 @@ const resources = {
         durationUnit: "时长单位",
         groups: {
             "providers": "Provider 配置",
-            "delivery": "媒体与网络",
+            "delivery": "媒体",
             "policies": "运行策略",
             "about": "关于",
             "audit": "日志设置",
@@ -2087,7 +2087,7 @@ const resources = {
             "durationUnit": "Duration unit",
             "groups": {
               "providers": "Providers",
-              "delivery": "Media & network",
+              "delivery": "Media",
               "policies": "Runtime policies",
               "about": "About",
               "audit": "Audit & Logs",
