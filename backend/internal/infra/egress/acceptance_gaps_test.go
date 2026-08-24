@@ -41,7 +41,7 @@ func TestFreshQuarantineResetsRotationAttempts(t *testing.T) {
 }
 
 // 验收④:固定路由目标(含金丝雀钉住节点)在 L2 软冷却期间不可用,
-// 调用方退回自动调度而非继续命中受检出口。
+// 以 ErrRoutingTargetUnavailable 快速失败——严格绑定,不改道也不撞回坏出口。
 func TestPinnedNodeRejectsSoftCooledTarget(t *testing.T) {
 	repo := &qualityRotationRepo{node: newNodeWith(11)}
 	manager := NewManager(repo, testCipher(t))

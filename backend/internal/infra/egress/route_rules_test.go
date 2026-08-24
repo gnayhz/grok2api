@@ -103,8 +103,9 @@ func TestAcquireScopeTargetInheritsAssetScopes(t *testing.T) {
 	}
 }
 
-// 固定节点目标不可用时退回自动调度,请求绝不因配置失效而失败。
-func TestRoutingTargetNodeFallsBackToAutomaticSchedule(t *testing.T) {
+// 固定节点目标=强绑定:目标不可用(不存在/停用/冷却/池成员节点)时请求
+// 快速失败,绝不静默改道自动调度里的其它节点。需要容错应配置代理池。
+func TestRoutingTargetNodeUnavailableFailsStrict(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
@@ -130,14 +131,14 @@ func TestRoutingTargetNodeFallsBackToAutomaticSchedule(t *testing.T) {
 		manager.repository.(*routeRuleRepository).nodes = []domain.Node{fallback}
 		ctx := WithTrafficClass(context.Background(), domain.TrafficClassBilling)
 		lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, "acct")
-		if acquireErr != nil {
-			t.Errorf("%s: acquire failed: %v", name, acquireErr)
+		if acquireErr == nil {
+			lease.Release()
+			t.Errorf("%s: strict binding must fail when the target is unavailable, got lease node %d", name, lease.NodeID)
 			continue
 		}
-		if lease.NodeID != 22 {
-			t.Errorf("%s: lease node = %d, want fallback to automatic node 22", name, lease.NodeID)
+		if !errors.Is(acquireErr, ErrRoutingTargetUnavailable) {
+			t.Errorf("%s: err = %v, want ErrRoutingTargetUnavailable", name, acquireErr)
 		}
-		lease.Release()
 		// 目标配置在总出口层:统计归因到 default 行,而不是请求的流量类别。
 		// (进程内计数器是全局的,不断言 class 行为零——前序用例可能已写入。)
 		if stat := findRoutingStat("default", "node"); stat == nil || stat.Fallback < 1 {
@@ -210,7 +211,8 @@ func findRoutingStat(level, mode string) *RoutingStat {
 }
 
 // 降智守卫的请求内排除必须对固定节点目标生效:否则守卫对固定路由
-// 配置完全失效,重试 100% 撞回同一坏出口。
+// 配置完全失效。严格绑定语义下,排除即不可用——重试快速失败而不是
+// 撞回同一坏出口,也不是改道其它出口。
 func TestFixedTargetHonorsNodeExclusions(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -242,16 +244,17 @@ func TestFixedTargetHonorsNodeExclusions(t *testing.T) {
 	}
 	lease.Release()
 
-	// 守卫排除 31 后:必须退回自动调度落 32,而不是再次命中 31。
+	// 守卫排除 31 后:固定目标是强绑定,重试不得改道其它出口——账号出口
+	// IP 的中途突变本身就是风险。必须以 ErrRoutingTargetUnavailable 快速
+	// 失败,让操作者看到配置的出口已不适合服务。
 	ctx := WithNodeExclusions(context.Background(), map[uint64]struct{}{31: {}})
 	lease2, err := manager.Acquire(ctx, domain.ScopeBuild, "acct")
-	if err != nil {
-		t.Fatal(err)
+	if lease2 != nil {
+		lease2.Release()
 	}
-	if lease2.NodeID != 32 {
-		t.Fatalf("excluded fixed target must fall back to automatic schedule, got node %d", lease2.NodeID)
+	if !errors.Is(err, ErrRoutingTargetUnavailable) {
+		t.Fatalf("excluded fixed target must fail strict, got lease=%v err=%v", lease2, err)
 	}
-	lease2.Release()
 }
 
 type routeRuleDbErrorRepo struct {

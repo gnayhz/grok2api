@@ -348,7 +348,7 @@ Egress nodes are pure proxy resources - no scope, no account binding. The admin 
 - TCP, WebSocket, and TLS tunnel transports; unsupported variants are rejected during import
 - Subscription and text/Base64 import
 - Batch probes, filtering, and deletion
-- Three-level exit routing resolved per request: traffic class (inference / credential / billing / model sync / video) -> scope (Build / Web / Console) -> default exit -> automatic schedule. Each level can be unset (follows the next level down), direct, one fixed node, or a dedicated pool
+- Three-level exit routing resolved per request: traffic class (inference / credential / billing / model sync / video) -> scope (Build / Web / Console) -> default exit -> automatic schedule. Each level can be unset (follows the next level down), direct, one fixed node, or a dedicated pool. "Falling back" only means an unset level resolving to the next level down; a configured target is a strict binding — when its node is quarantined/cooling/disabled or its pool is exhausted, requests fail fast with an explicit error instead of silently rerouting to other exits. Use a pool for fault tolerance: member rotation, chained pools, and in-pool direct fallback all stay inside the configured boundary
 - Dedicated pools: named node groups with their own scheduling strategy (caller-sticky rendezvous, random, first-preferred, forward rotation) and an exhausted-fallback (another pool or direct)
 - Proxy-pool mode without global cooldown after one connection failure
 - Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
