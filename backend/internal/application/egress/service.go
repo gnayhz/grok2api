@@ -76,6 +76,10 @@ type Service struct {
 	qualityMu          sync.Mutex
 	qualityEvidence    map[uint64][]degradeObservation
 
+	// 死出口确认状态(probe_dead.go): 连续双族探活失败的观测计数。
+	probeDeadMu sync.Mutex
+	probeDead   map[uint64]probeDeadObservation
+
 	rotationCfg    RotationConfig
 	rotation       *rotationScheduler
 	rotationLogger *slog.Logger

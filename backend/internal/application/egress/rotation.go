@@ -403,6 +403,16 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 		s.failRotation(ctx, nodeID, &node, cfg, "exit ip unchanged after rotation", logger)
 		return
 	}
+	// 死出口轮换(LastError=transport 的探活确认触发): 隧道已重启且探活
+	// 健康, 目的即达成——健康探活已按 last_error=transport 自动清除冷却
+	// (repository CASE 分支), 节点已回池。不走 canary(质量判决与"隧道
+	// 复活"正交), 也无需解除质量隔离(本就没有质量隔离)。
+	if node.LastError == domain.LastErrorTransport {
+		s.recordRotationState(ctx, nodeID, 0, "", true)
+		logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP, "reason", "probe_dead_recovered")
+		perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "succeeded"})
+		return
+	}
 	now := time.Now().UTC()
 	if prober == nil {
 		// No canary wiring: tentative re-admission with a short cooldown. The
@@ -553,7 +563,7 @@ func (s *Service) waitNodeHealthy(ctx context.Context, nodeID uint64, cfg Rotati
 	deadline := time.Now().Add(cfg.ProbeTimeout)
 	var last domain.ProbeResult
 	for {
-		result, err := s.TestNode(ctx, nodeID)
+		result, err := s.testNode(ctx, nodeID, false)
 		if err != nil {
 			return result, err
 		}

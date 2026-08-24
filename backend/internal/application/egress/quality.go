@@ -71,6 +71,10 @@ type QualityQuarantiner interface {
 	// degrade counters; used for tentative re-admission after inconclusive
 	// verification.
 	CooldownNodeForQuality(ctx context.Context, nodeID uint64, until time.Time) error
+	// CooldownNodeForProbeFailure applies a transport cooldown after a
+	// confirmed dead exit (both address families failed twice in a row).
+	// Recovery is automatic: the next healthy probe clears it.
+	CooldownNodeForProbeFailure(ctx context.Context, nodeID uint64, until time.Time) error
 }
 
 // EgressQualityProber verifies one node's exit IP with a minimal real

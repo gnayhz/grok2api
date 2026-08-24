@@ -224,6 +224,35 @@ func TestRotationBothFamiliesUnchangedFails(t *testing.T) {
 	}
 }
 
+// 死出口轮换(LastError=transport): 隧道重启探活健康即成功——不走 canary、
+// 不做质量解除、不做暂定冷却; 尝试计数归零。
+func TestRotationProbeDeadRecoversWithoutCanary(t *testing.T) {
+	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7",
+		IPv4: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7"},
+		IPv6: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "2001:db8::dead:beef:9"}, TestedAt: time.Now()}
+	node := domain.Node{ID: 3, Name: "warp", Enabled: true, Health: 1, ExitIP: "198.51.100.7", LastError: "transport error",
+		IPv4Probe: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7"},
+		IPv6Probe: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "2001:db8::dead:beef:8"}}
+	service, repo, _, _, canary := newRotationTestService(t, node, true, probe, EgressQualityProbeResult{Outcome: EgressQualityProbeClean})
+	quarantiner := &fakeQuarantiner{}
+	service.qualityQuarantiner = quarantiner
+	service.processRotation(context.Background(), 3)
+	if canary.calls != 0 {
+		t.Fatalf("canary calls = %d, want 0 (transport rotation must not verify quality)", canary.calls)
+	}
+	quarantiner.mu.Lock()
+	releases, cooldowns := len(quarantiner.release), len(quarantiner.cooldown)
+	quarantiner.mu.Unlock()
+	if releases != 0 || cooldowns != 0 {
+		t.Fatalf("quality release/cooldown must not run: release=%d cooldown=%d", releases, cooldowns)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if attempts, _ := repo.rotationState[1].(int); attempts != 0 {
+		t.Fatalf("attempts = %v, want reset to 0", repo.rotationState[1])
+	}
+}
+
 // canary 判定降智 → 计失败；到上限后不再重排。
 func TestRotationCanaryDegradedCountsAndCaps(t *testing.T) {
 	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "203.0.113.9", TestedAt: time.Now()}

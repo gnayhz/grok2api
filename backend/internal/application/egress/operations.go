@@ -301,7 +301,18 @@ func (s *Service) ImportText(ctx context.Context, input ImportInput) (ImportResu
 	return ImportResult{Imported: created, Skipped: skipped}, nil
 }
 
+// TestNode probes one node and feeds the result into the dead-exit detector:
+// manual single tests, batch tests, periodic sweeps and confirmation re-probes
+// all observe.
 func (s *Service) TestNode(ctx context.Context, id uint64) (domain.ProbeResult, error) {
+	return s.testNode(ctx, id, true)
+}
+
+// testNode performs one probe. observe=false (rotation waitNodeHealthy) skips
+// the dead-exit detector: a tight restart-wait retry loop is not an independent
+// health observation, and counting it would confirm dead episodes from the
+// rotation machinery itself.
+func (s *Service) testNode(ctx context.Context, id uint64, observe bool) (domain.ProbeResult, error) {
 	operations, err := s.operationsRepository()
 	if err != nil {
 		return domain.ProbeResult{}, err
@@ -341,6 +352,9 @@ func (s *Service) TestNode(ctx context.Context, id uint64) (domain.ProbeResult, 
 	// An unreachable proxy is a completed probe with an unhealthy result, not
 	// an API operation failure. Persistence and repository failures still return
 	// above so callers can distinguish them from node health.
+	if observe {
+		s.observeProbeResult(node, result)
+	}
 	return result, nil
 }
 
