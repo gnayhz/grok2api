@@ -955,6 +955,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		if ruleConfigured {
 			RecordRoutingOutcome(level, target, RoutingOutcomeFallback)
 		}
+		m.log().Warn("egress_strict_target_unavailable", "level", level, "node_id", target.NodeID, "error", err.Error())
 		return nil, true, fmt.Errorf("路由固定出口不可用(严格绑定,不自动改道): %w", err)
 	case domain.RoutingTargetPool:
 		// 池的 direct 回退是降级而非主路由决策(与显式 direct 路由不同),
@@ -962,6 +963,11 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		// manager 直连租约,否则会绕过调用方 fallback transport 的
 		// HTTP_PROXY 语义。
 		lease, outcome, err := m.AcquirePoolRouted(ctx, scope, affinity, target.PoolID, allowDirect, encryptedCredentialCookies)
+		if err != nil && lease != nil {
+			// 防御:AcquirePoolRouted 的 direct 回退分支可能同时透传租约与错误,
+			// 先释放租约再失败,避免 inflight 计数泄漏。
+			lease.Release()
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				// 请求已取消:不得为死请求租约节点、抬高 inflight 计数
