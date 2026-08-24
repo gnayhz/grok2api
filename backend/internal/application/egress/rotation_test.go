@@ -184,6 +184,46 @@ func TestRotationUnchangedExitIPFails(t *testing.T) {
 	}
 }
 
+// IPv4 恒定、仅 IPv6 变化(MicroWARP 重启常态)→ 轮换视为有效,放行 canary。
+func TestRotationIPv6OnlyChangeSucceeds(t *testing.T) {
+	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7",
+		IPv4: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7"},
+		IPv6: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "2001:db8::dead:beef:2"}, TestedAt: time.Now()}
+	node := domain.Node{ID: 3, Name: "warp", Enabled: true, Health: 1, ExitIP: "198.51.100.7",
+		IPv4Probe: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7"},
+		IPv6Probe: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "2001:db8::dead:beef:1"}}
+	service, repo, _, _, canary := newRotationTestService(t, node, true, probe, EgressQualityProbeResult{Outcome: EgressQualityProbeClean})
+	service.processRotation(context.Background(), 3)
+	if canary.calls != 1 {
+		t.Fatalf("canary calls = %d, want 1 (IPv6 rotation must count as changed)", canary.calls)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if repo.rotationState[1] != 0 {
+		t.Fatalf("attempts = %+v, want reset to 0", repo.rotationState)
+	}
+}
+
+// 双栈均未变化 → 仍然失败(防假 webhook 语义保留)。
+func TestRotationBothFamiliesUnchangedFails(t *testing.T) {
+	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7",
+		IPv4: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7"},
+		IPv6: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "2001:db8::dead:beef:1"}, TestedAt: time.Now()}
+	node := domain.Node{ID: 3, Name: "warp", Enabled: true, Health: 1, ExitIP: "198.51.100.7",
+		IPv4Probe: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.7"},
+		IPv6Probe: domain.ProbeFamilyResult{Status: domain.ProbeStatusHealthy, ExitIP: "2001:db8::dead:beef:1"}}
+	service, repo, _, _, canary := newRotationTestService(t, node, true, probe, EgressQualityProbeResult{Outcome: EgressQualityProbeClean})
+	service.processRotation(context.Background(), 3)
+	if canary.calls != 0 {
+		t.Fatalf("canary calls = %d, want 0 (no family changed)", canary.calls)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if repo.rotationState[1] != 1 {
+		t.Fatalf("attempts = %+v, want 1", repo.rotationState)
+	}
+}
+
 // canary 判定降智 → 计失败；到上限后不再重排。
 func TestRotationCanaryDegradedCountsAndCaps(t *testing.T) {
 	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "203.0.113.9", TestedAt: time.Now()}
