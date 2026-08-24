@@ -734,6 +734,8 @@ func (h *Handler) handleVideoCreate(c *gin.Context, operation, label string) {
 	}
 	var request videoGenerationRequest
 	if err := decodeSingleJSON(c.Request.Body, &request, true); err != nil {
+		// 保留 unknown field 细节:视频端点用 DisallowUnknownFields 显式拒绝
+		// 不支持参数, 客户端依赖错误里的字段名(handler_test 锁定该契约)。
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", label+" JSON 请求无效: "+err.Error())
 		return
 	}
@@ -1591,11 +1593,18 @@ func nextInternalSSEMarker(value []byte) (int, int) {
 	return index, length
 }
 
-func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (responseMetadata, error) {
+func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (metadata responseMetadata, returnErr error) {
 	buffer := make([]byte, responseCopyBufferBytes)
 	metadataBody := make([]byte, 0, responseCopyBufferBytes)
 	metadataComplete := true
 	transferred := 0
+	// 错误出口也回填已交付字节:非流式传输中途失败(超限/写错误)时,
+	// RecordDelivery 此前拿到 0, 审计里"200+错误码"的行无法反映实际已写体量。
+	defer func() {
+		if returnErr != nil {
+			metadata = responseMetadata{DeliveredBytes: int64(transferred)}
+		}
+	}()
 	for {
 		n, readErr := source.Read(buffer)
 		if n > 0 {

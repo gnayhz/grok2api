@@ -59,6 +59,12 @@ func (c *streamConverter) thinkingDelta(delta string) error {
 	if c.operation != OperationMessages || !c.options.AnthropicThinking {
 		return nil
 	}
+	if c.thinkingClosed {
+		// 上游输出了第二个 reasoning 项:重开新的 content_block——对已 stop 的
+		// 块继续写 delta 是非法事件序列, 且该项签名会被丢弃。
+		c.thinkingStarted = false
+		c.thinkingClosed = false
+	}
 	if err := c.thinkingStart(""); err != nil {
 		return err
 	}
@@ -165,6 +171,12 @@ func (f *anthropicStreamStopFilter) Flush() string {
 func (c *streamConverter) toolStartMessages(item responseItem) error {
 	if err := c.start(); err != nil {
 		return err
+	}
+	// 上游重放同一 function_call 的 output_item.added 时(重试/恢复路径)跳过:
+	// 同 id 的 tool_use 块出现两次会让后续 tool_result 配对混乱。与 chat 路径
+	// 的 exists 守卫对齐。
+	if _, exists := c.tools[item.ID]; exists {
+		return nil
 	}
 	tool := streamTool{Index: c.nextIndex, ID: anthropicToolUseID(item.CallID), Name: item.Name, Arguments: item.Arguments}
 	c.nextIndex++

@@ -28,8 +28,10 @@ type Trace struct {
 
 type traceContextKey struct{}
 type accountContextKey struct{}
-type egressNodeContextKey struct{}
+type pinnedNodeContextKey struct{}
+type qualityVerificationContextKey struct{}
 type trafficClassContextKey struct{}
+type nodeExclusionsContextKey struct{}
 
 // WithTrafficClass labels one upstream call with its operational purpose so
 // egress route rules can select a dedicated exit without matching URLs. Calls
@@ -59,7 +61,7 @@ func WithAccount(ctx context.Context, provider string, accountID uint64) context
 	if ctx == nil || strings.TrimSpace(provider) == "" || accountID == 0 {
 		return ctx
 	}
-	return WithAccountIdentity(ctx, strings.TrimSpace(provider)+"_"+fmt.Sprintf("%d", accountID))
+	return WithAccountIdentity(ctx, strings.TrimSpace(provider)+fmt.Sprintf("%d", accountID))
 }
 
 // WithCredential passes the stable egress identity of a weakly linked account to Build transport;
@@ -71,33 +73,51 @@ func WithCredential(ctx context.Context, credential accountdomain.Credential) co
 		if provider == "" {
 			provider = accountdomain.ProviderBuild
 		}
-		return WithEgressNode(WithAccount(ctx, string(provider), credential.ID), credential.EgressNodeID)
+		return WithAccount(ctx, string(provider), credential.ID)
 	}
-	return WithEgressNode(WithAccountIdentity(ctx, identity), credential.EgressNodeID)
+	return WithAccountIdentity(ctx, identity)
 }
 
-// WithEgressNode attaches the explicitly assigned node ID for transports that
-// only receive a request context (notably Grok Build's RoundTripper).
-func WithEgressNode(ctx context.Context, nodeID uint64) context.Context {
+// WithPinnedNode pins one upstream call to a specific node, bypassing routing
+// but still honoring cooldowns, degrade-guard exclusions and probe waits.
+// It is set by degraded same-account retries (the retry re-enters the same exit
+// unless it is cooling) and by tests; exit-IP quality verification instead uses
+// WithQualityVerificationNode, which bypasses those guards.
+func WithPinnedNode(ctx context.Context, nodeID uint64) context.Context {
 	if ctx == nil || nodeID == 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, egressNodeContextKey{}, nodeID)
+	return context.WithValue(ctx, pinnedNodeContextKey{}, nodeID)
 }
 
-func egressNodeFromContext(ctx context.Context) uint64 {
+func pinnedNodeFromContext(ctx context.Context) uint64 {
 	if ctx == nil {
 		return 0
 	}
-	value, _ := ctx.Value(egressNodeContextKey{}).(uint64)
+	value, _ := ctx.Value(pinnedNodeContextKey{}).(uint64)
 	return value
 }
 
-// EgressNodeFromContext exposes a non-sensitive binding identifier to the
-// Build transport without exposing the context key itself.
-func EgressNodeFromContext(ctx context.Context) uint64 { return egressNodeFromContext(ctx) }
+// WithQualityVerificationNode 把一次调用钉到受检节点并绕过冷却/排除守卫。
+// 出口质量 canary 验证的对象必然处于质量隔离冷却(L2 软冷却也可能仍在生效,
+// 它们在 canary 判定通过/暂定放行时才被清除); 若钉住路径同样拒绝冷却节点,
+// canary 永远无法执行, "验证通过→解除隔离"的回池链路整体失效。与
+// WithPinnedNode(降智同号重试, 仍受冷却与探活等待约束)语义不同。
+func WithQualityVerificationNode(ctx context.Context, nodeID uint64) context.Context {
+	if ctx == nil || nodeID == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, qualityVerificationContextKey{}, nodeID)
+}
 
-// WithAccountIdentity attaches the stable, non-sensitive identity used by
+func qualityVerificationNodeFromContext(ctx context.Context) uint64 {
+	if ctx == nil {
+		return 0
+	}
+	value, _ := ctx.Value(qualityVerificationContextKey{}).(uint64)
+	return value
+}
+
 // account-bound proxy templates such as Resin. Providers that represent the
 // same upstream login (for example Web and Console sharing one SSO token) can
 // deliberately pass the same identity so their proxy and clearance lease is
@@ -148,6 +168,39 @@ func (t *Trace) Selection(scope domain.Scope) (Selection, bool) {
 	defer t.mu.RUnlock()
 	value, ok := t.selections[scope]
 	return value, ok
+}
+
+// WithNodeExclusions attaches the request-scoped set of egress node IDs that
+// must not serve this request. The real-time quality guard populates it after
+// a degraded attempt so the in-request retry lands on a different fixed exit
+// IP instead of re-entering the same degraded node (account bindings included).
+func WithNodeExclusions(ctx context.Context, nodeIDs map[uint64]struct{}) context.Context {
+	if ctx == nil || len(nodeIDs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, nodeExclusionsContextKey{}, nodeIDs)
+}
+
+// NodeExclusionsFromContext returns the request-scoped exclusion set. It is
+// exported so tests and future callers can inspect what the guard excluded.
+func NodeExclusionsFromContext(ctx context.Context) map[uint64]struct{} {
+	if ctx == nil {
+		return nil
+	}
+	excluded, _ := ctx.Value(nodeExclusionsContextKey{}).(map[uint64]struct{})
+	return excluded
+}
+
+func nodeExcluded(ctx context.Context, nodeID uint64) bool {
+	if ctx == nil || nodeID == 0 {
+		return false
+	}
+	excluded, ok := ctx.Value(nodeExclusionsContextKey{}).(map[uint64]struct{})
+	if !ok {
+		return false
+	}
+	_, hit := excluded[nodeID]
+	return hit
 }
 
 func recordSelection(ctx context.Context, value Selection) {

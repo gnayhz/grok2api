@@ -134,6 +134,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 	}
 	cfg := a.config()
+	// 对话主请求按推理语义路由(未单独配置时沿用作用域/总出口)。
+	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassInference)
 	requestCtx, totalCancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
 	var idleCancel context.CancelCauseFunc
 	if request.Streaming && cfg.StreamIdleTimeoutSeconds > 0 {
@@ -319,6 +321,9 @@ func consoleEndpoint(baseURL string) string {
 func normalizeRateLimitResponse(response *http.Response) (bool, *provider.RateLimitMetadata, error) {
 	data, truncated, err := provider.ReadDiagnosticBody(response.Body)
 	if err != nil {
+		// 读取失败也要归还连接:此前提前 return 跳过了下方的 Close, 排空 429
+		// 响应体遇网络错误时 tls-client 连接池每次泄漏一个连接。
+		_ = response.Body.Close()
 		return truncated, nil, err
 	}
 	_ = response.Body.Close()

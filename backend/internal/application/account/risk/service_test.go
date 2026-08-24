@@ -102,6 +102,11 @@ func (f *fakeStore) SaveRiskVerdict(_ context.Context, id uint64, v StoredVerdic
 	f.verdicts[id] = v
 	return nil
 }
+func (f *fakeStore) DeleteRiskVerdict(_ context.Context, id uint64) error {
+	delete(f.verdicts, id)
+	return nil
+}
+
 func (f *fakeStore) ListRiskyVerdictAccountIDs(_ context.Context) ([]uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -161,7 +166,7 @@ func TestAttributionDeniedDisablesIdentity(t *testing.T) {
 	checker := &fakeChecker{result: deniedResult()}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
 
-	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild})
+	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
 
 	if checker.calls.Load() != 1 {
 		t.Fatalf("checker calls = %d", checker.calls.Load())
@@ -189,7 +194,7 @@ func TestAttributionDeniedFlagsIdentity(t *testing.T) {
 	cfg.OnDenied = "flag"
 	service := New(cfg, accounts, store, checker, nil)
 
-	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild})
+	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
 
 	for _, id := range []uint64{90, 7, 8} {
 		if !accounts.flagged[id] {
@@ -254,7 +259,7 @@ func TestReconcileRiskyVerdictsFlagsDrifted(t *testing.T) {
 		95: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
 	}}
 	service2 := New(cfg, accounts2, store2, &fakeChecker{result: cleanResult()}, nil)
-	service2.attribute(context.Background(), accountdomain.Credential{ID: 11, Provider: accountdomain.ProviderBuild})
+	service2.attribute(context.Background(), accountdomain.Credential{ID: 11, Provider: accountdomain.ProviderBuild}, 0)
 	if !accounts2.flagged[12] {
 		t.Fatal("linked console account must be flagged with the identity group")
 	}
@@ -271,7 +276,7 @@ func TestAttributionCleanClearsCooldown(t *testing.T) {
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	service := New(baseTestConfig(), accounts, store, &fakeChecker{result: cleanResult()}, nil)
 
-	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild})
+	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
 
 	if len(accounts.cleared) != 1 || accounts.cleared[0] != 7 {
 		t.Fatalf("cleared = %v", accounts.cleared)
@@ -287,7 +292,7 @@ func TestAttributionUnlinkedSkipsCheck(t *testing.T) {
 	checker := &fakeChecker{result: deniedResult()}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
 
-	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild})
+	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
 
 	if checker.calls.Load() != 0 {
 		t.Fatal("unlinked account must not trigger an RSC check")
@@ -307,7 +312,7 @@ func TestCachedRiskySkipsCheck(t *testing.T) {
 	checker := &fakeChecker{result: cleanResult()}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
 
-	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild})
+	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
 
 	if checker.calls.Load() != 0 {
 		t.Fatal("fresh risky verdict must not re-check")
@@ -346,4 +351,41 @@ func TestRiskyVerdictMatrix(t *testing.T) {
 		t.Fatal("clean/error must not be risky")
 	}
 	_ = errors.New
+}
+
+// 人工解除闭环:清除 risk_status 时必须级联删除身份组 verdict——
+// denied/flagged 永久 fresh, 不删会被启动对账与后续降智事件自动回滚
+// (此前全仓库无任何删除路径, 运维只能手工改库)。
+func TestClearIdentityVerdictsRemovesRiskyVerdict(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	accounts.linkedWeb[7] = 90
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
+		90: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
+	}}
+	service := New(baseTestConfig(), accounts, store, &fakeChecker{}, nil)
+
+	// Build 账号入口:身份解析到 webID=90 后删除其 verdict。
+	if err := service.ClearIdentityVerdicts(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetRiskVerdict(context.Background(), 90); err != ErrNotFound {
+		t.Fatalf("verdict not deleted: %v", err)
+	}
+	// 删除后不再 fresh:下一次降智事件会重新检测而不是重放旧结论。
+	if _, fresh := service.freshVerdict(context.Background(), 90); fresh {
+		t.Fatalf("deleted verdict still reported fresh")
+	}
+	// Web 账号入口同样生效(直接身份)。
+	store.verdicts[90] = StoredVerdict{Verdict: VerdictFlagged, CheckedAt: time.Now().UTC()}
+	if err := service.ClearIdentityVerdicts(context.Background(), accountdomain.Credential{ID: 90, Provider: accountdomain.ProviderWeb}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetRiskVerdict(context.Background(), 90); err != ErrNotFound {
+		t.Fatalf("web-entry verdict not deleted: %v", err)
+	}
+	// 未链接账号(Console 单独身份)是无害 no-op。
+	if err := service.ClearIdentityVerdicts(context.Background(), accountdomain.Credential{ID: 11, Provider: accountdomain.ProviderConsole}); err != nil {
+		t.Fatal(err)
+	}
 }

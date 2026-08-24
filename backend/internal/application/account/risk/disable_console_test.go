@@ -23,7 +23,7 @@ func TestDisableModeCoversConsoleChannel(t *testing.T) {
 	cfg := baseTestConfig() // OnDenied: disable
 	service := New(cfg, accounts, store, checker, nil)
 
-	service.attribute(context.Background(), credentialBuild(7))
+	service.attribute(context.Background(), credentialBuild(7), 0)
 
 	accounts.mu.Lock()
 	defer accounts.mu.Unlock()

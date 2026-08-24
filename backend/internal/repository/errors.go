@@ -6,15 +6,17 @@ import (
 )
 
 var (
-	ErrNotFound                   = errors.New("repository: not found")
-	ErrConflict                   = errors.New("repository: conflict")
-	ErrLimitExceeded              = errors.New("repository: limit exceeded")
-	ErrInvalidRecord              = errors.New("repository: invalid record")
-	ErrAccountPoolMismatch        = errors.New("repository: account pool mismatch")
-	ErrEgressFallbackInUse        = errors.New("repository: egress fallback node in use")
-	ErrEgressRouteRuleNodeInUse   = errors.New("repository: egress route rule node in use")
-	ErrEgressProxyProfileNotFound = errors.New("repository: egress proxy profile not found")
-	ErrEgressProxyProfileInUse    = errors.New("repository: egress proxy profile in use")
+	ErrNotFound               = errors.New("repository: not found")
+	ErrConflict               = errors.New("repository: conflict")
+	ErrLimitExceeded          = errors.New("repository: limit exceeded")
+	ErrInvalidRecord          = errors.New("repository: invalid record")
+	ErrAccountPoolMismatch    = errors.New("repository: account pool mismatch")
+	ErrEgressRoutingNodeInUse = errors.New("repository: egress routing target node in use")
+	ErrEgressRoutingInvalid   = errors.New("repository: egress routing target invalid")
+	// ErrEgressConfigStale 报告条件写冲突:运营配置自调用方读取快照以来已被
+	// 其他写入者修改。后台写者(订阅同步卫生检查)必须重读重算后重试,
+	// 而不是用旧快照整行覆盖并发提交。
+	ErrEgressConfigStale = errors.New("repository: egress operations config changed since read")
 )
 
 // InvalidBatchRecordError identifies a deterministic invalid record without

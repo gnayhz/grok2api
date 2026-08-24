@@ -745,6 +745,19 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
 	if err := s.persistVideoJobWithRetry(parent, job); err != nil {
 		s.logger.Error("video_job_terminal_write_failed", "job_id", job.ID, "error", err)
+		// 终态落盘失败时行内仍是旧租约(约 2h)且无完成时间:结果最长 2 小时
+		// 不可见、计费预留悬挂。用独立于请求生命周期的 ctx 做一次最小救援——
+		// 带上已完成字段重写, 成功则结果立即可见; 仍失败则至少把租约缩短到
+		// 5 分钟让恢复尽快重跑。
+		rescue := job
+		leaseUntil := now.Add(5 * time.Minute)
+		rescue.LeaseUntil = &leaseUntil
+		rescueCtx, rescueCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		rescueErr := s.mediaJobs.UpdateMediaJob(rescueCtx, rescue)
+		rescueCancel()
+		if rescueErr != nil {
+			s.logger.Warn("video_job_terminal_rescue_failed", "job_id", job.ID, "error", rescueErr)
+		}
 		return
 	}
 	s.selector.MarkSuccess(context.Background(), lease.Credential)

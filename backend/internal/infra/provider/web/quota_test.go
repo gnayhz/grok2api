@@ -168,7 +168,7 @@ func TestSyncQuotaBlockedForbiddenIsUnauthorized(t *testing.T) {
 		t.Fatal(err)
 	}
 	egressRepository := &recordingWebEgressRepository{node: egressdomain.Node{
-		ID: 1, Name: "web", Scope: egressdomain.ScopeWeb, Enabled: true, Health: 1,
+		ID: 1, Name: "web", Enabled: true, Health: 1,
 	}}
 	adapter := NewAdapter(Config{
 		BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "test-signature",
@@ -348,12 +348,9 @@ type recordingWebEgressRepository struct {
 	updates int
 }
 
-func (r *recordingWebEgressRepository) ListEgressNodes(_ context.Context, scope egressdomain.Scope, _ repository.SortQuery) ([]egressdomain.Node, error) {
+func (r *recordingWebEgressRepository) ListEgressNodes(_ context.Context, _ repository.SortQuery) ([]egressdomain.Node, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.node.Scope != scope {
-		return nil, nil
-	}
 	return []egressdomain.Node{r.node}, nil
 }
 

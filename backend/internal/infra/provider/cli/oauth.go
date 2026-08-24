@@ -372,7 +372,10 @@ func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Va
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("xAI OAuth 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// 与 exchange() 同一脱敏口径:错误响应可能回显请求参数或 HTML, 原文
+		// 不应进入日志/管理界面。
+		redacted := normalizeOAuthErrorMessage(redactOAuthDiagnosticText(string(body)), 512)
+		return fmt.Errorf("xAI OAuth 返回 %d: %s", resp.StatusCode, redacted)
 	}
 	return json.Unmarshal(body, output)
 }

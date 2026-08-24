@@ -53,6 +53,14 @@ func (r *RiskRepository) SaveRiskVerdict(ctx context.Context, verdict AccountRis
 	return r.db.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
 }
 
+// DeleteRiskVerdict permanently removes one identity's verdict (operator
+// manual clear). Missing rows are a no-op: the goal is that no verdict stays.
+func (r *RiskRepository) DeleteRiskVerdict(ctx context.Context, accountID uint64) error {
+	return r.db.db.WithContext(ctx).
+		Where("account_id = ?", accountID).
+		Delete(&accountRiskVerdictModel{}).Error
+}
+
 // ListRiskyVerdictAccountIDs returns every account holding a denied/flagged
 // verdict, paged by riskyVerdictPageLimit. Startup reconciliation uses it to
 // converge risk_status flags with the verdict table (the durable source of truth).

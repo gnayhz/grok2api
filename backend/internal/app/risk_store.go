@@ -60,6 +60,10 @@ func (s riskRelationalStore) SaveRiskVerdict(ctx context.Context, accountID uint
 	})
 }
 
+func (s riskRelationalStore) DeleteRiskVerdict(ctx context.Context, accountID uint64) error {
+	return s.Repo.DeleteRiskVerdict(ctx, accountID)
+}
+
 func (s riskRelationalStore) ListRiskyVerdictAccountIDs(ctx context.Context) ([]uint64, error) {
 	return s.Repo.ListRiskyVerdictAccountIDs(ctx)
 }

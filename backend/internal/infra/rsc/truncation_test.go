@@ -38,7 +38,7 @@ func TestCompleteDocumentWithoutFlagsIsClean(t *testing.T) {
 
 // A closed inline script with flags still parses normally.
 func TestCompleteFlightDeniedStillDenied(t *testing.T) {
-	body := homepage("{\"user\":{\"botFlagSource\":1,\"botFlagDetails\":\"policy=deny,risk=0.9,event=$registration\"}}")
+	body := homepage(realisticUserPayload(1, "policy=deny,risk=0.9,event=$registration"))
 	result := ParseRisk(body)
 	if result.Verdict != VerdictDenied || result.RiskScore != 0.9 {
 		t.Fatalf("complete denied fixture = %#v", result)
@@ -77,7 +77,7 @@ func TestContentLengthShortReadIsError(t *testing.T) {
 
 // Close-delimited complete body (no Content-Length) with flags parses fine.
 func TestChunkedCompleteBodyParses(t *testing.T) {
-	body := homepage("{\"user\":{\"botFlagSource\":1,\"botFlagDetails\":\"policy=deny,risk=0.9,event=$registration\"}}")
+	body := homepage(realisticUserPayload(1, "policy=deny,risk=0.9,event=$registration"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(body))

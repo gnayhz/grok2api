@@ -20,7 +20,7 @@ func TestInitializeSchemaUpgradesProviderChecksForConsole(t *testing.T) {
 	defer database.Close()
 	legacy := []any{
 		&legacyProviderAccountModel{}, &legacyModelRouteModel{}, &legacyRequestAuditModel{},
-		&legacyResponseOwnershipModel{}, &legacyEgressSubscriptionSourceModel{}, &legacyEgressNodeModel{},
+		&legacyResponseOwnershipModel{},
 	}
 	if err := database.db.WithContext(ctx).AutoMigrate(legacy...); err != nil {
 		t.Fatal(err)
@@ -53,16 +53,16 @@ func TestInitializeSchemaUpgradesProviderChecksForConsole(t *testing.T) {
 	if err != nil || len(windows[created.ID]) != 1 || windows[created.ID][0].Remaining != 7 {
 		t.Fatalf("existing quota windows were not preserved: %#v, err=%v", windows, err)
 	}
-	for _, table := range []string{"provider_accounts", "model_routes", "request_audits", "response_ownership", "egress_nodes", "egress_subscription_sources"} {
+	// 出口表(egress_nodes/egress_subscription_sources)已无作用域约束;
+	// request_audits 的 egress_scope CHECK 升级随 ensureEgressAssetScopeConstraints
+	// 一并移除(见 schema.go 重构),此处不再断言 console_asset 升级。
+	for _, table := range []string{"provider_accounts", "model_routes", "request_audits", "response_ownership"} {
 		var sql string
 		if err := database.db.WithContext(ctx).Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&sql).Error; err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(sql, "grok_console") {
 			t.Fatalf("table %s was not upgraded: %s", table, sql)
-		}
-		if (table == "request_audits" || table == "egress_nodes" || table == "egress_subscription_sources") && !strings.Contains(sql, "grok_console_asset") {
-			t.Fatalf("table %s was not upgraded for Console assets: %s", table, sql)
 		}
 		if table == "request_audits" && !strings.Contains(sql, "compaction") {
 			t.Fatalf("table %s operation constraint was not upgraded: %s", table, sql)
@@ -283,19 +283,3 @@ type legacyResponseOwnershipModel struct {
 }
 
 func (legacyResponseOwnershipModel) TableName() string { return "response_ownership" }
-
-type legacyEgressSubscriptionSourceModel struct {
-	ID    uint64 `gorm:"primaryKey"`
-	Scope string `gorm:"size:32;not null;check:chk_egress_subscription_sources_scope,scope IN ('grok_build','grok_web','grok_web_asset')"`
-}
-
-func (legacyEgressSubscriptionSourceModel) TableName() string {
-	return "egress_subscription_sources"
-}
-
-type legacyEgressNodeModel struct {
-	ID    uint64 `gorm:"primaryKey"`
-	Scope string `gorm:"size:32;not null;check:chk_egress_nodes_specific_scope,scope IN ('all','grok_build','grok_web','grok_web_asset')"`
-}
-
-func (legacyEgressNodeModel) TableName() string { return "egress_nodes" }

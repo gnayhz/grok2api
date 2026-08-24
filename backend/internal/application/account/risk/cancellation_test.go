@@ -121,7 +121,7 @@ func TestSharedCancellationStillDeliversGroupConsequences(t *testing.T) {
 		cancel()           // kill the deadline mid-check
 	}()
 	// attribute returns nothing; assert on the persisted verdict instead.
-	service.attribute(ctx, credential7())
+	service.attribute(ctx, credential7(), 0)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		accounts.mu.Lock()

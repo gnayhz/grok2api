@@ -240,7 +240,7 @@ func TestGenerateVideoPostsReferenceImagesAndPollsUntilReady(t *testing.T) {
 	var createBody map[string]any
 	var pollCount atomic.Int32
 	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if identity := infraegress.AccountFromContext(request.Context()); identity != "grok_build_9" {
+		if identity := infraegress.AccountFromContext(request.Context()); identity != "grok_build9" {
 			t.Fatalf("egress account identity = %q", identity)
 		}
 		switch {
@@ -300,7 +300,7 @@ func TestGenerateVideoPostsSingleImageAndPollsUntilReady(t *testing.T) {
 	var createBody map[string]any
 	var pollCount atomic.Int32
 	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if identity := infraegress.AccountFromContext(request.Context()); identity != "grok_build_9" {
+		if identity := infraegress.AccountFromContext(request.Context()); identity != "grok_build9" {
 			t.Fatalf("egress account identity = %q", identity)
 		}
 		switch {
@@ -542,7 +542,7 @@ func TestGenerateVideoFailedStatusAndDownloadTrustedURL(t *testing.T) {
 		if request.Method != http.MethodGet || request.URL.String() != assetURL {
 			t.Fatalf("download request = %s %s", request.Method, request.URL)
 		}
-		if identity := infraegress.AccountFromContext(request.Context()); identity != "grok_build_99" {
+		if identity := infraegress.AccountFromContext(request.Context()); identity != "grok_build99" {
 			t.Fatalf("download egress account identity = %q", identity)
 		}
 		for _, key := range []string{
