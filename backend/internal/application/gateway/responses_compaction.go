@@ -10,6 +10,21 @@ import (
 // instead; the TUI appends this prompt as a normal last user item.
 const clientCompactionPromptMarker = "it is a system-generated compaction prompt, not a real user message"
 
+// Compaction directives delivered as a plain final user message by agents
+// that implement client-side compaction (no compaction_trigger item, no TUI
+// marker). Such requests replay the conversation and append the directive
+// as the last user item; the summary response carries no visible thinking
+// by design, so an undetected directive falls into the quality hold and is
+// wrongly withheld. Each entry is a stable opening phrase of one client's
+// directive; matching any one classifies the request as compaction.
+var clientCompactionPromptMarkers = []string{
+	clientCompactionPromptMarker,
+	// deepseek-harness (@deepseek-ai/dsh-compaction-basic COMPACTION_INSTRUCTION)
+	"You are now acting as a compaction engine for this AI coding assistant",
+	// Codex CLI local /compact (codex-rs/prompts templates/compact/prompt.md)
+	"You are performing a CONTEXT CHECKPOINT COMPACTION",
+}
+
 type responsesCompactionKind uint8
 
 const (
@@ -74,7 +89,12 @@ func lastItemLooksLikeCompactionPrompt(items []json.RawMessage) bool {
 }
 
 func looksLikeCompactionPrompt(text string) bool {
-	return strings.Contains(text, clientCompactionPromptMarker)
+	for _, marker := range clientCompactionPromptMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractContentText(raw json.RawMessage) string {
