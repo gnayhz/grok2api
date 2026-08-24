@@ -340,14 +340,14 @@ curl http://127.0.0.1:8000/v1/responses \
 
 ## 出口与 Cloudflare
 
-出口节点按 Build、Web、Console 或 Web 资源隔离。管理端支持：
+出口节点是纯代理资源——无作用域、无账号绑定。管理端支持：
 
 - HTTP、HTTPS、SOCKS4/4A、SOCKS5/5H、Resin、Trojan、VLESS、Shadowsocks 与 VMess
 - 隧道协议支持 TCP、WebSocket 和 TLS，未实现的传输形态会在导入时拒绝
 - 订阅和文本/Base64 导入
-- 批量探测、筛选、删除、分配与均衡
-- 按作用域配置无回退、直连或固定节点
-- Grok Build 流量类别路由：将推理、OAuth、账单、模型同步或视频调用固定到专属节点或直连。推理与视频尊重账号绑定；辅助调用即使账号已绑定也按规则分流，目标不可用时回退节点池
+- 批量探测、筛选、删除
+- 三层出口路由，逐请求解析：流量类别（推理/凭据/账单/模型同步/视频）→ 作用域（Build/Web/Console）→ 总出口 → 自动调度。每层可设未配置（跟随下层）、直连、固定节点或代理池
+- 专属代理池：命名的节点分组，自带调度策略（会话固定/随机打散/固定首选/顺位轮换）与耗尽回退（另一池或直连）
 - 代理池模式，单次连接失败不会触发全局冷却
 - 固定代理传输失败后立即复测；同节点复测自动合并，后续绑定请求限时等待并在恢复后快速重试
 - 固定 sticky 会话应各自建成独立节点（`proxyPool=false`）。不要把多条 sticky 合成一个节点，否则异常时只能整组摘流，无法定位坏会话
@@ -373,6 +373,7 @@ requestRetry:
 
 ### 账号风险归因（RSC）
 
+
 扣留一条流并不等于账号本身降智——出口 IP 同样可能是元凶。启用 `accountRisk.rscCheck` 后，
 每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查：
 
@@ -383,6 +384,48 @@ requestRetry:
   账号恢复可调度。泛型 5xx 故障永不因 clean 结论被清除。
 - 巡检循环按 `patrol.bucketDays` 周期复查 clean/error 结论；风险结论永不自动恢复。
   本段修改需重启进程生效。
+
+### 出口 IP 质量守卫与自动换 IP
+
+账号归因是 **CLEAN** 时，降智元凶就是出口 IP。出口 IP 质量守卫把这条链路闭环（`egress` 配置段）：
+
+
+> 完整部署步骤（一机多 WARP 实例、批量模板配置 webhook、端到端验证与排障）见 [EXIT-IP-GUARD.md](EXIT-IP-GUARD.md)；多实例轮换 webhook 服务在 `scripts/rotate-server/`。
+```
+请求降智（扣留/空流/头预算早断）
+  ├─ 本请求内：坏节点加入排除集 → 下一次尝试立即换出口继续（会话不断）
+  └─ 异步归因 CLEAN → 节点隔离（默认 24h），后续请求由路由层自动落到其他可用出口
+       → POST 节点"换 IP Webhook"（如重启 MicroWARP）
+       → 静默期 → 连通探活 → 校验出口 IP 已变化
+       → 一次性 canary 验证（极小流式请求：首事件 <10s 且有思考证据 = 通过）
+            ├─ 通过 → 解除隔离回池
+            └─ 降智 → 再换（每周期最多 3 次；耗尽保持隔离并告警）
+```
+
+要点：
+
+- **只作用于固定节点**（非代理池模式）。代理池/sticky 节点（如 resin 池）豁免质量隔离与自动换 IP——它们的出口本就不固定，但请求内排除（降智重试立即换出口）仍然生效。
+- RSC 归因关闭或未链接账号时，**跨账号确认**兜底：同一节点在 30 分钟窗口内有 2 个不同账号降智即隔离。
+- canary 未配置模型或无可用账号时**暂定放行**（短冷却 30m），被动守卫继续兜底。
+- 频率护栏：单节点两次换 IP ≥10 分钟，全局每小时 ≤6 次。
+- 节点编辑页可为每个节点单独配置「换 IP Webhook」；节点行菜单可手动触发轮换；列表显示降智次数与换 IP 尝试。
+
+#### 换 IP Webhook（B/C 服务器侧）
+
+grok2api 只做一次带 JSON 体的 POST；节点侧用现成的多实例轮换服务执行重启（仓库 `scripts/rotate-server/`，纯 Python 标准库）：
+
+- **Docker 部署（推荐）**：`Dockerfile` + `docker-compose.example.yml` 现成可用，**全部环境变量配置**（`ROTATE_TOKEN`、`ROTATE_INSTANCES`，如 `"1080=warp-a,1081=warp-b"`），不改脚本不改镜像；挂载 `/var/run/docker.sock` 后按端口或容器名精确重启某一个 WARP 容器（一机多实例、不同宿主端口场景）。
+- **systemd 直装**：`rotate-server.py` 顶部 `DEFAULT_TOKEN`/`DEFAULT_INSTANCES` 改用 `{"cmd": ["systemctl", ...]}` 形式，配 `rotate-server.service`。
+
+节点配置里填 `http://<B服务器>:9000/rotate/{port}?token=xxx`（批量模板，`{port}` 即实例宿主端口）；
+URL 与 token 一起加密存储，管理端只回显「已配置」。内置 token 校验（错误返回 404）与同实例 60s 冷却（429）。
+建议配合防火墙仅放行 A 服务器来源。
+
+#### MicroWARP 固定出口直连拓扑（推荐）
+
+每个 MicroWARP 端点在 grok2api 建一个**独立固定节点**（socks5/http），开启本守卫即可实现
+「坏 IP 自动隔离 + 自动重启换 IP + 验证回池」；resin 可保留作兜底代理池节点（守卫不动代理池节点）。
+多实例 grok2api 部署时出口状态共享（数据库），轮换 worker 按节点账本（尝试次数/最近轮换时间）自然收敛。
 
 ### 请求审计
 
@@ -515,7 +558,6 @@ docker network inspect grok2api_default \
 - `audit.ledgerMode`：`observe` 仅报告账本故障；`enforce` 可暂停新推理以保护计费准确性。
 - `routing.accountIsolatedConnections`：为外部 L4 或按连接哈希的负载均衡器按账号拆分出站 TCP/HTTP 连接池。默认关闭，因为会增加连接数、TLS 握手、内存和文件描述符占用。
 - `routing.segmentedSelectorEnabled`：默认对至少 3000 个可用账号的大号池启用，限制动态并发读取规模，同时保留额度/等级优先级、会话粘性、完整选号回退与原子门禁。
-- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`：可选的大号池保护。`0`（默认）保持历史行为：不健康节点上的 auto 账号会一次性迁走，容量/再均衡仍最多 200 次。仅在一个节点下线会把大量账号压到最后几个健康出口时，才设为 `0.05`–`1`。环境变量 `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` 与 `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` 可覆盖 YAML。
 - Build 响应头超时和精确匹配的 403 失效规则支持热加载。
 - “同步最新版本”可应用已验证的 Grok Build 客户端版本和 User-Agent。
 
