@@ -153,6 +153,66 @@ func TestQuarantineForExitIPIdempotent(t *testing.T) {
 }
 
 
+// RSC clean 路径的确认门槛:单次降智(即使账号被 RSC 还清白)不隔离,
+// 只留软冷却;窗口内第二次观测(不同账号或同账号再犯)才升级 24h 隔离。
+// 防的是健康节点的偶发慢头(冷连接/上游瞬时负载)被一次排除法定罪。
+func TestRscCleanDegradeRequiresSecondObservation(t *testing.T) {
+	service, _, quarantiner := newQualityTestService(t)
+	ctx := context.Background()
+	// 第一次:窗口里只有本次观测(由 OnEgressDegraded 先行记录)。
+	service.OnEgressDegraded(ctx, 1, 100)
+	service.OnRscCleanDegrade(ctx, 1, 100)
+	time.Sleep(50 * time.Millisecond)
+	quarantiner.mu.Lock()
+	if len(quarantiner.quarantine) != 0 {
+		quarantiner.mu.Unlock()
+		t.Fatalf("first RSC-clean degrade must not quarantine: %v", quarantiner.quarantine)
+	}
+	quarantiner.mu.Unlock()
+	// 同账号再犯(第二次 RSC clean):窗口内第二份观测 → 隔离。
+	service.OnEgressDegraded(ctx, 1, 100)
+	service.OnRscCleanDegrade(ctx, 1, 100)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		quarantiner.mu.Lock()
+		quarantined := len(quarantiner.quarantine)
+		quarantiner.mu.Unlock()
+		if quarantined > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	quarantiner.mu.Lock()
+	defer quarantiner.mu.Unlock()
+	if len(quarantiner.quarantine) != 1 || quarantiner.quarantine[0] != 1 {
+		t.Fatalf("second in-window observation should quarantine node 1: %v", quarantiner.quarantine)
+	}
+}
+
+// 确认机制关闭(threshold<2,窗口不再记录)时 RSC clean 保持旧的立即隔离。
+func TestRscCleanDegradeImmediateWhenConfirmationDisabled(t *testing.T) {
+	service, _, quarantiner := newQualityTestService(t)
+	cfg := DefaultQualityGuardConfig()
+	cfg.CrossAccountThreshold = 1
+	service.SetQualityGuardConfig(cfg)
+	service.OnRscCleanDegrade(context.Background(), 1, 100)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		quarantiner.mu.Lock()
+		quarantined := len(quarantiner.quarantine)
+		quarantiner.mu.Unlock()
+		if quarantined > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	quarantiner.mu.Lock()
+	defer quarantiner.mu.Unlock()
+	if len(quarantiner.quarantine) != 1 {
+		t.Fatalf("disabled confirmation must keep immediate quarantine: %v", quarantiner.quarantine)
+	}
+}
+
 // 质量守卫观察者面（SetQualityQuarantiner/MarkDegradeEvidence/
 // ClearDegradeEvidence/ReleaseIfEvidenceOnlyFrom）此前 0%——它们是
 // gateway 实时守卫与 RSC 风险归因的真实接线面（app.go:321、risk/
