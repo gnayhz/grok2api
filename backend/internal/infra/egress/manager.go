@@ -1812,6 +1812,35 @@ func (m *Manager) CooldownNodeForQuality(ctx context.Context, nodeID uint64, unt
 	return nil
 }
 
+// CooldownNodeForProbeFailure applies a transport cooldown to a node whose
+// exit was confirmed dead by probes (both address families failing twice in
+// a row). It mirrors the request-transport feedback branch so recovery
+// semantics match exactly: UpdateEgressNodeProbe clears it on the next
+// healthy probe, without any manual intervention.
+func (m *Manager) CooldownNodeForProbeFailure(ctx context.Context, nodeID uint64, until time.Time) error {
+	if m == nil || nodeID == 0 {
+		return nil
+	}
+	value, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	value.FailureCount++
+	value.Health = max(0.05, value.Health*0.7)
+	cooldown := until
+	value.CooldownUntil = &cooldown
+	value.LastError = domain.LastErrorTransport
+	if stateRepository, ok := m.repository.(egressStateRepository); ok {
+		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err != nil {
+			return err
+		}
+	} else if _, err := m.repository.UpdateEgressNode(ctx, value); err != nil {
+		return err
+	}
+	m.invalidateNodes()
+	return nil
+}
+
 // ReleaseQualityQuarantine re-admits a node whose rotated exit IP passed
 // verification: quality state resets so the node competes normally again.
 // A non-quality last error is preserved — it belongs to the transport layer.

@@ -38,12 +38,13 @@ func (r *qualityStubRepo) ListEgressNodes(_ context.Context, _ repository.SortQu
 }
 
 type fakeQuarantiner struct {
-	mu         sync.Mutex
-	quarantine []uint64
-	release    []uint64
-	cooldown   []uint64
-	markCalls  []uint64
-	clearCalls []uint64
+	mu            sync.Mutex
+	quarantine    []uint64
+	release       []uint64
+	cooldown      []uint64
+	probeCooldown []uint64
+	markCalls     []uint64
+	clearCalls    []uint64
 }
 
 func (f *fakeQuarantiner) QuarantineNodeForQuality(_ context.Context, nodeID uint64, until time.Time) (domain.Node, error) {
@@ -75,6 +76,13 @@ func (f *fakeQuarantiner) CooldownNodeForQuality(_ context.Context, nodeID uint6
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cooldown = append(f.cooldown, nodeID)
+	return nil
+}
+
+func (f *fakeQuarantiner) CooldownNodeForProbeFailure(_ context.Context, nodeID uint64, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probeCooldown = append(f.probeCooldown, nodeID)
 	return nil
 }
 
