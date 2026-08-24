@@ -192,9 +192,11 @@ func TestCanNodeServeFixedTarget(t *testing.T) {
 	if CanNodeServeFixedTarget(noProxy) {
 		t.Error("node without proxy must not serve fixed target")
 	}
+	// 旋转出口(节点级代理池模式)可以服务固定目标:固定的是隧道而非
+	// 瞬时出口 IP,运行时对其豁免硬/软冷却,不会被坏 IP 卡死。
 	pooled := base
 	pooled.ProxyPool = true
-	if CanNodeServeFixedTarget(pooled) {
-		t.Error("proxy-pool node must not serve fixed target")
+	if !CanNodeServeFixedTarget(pooled) {
+		t.Error("rotating (pool-mode) node must serve fixed target")
 	}
 }
