@@ -278,12 +278,12 @@ function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; o
         ) : (
           <Table className="table-fixed" viewportRows={10} rowHeight={40}>
             <TableHeader><TableRow className="hover:bg-transparent">
-              <TableHead className="w-[180px] text-center">{t("settings.egress.name")}</TableHead>
+              <TableHead className="w-[132px] text-center">{t("settings.egress.name")}</TableHead>
               <TableHead className="w-[72px] text-center">{t("proxies.pools.statsStatus")}</TableHead>
               <TableHead className="w-[64px] text-center">{t("proxies.pools.statsSelections")}</TableHead>
               <TableHead className="w-[64px] text-center">{t("proxies.pools.statsFailures")}</TableHead>
               <TableHead className="w-[84px] whitespace-nowrap text-center">{t("proxies.pools.statsLatency")}</TableHead>
-              <TableHead className="w-[124px] text-center">{t("proxies.pools.statsLastSelected")}</TableHead>
+              <TableHead className="w-[172px] whitespace-nowrap text-center">{t("proxies.pools.statsLastSelected")}</TableHead>
             </TableRow></TableHeader>
             <TableBody>
               {rows.map((row) => (
@@ -293,7 +293,7 @@ function PoolStatsDialog({ pool, onOpenChange }: { pool: EgressPoolDTO | null; o
                   <TableCell className="text-center text-xs tabular-nums">{row.stat?.selections ?? 0}</TableCell>
                   <TableCell className={cn("text-center text-xs tabular-nums", (row.stat?.failures ?? 0) > 0 && "text-destructive")}>{row.stat?.failures ?? 0}</TableCell>
                   <TableCell className="whitespace-nowrap px-1 text-center text-[11px] tabular-nums text-muted-foreground">{row.latency > 0 ? t("proxies.pools.statsLatencyValue", { ms: row.latency }) : "-"}</TableCell>
-                  <TableCell className="whitespace-nowrap text-center text-xs text-muted-foreground">{row.stat?.lastSelectedAt ? formatCompactDateTime(row.stat.lastSelectedAt, i18n.language) : t("settings.egress.never")}</TableCell>
+                  <TableCell className="whitespace-nowrap text-center text-xs tabular-nums text-muted-foreground">{row.stat?.lastSelectedAt ? formatCompactDateTime(row.stat.lastSelectedAt, i18n.language) : t("settings.egress.never")}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
