@@ -103,7 +103,7 @@ func TestAcquireScopeTargetInheritsAssetScopes(t *testing.T) {
 	}
 }
 
-// 固定节点目标=强绑定:目标不可用(不存在/停用/冷却/池成员节点)时请求
+// 固定节点目标=强绑定:目标不可用(不存在/停用/无代理/硬冷却)时请求
 // 快速失败,绝不静默改道自动调度里的其它节点。需要容错应配置代理池。
 func TestRoutingTargetNodeUnavailableFailsStrict(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -119,7 +119,6 @@ func TestRoutingTargetNodeUnavailableFailsStrict(t *testing.T) {
 		"missing node": {ID: 0},
 		"disabled":     {ID: 11, Enabled: false},
 		"no proxy":     {ID: 11, Enabled: true, EncryptedProxyURL: "-"},
-		"proxy pool":   {ID: 11, Enabled: true, ProxyPool: true},
 		"cooling down": {ID: 11, Enabled: true, CooldownUntil: &cooldown},
 	}
 	config := domain.OperationsConfig{
@@ -145,6 +144,36 @@ func TestRoutingTargetNodeUnavailableFailsStrict(t *testing.T) {
 			t.Errorf("%s: fallback outcome not recorded: %+v", name, stat)
 		}
 	}
+}
+
+// 旋转出口(节点级代理池模式)可以作为固定目标:固定的是隧道而非瞬时出口
+// IP。即使该节点带有硬冷却/软冷却(单个坏 IP 不代表端点坏),固定目标
+// 仍继续服务——与自动调度对池模式节点的豁免口径一致。
+func TestRotatingNodeServesFixedTargetDespiteCooldowns(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatingProxy, err := cipher.Encrypt("http://rotating.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cooldown := time.Now().UTC().Add(5 * time.Minute)
+	node := domain.Node{ID: 11, Name: "rotating", Enabled: true, Health: 1, EncryptedProxyURL: rotatingProxy, ProxyPool: true, CooldownUntil: &cooldown}
+	config := domain.OperationsConfig{
+		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 11},
+	}
+	manager := newRouteRuleTestManager(t, node, config)
+	manager.MarkDegradeEvidence(11) // L2 软冷却
+	ctx := WithTrafficClass(context.Background(), domain.TrafficClassBilling)
+	lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, "acct")
+	if acquireErr != nil {
+		t.Fatalf("rotating fixed target must ignore cooldowns: %v", acquireErr)
+	}
+	if lease.NodeID != 11 {
+		t.Fatalf("lease node = %d, want the rotating node 11", lease.NodeID)
+	}
+	lease.Release()
 }
 
 // 读取 operations config 失败时请求失败(fail closed at config layer),

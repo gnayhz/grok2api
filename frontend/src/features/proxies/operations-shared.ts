@@ -52,11 +52,13 @@ export function operationsFormFrom(value?: EgressOperationsConfigDTO): EgressOpe
 	};
 }
 
-// 节点是纯资源: 可作固定目标的条件只是启用 + 已配置代理 + 非代理池模式。
-// 冷却是瞬态运行态(与后端 CanNodeServeFixedTarget 口径一致):冷却中的节点
-// 仍持有并承接固定路由, 过滤掉会把活路由误显示为"目标已不可用"。
+// 节点是纯资源: 可作固定目标的条件是启用 + 已配置代理。旋转出口(代理池
+// 模式)可选——固定的是隧道而非瞬时出口 IP;账号绑定代理({account} 模板)
+// 仍排除——它按账号渲染不同子会话,应进池用 affinity 策略。冷却是瞬态
+// 运行态(与后端 CanNodeServeFixedTarget 口径一致):冷却中的节点仍持有并
+// 承接固定路由, 过滤掉会把活路由误显示为"目标已不可用"。
 export function fixedTargetCandidates(nodes: EgressNodeDTO[]): EgressNodeDTO[] {
-	return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.proxyPool && !node.accountBoundProxy);
+	return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.accountBoundProxy);
 }
 
 export function nodeCooling(node: EgressNodeDTO): boolean {

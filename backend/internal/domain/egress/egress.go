@@ -551,8 +551,12 @@ func DefaultOperationsConfig() OperationsConfig {
 // save-time, and edit-guard paths; all of them must agree or a target accepted
 // by one path silently degrades at another. Sticky per-account templates are
 // rejected separately at the application layer (they need decryption).
+//
+// 旋转出口(节点级代理池模式)可以被固定目标引用:固定的是"这条隧道",
+// 不是它的瞬时出口 IP。运行时对池模式节点豁免硬/软冷却(单个坏 IP 不
+// 代表端点坏),所以旋转目标几乎不会被冷却卡死——这正是它的用法。
 func CanNodeServeFixedTarget(node Node) bool {
-	return node.Enabled && node.EncryptedProxyURL != "" && !node.ProxyPool
+	return node.Enabled && node.EncryptedProxyURL != ""
 }
 
 // ProxyAccountPlaceholder 是粘性代理模板占位符:代理 URL 含该占位符时,

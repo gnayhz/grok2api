@@ -294,11 +294,12 @@ func (s *Service) validateRoutingTargetNodeUpdate(ctx context.Context, node doma
 }
 
 // validateFixedTargetNode reports whether the node can keep serving as a
-// fixed routing target. Sticky per-account templates rotate their exit with
-// the caller identity, which contradicts the fixed-target contract.
+// fixed routing target. 旋转出口(代理池模式)可以:固定的是隧道而非瞬时
+// 出口 IP。粘性账号模板仍拒绝——它按调用方账号渲染不同子会话,对路由
+// 而言"节点身份"本身不稳定,应进池用 affinity 策略。
 func (s *Service) validateFixedTargetNode(node domain.Node) error {
 	if !domain.CanNodeServeFixedTarget(node) {
-		return fmt.Errorf("%w: 固定出口目标必须启用、已配置代理地址且非代理池模式", ErrInvalidInput)
+		return fmt.Errorf("%w: 固定出口目标必须启用且已配置代理地址", ErrInvalidInput)
 	}
 	if proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL); err == nil && domain.IsAccountTemplateProxy(proxyURL) {
 		return fmt.Errorf("%w: 固定出口目标不能使用账号代理模板", ErrInvalidInput)

@@ -1103,8 +1103,9 @@ func (m *Manager) acquireFixedTarget(ctx context.Context, scope domain.Scope, af
 			return nil, fmt.Errorf("%w: node %d cooling down", ErrRoutingTargetUnavailable, nodeID)
 		}
 		// L2 未决软冷却同样使固定目标不可用:降智证据尚未归因,继续命中只会
-		// 重复撞坏出口;以不可用告终,由调用方快速失败。
-		if m.nodeSoftCooled(nodeID, time.Now().UTC()) {
+		// 重复撞坏出口;以不可用告终,由调用方快速失败。池模式(旋转)节点
+		// 豁免——与上方硬冷却豁免及自动调度口径一致:单个坏 IP 不代表端点坏。
+		if !m.isProxyPoolNode(selected) && m.nodeSoftCooled(nodeID, time.Now().UTC()) {
 			return nil, fmt.Errorf("%w: node %d pending degrade evidence", ErrRoutingTargetUnavailable, nodeID)
 		}
 		lease, _, err := m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)

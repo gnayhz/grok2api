@@ -124,15 +124,16 @@ func TestEgressOperationsConfigRejectsUnsafeRoutingTarget(t *testing.T) {
 		t.Fatalf("missing pool err = %v, want ErrEgressRoutingInvalid", err)
 	}
 
-	// 代理池节点不能再当固定出口目标(出口由网关轮换)。
+	// 旋转出口(节点级代理池模式)可以作为固定目标:固定的是隧道而非
+	// 瞬时出口 IP,运行时对其豁免硬/软冷却。
 	poolNode := createHealthyEgressNode(t, ctx, nodes, cipher, "gateway")
 	poolNode.ProxyPool = true
 	if _, err := nodes.UpdateEgressNode(ctx, poolNode); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := nodes.SaveEgressOperationsConfig(ctx, routingTargetTestConfig(
-		&egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: poolNode.ID}, nil, nil)); !errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
-		t.Fatalf("proxy-pool target err = %v, want ErrEgressRoutingNodeInUse", err)
+		&egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: poolNode.ID}, nil, nil)); err != nil {
+		t.Fatalf("rotating (pool-mode) node must be saveable as a fixed target: %v", err)
 	}
 }
 
