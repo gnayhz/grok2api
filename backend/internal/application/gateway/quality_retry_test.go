@@ -607,8 +607,8 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 			}
 		})
 	}
-	// In-flight tool results are the replay-safety boundary: retrying a turn
-	// whose input already carries tool output can repeat external side effects.
+	// 带工具结果的轮次照常 hold(2026-08-25 回归锁定):扣留的响应从不发给
+	// 客户端,不存在客户端重放;判决只看这条响应自身的流特征。
 	for _, test := range []struct {
 		name string
 		body string
@@ -622,8 +622,8 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
-			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
-				t.Fatal("in-flight tool results must not be held")
+			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+				t.Fatal("tool results in context must not exempt the hold (stream-characteristic verdict)")
 			}
 		})
 	}

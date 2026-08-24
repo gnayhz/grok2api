@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -387,19 +386,11 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 	if route.Provider != accountdomain.ProviderBuild && route.Provider != accountdomain.ProviderConsole {
 		return false
 	}
-	// Retrying an in-flight tool *result* can repeat external side effects, so
-	// turns that already carry tool output stay outside the hold. Declaring a
-	// tools schema alone does not: Grok TUI attaches the schema to every agent
-	// turn including the first thinking-only one, and skipping on the schema
-	// would exempt all TUI traffic from the guard.
-	if qualityRequestHasInFlightToolResults(input.Body) {
-		return false
-	}
-	// Hosted/服务端工具不同：重试会重复上游侧执行的搜索、沙箱运行、
-	// 图片作业或远程 MCP 调用。任何声明了 hosted 工具的请求保留不重放边界。
-	if qualityRequestHasReplayUnsafeHostedTools(input.Body) {
-		return false
-	}
+	// 判定只看流特征,不看请求体里的工具标记(2026-08-25 线上实证:同一 agent
+	// 会话 52 轮只有第 1 轮有守卫,后 51 轮全部裸奔,唯一一条降智原样交付)。
+	// 上游曾按"带 function_call_output/hosted 工具"豁免整轮——扣留的响应从不
+	// 发给客户端,客户端不可能重放其中的工具调用;而纯语义输出(工具调用形态)
+	// 的流本来就会按特征 Deliver。请求体携带什么与这条响应是否降智无关。
 	// Aliases are rewritten before this gate, so inspect the effective request
 	// body instead of only the reasoning-capable base model. In particular,
 	// grok-4.3-none becomes grok-4.3 plus an explicit disabled setting.
@@ -419,152 +410,6 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 	return modeldomain.SupportsReasoningForProvider(route.Provider, route.UpstreamModel)
 }
 
-// qualityRequestHasInFlightToolResults reports whether the request body
-// already carries tool output (function_call_output / tool_result /
-// tool_use_output items or role=tool messages, at any nesting depth). Only
-// those turns are excluded from the hold: replaying them can repeat external
-// side effects. A tools/functions schema declaration is deliberately NOT
-// counted — see shouldHoldQualityStream.
-func qualityRequestHasInFlightToolResults(body []byte) bool {
-	// 廉价必要条件预检：JSON 中这些标记值必然以带引号字面量出现（字符串
-	// 内容里的出现会被转义成 \"...\"，不会产生干净的完整匹配），预检全
-	// 部落空时树中必无目标节点，免去每请求一次的全量 body 解析。普通对话
-	// 请求（含 TUI 纯 schema 轮，\"tools\" 不含完整子串 \"tool\"）全部短路。
-	for _, marker := range [...][]byte{
-		[]byte(`"function_call_output"`),
-		[]byte(`"tool_result"`),
-		[]byte(`"tool_use_output"`),
-		[]byte(`"tool"`),
-	} {
-		if bytes.Contains(body, marker) {
-			var payload any
-			if json.Unmarshal(body, &payload) != nil {
-				return false
-			}
-			return jsonTreeHasInFlightToolResult(payload)
-		}
-	}
-	return false
-}
-
-func jsonTreeHasInFlightToolResult(node any) bool {
-	switch value := node.(type) {
-	case map[string]any:
-		if role, ok := value["role"].(string); ok && role == "tool" {
-			return true
-		}
-		if typ, ok := value["type"].(string); ok {
-			switch typ {
-			case "function_call_output", "tool_result", "tool_use_output":
-				return true
-			}
-		}
-		for _, child := range value {
-			if jsonTreeHasInFlightToolResult(child) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if jsonTreeHasInFlightToolResult(child) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// qualityRequestHasReplayUnsafeHostedTools reports whether the request declares
-// a tool whose execution happens upstream. Client-executed tools are safe to
-// hold: their calls have not reached the client yet. Hosted tools are not —
-// retrying repeats an upstream search, sandbox run, image job, or remote MCP
-// call. Unknown tool types default to replay-unsafe so future protocol
-// additions stay on the safe side until classified here.
-func qualityRequestHasReplayUnsafeHostedTools(body []byte) bool {
-	// 键名级必要条件预检（与在途工具结果检测同策略）：四个键全无即短路，
-	//普通对话请求零解析成本。
-	for _, marker := range [...][]byte{
-		[]byte("web_search_options"),
-		[]byte("mcp_servers"),
-		[]byte(`"tools"`),
-	} {
-		if bytes.Contains(body, marker) {
-			var payload map[string]any
-			if json.Unmarshal(body, &payload) != nil || payload == nil {
-				return false
-			}
-			return qualityPayloadHasReplayUnsafeHostedTool(payload)
-		}
-	}
-	return false
-}
-
-func qualityPayloadHasReplayUnsafeHostedTool(payload map[string]any) bool {
-	if raw, exists := payload["web_search_options"]; exists && raw != nil {
-		return true
-	}
-	if raw, exists := payload["mcp_servers"]; exists && raw != nil {
-		servers, ok := raw.([]any)
-		if !ok || len(servers) > 0 {
-			return true
-		}
-	}
-	if qualityToolListHasReplayUnsafeHostedTool(payload["tools"]) {
-		return true
-	}
-	// Responses Tool Search can load declarations later in the request. Only
-	// inspect additional_tools items; arbitrary user/schema objects may also
-	// contain a field named "tools" and must not affect the retry policy.
-	items, _ := payload["input"].([]any)
-	for _, rawItem := range items {
-		item, ok := rawItem.(map[string]any)
-		if !ok || jsonNodeString(item["type"]) != "additional_tools" {
-			continue
-		}
-		if qualityToolListHasReplayUnsafeHostedTool(item["tools"]) {
-			return true
-		}
-	}
-	return false
-}
-
-func qualityToolListHasReplayUnsafeHostedTool(value any) bool {
-	tools, ok := value.([]any)
-	if !ok {
-		return false
-	}
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		kind := jsonNodeString(tool["type"])
-		switch kind {
-		case "", "function", "custom", "local_shell", "apply_patch", "tool_search":
-			// Declaration-only tools: execution happens in the client after the
-			// held response is committed, so a retry cannot repeat side effects.
-		case "shell":
-			environment, _ := tool["environment"].(map[string]any)
-			if jsonNodeString(environment["type"]) != "local" {
-				return true
-			}
-		case "namespace":
-			if qualityToolListHasReplayUnsafeHostedTool(tool["tools"]) {
-				return true
-			}
-		default:
-			// Server/native tools and every type added by future protocol
-			// versions default to no-replay.
-			return true
-		}
-	}
-	return false
-}
-
-func jsonNodeString(value any) string {
-	text, _ := value.(string)
-	return text
-}
 
 func qualityRequestDisablesReasoning(body []byte) bool {
 	var payload map[string]json.RawMessage
