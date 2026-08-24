@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""多实例出口轮换 webhook 服务（B/C 服务器侧，Docker 或 systemd 部署）。
+"""多实例出口轮换 webhook 服务（Docker 部署）。
 
 grok2api 的出口节点配置「换 IP Webhook」指向本服务；出口 IP 被判定降智时，
-grok2api POST 对应实例的地址，本服务重启该 WARP 容器/服务以更换出口 IP。
+grok2api POST 对应实例的地址，本服务重启该 WARP 容器以更换出口 IP。
 
-配置方式（二选一，环境变量优先）：
-  Docker：环境变量 ROTATE_TOKEN / ROTATE_INSTANCES（推荐，见 docker-compose.example.yml）
-  systemd：直接改本文件 DEFAULT_TOKEN / DEFAULT_INSTANCES 常量
+配置全部走环境变量（见 docker-compose.example.yml），缺失即拒绝启动：
+  ROTATE_TOKEN        必填，与 grok2api webhook URL 里的 token 一致
+  ROTATE_INSTANCES    必填，如 "41081=microwarp-warp1-1"（别名=容器名，逗号分隔）
+  ROTATE_MIN_INTERVAL 可选，同实例两次重启最小间隔秒数（默认 60）
+  ROTATE_DOCKER_SOCK  可选，docker.sock 路径（默认 /var/run/docker.sock）
+  ROTATE_LISTEN       可选，监听地址（默认 0.0.0.0:9000）
 
 ROTATE_INSTANCES 格式：逗号分隔的 "别名=容器名"。别名通常是 grok2api 侧的宿主端口，
-例如 "1080=warp-a,1081=warp-b" —— grok2api 批量模板 http://主机:9000/rotate/{port}?token=…
-中的 {port} 替换成 1080/1081 后即命中对应容器。需要额外别名（如容器名/实例名）时
+例如 "41081=microwarp-warp1-1" —— grok2api 批量模板 http://主机:9000/rotate/{port}?token=…
+中的 {port} 替换成 41081 后即命中对应容器。需要额外别名（如容器名/实例名）时
 追加 name=容器名 条目即可。
 
-systemd 场景的条目也可用 {"cmd": [...], "aliases": [...]} 指定宿主机命令。
+更新脚本：compose 已把本文件只读挂载进容器，改完只需
+  docker compose restart rotate-server
+无需重新构建镜像。
 
 请求形式（grok2api 发出 POST，JSON 空 body）：
   POST /rotate/<别名或容器名>?token=<TOKEN>
@@ -26,18 +31,12 @@ import hmac
 import json
 import os
 import socket
-import subprocess
 import threading
 import time
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-DEFAULT_TOKEN = ""            # systemd 直装时在此填写；Docker 用 ROTATE_TOKEN
-DEFAULT_INSTANCES = {
-    # systemd 直装示例（Docker 部署无需改这里，用 ROTATE_INSTANCES 环境变量）：
-    # "warp-a": {"cmd": ["systemctl", "restart", "microwarp@a"], "aliases": ["1080"]},
-}
 DEFAULT_MIN_INTERVAL = 60     # 同一实例两次重启的最小间隔（秒）；env ROTATE_MIN_INTERVAL
 DOCKER_SOCKET_DEFAULT = "/var/run/docker.sock"
 DOCKER_TIMEOUT = 30
@@ -72,11 +71,11 @@ def restart_container(docker_socket: str, name: str) -> None:
 
 
 def load_config():
-    """env 优先：Docker 零脚本编辑；无 env 时回落到脚本内常量(systemd)。"""
-    token = os.environ.get("ROTATE_TOKEN", "").strip() or DEFAULT_TOKEN
+    """环境变量是唯一配置来源；缺失即拒绝启动，不做脚本内回落。"""
+    token = os.environ.get("ROTATE_TOKEN", "").strip()
     raw = os.environ.get("ROTATE_INSTANCES", "").strip()
+    instances = {}
     if raw:
-        instances = {}
         for part in raw.split(","):
             part = part.strip()
             if not part:
@@ -94,14 +93,11 @@ def load_config():
                         " 静默重启错误的实例" % (alias, other, container))
             if alias not in entry["aliases"]:
                 entry["aliases"].append(alias)
-    else:
-        instances = {name: dict(entry) for name, entry in DEFAULT_INSTANCES.items()}
     if not token:
-        raise SystemExit("未配置 token：设置环境变量 ROTATE_TOKEN（或改脚本内 DEFAULT_TOKEN）")
+        raise SystemExit("未配置 token：设置环境变量 ROTATE_TOKEN")
     if not instances:
         raise SystemExit(
-            "未配置实例：设置环境变量 ROTATE_INSTANCES，例如 '1080=warp-a,1081=warp-b'"
-            "（或改脚本内 DEFAULT_INSTANCES）")
+            "未配置实例：设置环境变量 ROTATE_INSTANCES，例如 '41081=microwarp-warp1-1'")
     try:
         min_interval = int(os.environ.get("ROTATE_MIN_INTERVAL", "").strip() or DEFAULT_MIN_INTERVAL)
     except ValueError:
@@ -129,15 +125,14 @@ def resolve(key: str):
 
 
 def trigger(entry: dict) -> None:
-    if "container" in entry:
-        restart_container(CONFIG["docker_socket"], entry["container"])
-    elif "cmd" in entry:
-        subprocess.run(entry["cmd"], check=False, timeout=120)
-    else:
-        raise RuntimeError("实例条目缺少 container 或 cmd")
+    restart_container(CONFIG["docker_socket"], entry["container"])
 
 
 class Handler(BaseHTTPRequestHandler):
+    # 空闲读超时:客户端建连后不发完整请求(扫描器/半开连接)时,线程
+    # 最长阻塞 timeout 秒即被关闭,不会无限累积驻留线程与 fd。
+    timeout = 30
+
     def _deny(self, status: int, extra_headers=None):
         self.send_response(status)
         for key, value in (extra_headers or {}).items():
@@ -159,8 +154,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/":
             self._respond(200, {"instances": [
-                {"name": name, "aliases": entry.get("aliases", []),
-                 "mode": "docker" if "container" in entry else "command"}
+                {"name": name, "aliases": entry.get("aliases", [])}
                 for name, entry in sorted(CONFIG["instances"].items())]})
             return
         self._deny(404)
@@ -172,8 +166,12 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(404)
             return
         token = (parse_qs(parsed.query).get("token") or [""])[0]
-        # 常数时间比较, 避免逐字节比较的计时侧信道。
-        if not token or not hmac.compare_digest(token, CONFIG["token"]):
+        # 常数时间比较, 避免逐字节比较的计时侧信道。str 重载只接受纯 ASCII:
+        # 非 ASCII 候选(扫描器往 query 塞多字节字符)会抛 TypeError, 连接被
+        # 硬切、curl 报 Empty reply——统一降到 bytes 再比, 编码异常即不匹配。
+        token_bytes = token.encode("utf-8", "replace")
+        if not token or not hmac.compare_digest(
+                token_bytes, CONFIG["token"].encode("utf-8")):
             self._deny(404)
             return
         canonical, entry = resolve(parts[1])
@@ -210,6 +208,32 @@ class Handler(BaseHTTPRequestHandler):
         print("%s - %s" % (self.log_date_time_string(), message), flush=True)
 
 
+class Server(ThreadingHTTPServer):
+    # 并发上限:thread-per-request 模型在突发/扫描下没有自然边界;
+    # 槽位耗尽时新连接立即断开(grok2api 侧有 webhookRetries 兜底),
+    # 驻留线程数被硬性封顶,内存占用有确定上界。
+    max_workers = 64
+    _slots = threading.BoundedSemaphore(max_workers)
+    # 监听 backlog:默认 5 在突发下容易直接拒连,提高到 32。
+    request_queue_size = 32
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def main():
     global CONFIG
     parser = argparse.ArgumentParser(description="multi-instance exit-IP rotation webhook")
@@ -225,10 +249,12 @@ def main():
     host, _, port = arguments.listen.rpartition(":")
     print("rotation webhook on %s:%s, instances: %s, docker_sock: %s"
           % (host or "0.0.0.0", port, sorted(instances), docker_socket), flush=True)
-    # 多线程:一次 docker restart(最长 30s)/宿主命令(最长 120s)期间,
-    # /healthz 与其他实例的并发 webhook 不再被串行阻塞——单线程下 30s 重启
-    # 恰好耗尽 HEALTHCHECK(30s 间隔/3 次重试), 可能触发容器被判定不健康。
-    ThreadingHTTPServer((host or "0.0.0.0", int(port)), Handler).serve_forever()
+    # 多线程:一次 docker restart(最长 30s)期间,/healthz 与其他实例的并发
+    # webhook 不再被串行阻塞——单线程下 30s 重启恰好耗尽 HEALTHCHECK
+    # (30s 间隔/3 次重试), 可能触发容器被判定不健康。
+    # 驻留资源上界:线程数 ≤ Server.max_workers;单线程卡在死连接上
+    # 至多 Handler.timeout 秒。
+    Server((host or "0.0.0.0", int(port)), Handler).serve_forever()
 
 
 if __name__ == "__main__":

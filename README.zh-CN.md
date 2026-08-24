@@ -414,8 +414,7 @@ requestRetry:
 
 grok2api 只做一次带 JSON 体的 POST；节点侧用现成的多实例轮换服务执行重启（仓库 `scripts/rotate-server/`，纯 Python 标准库）：
 
-- **Docker 部署（推荐）**：`Dockerfile` + `docker-compose.example.yml` 现成可用，**全部环境变量配置**（`ROTATE_TOKEN`、`ROTATE_INSTANCES`，如 `"1080=warp-a,1081=warp-b"`），不改脚本不改镜像；挂载 `/var/run/docker.sock` 后按端口或容器名精确重启某一个 WARP 容器（一机多实例、不同宿主端口场景）。
-- **systemd 直装**：`rotate-server.py` 顶部 `DEFAULT_TOKEN`/`DEFAULT_INSTANCES` 改用 `{"cmd": ["systemctl", ...]}` 形式，配 `rotate-server.service`。
+- **Docker 部署**：`Dockerfile` + `docker-compose.example.yml` 现成可用，**全部环境变量配置**（`ROTATE_TOKEN`、`ROTATE_INSTANCES`，如 `"41081=microwarp-warp1-1"`）；脚本以只读卷挂载进容器，改 `rotate-server.py` 后 `docker compose restart` 即生效，无需重建镜像；挂载 `/var/run/docker.sock` 后按端口或容器名精确重启某一个 WARP 容器（一机多实例、不同宿主端口场景）。
 
 节点配置里填 `http://<B服务器>:9000/rotate/{port}?token=xxx`（批量模板，`{port}` 即实例宿主端口）；
 URL 与 token 一起加密存储，管理端只回显「已配置」。内置 token 校验（错误返回 404）与同实例 60s 冷却（429）。

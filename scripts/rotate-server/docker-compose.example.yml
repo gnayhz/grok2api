@@ -7,6 +7,9 @@
 #   2. 按需修改: WARP 镜像/数量/端口、ROTATE_TOKEN、ROTATE_INSTANCES
 #   3. docker compose up -d   (build: . 会自动构建 rotate-server 镜像)
 #
+# 脚本以只读卷挂载进容器: 以后改 rotate-server.py 只需
+#   docker compose restart rotate-server   —— 无需重新 build。
+#
 # 与 grok2api 的对应关系(A 服务器侧)：
 #   节点代理地址:          socks5://<本机公网IP>:<宿主端口>   (如 1080/1081)
 #   批量换IP Webhook 模板:  http://<本机公网IP>:9000/rotate/{port}?token=<ROTATE_TOKEN>
@@ -37,7 +40,7 @@ services:
       - NET_ADMIN
 
   rotate-server:
-    build: .                             # 用同目录 Dockerfile 构建
+    build: .                             # 用同目录 Dockerfile 构建镜像
     container_name: rotate-server
     restart: unless-stopped
     ports:
@@ -52,6 +55,13 @@ services:
       # ROTATE_MIN_INTERVAL: "60"       # 可选:同实例重启冷却秒数
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # 重启本机 WARP 容器所必需
+      - ./rotate-server.py:/app/rotate-server.py:ro # 改脚本后 restart 即生效,免重建
+    # 日志轮转:扫描噪声长期运行也不会写满宿主磁盘(默认 json-file 无上限)。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 # 已有 WARP 容器不在本 compose 里? 没关系——rotate-server 按容器名全局查找,
 # 把 ROTATE_INSTANCES 右侧写成已存在容器的 container_name 即可;
