@@ -376,6 +376,9 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
 	}
 	now := time.Now().UTC()
+	if s.authCache.getNegative(prefix, now) {
+		return clientkeydomain.Key{}, nil, ErrInvalidKey
+	}
 	value, cached := s.authCache.get(prefix, now)
 	if !cached {
 		var err error
@@ -384,6 +387,7 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 			if !errors.Is(err, repository.ErrNotFound) {
 				return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 客户端 Key 仓储: %v", ErrRuntimeUnavailable, err)
 			}
+			s.authCache.putNegative(prefix, now)
 			return clientkeydomain.Key{}, nil, ErrInvalidKey
 		}
 		s.authCache.put(prefix, value, now)
@@ -404,25 +408,29 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 			return clientkeydomain.Key{}, nil, ErrBillingLimit
 		}
 	}
-	if value.RPMLimit > 0 {
-		allowed, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client:%d", value.ID), value.RPMLimit, now)
-		if err != nil {
-			return clientkeydomain.Key{}, nil, fmt.Errorf("%w: RPM 限流器: %v", ErrRuntimeUnavailable, err)
-		}
-		if !allowed {
-			return clientkeydomain.Key{}, nil, ErrRateLimited
-		}
-	}
 	release := func() {}
 	if value.MaxConcurrent > 0 {
 		var acquired bool
 		var err error
+		// 并发租约先于 RPM 扣减:并发打满时拒绝的请求不该再消耗一次 RPM
+		// 配额——高并发场景下有效 RPM 被虚耗, 实际吞吐低于配置预期。
 		release, acquired, err = s.concurrency.Acquire(ctx, fmt.Sprintf("client:%d", value.ID), value.MaxConcurrent)
 		if err != nil {
 			return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 并发租约: %v", ErrRuntimeUnavailable, err)
 		}
 		if !acquired {
 			return clientkeydomain.Key{}, nil, ErrConcurrencyLimit
+		}
+	}
+	if value.RPMLimit > 0 {
+		allowed, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client:%d", value.ID), value.RPMLimit, now)
+		if err != nil {
+			release()
+			return clientkeydomain.Key{}, nil, fmt.Errorf("%w: RPM 限流器: %v", ErrRuntimeUnavailable, err)
+		}
+		if !allowed {
+			release()
+			return clientkeydomain.Key{}, nil, ErrRateLimited
 		}
 	}
 	if s.touches.shouldTouch(value.ID, now) {

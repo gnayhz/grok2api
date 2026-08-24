@@ -257,7 +257,18 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	}
 	// 仅保留 egress 路径上的匿名 GET；禁止 Authorization / Token-Auth / 会话身份头。
 	req.Header.Set("Accept", "*/*")
-	response, err := a.http.Do(req)
+	// 重定向每一跳都重新校验可信主机:共享 client 用默认策略(最多 10 跳可跨
+	// 主机), x.ai/grok.com 任意子域上的开放重定向可让网关抓取任意内网地址。
+	client := &http.Client{
+		Transport: a.http.Transport,
+		CheckRedirect: func(request *http.Request, _ []*http.Request) error {
+			if request.URL.Scheme != "https" || request.URL.User != nil || !trustedBuildVideoAssetHost(request.URL.Hostname()) {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	response, err := client.Do(req)
 	if err != nil {
 		return nil, "", 0, err
 	}

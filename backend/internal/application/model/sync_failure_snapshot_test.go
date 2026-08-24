@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"encoding/base64"
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"encoding/base64"
 )
 
 // failingModelsAdapter 让全部账号的模型能力同步失败。

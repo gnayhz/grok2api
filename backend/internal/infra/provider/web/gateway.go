@@ -67,6 +67,8 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
+	// 聊天主请求按推理语义路由。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassInference)
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, credential)
 	if err != nil {
 		return nil, nil, nil, "", err

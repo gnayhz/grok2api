@@ -18,7 +18,8 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 
 func TestCheckFindsLatestRelease(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if request.URL.String() != latestReleaseAPI || request.Header.Get("User-Agent") != "grok2api/v3.0.0" {
+		// UA 刻意不带精确版本(发往第三方 api.github.com 的被动指纹), 只断言前缀。
+		if request.URL.String() != latestReleaseAPI || !strings.HasPrefix(request.Header.Get("User-Agent"), "grok2api/") {
 			t.Fatalf("request = %#v", request)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Release notes"}`)), Header: make(http.Header)}, nil

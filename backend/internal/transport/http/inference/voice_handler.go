@@ -131,7 +131,9 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 	input := gateway.STTInput{PublicModel: "grok-stt"}
 	unsupportedOpenAIParameter := ""
 	if strings.HasPrefix(contentType, "multipart/form-data") {
-		if err := c.Request.ParseMultipartForm(h.maxBodyBytes); err != nil {
+		// maxMemory=1MiB:超过部分落临时文件。此前传 maxBodyBytes(32MiB)使整个
+		// 音频驻留内存, 再 io.ReadAll 又复制一份——单请求双份 32MiB。
+		if err := c.Request.ParseMultipartForm(1 << 20); err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "STT multipart 请求无效")
 			return
 		}

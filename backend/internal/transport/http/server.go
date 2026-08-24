@@ -163,8 +163,8 @@ func New(deps Dependencies) *gin.Engine {
 	}, deps.Updates).Register(adminProtected)
 
 	v1 := router.Group("/v1")
-	v1.Use(deps.ConcurrencyGate.Middleware())
-	v1.Use(middleware.ObserveBodyMemory())
+	// 就绪门最前:启动恢复期间对所有流量(含未鉴权)返回 503, 语义与既有
+	// 流量拒绝测试一致; 也是纯内存标记检查, 成本为零。
 	if deps.TrafficReady != nil {
 		v1.Use(func(c *gin.Context) {
 			if deps.TrafficReady() {
@@ -176,7 +176,12 @@ func New(deps Dependencies) *gin.Engine {
 			}})
 		})
 	}
+	// 鉴权先于并发闸门:闸门在鉴权前会为每个伪造 key 占住一个全局并发槽,
+	// 无凭据流量即可把 1024 个槽耗尽, 令所有合法推理请求 503。先 401 伪请求,
+	// 闸门槽位只留给已通过鉴权的流量。per-key 的 RPM/并发租约仍在闸门之后。
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
+	v1.Use(deps.ConcurrencyGate.Middleware())
+	v1.Use(middleware.ObserveBodyMemory())
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes, deps.PublicAPIBaseURL)
 	if deps.Settings != nil {
 		inferenceHandler.SetPublicAPIBaseURLResolver(deps.Settings.PublicAPIBaseURL)

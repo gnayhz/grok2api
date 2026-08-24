@@ -67,7 +67,7 @@ func newRouteRuleProxyPair(t *testing.T) (proxyURL string, proxyCalls *int64, up
 	return proxy.URL, &counter, upstream
 }
 
-func newRouteRuleTransport(t *testing.T, proxyURL string, rules []domainegress.RouteRule) *egressTransport {
+func newRouteRuleTransport(t *testing.T, proxyURL string, config domainegress.OperationsConfig) *egressTransport {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -77,16 +77,16 @@ func newRouteRuleTransport(t *testing.T, proxyURL string, rules []domainegress.R
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := domainegress.Node{ID: 21, Name: "rule-exit", Scope: domainegress.ScopeBuild, Enabled: true, EncryptedProxyURL: encryptedProxy}
-	repo := routeRuleEgressRepository{nodes: map[uint64]domainegress.Node{21: node}, config: domainegress.OperationsConfig{RouteRules: rules}}
+	node := domainegress.Node{ID: 21, Name: "rule-exit", Enabled: true, EncryptedProxyURL: encryptedProxy}
+	repo := routeRuleEgressRepository{nodes: map[uint64]domainegress.Node{21: node}, config: config}
 	manager := infraegress.NewManager(repo, cipher)
 	return &egressTransport{manager: manager, fallback: http.DefaultTransport}
 }
 
 // newRouteRuleTwoExitTransport builds a transport with a rule exit (node 21)
-// and a separate binding exit (node 31) so assertions can tell which path a
-// request actually took.
-func newRouteRuleTwoExitTransport(t *testing.T, ruleProxyURL, bindingProxyURL string, rules []domainegress.RouteRule) *egressTransport {
+// and a separate exit (node 31) so assertions can tell which path a request
+// actually took.
+func newRouteRuleTwoExitTransport(t *testing.T, ruleProxyURL, otherProxyURL string, config domainegress.OperationsConfig) *egressTransport {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -96,26 +96,30 @@ func newRouteRuleTwoExitTransport(t *testing.T, ruleProxyURL, bindingProxyURL st
 	if err != nil {
 		t.Fatal(err)
 	}
-	bindingProxy, err := cipher.Encrypt(bindingProxyURL)
+	otherProxy, err := cipher.Encrypt(otherProxyURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	nodes := map[uint64]domainegress.Node{
-		21: {ID: 21, Name: "rule-exit", Scope: domainegress.ScopeBuild, Enabled: true, EncryptedProxyURL: ruleProxy},
-		31: {ID: 31, Name: "binding-exit", Scope: domainegress.ScopeBuild, Enabled: true, EncryptedProxyURL: bindingProxy},
+		21: {ID: 21, Name: "rule-exit", Enabled: true, EncryptedProxyURL: ruleProxy},
+		31: {ID: 31, Name: "other-exit", Enabled: true, EncryptedProxyURL: otherProxy},
 	}
-	repo := routeRuleEgressRepository{nodes: nodes, config: domainegress.OperationsConfig{RouteRules: rules}}
+	repo := routeRuleEgressRepository{nodes: nodes, config: config}
 	manager := infraegress.NewManager(repo, cipher)
 	return &egressTransport{manager: manager, fallback: http.DefaultTransport}
 }
 
-func TestEgressTransportRoutesByTrafficClassRule(t *testing.T) {
-	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
-	transport := newRouteRuleTransport(t, proxyURL, []domainegress.RouteRule{
-		{Scope: domainegress.ScopeBuild, Class: domainegress.TrafficClassBilling, TargetMode: domainegress.RouteRuleTargetFixed, TargetNodeID: 21, Enabled: true},
-	})
+func classNodeTarget(class domainegress.TrafficClass, nodeID uint64) domainegress.OperationsConfig {
+	return domainegress.OperationsConfig{ClassTargets: map[domainegress.TrafficClass]domainegress.RoutingTarget{
+		class: {Mode: domainegress.RoutingTargetNode, NodeID: nodeID},
+	}}
+}
 
-	// Billing class honors the rule and exits through the fixed node's proxy.
+func TestEgressTransportRoutesByTrafficClassTarget(t *testing.T) {
+	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
+	transport := newRouteRuleTransport(t, proxyURL, classNodeTarget(domainegress.TrafficClassBilling, 21))
+
+	// Billing class honors the class target and exits through the fixed node.
 	request, err := http.NewRequestWithContext(
 		infraegress.WithTrafficClass(context.Background(), domainegress.TrafficClassBilling),
 		http.MethodGet, upstream.URL+"/billing", nil,
@@ -133,10 +137,11 @@ func TestEgressTransportRoutesByTrafficClassRule(t *testing.T) {
 		t.Fatalf("body = %q", body)
 	}
 	if got := atomic.LoadInt64(proxyCalls); got != 1 {
-		t.Fatalf("proxy calls = %d, want 1 (rule must pin the exit)", got)
+		t.Fatalf("proxy calls = %d, want 1 (class target must pin the exit)", got)
 	}
 
-	// Credential class has no rule: the empty node pool keeps the direct path.
+	// Credential class has no target and no pool nodes: the direct fallback
+	// keeps the counter unchanged.
 	request, err = http.NewRequestWithContext(
 		infraegress.WithTrafficClass(context.Background(), domainegress.TrafficClassCredential),
 		http.MethodGet, upstream.URL+"/oauth2/token", nil,
@@ -154,15 +159,69 @@ func TestEgressTransportRoutesByTrafficClassRule(t *testing.T) {
 	}
 }
 
-func TestEgressTransportKeepsBindingForInference(t *testing.T) {
+// Class targets outrank scope targets: a billing class pinned to node 21 must
+// not be rerouted by the build scope target pointing at node 31.
+func TestEgressTransportClassTargetOutranksScopeTarget(t *testing.T) {
 	ruleProxyURL, ruleCalls, upstream := newRouteRuleProxyPair(t)
-	bindingProxyURL, bindingCalls, _ := newRouteRuleProxyPair(t)
-	transport := newRouteRuleTwoExitTransport(t, ruleProxyURL, bindingProxyURL, []domainegress.RouteRule{
-		{Scope: domainegress.ScopeBuild, Class: domainegress.TrafficClassInference, TargetMode: domainegress.RouteRuleTargetFixed, TargetNodeID: 21, Enabled: true},
+	otherProxyURL, otherCalls, _ := newRouteRuleProxyPair(t)
+	transport := newRouteRuleTwoExitTransport(t, ruleProxyURL, otherProxyURL, domainegress.OperationsConfig{
+		ScopeTargets: map[domainegress.Scope]domainegress.RoutingTarget{
+			domainegress.ScopeBuild: {Mode: domainegress.RoutingTargetNode, NodeID: 31},
+		},
+		ClassTargets: map[domainegress.TrafficClass]domainegress.RoutingTarget{
+			domainegress.TrafficClassBilling: {Mode: domainegress.RoutingTargetNode, NodeID: 21},
+		},
 	})
 
-	bound := infraegress.WithEgressNode(context.Background(), 31)
-	request, err := http.NewRequestWithContext(bound, http.MethodGet, upstream.URL+"/v1/responses", nil)
+	request, err := http.NewRequestWithContext(
+		infraegress.WithTrafficClass(context.Background(), domainegress.TrafficClassBilling),
+		http.MethodGet, upstream.URL+"/billing", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if got := atomic.LoadInt64(ruleCalls); got != 1 {
+		t.Fatalf("class exit calls = %d, want 1 (class target wins)", got)
+	}
+	if got := atomic.LoadInt64(otherCalls); got != 0 {
+		t.Fatalf("scope exit calls = %d, want 0", got)
+	}
+}
+
+// Without an explicit traffic class the request defaults to inference, so the
+// inference class target still routes it.
+func TestEgressTransportDefaultClassIsInference(t *testing.T) {
+	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
+	transport := newRouteRuleTransport(t, proxyURL, classNodeTarget(domainegress.TrafficClassInference, 21))
+
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, upstream.URL+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if got := atomic.LoadInt64(proxyCalls); got != 1 {
+		t.Fatalf("proxy calls = %d, want 1 (default inference class follows the target)", got)
+	}
+}
+
+// A pinned node (quality canary) bypasses routing entirely.
+func TestEgressTransportPinnedNodeBypassesRouting(t *testing.T) {
+	ruleProxyURL, ruleCalls, upstream := newRouteRuleProxyPair(t)
+	otherProxyURL, otherCalls, _ := newRouteRuleProxyPair(t)
+	transport := newRouteRuleTwoExitTransport(t, ruleProxyURL, otherProxyURL, classNodeTarget(domainegress.TrafficClassInference, 21))
+
+	pinned := infraegress.WithPinnedNode(context.Background(), 31)
+	request, err := http.NewRequestWithContext(pinned, http.MethodGet, upstream.URL+"/v1/responses", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,41 +235,19 @@ func TestEgressTransportKeepsBindingForInference(t *testing.T) {
 		t.Fatalf("body = %q", body)
 	}
 	if got := atomic.LoadInt64(ruleCalls); got != 0 {
-		t.Fatalf("rule exit calls = %d, want 0 (bound inference must not be rerouted)", got)
+		t.Fatalf("rule exit calls = %d, want 0 (pinned node must not be rerouted)", got)
 	}
-	if got := atomic.LoadInt64(bindingCalls); got != 1 {
-		t.Fatalf("binding exit calls = %d, want 1", got)
-	}
-}
-
-func TestEgressTransportUnboundInferenceFollowsRule(t *testing.T) {
-	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
-	transport := newRouteRuleTransport(t, proxyURL, []domainegress.RouteRule{
-		{Scope: domainegress.ScopeBuild, Class: domainegress.TrafficClassInference, TargetMode: domainegress.RouteRuleTargetFixed, TargetNodeID: 21, Enabled: true},
-	})
-
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, upstream.URL+"/v1/responses", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := transport.RoundTrip(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = response.Body.Close()
-	if got := atomic.LoadInt64(proxyCalls); got != 1 {
-		t.Fatalf("proxy calls = %d, want 1 (unbound inference follows the rule)", got)
+	if got := atomic.LoadInt64(otherCalls); got != 1 {
+		t.Fatalf("pinned exit calls = %d, want 1", got)
 	}
 }
 
-// A fixed rule whose target became unavailable must not fail the request:
-// the transport falls back to the ordinary pool path and records the outcome.
-func TestEgressTransportFallsBackWhenRuleTargetUnavailable(t *testing.T) {
+// A node target that became unavailable must not fail the request: the
+// transport falls back to the automatic schedule and records the outcome.
+func TestEgressTransportFallsBackWhenNodeTargetUnavailable(t *testing.T) {
 	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
-	transport := newRouteRuleTransport(t, proxyURL, []domainegress.RouteRule{
-		{Scope: domainegress.ScopeBuild, Class: domainegress.TrafficClassBilling, TargetMode: domainegress.RouteRuleTargetFixed, TargetNodeID: 404, Enabled: true},
-	})
-	// The repository has no node 404, so the rule target misses.
+	transport := newRouteRuleTransport(t, proxyURL, classNodeTarget(domainegress.TrafficClassBilling, 404))
+	// The repository has no node 404, so the target misses.
 
 	request, err := http.NewRequestWithContext(
 		infraegress.WithTrafficClass(context.Background(), domainegress.TrafficClassBilling),
@@ -221,24 +258,26 @@ func TestEgressTransportFallsBackWhenRuleTargetUnavailable(t *testing.T) {
 	}
 	response, err := transport.RoundTrip(request)
 	if err != nil {
-		t.Fatalf("unavailable rule target must fall back, got error: %v", err)
+		t.Fatalf("unavailable node target must fall back, got error: %v", err)
 	}
 	body, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if string(body) != "upstream-body" {
 		t.Fatalf("body = %q", body)
 	}
-	// No pool node is configured either, so the request went direct: the
-	// invariant is the request survived the dead rule target.
+	// No automatic node is configured either, so the request went direct: the
+	// invariant is the request survived the dead target.
 	if got := atomic.LoadInt64(proxyCalls); got != 0 {
-		t.Fatalf("proxy calls = %d, want 0 (rule target missing, pool empty)", got)
+		t.Fatalf("proxy calls = %d, want 0 (target missing, pool empty)", got)
 	}
 }
 
-func TestEgressTransportDirectRuleBypassesProxy(t *testing.T) {
+func TestEgressTransportDirectTargetBypassesProxy(t *testing.T) {
 	proxyURL, proxyCalls, upstream := newRouteRuleProxyPair(t)
-	transport := newRouteRuleTransport(t, proxyURL, []domainegress.RouteRule{
-		{Scope: domainegress.ScopeBuild, Class: domainegress.TrafficClassCredential, TargetMode: domainegress.RouteRuleTargetDirect, Enabled: true},
+	transport := newRouteRuleTransport(t, proxyURL, domainegress.OperationsConfig{
+		ClassTargets: map[domainegress.TrafficClass]domainegress.RoutingTarget{
+			domainegress.TrafficClassCredential: {Mode: domainegress.RoutingTargetDirect},
+		},
 	})
 
 	request, err := http.NewRequestWithContext(
@@ -258,6 +297,6 @@ func TestEgressTransportDirectRuleBypassesProxy(t *testing.T) {
 		t.Fatalf("body = %q", body)
 	}
 	if got := atomic.LoadInt64(proxyCalls); got != 0 {
-		t.Fatalf("proxy calls = %d, want 0 (direct rule must bypass the proxy)", got)
+		t.Fatalf("proxy calls = %d, want 0 (direct target must bypass the proxy)", got)
 	}
 }

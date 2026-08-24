@@ -6,58 +6,60 @@ import (
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 )
 
-// Regression: a PUT body without the fallbacks field must still carry
-// routeRules into the service input. The historical early return on nil
-// fallbacks silently dropped the rules payload.
-func TestOperationsConfigRequestInputKeepsRouteRulesWithoutFallbacks(t *testing.T) {
+// Regression: a PUT body without scope/class targets must still parse; nil
+// maps mean "keep the stored targets", so they must round-trip as nil.
+func TestOperationsConfigRequestInputKeepsDefaultTargetWithoutMaps(t *testing.T) {
 	request := operationsConfigRequest{
-		ProbeProvider: "cloudflare", ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		RouteRules: []operationsRouteRuleRequest{
-			{Scope: "grok_build", Class: "billing", TargetMode: "direct", Enabled: true},
-			{Scope: "grok_build", Class: "credential", TargetMode: "fixed", TargetNodeID: "21", Enabled: true},
-		},
+		ProbeProvider: "cloudflare", ProbeIntervalSeconds: 900,
+		DefaultTarget: &routingTargetRequest{Mode: "node", NodeID: "21"},
 	}
 	input, err := request.input()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.RouteRules == nil {
-		t.Fatal("route rules were dropped when fallbacks were omitted")
+	if input.DefaultTarget == nil || input.DefaultTarget.NodeID != 21 {
+		t.Fatalf("default target = %#v", input.DefaultTarget)
 	}
-	if len(input.RouteRules) != 2 {
-		t.Fatalf("route rules = %#v, want 2 entries", input.RouteRules)
-	}
-	if input.RouteRules[0].Class != egressdomain.TrafficClassBilling || input.RouteRules[0].TargetMode != egressdomain.RouteRuleTargetDirect {
-		t.Fatalf("first rule = %#v", input.RouteRules[0])
-	}
-	if input.RouteRules[1].TargetNodeID != 21 {
-		t.Fatalf("second rule node id = %d, want 21", input.RouteRules[1].TargetNodeID)
-	}
-	if input.Fallbacks != nil {
-		t.Fatalf("fallbacks = %#v, want nil preserved", input.Fallbacks)
+	if input.ScopeTargets != nil || input.ClassTargets != nil {
+		t.Fatalf("scope/class targets = %#v/%#v, want nil (keep-stored semantics)", input.ScopeTargets, input.ClassTargets)
 	}
 }
 
-func TestOperationsConfigRequestInputNilRouteRulesStayNil(t *testing.T) {
-	request := operationsConfigRequest{ProbeProvider: "cloudflare", ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300, Fallbacks: nil}
+func TestOperationsConfigRequestInputNilMapsStayNil(t *testing.T) {
+	request := operationsConfigRequest{ProbeProvider: "cloudflare", ProbeIntervalSeconds: 900}
 	input, err := request.input()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.RouteRules != nil {
-		t.Fatalf("route rules = %#v, want nil (keep-stored semantics)", input.RouteRules)
+	if input.DefaultTarget != nil {
+		t.Fatalf("default target = %#v, want nil", input.DefaultTarget)
 	}
-	if input.Fallbacks != nil {
-		t.Fatalf("fallbacks = %#v, want nil", input.Fallbacks)
+	if input.ScopeTargets != nil || input.ClassTargets != nil {
+		t.Fatalf("scope/class targets = %#v/%#v, want nil", input.ScopeTargets, input.ClassTargets)
 	}
 }
 
-func TestOperationsConfigRequestInputInvalidRouteRuleNodeID(t *testing.T) {
+func TestOperationsConfigRequestInputParsesAllTargetLevels(t *testing.T) {
 	request := operationsConfigRequest{
-		ProbeProvider: "cloudflare", ProbeIntervalSeconds: 900, AssignmentIntervalSeconds: 300,
-		RouteRules: []operationsRouteRuleRequest{
-			{Scope: "grok_build", Class: "billing", TargetMode: "fixed", TargetNodeID: "0", Enabled: true},
-		},
+		ProbeProvider: "cloudflare", ProbeIntervalSeconds: 900,
+		ScopeTargets: map[string]routingTargetRequest{"grok_build": {Mode: "direct"}},
+		ClassTargets: map[string]routingTargetRequest{"billing": {Mode: "node", NodeID: "21"}},
+	}
+	input, err := request.input()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target := input.ScopeTargets[egressdomain.ScopeBuild]; target.Mode != egressdomain.RoutingTargetDirect {
+		t.Fatalf("build scope target = %#v", target)
+	}
+	if target := input.ClassTargets[egressdomain.TrafficClassBilling]; target.Mode != egressdomain.RoutingTargetNode || target.NodeID != 21 {
+		t.Fatalf("billing class target = %#v", target)
+	}
+}
+
+func TestOperationsConfigRequestInputRejectsZeroTargetNodeID(t *testing.T) {
+	request := operationsConfigRequest{
+		ClassTargets: map[string]routingTargetRequest{"billing": {Mode: "node", NodeID: "0"}},
 	}
 	if _, err := request.input(); err == nil {
 		t.Fatal("expected error for zero target node id")

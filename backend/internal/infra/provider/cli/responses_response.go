@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 const (
@@ -43,48 +45,49 @@ func (c *responsesToolCompatibility) normalizeResponseStream(source io.ReadClose
 	reader, writer := io.Pipe()
 	go func() {
 		defer func() { _ = source.Close() }()
-		err := consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
-			if isPrivateBuildControlEvent(event) {
-				return nil
-			}
-			if c == nil {
-				return event.writeTo(writer)
-			}
-			if !event.HasData() {
-				return event.writeTo(writer)
-			}
-			outputs, rewriteErr := c.rewriteStreamData(event.Event, event.Data())
-			if rewriteErr != nil {
-				return rewriteErr
-			}
-			for index, output := range outputs {
-				outputData := output.Data
-				if output.Payload != nil {
-					c.resequenceStreamPayload(output.Payload)
-					encoded, encodeErr := json.Marshal(output.Payload)
-					if encodeErr != nil {
-						return fmt.Errorf("编码兼容 Responses SSE: %w", encodeErr)
+		streampipe.Run(writer, func() error {
+			return consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
+				if isPrivateBuildControlEvent(event) {
+					return nil
+				}
+				if c == nil {
+					return event.writeTo(writer)
+				}
+				if !event.HasData() {
+					return event.writeTo(writer)
+				}
+				outputs, rewriteErr := c.rewriteStreamData(event.Event, event.Data())
+				if rewriteErr != nil {
+					return rewriteErr
+				}
+				for index, output := range outputs {
+					outputData := output.Data
+					if output.Payload != nil {
+						c.resequenceStreamPayload(output.Payload)
+						encoded, encodeErr := json.Marshal(output.Payload)
+						if encodeErr != nil {
+							return fmt.Errorf("编码兼容 Responses SSE: %w", encodeErr)
+						}
+						outputData = encoded
 					}
-					outputData = encoded
+					current := event
+					if output.Event != "" {
+						current.Event = output.Event
+					}
+					if index > 0 {
+						current.ID = ""
+						current.Retry = ""
+						current.Comments = nil
+						current.Other = nil
+					}
+					current.SetData(outputData)
+					if err := current.writeTo(writer); err != nil {
+						return err
+					}
 				}
-				current := event
-				if output.Event != "" {
-					current.Event = output.Event
-				}
-				if index > 0 {
-					current.ID = ""
-					current.Retry = ""
-					current.Comments = nil
-					current.Other = nil
-				}
-				current.SetData(outputData)
-				if err := current.writeTo(writer); err != nil {
-					return err
-				}
-			}
-			return nil
+				return nil
+			})
 		})
-		_ = writer.CloseWithError(err)
 	}()
 	return reader
 }

@@ -32,7 +32,7 @@ type buildSessionIdentity struct {
 // 1. Prefer explicit client session signals, isolated by client key, provider, and model.
 // 2. Fall back to system/instructions and the first user message when no explicit signal exists.
 // 3. Return an empty identity when no signal exists; never generate a random session ID per request.
-func resolveBuildSessionIdentity(clientKeyID uint64, provider accountdomain.Provider, upstreamModel, explicitKey, sessionSeed string, body []byte) buildSessionIdentity {
+func resolveBuildSessionIdentity(clientKeyID uint64, provider accountdomain.Provider, upstreamModel, explicitKey, sessionSeed, requestScope string, body []byte) buildSessionIdentity {
 	// Prefer Claude Code and Codex session signals extracted by the transport layer.
 	// body.prompt_cache_key is only a fallback when no stronger header or session signal exists.
 	seed := strings.TrimSpace(sessionSeed)
@@ -60,7 +60,11 @@ func resolveBuildSessionIdentity(clientKeyID uint64, provider accountdomain.Prov
 	if firstUser == "" {
 		return buildSessionIdentity{}
 	}
-	upstreamSource := fmt.Sprintf("grok2api:build-soft-session:%s:%d:%s:%s:%s:%s", buildSessionIdentityVersion, clientKeyID, provider, model, system, firstUser)
+	// 软会话只保留账号亲和(affinityKey 稳定), 发往上游的会话 ID 按请求隔离:
+	// 此前按「system+首条 user 前缀」合并, 开头雷同的不同对话会共享同一个上游
+	// 会话, 上游历史互相串扰。客户端显式传 prompt_cache_key/session 的路径不受
+	// 影响(它们的会话连续性来自显式信号)。
+	upstreamSource := fmt.Sprintf("grok2api:build-soft-session:%s:%d:%s:%s:%s:%s:%s", buildSessionIdentityVersion, clientKeyID, provider, model, system, firstUser, strings.TrimSpace(requestScope))
 	affinitySource := fmt.Sprintf("grok2api:build-soft-affinity:%s:%d:%s:%s:%s:%s", buildSessionIdentityVersion, clientKeyID, provider, model, system, firstUser)
 	return buildSessionIdentity{
 		upstreamID:  digestUUID(upstreamSource),

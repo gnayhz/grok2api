@@ -8,14 +8,14 @@ import (
 )
 
 func TestResolveBuildSessionIdentityIsStableAndTenantIsolated(t *testing.T) {
-	base := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", nil)
-	if len(base.upstreamID) != 36 || len(base.affinityKey) != 64 || len(base.replayKey) != 64 || base != resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", nil) {
+	base := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-1", nil)
+	if len(base.upstreamID) != 36 || len(base.affinityKey) != 64 || len(base.replayKey) != 64 || base != resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-1", nil) {
 		t.Fatalf("unstable identity = %#v", base)
 	}
 	for name, value := range map[string]buildSessionIdentity{
-		"client":   resolveBuildSessionIdentity(8, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", nil),
-		"provider": resolveBuildSessionIdentity(7, accountdomain.ProviderConsole, "grok-4.5", "", "session-1", nil),
-		"session":  resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-2", nil),
+		"client":   resolveBuildSessionIdentity(8, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-1", nil),
+		"provider": resolveBuildSessionIdentity(7, accountdomain.ProviderConsole, "grok-4.5", "", "session-1", "request-1", nil),
+		"session":  resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-2", "request-1", nil),
 	} {
 		if value.upstreamID == base.upstreamID || value.affinityKey == base.affinityKey {
 			t.Fatalf("%s was not isolated: %#v vs %#v", name, value, base)
@@ -37,24 +37,24 @@ func TestEnsureBuildComposerSessionIdentityIsRequestStable(t *testing.T) {
 	if got := ensureBuildComposerSessionIdentity(empty, 7, accountdomain.ProviderBuild, "grok-4.5", "request-1"); got != empty {
 		t.Fatalf("non-Composer request gained an identity: %#v", got)
 	}
-	explicit := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "client-session", "", nil)
+	explicit := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "client-session", "", "request-1", nil)
 	if got := ensureBuildComposerSessionIdentity(explicit, 7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "request-1"); got != explicit {
 		t.Fatalf("explicit Composer identity was overwritten: got=%#v want=%#v", got, explicit)
 	}
-	soft := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "", "", []byte(`{"input":"same opening message"}`))
+	soft := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "", "", "request-1", []byte(`{"input":"same opening message"}`))
 	isolated := ensureBuildComposerSessionIdentity(soft, 7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "request-1")
 	if !soft.soft || isolated.upstreamID == soft.upstreamID || isolated.soft || !isolated.isolated {
 		t.Fatalf("soft Composer identity was not isolated: soft=%#v isolated=%#v", soft, isolated)
 	}
-	softNonComposer := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", []byte(`{"input":"same opening message"}`))
+	softNonComposer := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", []byte(`{"input":"same opening message"}`))
 	if got := ensureBuildComposerSessionIdentity(softNonComposer, 7, accountdomain.ProviderBuild, "grok-4.5", "request-1"); got != softNonComposer {
 		t.Fatalf("non-Composer soft identity was overwritten: got=%#v want=%#v", got, softNonComposer)
 	}
 }
 
 func TestResolveBuildSessionIdentitySeparatesAffinityFromUpstreamSession(t *testing.T) {
-	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", nil)
-	otherModel := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.3", "", "session-1", nil)
+	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-1", nil)
+	otherModel := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.3", "", "session-1", "request-1", nil)
 	if first.upstreamID == "" || first.upstreamID == otherModel.upstreamID || first.replayKey == otherModel.replayKey {
 		t.Fatalf("model-specific upstream session was not isolated: first=%#v other=%#v", first, otherModel)
 	}
@@ -65,8 +65,8 @@ func TestResolveBuildSessionIdentitySeparatesAffinityFromUpstreamSession(t *test
 
 func TestResolveBuildSoftSessionIdentityIsModelScoped(t *testing.T) {
 	body := []byte(`{"instructions":"stable system","input":[{"role":"user","content":"hello"}]}`)
-	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", body)
-	otherModel := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.3", "", "", body)
+	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", body)
+	otherModel := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.3", "", "", "request-1", body)
 	if first.upstreamID == "" || first.affinityKey == "" || !first.soft || !otherModel.soft {
 		t.Fatalf("soft identity missing: first=%#v other=%#v", first, otherModel)
 	}
@@ -76,19 +76,19 @@ func TestResolveBuildSoftSessionIdentityIsModelScoped(t *testing.T) {
 }
 
 func TestResolveBuildSessionIdentityPrefersSessionSignal(t *testing.T) {
-	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "client-key", "session-1", nil)
-	second := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "client-key", "session-2", nil)
+	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "client-key", "session-1", "request-1", nil)
+	second := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "client-key", "session-2", "request-1", nil)
 	if first.upstreamID == "" || first == second {
 		t.Fatalf("session signal did not take precedence: first=%#v second=%#v", first, second)
 	}
-	clientKeyOnly := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "client-key", "", nil)
+	clientKeyOnly := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "client-key", "", "request-1", nil)
 	if clientKeyOnly.upstreamID == "" || clientKeyOnly == first {
 		t.Fatalf("explicit key fallback was not isolated: session=%#v explicit=%#v", first, clientKeyOnly)
 	}
-	if value := resolveBuildSessionIdentity(0, accountdomain.ProviderBuild, "grok-4.5", "client-key", "", nil); value != (buildSessionIdentity{}) {
+	if value := resolveBuildSessionIdentity(0, accountdomain.ProviderBuild, "grok-4.5", "client-key", "", "request-1", nil); value != (buildSessionIdentity{}) {
 		t.Fatal("identity without client ownership should be empty")
 	}
-	if value := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", nil); value != (buildSessionIdentity{}) {
+	if value := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", nil); value != (buildSessionIdentity{}) {
 		t.Fatal("identity without an explicit key or session or body should be empty")
 	}
 }
@@ -96,8 +96,8 @@ func TestResolveBuildSessionIdentityPrefersSessionSignal(t *testing.T) {
 func TestResolveBuildSessionIdentitySoftFromMessagesIsStableAcrossTurns(t *testing.T) {
 	turn1 := []byte(`{"messages":[{"role":"system","content":"rules"},{"role":"user","content":"hello world"}]}`)
 	turn2 := []byte(`{"messages":[{"role":"system","content":"rules"},{"role":"user","content":"hello world"},{"role":"assistant","content":"hi"},{"role":"user","content":"next"}]}`)
-	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", turn1)
-	second := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", turn2)
+	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", turn1)
+	second := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", turn2)
 	if !first.soft || first.upstreamID == "" {
 		t.Fatalf("expected soft identity, got %#v", first)
 	}
@@ -108,7 +108,7 @@ func TestResolveBuildSessionIdentitySoftFromMessagesIsStableAcrossTurns(t *testi
 		t.Fatalf("soft identity drifted across turns: first=%#v second=%#v", first, second)
 	}
 	// Different first user messages must remain isolated.
-	other := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", []byte(`{"messages":[{"role":"user","content":"different"}]}`))
+	other := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", []byte(`{"messages":[{"role":"user","content":"different"}]}`))
 	if other.upstreamID == first.upstreamID {
 		t.Fatal("different first user shared soft upstream id")
 	}
@@ -116,8 +116,8 @@ func TestResolveBuildSessionIdentitySoftFromMessagesIsStableAcrossTurns(t *testi
 
 func TestResolveBuildSessionIdentitySoftFromResponsesInput(t *testing.T) {
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"cache me"}]}]}`)
-	first := resolveBuildSessionIdentity(9, accountdomain.ProviderBuild, "grok-4.5", "", "", body)
-	second := resolveBuildSessionIdentity(9, accountdomain.ProviderBuild, "grok-4.5", "", "", body)
+	first := resolveBuildSessionIdentity(9, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", body)
+	second := resolveBuildSessionIdentity(9, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", body)
 	if first.upstreamID == "" || first != second || !first.soft {
 		t.Fatalf("responses soft identity unstable: %#v %#v", first, second)
 	}
@@ -128,13 +128,39 @@ func TestResolveBuildSessionIdentitySoftFromResponsesInput(t *testing.T) {
 
 func TestResolveBuildSessionIdentityUsesInstructionsAsSystemAnchor(t *testing.T) {
 	// Responses commonly uses top-level instructions instead of messages[system].
-	a := resolveBuildSessionIdentity(3, accountdomain.ProviderBuild, "grok-4.5", "", "", []byte(`{"instructions":"stable system","input":[{"role":"user","content":"hello"}]}`))
-	b := resolveBuildSessionIdentity(3, accountdomain.ProviderBuild, "grok-4.5", "", "", []byte(`{"instructions":"stable system","input":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"next"}]}`))
-	c := resolveBuildSessionIdentity(3, accountdomain.ProviderBuild, "grok-4.5", "", "", []byte(`{"instructions":"other system","input":[{"role":"user","content":"hello"}]}`))
+	a := resolveBuildSessionIdentity(3, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", []byte(`{"instructions":"stable system","input":[{"role":"user","content":"hello"}]}`))
+	b := resolveBuildSessionIdentity(3, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", []byte(`{"instructions":"stable system","input":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"next"}]}`))
+	c := resolveBuildSessionIdentity(3, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", []byte(`{"instructions":"other system","input":[{"role":"user","content":"hello"}]}`))
 	if !a.soft || a.upstreamID == "" || a.upstreamID != b.upstreamID {
 		t.Fatalf("instructions soft session unstable: %#v %#v", a, b)
 	}
 	if a.upstreamID == c.upstreamID {
 		t.Fatal("different instructions should isolate soft session")
+	}
+}
+
+// 软会话按请求隔离(运营决策: 完全隔离): 同前缀的不同请求不再共享上游会话
+// (消除上下文串扰), 但账号亲和(affinityKey)保持稳定 —— 同一对话仍尽量粘同一账号。
+func TestSoftSessionUpstreamIDIsRequestScopedAffinityStable(t *testing.T) {
+	body := []byte(`{"input":"same opening message"}`)
+	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-1", body)
+	second := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "", "request-2", body)
+	if !first.soft || !second.soft {
+		t.Fatalf("expected soft identities")
+	}
+	if first.upstreamID == second.upstreamID {
+		t.Fatalf("soft upstream session must be request-scoped")
+	}
+	if first.affinityKey != second.affinityKey {
+		t.Fatalf("soft account affinity must stay stable")
+	}
+	if first.replayKey != "" || second.replayKey != "" {
+		t.Fatalf("soft identities must not drive reasoning replay")
+	}
+	// 显式信号路径不受影响: scope 变化不改变身份(跨轮次/跨账号切换稳定)。
+	a := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-1", nil)
+	b := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-2", nil)
+	if a != b {
+		t.Fatalf("explicit session identity must ignore request scope")
 	}
 }

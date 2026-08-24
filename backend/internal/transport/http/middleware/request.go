@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
 	"github.com/gin-gonic/gin"
 )
@@ -101,11 +102,23 @@ func SecurityHeaders() gin.HandlerFunc {
 }
 
 // AccessLog 只记录路径、状态和耗时，不读取请求或响应正文。
+// 5xx 额外计入 http_request_server_error_total（方法 × 状态码，有限标签
+// 空间）：成功路径零额外开销，服务端故障面获得分钟级 performance_metric
+// 速率可观测——此前 5xx 只存在于单条日志，无法与 CollectAndReset 周期
+// 对齐做趋势/告警。
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startedAt := time.Now()
 		c.Next()
+		status := c.Writer.Status()
 		requestID, _ := c.Get(RequestIDKey)
-		logger.Info("http_request", "request_id", requestID, "method", c.Request.Method, "path", c.FullPath(), "status", c.Writer.Status(), "duration_ms", time.Since(startedAt).Milliseconds())
+		logger.Info("http_request", "request_id", requestID, "method", c.Request.Method, "path", c.FullPath(), "status", status, "duration_ms", time.Since(startedAt).Milliseconds())
+		if status >= http.StatusInternalServerError {
+			perfmetrics.Default.Inc("http_request_server_error_total", perfmetrics.Labels{
+				Subsystem: "http",
+				Operation: c.FullPath(),
+				Outcome:   strconv.Itoa(status),
+			})
+		}
 	}
 }

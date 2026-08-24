@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"math"
@@ -10,6 +11,7 @@ import (
 
 	upstreamws "github.com/bogdanfinn/websocket"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/gin-gonic/gin"
 	clientws "github.com/gorilla/websocket"
 )
@@ -85,23 +87,35 @@ func (h *Handler) proxyVoiceWebSocket(c *gin.Context, pathValue string) {
 		result       voiceWSPumpResult
 	}
 	errCh := make(chan pumpResult, 2)
+	// 两个泵 goroutine 直接处理双向 WS 消息, panic 不得击穿进程:batch.Do
+	// 捕获后以 PanicError 送入 errCh, 走既有的流中断路径。
 	go func() {
-		errCh <- pumpResult{result: proxyVoiceWSPump(func() (int, []byte, error) {
-			return clientConn.ReadMessage()
-		}, session.Conn.WriteMessage)}
+		if err := batch.Do(context.Background(), func(context.Context) error {
+			errCh <- pumpResult{result: proxyVoiceWSPump(func() (int, []byte, error) {
+				return clientConn.ReadMessage()
+			}, session.Conn.WriteMessage)}
+			return nil
+		}); err != nil {
+			errCh <- pumpResult{result: voiceWSPumpResult{err: err}}
+		}
 	}()
 	go func() {
-		errCh <- pumpResult{upstreamSide: true, result: proxyVoiceWSPump(func() (int, []byte, error) {
-			messageType, payload, readErr := session.Conn.ReadMessage()
-			if readErr == nil && pathValue == "/stt" {
-				if duration, ok := streamingSTTDuration(payload); ok {
-					outcomeMu.Lock()
-					outcome.AudioDurationSeconds = max(outcome.AudioDurationSeconds, duration)
-					outcomeMu.Unlock()
+		if err := batch.Do(context.Background(), func(context.Context) error {
+			errCh <- pumpResult{upstreamSide: true, result: proxyVoiceWSPump(func() (int, []byte, error) {
+				messageType, payload, readErr := session.Conn.ReadMessage()
+				if readErr == nil && pathValue == "/stt" {
+					if duration, ok := streamingSTTDuration(payload); ok {
+						outcomeMu.Lock()
+						outcome.AudioDurationSeconds = max(outcome.AudioDurationSeconds, duration)
+						outcomeMu.Unlock()
+					}
 				}
-			}
-			return messageType, payload, readErr
-		}, clientConn.WriteMessage)}
+				return messageType, payload, readErr
+			}, clientConn.WriteMessage)}
+			return nil
+		}); err != nil {
+			errCh <- pumpResult{result: voiceWSPumpResult{err: err}}
+		}
 	}()
 	first := <-errCh
 	if !isNormalVoiceWSClose(first.result.err) {

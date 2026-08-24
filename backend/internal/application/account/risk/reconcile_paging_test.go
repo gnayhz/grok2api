@@ -37,6 +37,13 @@ func (p *pagedStore) SaveRiskVerdict(_ context.Context, id uint64, v StoredVerdi
 	return nil
 }
 
+func (p *pagedStore) DeleteRiskVerdict(_ context.Context, id uint64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.verdicts, id)
+	return nil
+}
+
 func (p *pagedStore) ListRiskyVerdictAccountIDs(_ context.Context) ([]uint64, error) {
 	return nil, nil
 }
