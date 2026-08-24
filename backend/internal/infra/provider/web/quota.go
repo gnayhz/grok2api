@@ -301,6 +301,10 @@ func inferWebTierFromQuota(windows []account.QuotaWindow) (account.WebTier, bool
 }
 
 func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credential, mode string) (account.QuotaWindow, error) {
+	// 额度同步按账单语义路由(与 SyncQuotaGroup/Console 一致)。缺标时默认
+	// 落到推理类:启动补账 queueDueWebQuotaRefresh 按账号×模式批量刷新,
+	// 会把"命中 201"这类计数整个灌进推理请求行,徽标彻底失真。
+	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassBilling)
 	if mode == weeklyQuotaMode {
 		return a.syncWeeklyCredits(ctx, credential)
 	}
