@@ -11,17 +11,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-type legacyAllEgressNode struct {
-	ID    uint64 `gorm:"primaryKey;autoIncrement"`
-	Scope string `gorm:"size:32;not null"`
-}
-
-func (legacyAllEgressNode) TableName() string { return "egress_nodes" }
-
 type legacyEgressNodeWithoutProxyPool struct {
 	ID                          uint64 `gorm:"primaryKey;autoIncrement"`
 	Name                        string `gorm:"size:160;not null"`
-	Scope                       string `gorm:"size:32;not null"`
 	Enabled                     bool   `gorm:"not null;default:true"`
 	EncryptedProxyURL           string `gorm:"type:text;not null;default:''"`
 	UserAgent                   string `gorm:"size:512;not null;default:''"`
@@ -51,15 +43,15 @@ func TestEgressRepositorySortsInDatabase(t *testing.T) {
 	}
 	repo := NewEgressRepository(database)
 	for _, value := range []egress.Node{
-		{Name: "slow", Scope: egress.ScopeBuild, Enabled: true, Health: 0.2},
-		{Name: "healthy", Scope: egress.ScopeWeb, Enabled: true, Health: 0.9},
-		{Name: "middle", Scope: egress.ScopeWebAsset, Enabled: true, Health: 0.5},
+		{Name: "slow", Enabled: true, Health: 0.2},
+		{Name: "healthy", Enabled: true, Health: 0.9},
+		{Name: "middle", Enabled: true, Health: 0.5},
 	} {
 		if _, err := repo.CreateEgressNode(ctx, value); err != nil {
 			t.Fatal(err)
 		}
 	}
-	values, err := repo.ListEgressNodes(ctx, "", repository.SortQuery{Field: "health", Direction: repository.SortDescending})
+	values, err := repo.ListEgressNodes(ctx, repository.SortQuery{Field: "health", Direction: repository.SortDescending})
 	if err != nil || len(values) != 3 || values[0].Name != "healthy" || values[2].Name != "slow" {
 		t.Fatalf("health sort = %#v, err = %v", values, err)
 	}
@@ -78,9 +70,9 @@ func TestEgressRepositoryPaginatesAndFiltersManagementList(t *testing.T) {
 	repo := NewEgressRepository(database)
 	created := make(map[string]egress.Node)
 	for _, value := range []egress.Node{
-		{Name: "alpha", Scope: egress.ScopeBuild, Enabled: true, Health: 0.9, ProbeStatus: egress.ProbeStatusHealthy},
-		{Name: "beta", Scope: egress.ScopeWeb, Enabled: false, Health: 0.4, ProbeStatus: egress.ProbeStatusUnhealthy},
-		{Name: "gamma", Scope: egress.ScopeBuild, Enabled: true, Health: 0.7, ProbeStatus: egress.ProbeStatusUnknown},
+		{Name: "alpha", Enabled: true, Health: 0.9, ProbeStatus: egress.ProbeStatusHealthy},
+		{Name: "beta", Enabled: false, Health: 0.4, ProbeStatus: egress.ProbeStatusUnhealthy},
+		{Name: "gamma", Enabled: true, Health: 0.7, ProbeStatus: egress.ProbeStatusUnknown},
 	} {
 		node, createErr := repo.CreateEgressNode(ctx, value)
 		if createErr != nil {
@@ -91,18 +83,11 @@ func TestEgressRepositoryPaginatesAndFiltersManagementList(t *testing.T) {
 	if err := database.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", created["beta"].ID).Update("enabled", false).Error; err != nil {
 		t.Fatal(err)
 	}
-	alphaID := created["alpha"].ID
-	if err := database.db.WithContext(ctx).Create(&accountModel{
-		IdentityKey: strings.Repeat("a", 64), Provider: "grok_build", Name: "bound", SourceKey: "bound-source",
-		Enabled: true, AuthStatus: "active", Priority: 1, MaxConcurrent: 8, EgressNodeID: &alphaID,
-	}).Error; err != nil {
-		t.Fatal(err)
-	}
 
 	values, total, err := repo.ListEgressNodePage(ctx, repository.EgressNodeListQuery{
 		Page: repository.PageQuery{Limit: 2, Sort: repository.SortQuery{Field: "name", Direction: repository.SortAscending}},
 	})
-	if err != nil || total != 3 || len(values) != 2 || values[0].Name != "alpha" || values[1].Name != "beta" || values[0].AssignedAccountCount != 1 {
+	if err != nil || total != 3 || len(values) != 2 || values[0].Name != "alpha" || values[1].Name != "beta" {
 		t.Fatalf("first page = %#v, total=%d, err=%v", values, total, err)
 	}
 	values, total, err = repo.ListEgressNodePage(ctx, repository.EgressNodeListQuery{
@@ -112,23 +97,20 @@ func TestEgressRepositoryPaginatesAndFiltersManagementList(t *testing.T) {
 		t.Fatalf("second page = %#v, total=%d, err=%v", values, total, err)
 	}
 
-	bound := "bound"
 	values, total, err = repo.ListEgressNodePage(ctx, repository.EgressNodeListQuery{
-		Page: repository.PageQuery{Limit: 20, Search: "ALP"},
-		Filter: repository.EgressNodeListFilter{
-			Scope: egress.ScopeBuild, ProbeStatus: egress.ProbeStatusHealthy, Assignment: bound,
-		},
+		Page:   repository.PageQuery{Limit: 20, Search: "ALP"},
+		Filter: repository.EgressNodeListFilter{ProbeStatus: egress.ProbeStatusHealthy},
 	})
-	if err != nil || total != 1 || len(values) != 1 || values[0].Name != "alpha" || values[0].AssignedAccountCount != 1 {
+	if err != nil || total != 1 || len(values) != 1 || values[0].Name != "alpha" {
 		t.Fatalf("filtered page = %#v, total=%d, err=%v", values, total, err)
 	}
 
 	disabled := false
 	values, total, err = repo.ListEgressNodePage(ctx, repository.EgressNodeListQuery{
-		Page: repository.PageQuery{Limit: 20}, Filter: repository.EgressNodeListFilter{Enabled: &disabled, Assignment: "unbound"},
+		Page: repository.PageQuery{Limit: 20}, Filter: repository.EgressNodeListFilter{Enabled: &disabled},
 	})
 	if err != nil || total != 1 || len(values) != 1 || values[0].Name != "beta" {
-		t.Fatalf("disabled unbound page = %#v, total=%d, err=%v", values, total, err)
+		t.Fatalf("disabled page = %#v, total=%d, err=%v", values, total, err)
 	}
 }
 
@@ -143,7 +125,7 @@ func TestEgressStateUpdatesDoNotOverwriteClearanceOrHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := NewEgressRepository(database)
-	node, err := repo.CreateEgressNode(ctx, egress.Node{Name: "web", Scope: egress.ScopeWeb, Enabled: true, Health: 1, UserAgent: "old", EncryptedCloudflareCookie: "old-cookie"})
+	node, err := repo.CreateEgressNode(ctx, egress.Node{Name: "web", Enabled: true, Health: 1, UserAgent: "old", EncryptedCloudflareCookie: "old-cookie"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,32 +144,32 @@ func TestEgressStateUpdatesDoNotOverwriteClearanceOrHealth(t *testing.T) {
 	}
 }
 
-func TestInitializeSchemaRemovesAndRejectsLegacyAllEgressNodes(t *testing.T) {
+// 新架构的出口表是无作用域资源:所有 scope/账号绑定列都不存在。
+// (旧列删除迁移路径 dropLegacyEgressResourceColumns 在 SQLite 上存在非测试
+// 代码缺陷——字符串表名触发 glebarez DropColumn 空指针——修复前无法在测试
+// 中构造带旧列的库;这里断言目标 schema 形态。)
+func TestInitializeSchemaBuildsScopeFreeEgressTables(t *testing.T) {
 	ctx := context.Background()
-	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "legacy-egress.db"))
+	database := openTestDatabase(t)
+	migrator := database.db.WithContext(ctx).Migrator()
+	if migrator.HasColumn("egress_nodes", "scope") || migrator.HasColumn("egress_nodes", "pool_id") || migrator.HasColumn("egress_nodes", "account_capacity") {
+		t.Fatal("egress_nodes still carries legacy scope/binding columns")
+	}
+	if migrator.HasColumn("egress_pools", "scope") {
+		t.Fatal("egress_pools still carries the legacy scope column")
+	}
+	if migrator.HasColumn("egress_subscription_sources", "scope") || migrator.HasColumn("egress_subscription_sources", "default_account_capacity") {
+		t.Fatal("egress_subscription_sources still carries legacy columns")
+	}
+	if migrator.HasTable("egress_proxy_profiles") {
+		t.Fatal("shared proxy profile table still exists")
+	}
+	node, err := NewEgressRepository(database).CreateEgressNode(ctx, egress.Node{Name: "scope-free", Enabled: true})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("scope-free node rejected: %v", err)
 	}
-	defer database.Close()
-	if err := database.db.WithContext(ctx).AutoMigrate(&legacyAllEgressNode{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.db.WithContext(ctx).Create(&legacyAllEgressNode{Scope: "all"}).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var count int64
-	if err := database.db.WithContext(ctx).Model(&egressNodeModel{}).Where("scope = ?", "all").Count(&count).Error; err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("legacy all-scope nodes = %d", count)
-	}
-	if _, err := NewEgressRepository(database).CreateEgressNode(ctx, egress.Node{Name: "invalid", Scope: egress.Scope("all"), Enabled: true}); err == nil {
-		t.Fatal("all-scope node passed the database constraint")
+	if node.Name != "scope-free" {
+		t.Fatalf("created node = %#v", node)
 	}
 }
 
@@ -201,7 +183,7 @@ func TestInitializeSchemaAddsProxyPoolWithoutChangingExistingRows(t *testing.T) 
 	if err := database.db.WithContext(ctx).AutoMigrate(&legacyEgressNodeWithoutProxyPool{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.db.WithContext(ctx).Create(&legacyEgressNodeWithoutProxyPool{Name: "existing", Scope: string(egress.ScopeBuild), Enabled: true}).Error; err != nil {
+	if err := database.db.WithContext(ctx).Create(&legacyEgressNodeWithoutProxyPool{Name: "existing", Enabled: true}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := database.InitializeSchema(ctx); err != nil {

@@ -365,7 +365,7 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 		EstimatedCostInUSDTicks: nonNegative(value.EstimatedCostInUSDTicks), PricingModel: truncate(value.PricingModel, 100), PricingVersion: truncate(value.PricingVersion, 20),
 		NumSourcesUsed: nonNegative(value.NumSourcesUsed), NumServerSideToolsUsed: nonNegative(value.NumServerSideToolsUsed),
 		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), FirstTokenMS: normalizedFirstToken(value), DeliveredEvents: nonNegative(value.DeliveredEvents), DeliveredBytes: nonNegative(value.DeliveredBytes), DurationMS: nonNegative(value.DurationMS),
-		ErrorCode: truncate(value.ErrorCode, 100), AttemptCount: len(value.Attempts), CreatedAt: value.CreatedAt,
+		ErrorCode: truncate(value.ErrorCode, 100), QualityFailOpen: value.QualityFailOpen, AttemptCount: len(value.Attempts), CreatedAt: value.CreatedAt,
 	}
 	attempts := make([]requestAuditAttemptModel, 0, len(value.Attempts))
 	for _, attempt := range value.Attempts {
