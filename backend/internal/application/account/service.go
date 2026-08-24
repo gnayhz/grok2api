@@ -46,6 +46,15 @@ var (
 var ErrCredentialRefreshPermanent = errors.New("OAuth refresh token 已永久失效")
 var errQuotaRefreshBusy = errors.New("额度同步已由其他实例执行")
 
+type RateLimitReconcileState string
+
+const (
+	RateLimitReconcileInconclusive RateLimitReconcileState = "inconclusive"
+	RateLimitReconcileRefreshing   RateLimitReconcileState = "refreshing"
+	RateLimitReconcileAvailable    RateLimitReconcileState = "available"
+	RateLimitReconcileExhausted    RateLimitReconcileState = "exhausted"
+)
+
 const (
 	// estimatedFreeTokenLimit is only a fallback until an upstream exhaustion
 	// response supplies the account-specific actual/limit pair.
@@ -186,6 +195,10 @@ type View struct {
 	QuotaWindows       []accountdomain.QuotaWindow
 	BuildBotFlagged    bool
 	BuildBotFlagSource int
+	// EnabledChanged is request-scoped update metadata. It is not persisted or
+	// serialized directly; the HTTP layer uses it to avoid warning when a PATCH
+	// merely repeats the account's existing enabled value.
+	EnabledChanged bool
 }
 
 type UpdateInput struct {
@@ -2181,6 +2194,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	if err != nil {
 		return View{}, mapRepositoryError(err)
 	}
+	enabledChanged := input.Enabled != nil && value.Enabled != *input.Enabled
 	if input.Name != nil {
 		value.Name = strings.TrimSpace(*input.Name)
 		if value.Name == "" {
@@ -2273,7 +2287,30 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	} else if updated.Enabled && s.providers != nil && s.providers.SupportsCredentialRefresh(updated.Provider) {
 		s.WakeCredentialRefresh()
 	}
-	return s.Get(ctx, updated.ID)
+	view, err := s.Get(ctx, updated.ID)
+	if err != nil {
+		return View{}, err
+	}
+	view.EnabledChanged = enabledChanged
+	return view, nil
+}
+
+// ClearCooldown resets request-path health so a cooled account can be
+// scheduled again. UpdateHealth publishes InvalidationAccountHealthChanged,
+// which overwrites the selector memory overlay (runtimeStore=memory).
+func (s *Service) ClearCooldown(ctx context.Context, id uint64) (View, error) {
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		return View{}, mapRepositoryError(err)
+	}
+	// missing_thinking is a durable quality strike, not a transient cooldown
+	// error. Clearing the timer must not turn the next miss into another first
+	// strike and bypass the second-miss disable policy.
+	healthMarker := accountdomain.NormalizeHealthMarker(value.LastError)
+	if err := s.accounts.UpdateHealth(ctx, value.ID, value.Provider, 0, nil, healthMarker, false); err != nil {
+		return View{}, mapRepositoryError(err)
+	}
+	return s.Get(ctx, id)
 }
 
 // MarkBuildAPIFallback 幂等写入 Build 账号 XAI 推理回退标记；失败不吞掉，调用方可重试。
@@ -2986,14 +3023,35 @@ func preserveActiveQuotaWindows(existing, incoming []accountdomain.QuotaWindow, 
 	return result
 }
 
-// ReconcileRateLimit 根据额度模式核实 429；Web 周池继续以上游快照为准。
-func (s *Service) ReconcileRateLimit(ctx context.Context, id uint64, mode string, retryAfter time.Duration) (bool, error) {
-	if mode == "weekly" {
-		window, err := s.RefreshQuotaMode(ctx, id, mode)
-		if err != nil {
-			return false, err
+// ReconcileRateLimit 根据额度模式核实 429。Web 周池和 Console
+// 均以上游快照为准；Console 的 resource-exhausted 还可能表示瞬时
+// RPS/RPM 限流，不能在未查询 /usage 时直接将账号冻结 24 小时。
+func (s *Service) ReconcileRateLimit(ctx context.Context, id uint64, mode string, retryAfter time.Duration) (RateLimitReconcileState, error) {
+	if mode == "weekly" || isConsoleUsageQuotaMode(mode) {
+		var window accountdomain.QuotaWindow
+		var err error
+		if isConsoleUsageQuotaMode(mode) {
+			window, err = s.refreshConsoleQuotaModeLocked(ctx, id, mode)
+		} else {
+			window, err = s.RefreshQuotaMode(ctx, id, mode)
 		}
-		return window.Remaining == 0 || window.UsagePercent >= 100, nil
+		if err != nil {
+			if isConsoleUsageQuotaMode(mode) {
+				if errors.Is(err, errQuotaRefreshBusy) {
+					return RateLimitReconcileRefreshing, nil
+				}
+				// Keep the last known snapshot on an inconclusive probe and let the
+				// bounded refresh worker retry. The gateway will still apply its normal
+				// account cooldown and rotate this request to another account.
+				s.QueueQuotaRefresh(id, mode)
+				s.logger.Warn("console_rate_limit_quota_probe_failed", "account_id", id, "mode", mode, "error", err)
+			}
+			return RateLimitReconcileInconclusive, err
+		}
+		if window.Remaining == 0 || window.UsagePercent >= 100 {
+			return RateLimitReconcileExhausted, nil
+		}
+		return RateLimitReconcileAvailable, nil
 	}
 	var resetAt *time.Time
 	if retryAfter > 0 {
@@ -3001,13 +3059,14 @@ func (s *Service) ReconcileRateLimit(ctx context.Context, id uint64, mode string
 		resetAt = &value
 	}
 	if err := s.ExhaustQuota(ctx, id, mode, resetAt); err != nil {
-		return false, err
+		return RateLimitReconcileInconclusive, err
 	}
-	return true, nil
+	return RateLimitReconcileExhausted, nil
 }
 
 func (s *Service) ReconcileWebRateLimit(ctx context.Context, id uint64, mode string, retryAfter time.Duration) (bool, error) {
-	return s.ReconcileRateLimit(ctx, id, mode, retryAfter)
+	state, err := s.ReconcileRateLimit(ctx, id, mode, retryAfter)
+	return state == RateLimitReconcileExhausted, err
 }
 
 func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
@@ -3031,9 +3090,9 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 			return accountdomain.QuotaWindow{}, err
 		}
 	}
-	window, ok := quotaWindowByMode(refreshed.Windows, mode)
-	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider usage 响应缺少 %s 额度", mode)
+	window, err := s.resolveRefreshedQuotaWindow(ctx, id, mode, refreshed)
+	if err != nil {
+		return accountdomain.QuotaWindow{}, err
 	}
 	if len(refreshed.Modes) == 0 && refreshed.Credential.Provider == accountdomain.ProviderConsole {
 		// One Console request refreshes all three authoritative windows. Reconcile
@@ -3043,6 +3102,13 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 			return window, err
 		}
 	} else if len(refreshed.Modes) == 0 {
+		if err := s.reconcileQuotaRecoveryWindow(ctx, refreshed.Credential.Provider, id, window); err != nil {
+			return window, err
+		}
+	} else if window.Mode == "weekly" {
+		// The requested Imagine product was availability-only and resolved to
+		// the paid shared pool. Reconcile the authoritative weekly window too;
+		// the group reconciliation above only covers product-specific modes.
 		if err := s.reconcileQuotaRecoveryWindow(ctx, refreshed.Credential.Provider, id, window); err != nil {
 			return window, err
 		}
@@ -3069,11 +3135,26 @@ func (s *Service) ProbeQuotaMode(ctx context.Context, id uint64, mode string) (a
 	if !ok {
 		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 模式额度探测返回类型无效")
 	}
-	window, ok := quotaWindowByMode(refreshed.Windows, mode)
-	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider usage 响应缺少 %s 额度", mode)
+	return s.resolveRefreshedQuotaWindow(ctx, id, mode, refreshed)
+}
+
+func (s *Service) resolveRefreshedQuotaWindow(ctx context.Context, id uint64, mode string, refreshed quotaRefreshResult) (accountdomain.QuotaWindow, error) {
+	if window, ok := quotaWindowByMode(refreshed.Windows, mode); ok {
+		return window, nil
 	}
-	return window, nil
+	credential := refreshed.Credential
+	paidWebImagine := credential.Provider == accountdomain.ProviderWeb && isWebImagineQuotaMode(mode) &&
+		(credential.WebTier == accountdomain.WebTierSuper || credential.WebTier == accountdomain.WebTierHeavy)
+	if paidWebImagine {
+		weekly, err := s.refreshQuotaMode(ctx, id, "weekly")
+		if err != nil {
+			return accountdomain.QuotaWindow{}, err
+		}
+		if window, ok := quotaWindowByMode(weekly.Windows, "weekly"); ok {
+			return window, nil
+		}
+	}
+	return accountdomain.QuotaWindow{}, fmt.Errorf("Provider usage 响应缺少 %s 额度", mode)
 }
 
 func (s *Service) refreshQuotaGroup(ctx context.Context, id uint64, group string) (quotaRefreshResult, error) {
@@ -3451,13 +3532,13 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 		acquired := true
 		var release func()
 		if !skipUpstream && s.refreshLock != nil {
-			effectiveKey := strconv.FormatUint(request.accountID, 10) + ":" + refreshMode
+			lockKey := "quota-refresh:" + strconv.FormatUint(request.accountID, 10) + ":" + refreshMode
 			if consoleMode {
 				// Every Console mode reads the same /usage snapshot. Serialize all
 				// three kinds across instances to avoid duplicate upstream probes.
-				effectiveKey = "console:" + strconv.FormatUint(request.accountID, 10)
+				lockKey = consoleQuotaRefreshLockKey(request.accountID)
 			}
-			release, acquired, refreshErr = s.refreshLock.Acquire(ctx, "quota-refresh:"+effectiveKey, quotaRefreshTimeout)
+			release, acquired, refreshErr = s.refreshLock.Acquire(ctx, lockKey, quotaRefreshTimeout)
 		}
 		if !skipUpstream && refreshErr == nil && acquired {
 			if err := s.syncPool.Do(ctx, func(workCtx context.Context) error {
@@ -3806,23 +3887,7 @@ func (s *Service) SyncIncompleteConsoleQuotas(ctx context.Context) (int, int, er
 		}
 		var batchSucceeded, batchFailed int
 		if len(pending) > 0 {
-			batchSucceeded, batchFailed, err = s.runAccountBatch(ctx, "console_usage_migration", pending, s.syncPool, nil, func(workCtx context.Context, id uint64) error {
-				var release func()
-				if s.refreshLock != nil {
-					var acquired bool
-					var lockErr error
-					release, acquired, lockErr = s.refreshLock.Acquire(workCtx, "quota-refresh:"+strconv.FormatUint(id, 10)+":console", 2*quotaRefreshTimeout)
-					if lockErr != nil {
-						return lockErr
-					}
-					if !acquired {
-						return errQuotaRefreshBusy
-					}
-					defer release()
-				}
-				_, refreshErr := s.RefreshQuotaMode(workCtx, id, "console")
-				return refreshErr
-			})
+			batchSucceeded, batchFailed, err = s.syncConsoleQuotaAccounts(ctx, "console_usage_migration", pending)
 		}
 		succeeded += batchSucceeded
 		failed += batchFailed
@@ -3834,6 +3899,110 @@ func (s *Service) SyncIncompleteConsoleQuotas(ctx context.Context) (int, int, er
 			return succeeded, failed, nil
 		}
 	}
+}
+
+// SyncStaleConsoleQuotas refreshes a bounded batch of complete but old /usage
+// snapshots. Active accounts are already refreshed after successful requests;
+// this catch-up covers idle pools without turning a large deployment into a
+// periodic upstream request burst.
+func (s *Service) SyncStaleConsoleQuotas(ctx context.Context, before time.Time, afterID uint64, limit int) (int, int, uint64, error) {
+	if limit <= 0 || limit > accountTaskBatchSize {
+		limit = 50
+	}
+	pending := make([]uint64, 0, limit)
+	nextAfterID := afterID
+	reachedEnd := false
+	for len(pending) < limit {
+		values, _, err := s.accounts.ListProviderAccountBatch(ctx, accountdomain.ProviderConsole, nextAfterID, accountTaskBatchSize)
+		if err != nil {
+			return 0, 0, nextAfterID, err
+		}
+		if len(values) == 0 {
+			reachedEnd = true
+			break
+		}
+		ids := make([]uint64, 0, len(values))
+		for _, value := range values {
+			if value.Enabled && value.AuthStatus == accountdomain.AuthStatusActive {
+				ids = append(ids, value.ID)
+			}
+		}
+		windows, err := s.accounts.GetQuotaWindows(ctx, ids)
+		if err != nil {
+			return 0, 0, nextAfterID, err
+		}
+		for _, value := range values {
+			nextAfterID = value.ID
+			if value.Enabled && value.AuthStatus == accountdomain.AuthStatusActive && staleCompleteConsoleUsageSnapshot(windows[value.ID], before) {
+				pending = append(pending, value.ID)
+				if len(pending) == limit {
+					break
+				}
+			}
+		}
+		if len(values) < accountTaskBatchSize {
+			reachedEnd = len(pending) < limit
+			break
+		}
+	}
+	if reachedEnd {
+		nextAfterID = 0
+	}
+	if len(pending) == 0 {
+		return 0, 0, nextAfterID, nil
+	}
+	succeeded, failed, err := s.syncConsoleQuotaAccounts(ctx, "console_quota_stale_catchup", pending)
+	return succeeded, failed, nextAfterID, err
+}
+
+func staleCompleteConsoleUsageSnapshot(windows []accountdomain.QuotaWindow, before time.Time) bool {
+	if !completeConsoleUsageSnapshot(windows) {
+		return false
+	}
+	for _, window := range windows {
+		if !isConsoleUsageQuotaMode(window.Mode) {
+			continue
+		}
+		if window.SyncedAt == nil || window.SyncedAt.Before(before) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) syncConsoleQuotaAccounts(ctx context.Context, operation string, ids []uint64) (int, int, error) {
+	return s.runAccountBatch(ctx, operation, ids, s.syncPool, nil, func(workCtx context.Context, id uint64) error {
+		_, refreshErr := s.refreshConsoleQuotaModeLocked(workCtx, id, "console")
+		if errors.Is(refreshErr, errQuotaRefreshBusy) {
+			// Another replica already owns the refresh. Treat that as accepted work:
+			// queuing the same account locally only creates a trailing duplicate probe.
+			return nil
+		}
+		if refreshErr != nil && workCtx.Err() == nil {
+			s.QueueQuotaRefresh(id, "console")
+		}
+		return refreshErr
+	})
+}
+
+func (s *Service) refreshConsoleQuotaModeLocked(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
+	var release func()
+	if s.refreshLock != nil {
+		acquiredRelease, acquired, err := s.refreshLock.Acquire(ctx, consoleQuotaRefreshLockKey(id), 2*quotaRefreshTimeout)
+		if err != nil {
+			return accountdomain.QuotaWindow{}, err
+		}
+		if !acquired {
+			return accountdomain.QuotaWindow{}, errQuotaRefreshBusy
+		}
+		release = acquiredRelease
+		defer release()
+	}
+	return s.RefreshQuotaMode(ctx, id, mode)
+}
+
+func consoleQuotaRefreshLockKey(id uint64) string {
+	return "quota-refresh:console:" + strconv.FormatUint(id, 10)
 }
 
 func completeConsoleUsageSnapshot(windows []accountdomain.QuotaWindow) bool {
@@ -4669,13 +4838,14 @@ func (s *Service) ClearMissingThinkingCooldown(ctx context.Context, id uint64) e
 	return nil
 }
 
-// ClearCooldown is the manual operator escape hatch: it unconditionally lifts
-// the request-path cooldown (failure_count / cooldown_until / last_error).
-// Unlike ClearMissingThinkingCooldown it is not verdict-scoped — an operator
-// invoking it explicitly takes over the judgment, including generic 5xx
-// cooldowns and the missing-thinking strike marker. The enabled state stays
-// untouched: re-enabling a disabled account remains a separate action.
-func (s *Service) ClearCooldown(ctx context.Context, id uint64) error {
+// ClearCooldownUnconditional is the manual operator escape hatch: it
+// unconditionally lifts the request-path cooldown (failure_count /
+// cooldown_until / last_error). Unlike ClearMissingThinkingCooldown it is not
+// verdict-scoped — an operator invoking it explicitly takes over the judgment,
+// including generic 5xx cooldowns and the missing-thinking strike marker. The
+// enabled state stays untouched: re-enabling a disabled account remains a
+// separate action.
+func (s *Service) ClearCooldownUnconditional(ctx context.Context, id uint64) error {
 	if err := s.accounts.ClearCooldown(ctx, id); err != nil {
 		return mapRepositoryError(err)
 	}

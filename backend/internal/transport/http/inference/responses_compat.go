@@ -179,11 +179,8 @@ func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) b
 		}
 		if model := strings.TrimSpace(stringAny(resp["model"])); model != "" {
 			state.model = model
-		} else if responsesEventIsTerminal(typ) {
-			// Grok TUI serde requires `model` on response.completed / failed;
-			// a missing key fails deserialization even when the value is empty.
-			// Only terminal events are backfilled so non-terminal frames keep
-			// their original wire shape.
+		} else {
+			// Grok TUI serde requires `model` on response.failed / completed.
 			resp["model"] = state.model
 			changed = true
 		}
@@ -231,6 +228,35 @@ func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) b
 				state.responseID = id
 			} else if id != state.responseID {
 				event["id"] = state.responseID
+				changed = true
+			}
+		}
+	}
+	if ensureOutputTextAnnotations(event) {
+		changed = true
+	}
+	return changed
+}
+
+// Grok CLI serde requires output_text.annotations even when there are no
+// citations. Missing the field makes a retry fail with
+// "serialization error: missing field `annotations`".
+func ensureOutputTextAnnotations(node any) bool {
+	changed := false
+	switch typed := node.(type) {
+	case map[string]any:
+		if stringAny(typed["type"]) == "output_text" && typed["annotations"] == nil {
+			typed["annotations"] = []any{}
+			changed = true
+		}
+		for _, key := range []string{"item", "part", "response", "content", "output", "delta"} {
+			if ensureOutputTextAnnotations(typed[key]) {
+				changed = true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if ensureOutputTextAnnotations(child) {
 				changed = true
 			}
 		}

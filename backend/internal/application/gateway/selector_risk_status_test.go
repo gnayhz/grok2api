@@ -92,7 +92,7 @@ func TestAcquirePinnedSkipsRiskFlagged(t *testing.T) {
 		t.Fatal(err)
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	if _, err := selector.acquirePinned(ctx, account.ProviderBuild, flagged.ID, 0, "grok-test", "", true, clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeAll}); err == nil {
+	if _, err := selector.acquirePinned(ctx, account.ProviderBuild, flagged.ID, 0, "grok-test", "", true, false, clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeAll}); err == nil {
 		t.Fatal("pinned acquire of a risk-flagged account must fail, not serve the flagged identity")
 	}
 }

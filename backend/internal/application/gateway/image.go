@@ -31,6 +31,9 @@ type ImageGenerationInput struct {
 	ResponseFormat string
 	Streaming      bool
 	PartialImages  int
+	Method         string
+	Path           string
+	Headers        map[string][]string
 }
 
 // ImageEditInput 表示图片编辑用例已经完成协议校验后的输入。
@@ -48,6 +51,9 @@ type ImageEditInput struct {
 	ResponseFormat string
 	Streaming      bool
 	PartialImages  int
+	Method         string
+	Path           string
+	Headers        map[string][]string
 }
 
 type imageProviderSupport func(accountdomain.Provider) bool
@@ -69,7 +75,7 @@ func (s *Service) GenerateImage(ctx context.Context, input ImageGenerationInput)
 			Size: input.Size, AspectRatio: input.AspectRatio, Resolution: input.Resolution, Quality: input.Quality,
 			ResponseFormat: input.ResponseFormat, Streaming: input.Streaming, PartialImages: input.PartialImages,
 		})
-	}, input.Streaming, input.Resolution, input.Quality, input.Count, 0)
+	}, input.Streaming, input.Resolution, input.Quality, input.Count, 0, input.Method, input.Path, input.Headers)
 }
 
 // EditImage 选择支持图片编辑的路由和账号，并返回可统一审计的上游响应。
@@ -88,7 +94,7 @@ func (s *Service) EditImage(ctx context.Context, input ImageEditInput) (*Result,
 			Resolution: input.Resolution, Quality: input.Quality, ResponseFormat: input.ResponseFormat,
 			Streaming: input.Streaming, PartialImages: input.PartialImages,
 		})
-	}, input.Streaming, input.Resolution, input.Quality, input.Count, len(input.ImageURLs))
+	}, input.Streaming, input.Resolution, input.Quality, input.Count, len(input.ImageURLs), input.Method, input.Path, input.Headers)
 }
 
 func (s *Service) executeImage(
@@ -105,6 +111,9 @@ func (s *Service) executeImage(
 	quality string,
 	requestedCount int,
 	inputImageCount int,
+	method string,
+	path string,
+	headers map[string][]string,
 ) (*Result, error) {
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
@@ -132,6 +141,7 @@ func (s *Service) executeImage(
 		ClientIP:     requestmeta.ClientIP(ctx),
 		ModelRouteID: route.ID, ModelPublicID: externalModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
 		Provider: string(route.Provider), Operation: operation, UsageSource: audit.UsageSourceNone, Streaming: streaming,
+		RequestMethod: method, RequestPath: path, RequestHeaders: headers,
 	}
 	if operation == audit.OperationImageEdit {
 		auditBase.MediaInputImages = int64(max(0, inputImageCount))
@@ -334,7 +344,7 @@ func (s *Service) executeImage(
 				}
 			}
 			quotaKind, _ := s.providers.QuotaKind(route.Provider)
-			refreshMode, decrementMode := quotaFinalizationModes(effectiveQuotaMode, quotaRefreshGroup)
+			refreshMode, decrementMode, availabilityMode := quotaFinalizationModes(effectiveQuotaMode, quotaRefreshGroup)
 			if successful && quotaKind == provider.QuotaRemoteWindow && refreshMode != "" {
 				if decrementMode != "" && decrementMode != "weekly" {
 					units := max(1, response.QuotaUnits)
@@ -351,6 +361,9 @@ func (s *Service) executeImage(
 					}
 				}
 				s.accounts.QueueQuotaRefresh(accountID, refreshMode)
+				if availabilityMode != "" && availabilityMode != refreshMode {
+					s.accounts.QueueQuotaRefresh(accountID, availabilityMode)
+				}
 			}
 			if err := budget.run("audit", finalizationAuditBudget, func(stageCtx context.Context) error {
 				return s.audits.Create(stageCtx, record)
@@ -368,10 +381,17 @@ func (s *Service) executeImage(
 // upstream windows atomically, while the local fence must charge the exact
 // window selected for this account so concurrent media requests cannot
 // over-allocate during the short refresh delay.
-func quotaFinalizationModes(effectiveMode, refreshGroup string) (refreshMode, decrementMode string) {
+func quotaFinalizationModes(effectiveMode, refreshGroup string) (refreshMode, decrementMode, availabilityMode string) {
+	// Availability-only Imagine products on paid Web tiers are governed by the
+	// shared weekly pool. Refresh its numeric counter and also re-read the
+	// product group so available=false/nextAvailableAt can install an exact
+	// product fence that overrides weekly routing.
+	if effectiveMode == "weekly" {
+		return effectiveMode, effectiveMode, refreshGroup
+	}
 	refreshMode = effectiveMode
 	if refreshGroup != "" {
 		refreshMode = refreshGroup
 	}
-	return refreshMode, effectiveMode
+	return refreshMode, effectiveMode, ""
 }

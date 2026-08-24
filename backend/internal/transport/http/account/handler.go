@@ -165,8 +165,9 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.DELETE("/accounts", h.batchDelete)
 	router.PATCH("/accounts/:id", h.update)
 	router.DELETE("/accounts/:id", h.delete)
-	router.POST("/accounts/:id/refresh-token", h.refreshToken)
 	router.POST("/accounts/:id/clear-cooldown", h.clearCooldown)
+	router.POST("/accounts/:id/clear-cooldown-force", h.clearCooldownUnconditional)
+	router.POST("/accounts/:id/refresh-token", h.refreshToken)
 	router.POST("/accounts/:id/refresh-billing", h.refreshBilling)
 	router.POST("/accounts/:id/refresh-quota", h.refreshWebQuota)
 }
@@ -310,6 +311,9 @@ type accountResponse struct {
 	FailureCount               int                     `json:"failureCount"`
 	CooldownUntil              *time.Time              `json:"cooldownUntil,omitempty"`
 	LastError                  string                  `json:"lastError,omitempty"`
+	// EnabledDoesNotClearCooldown is set on PATCH when enabled was changed
+	// while the account is still cooling. Toggling enabled is not a health reset.
+	EnabledDoesNotClearCooldown bool `json:"enabledDoesNotClearCooldown,omitempty"`
 	LastUsedAt                 *time.Time              `json:"lastUsedAt,omitempty"`
 	LinkedAccountID            uint64                  `json:"linkedAccountId,omitempty,string"`
 	LinkedName                 string                  `json:"linkedAccountName,omitempty"`
@@ -1259,12 +1263,31 @@ func (h *Handler) update(c *gin.Context) {
 		return
 	}
 	result := newAccountResponse(value)
+	if value.EnabledChanged && result.CooldownUntil != nil && time.Now().UTC().Before(*result.CooldownUntil) {
+		result.EnabledDoesNotClearCooldown = true
+	}
 	if request.BuildSuperEntitled != nil {
 		if synchronizer, ok := h.sync.(accountModelSynchronizer); ok {
 			result.ModelSyncFailed = synchronizer.SyncModels(c.Request.Context(), id) != nil
 		}
 	}
 	response.Success(c, http.StatusOK, result)
+}
+
+// clearCooldown 清除请求路径冷却但保留 missing_thinking strike(round 语义:
+// strike 是持久质量污点,清除计时器不得让下一次 miss 变成"首击"而绕过
+// 二击禁用策略)。
+func (h *Handler) clearCooldown(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	value, err := h.service.ClearCooldown(c.Request.Context(), id)
+	if err != nil {
+		h.writeServiceError(c, "accountClearCooldownFailed", err, http.StatusInternalServerError, "清除账号冷却失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newAccountResponse(value))
 }
 
 func (h *Handler) delete(c *gin.Context) {
@@ -1387,12 +1410,13 @@ func (h *Handler) refreshToken(c *gin.Context) {
 	response.Success(c, http.StatusOK, newAccountResponse(value))
 }
 
-func (h *Handler) clearCooldown(c *gin.Context) {
+// clearCooldownUnconditional 是操作员显式接管的无条件清除(含 strike 标记)。
+func (h *Handler) clearCooldownUnconditional(c *gin.Context) {
 	id, ok := pathID(c)
 	if !ok {
 		return
 	}
-	if err := h.service.ClearCooldown(c.Request.Context(), id); err != nil {
+	if err := h.service.ClearCooldownUnconditional(c.Request.Context(), id); err != nil {
 		h.writeServiceError(c, "accountCooldownClearFailed", err, http.StatusInternalServerError, "解除账号冷却失败")
 		return
 	}

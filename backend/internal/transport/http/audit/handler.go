@@ -72,6 +72,9 @@ type auditResponse struct {
 	DurationMS              int64                     `json:"durationMs"`
 	ErrorCode               string                    `json:"errorCode,omitempty"`
 	QualityFailOpen         bool                      `json:"qualityFailOpen,omitempty"`
+	RequestMethod           string                    `json:"requestMethod,omitempty"`
+	RequestPath             string                    `json:"requestPath,omitempty"`
+	RequestHeaders          map[string][]string       `json:"requestHeaders,omitempty"`
 	AttemptCount            int                       `json:"attemptCount"`
 	CreatedAt               time.Time                 `json:"createdAt"`
 }
@@ -300,7 +303,7 @@ func newListFilter(c *gin.Context) auditapp.ListFilter {
 }
 
 func newAuditResponse(value auditdomain.Record) auditResponse {
-	return auditResponse{
+	result := auditResponse{
 		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName, ClientIP: value.ClientIP,
 		ModelRouteID: value.ModelRouteID, ModelPublicID: value.ModelPublicID, ModelUpstreamModel: value.ModelUpstreamModel,
 		Provider: value.Provider, Operation: string(value.Operation), UsageSource: string(value.UsageSource),
@@ -316,8 +319,10 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens,
 		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DeliveredEvents: value.DeliveredEvents, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
-		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
+		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: value.RequestHeaders,
+		AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
 	}
+	return result
 }
 
 func newBillingBreakdown(value auditdomain.Record) *billingBreakdownResponse {

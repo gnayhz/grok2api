@@ -241,6 +241,7 @@ type AuditConfig struct {
 	BatchSize                   int      `yaml:"batchSize"`
 	FlushInterval               Duration `yaml:"flushInterval"`
 	CommitDelay                 Duration `yaml:"commitDelay"`
+	RetentionDays               int      `yaml:"retentionDays"`
 	LedgerMode                  string   `yaml:"ledgerMode"`
 	LedgerFailureThreshold      int      `yaml:"ledgerFailureThreshold"`
 	LedgerUnhealthyGrace        Duration `yaml:"ledgerUnhealthyGrace"`
@@ -261,6 +262,7 @@ type RequestRetryConfig struct {
 	MinOutputTokens int      `yaml:"minOutputTokens"`
 	OnExhausted     string   `yaml:"onExhausted"`
 	AccountCooldown Duration `yaml:"accountCooldown"`
+
 	// EarlyHeaderAbort 是实验性的响应头预算早断（0=关闭）：quality hold 激活
 	// 的流式请求若超过该预算仍未收到上游响应头，视为降智路径特征立即中止
 	// 换路径重试。健康推理路径的头恒定秒级返回；降智路径要等生成完成。
@@ -677,8 +679,12 @@ func (c Config) Validate() error {
 	if c.Audit.CommitDelay.Value() < minAuditCommitDelay || c.Audit.CommitDelay.Value() > maxAuditCommitDelay {
 		return errors.New("audit.commitDelay 必须在 1ms 到 50ms 之间")
 	}
+
 	if d := c.Audit.Retention.Value(); d != 0 && (d < 24*time.Hour || d > 8760*time.Hour) {
 		return errors.New("audit.retention 必须在 24h 到 8760h 之间（0 表示永久保留）")
+	}
+	if c.Audit.RetentionDays < 0 || c.Audit.RetentionDays > 365 {
+		return errors.New("audit.retentionDays 必须在 0 到 365 之间")
 	}
 	if c.Audit.LedgerMode != "observe" && c.Audit.LedgerMode != "enforce" {
 		return errors.New("audit.ledgerMode 必须是 observe 或 enforce")
@@ -756,6 +762,9 @@ func validateRequestRetry(value RequestRetryConfig) error {
 	}
 	if d := value.CreatedTimeout.Value(); d != 0 && (d < time.Second || d > 2*time.Minute) {
 		return errors.New("requestRetry.createdTimeout 必须在 1s 到 2m 之间（0 表示默认 5s）")
+	}
+	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
+		return errors.New("qualityGuard.requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间")
 	}
 	return nil
 }
@@ -861,14 +870,15 @@ func defaultConfig() Config {
 		},
 		Audit: AuditConfig{
 			BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond), CommitDelay: Duration(5 * time.Millisecond),
-			LedgerMode: "enforce", LedgerFailureThreshold: 1,
+			RetentionDays: 7,
+			LedgerMode:    "enforce", LedgerFailureThreshold: 1,
 			LedgerUnhealthyGrace: Duration(10 * time.Second), LedgerQueueHighWatermarkPct: 90,
 		},
+
 		AccountRisk: DefaultAccountRiskConfig(),
 		RequestRetry: RequestRetryConfig{
 			MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed", SameAccountRetry: true,
-			AccountCooldown: Duration(24 * time.Hour),
-		},
+			AccountCooldown: Duration(24 * time.Hour),		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{
 			MarkBuildForbiddenReauth:             false,

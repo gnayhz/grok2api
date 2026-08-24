@@ -70,6 +70,9 @@ export type AuditDTO = {
   deliveredBytes: number;
   durationMs: number;
   errorCode?: string;
+  requestMethod?: string;
+  requestPath?: string;
+  requestHeaders?: Record<string, string[]>;
   attemptCount: number;
   createdAt: string;
 };
@@ -159,7 +162,8 @@ const auditValidator = hasShape({
   numSourcesUsed: isNumber, numServerSideToolsUsed: isNumber, contextInputTokens: isNumber, contextOutputTokens: isNumber,
   firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber),
   deliveredEvents: isNumber, deliveredBytes: isNumber,
-  durationMs: isNumber, errorCode: isOptional(isString), attemptCount: isNumber, createdAt: isString,
+  durationMs: isNumber, errorCode: isOptional(isString), requestMethod: isOptional(isString), requestPath: isOptional(isString),
+  requestHeaders: isOptional(isRecordOf(isArrayOf(isString))), attemptCount: isNumber, createdAt: isString,
 });
 const auditAttemptValidator = hasShape({
   id: isString, number: isNumber, source: isOneOf("upstream_http", "gateway_transport", "credential"), stage: isString,

@@ -54,11 +54,17 @@ type accountModel struct {
 	// BuildRouteMode 仅控制 grok_build 推理地址；其它 Provider 固定 auto。
 	BuildRouteMode string `gorm:"size:16;not null;default:auto;check:chk_accounts_build_route_mode,build_route_mode IN ('auto','build','xai')"`
 	// BuildSuperEntitled 仅对 grok_build 有意义：管理员确认的 Super/1.5 entitlement；其他 Provider 保持 false。
-	BuildSuperEntitled bool                    `gorm:"not null;default:false"`
-	CreatedAt          time.Time               `gorm:"not null"`
-	UpdatedAt          time.Time               `gorm:"not null"`
-	Credential         *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	WebProfile         *webAccountProfileModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	BuildSuperEntitled bool `gorm:"not null;default:false"`
+	// EgressNodeID is nullable so existing accounts retain the legacy pool
+	// routing behavior until an administrator explicitly assigns a node.
+	EgressNodeID         *uint64 `gorm:"index:idx_accounts_egress_node"`
+	EgressAssignmentMode string  `gorm:"size:16;not null;default:'';check:chk_accounts_egress_assignment_mode,egress_assignment_mode IN ('','manual','auto')"`
+	EgressAssignedAt     *time.Time
+	CreatedAt            time.Time               `gorm:"not null"`
+	UpdatedAt            time.Time               `gorm:"not null"`
+	Credential           *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	WebProfile           *webAccountProfileModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	EgressNode           *egressNodeModel        `gorm:"foreignKey:EgressNodeID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
 }
 
 func (accountModel) TableName() string { return "provider_accounts" }
@@ -249,6 +255,21 @@ type accountModelQuotaBlockModel struct {
 
 func (accountModelQuotaBlockModel) TableName() string { return "account_model_quota_blocks" }
 
+// accountEgressLeaseBlockModel 是账号-节点对的租约级质量隔离(上游 {account}
+// 租约节点体系):一个账号租约的被动异常只隔离该账号-节点对,不殃及共享节点。
+type accountEgressLeaseBlockModel struct {
+	AccountID     uint64           `gorm:"primaryKey"`
+	NodeID        uint64           `gorm:"primaryKey"`
+	Reason        string           `gorm:"size:100;not null;check:chk_account_egress_lease_blocks_reason,length(trim(reason)) BETWEEN 1 AND 100"`
+	Version       string           `gorm:"size:64;not null;check:chk_account_egress_lease_blocks_version,length(trim(version)) BETWEEN 16 AND 64"`
+	CooldownUntil time.Time        `gorm:"not null"`
+	UpdatedAt     time.Time        `gorm:"not null"`
+	Account       *accountModel    `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Node          *egressNodeModel `gorm:"foreignKey:NodeID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+}
+
+func (accountEgressLeaseBlockModel) TableName() string { return "account_egress_lease_blocks" }
+
 type clientKeyModel struct {
 	ID                    uint64  `gorm:"primaryKey;autoIncrement"`
 	Name                  string  `gorm:"size:160;not null;check:chk_client_keys_name,length(trim(name)) BETWEEN 1 AND 160"`
@@ -342,8 +363,13 @@ type requestAuditModel struct {
 	ErrorCode       string `gorm:"size:100;check:chk_request_audits_error_code,length(error_code) <= 100"`
 	// QualityFailOpen 标记 fail-open 交付的降智响应:主行仍按成功记账(计费
 	// 不变), 该列让运营能从审计数据区分"质量降级但放行"与"健康响应"。
-	QualityFailOpen bool      `gorm:"not null;default:false"`
-	AttemptCount    int       `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
+	QualityFailOpen bool `gorm:"not null;default:false"`
+	// 请求诊断载荷(#983):写入前经 sanitizeRequestMetadata 脱敏(query 全丢、
+	// 长度封顶),用于排查客户端/路径/请求头问题。
+	RequestMethod      string `gorm:"size:16;not null;default:'';check:chk_request_audits_request_method,length(request_method) <= 16"`
+	RequestPath        string `gorm:"type:text;not null;default:'';check:chk_request_audits_request_path,length(request_path) <= 2048"`
+	RequestHeadersJSON string `gorm:"type:text;not null;default:'{}';check:chk_request_audits_request_headers,length(request_headers_json) <= 65536"`
+	AttemptCount       int    `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
 	CreatedAt       time.Time `gorm:"not null"`
 }
 

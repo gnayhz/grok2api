@@ -117,9 +117,13 @@ type Record struct {
 	ErrorCode       string
 	// QualityFailOpen: 请求经质量守卫判定降级但按 fail-open 策略交付。
 	QualityFailOpen bool
-	AttemptCount    int
-	Attempts        []Attempt
-	CreatedAt       time.Time
+	// 请求诊断(#983 隐私安全载荷,写入前经 sanitizeRequestMetadata 脱敏)。
+	RequestMethod           string
+	RequestPath             string
+	RequestHeaders          map[string][]string
+	AttemptCount            int
+	Attempts                []Attempt
+	CreatedAt               time.Time
 }
 
 // Summary 表示指定审计范围内的聚合用量。
