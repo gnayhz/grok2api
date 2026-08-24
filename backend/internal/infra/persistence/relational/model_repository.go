@@ -588,23 +588,58 @@ func (r *ModelRepository) GetByPublicIDIncludingDisabled(ctx context.Context, pu
 }
 
 func findModelRoutesByPublicID(db *gorm.DB, publicID string) ([]modelRouteModel, error) {
-	candidates := model.PublicIDCandidates(publicID)
+	groups := model.PublicIDCandidateGroups(publicID)
 	requested := strings.TrimSpace(publicID)
-	if len(candidates) == 0 && requested == "" {
+	for index, candidates := range groups {
+		aliasRequested := ""
+		if len(groups) == 1 || index == len(groups)-1 {
+			aliasRequested = requested
+		}
+		rows, err := findModelRoutesByPublicIDGroup(db, candidates, aliasRequested)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) > 0 {
+			return rows, nil
+		}
+	}
+	if len(groups) > 0 {
 		return nil, gorm.ErrRecordNotFound
+	}
+	query := db.Session(&gorm.Session{})
+	query = query.Where(`
+		EXISTS (
+			SELECT 1 FROM model_route_aliases alias
+			WHERE alias.model_route_id = model_routes.id AND alias.alias = ?
+		)
+	`, requested).Order(modelProviderPriorityExpression + ", model_routes.id ASC")
+	var rows []modelRouteModel
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return rows, nil
+}
+
+// findModelRoutesByPublicIDGroup 在单个公开 ID 候选组内解析路由。
+// round 33 优化：原单条 "public_id IN ... OR EXISTS(alias)" 查询在路由表
+// 增大后退化为 enabled 全扫 + 临时 B 树全排序（1000 路由实测 6ms，EXPLAIN
+// 证实 OR 阻止复合索引点查）。改写为两个索引点查分支 + 应用层合并排序：
+// public_id 分支走复合索引，别名分支走 alias 索引 + rowid 回表——均为
+// O(log n)。合并行数为两候选集命中总和（实践中个位数），应用层排序成本
+// 可忽略。排序键与原 ORDER BY 逐项等价：候选名命中优先于别名命中、
+// Provider 优先级、id 升序。db 上预置的谓词（如账号可用性）经
+// Session 复制在两分支同时生效，语义与原单条查询一致。
+func findModelRoutesByPublicIDGroup(db *gorm.DB, candidates []string, requested string) ([]modelRouteModel, error) {
+	if len(candidates) == 0 && requested == "" {
+		return nil, nil
 	}
 	aliasCandidates := append([]string(nil), candidates...)
 	if requested != "" && !slices.Contains(aliasCandidates, requested) {
 		aliasCandidates = append(aliasCandidates, requested)
 	}
-	// round 33 优化：原单条 "public_id IN ... OR EXISTS(alias)" 查询在路由表
-	// 增大后退化为 enabled 全扫 + 临时 B 树全排序（1000 路由实测 6ms，EXPLAIN
-	// 证实 OR 阻止复合索引点查）。改写为两个索引点查分支 + 应用层合并排序：
-	// public_id 分支走复合索引，别名分支走 alias 索引 + rowid 回表——均为
-	// O(log n)。合并行数为两候选集命中总和（实践中个位数），应用层排序成本
-	// 可忽略。排序键与原 ORDER BY 逐项等价：候选名命中优先于别名命中、
-	// Provider 优先级、id 升序。db 上预置的谓词（如账号可用性）经
-	// Session 复制在两分支同时生效，语义与原单条查询一致。
 	byID := make(map[uint64]modelRouteModel, len(candidates)+len(aliasCandidates))
 	direct := make(map[uint64]bool, len(candidates))
 	if len(candidates) > 0 {
@@ -633,7 +668,7 @@ func findModelRoutesByPublicID(db *gorm.DB, publicID string) ([]modelRouteModel,
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		return nil, gorm.ErrRecordNotFound
+		return nil, nil
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		left, right := rows[i], rows[j]

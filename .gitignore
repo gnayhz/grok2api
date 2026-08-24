@@ -61,3 +61,5 @@ EXPERIMENT-*.md
 HARDENING.md
 EXIT-*.md
 EGRESS-*.md
+
+.devnull-check

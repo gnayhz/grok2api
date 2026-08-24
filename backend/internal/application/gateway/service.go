@@ -74,6 +74,15 @@ func newRoutingAttemptPolicy(configured int) routingAttemptPolicy {
 	return routingAttemptPolicy{limit: configured}
 }
 
+// newRequestRoutingAttemptPolicy 是请求级入口:pinned 请求(已有 ownership/
+// 预选会话)恒允许恰好一次尝试,无视配置上限——重试会破坏响应状态所有权。
+func newRequestRoutingAttemptPolicy(configured int, pinned bool) routingAttemptPolicy {
+	if pinned {
+		return routingAttemptPolicy{limit: 1}
+	}
+	return newRoutingAttemptPolicy(configured)
+}
+
 func (p routingAttemptPolicy) allows(attempt int) bool {
 	return p.unlimited || attempt < p.limit
 }
@@ -1652,9 +1661,9 @@ attemptLoop:
 			}
 			failureHandled := false
 			if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
-				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-				s.selector.MarkQuotaStateChanged(credential.Provider, credential.ID)
-				failureHandled = reconcileErr == nil && exhausted
+				state, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+				s.applyRateLimitReconciliation(ctx, credential, response.StatusCode, retryAfter, state, reconcileErr)
+				failureHandled = reconcileErr == nil && state == accountapp.RateLimitReconcileExhausted
 			} else if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
 				// The Free subscription signal is account-scoped, but its billing
 				// period is not a reliable reset promise. Probe again after 24 hours.
@@ -1700,8 +1709,12 @@ attemptLoop:
 			if lastFailure.AccountScoped && !failureHandled {
 				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 			} else if !lastFailure.AccountScoped && response.StatusCode >= http.StatusInternalServerError {
-				// 5xx 短冷却：本请求已 excluded，跨请求避免立刻再打同一坏号。
-				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+				// Provider 级 5xx:本请求换号,跨请求短暂隔离该账号,但不累积持久
+				// 失败计数(#999 防瞬态 5xx 级联成 exponential 冷却)。保留真实状态码
+				// 用于诊断,应用显式软失败策略。
+				if markErr := s.selector.markSoftFailure(ctx, credential, response.StatusCode, retryAfter); markErr != nil {
+					s.logger.Warn("soft_failure_mark_failed", "account_id", credential.ID, "status", response.StatusCode, "error", markErr.Error())
+				}
 			}
 			lease.Release()
 			lastErr = fmt.Errorf("上游返回 %d", response.StatusCode)
@@ -2305,6 +2318,27 @@ func isTerminalRequestForbidden(upstreamProvider accountdomain.Provider, failure
 func forcesAccountFailover(status int, upstreamProvider accountdomain.Provider) bool {
 	return upstreamProvider == accountdomain.ProviderBuild &&
 		(status == http.StatusPaymentRequired || status == http.StatusForbidden || status == http.StatusTooManyRequests)
+}
+
+// applyRateLimitReconciliation 把配额对账结果映射为选择器动作(#1003 Console
+// 429 对账):exhausted 才落 durable 失败;Console 429 的非 exhausted 态
+// (available/refreshing/inconclusive)是瞬态,按 Retry-After 软隔离即可,
+// 不增大失败计数(防止瞬态 429 级联成长期冷却)。
+func (s *Service) applyRateLimitReconciliation(ctx context.Context, credential accountdomain.Credential, status int, retryAfter time.Duration, state accountapp.RateLimitReconcileState, reconcileErr error) {
+	s.selector.MarkQuotaStateChanged(credential.Provider, credential.ID)
+	if reconcileErr == nil && state == accountapp.RateLimitReconcileExhausted {
+		return
+	}
+	if credential.Provider == accountdomain.ProviderConsole && status == http.StatusTooManyRequests {
+		// A Console 429 with available quota, an in-progress cross-instance probe,
+		// or an inconclusive /usage request is transient. Isolate the account for
+		// this Retry-After window without growing its durable failure count.
+		if err := s.selector.markSoftFailure(ctx, credential, status, retryAfter); err != nil {
+			s.logger.Warn("console_rate_limit_soft_cooldown_failed", "account_id", credential.ID, "state", state, "error", err)
+		}
+		return
+	}
+	s.selector.MarkFailure(ctx, credential, status, retryAfter)
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

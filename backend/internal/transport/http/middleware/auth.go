@@ -1,13 +1,16 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/adminsession"
 	"github.com/gin-gonic/gin"
 )
 
@@ -16,10 +19,10 @@ const (
 	ClientKey = "clientKey"
 )
 
-// AdminAuth 校验管理员 Bearer JWT。
+// AdminAuth 校验管理员 access JWT。
 func AdminAuth(service *adminauth.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		raw, ok := bearerToken(c.GetHeader("Authorization"))
+		raw, ok := adminAccessToken(c.Request)
 		if !ok {
 			response.Error(c, http.StatusUnauthorized, "adminUnauthorized", "管理员登录已失效")
 			return
@@ -34,6 +37,53 @@ func AdminAuth(service *adminauth.Service) gin.HandlerFunc {
 			return
 		}
 		c.Set(AdminKey, value)
+		c.Next()
+	}
+}
+
+// adminAccessToken prefers the explicit Bearer credential used by the SPA and
+// API clients. The scoped HttpOnly cookie is a browser fallback for deployments
+// whose reverse proxy drops Authorization; unsafe cookie-authenticated requests
+// must still originate from the same host.
+func adminAccessToken(request *http.Request) (string, bool) {
+	header := strings.TrimSpace(request.Header.Get("Authorization"))
+	if header != "" {
+		return bearerToken(header)
+	}
+	cookie, err := request.Cookie(adminsession.AccessCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" || !adminCookieRequestAllowed(request) {
+		return "", false
+	}
+	return strings.TrimSpace(cookie.Value), true
+}
+
+func adminCookieRequestAllowed(request *http.Request) bool {
+	if fetchSite := strings.ToLower(strings.TrimSpace(request.Header.Get("Sec-Fetch-Site"))); fetchSite != "" {
+		return fetchSite == "same-origin"
+	}
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		// Older browsers may omit Fetch Metadata on same-origin reads. SameSite=Strict,
+		// host-only cookies and the browser same-origin policy remain the fallback.
+		return true
+	}
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, request.Host)
+}
+
+// QualityGuardAuth accepts only the process-scoped token shared with the
+// quality-guard sidecar. It is intentionally separate from administrator JWTs.
+func QualityGuardAuth(expected string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		raw, ok := bearerToken(c.GetHeader("Authorization"))
+		if !ok || len(raw) != len(expected) || subtle.ConstantTimeCompare([]byte(raw), []byte(expected)) != 1 {
+			response.Error(c, http.StatusUnauthorized, "qualityGuardUnauthorized", "质量守护内部认证失败")
+			return
+		}
 		c.Next()
 	}
 }
@@ -109,9 +159,9 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 		c.AbortWithStatusJSON(status, gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}})
 		return
 	}
-	// type 与 handler.writeOpenAIError 同口径（此前硬编码 invalid_request_error，
-	// 401/429 的 OpenAI 规范类型漂移——inference handler 的同名函数有正确分支，
-	// 中间件这份是漂移副本，round 24 活体矩阵发现）。
+	// OpenAI 错误信封 type 与 inference handler 同口径(round 24 修复):
+	// 401=authentication_error、429=rate_limit_error、5xx=server_error、
+	// 其余 invalid_request_error。此前硬编码 invalid_request_error。
 	errorType := "invalid_request_error"
 	switch {
 	case status == http.StatusUnauthorized:

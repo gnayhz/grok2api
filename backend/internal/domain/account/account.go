@@ -134,6 +134,20 @@ func NormalizeHealthMarker(value string) string {
 // RiskStatusRSCDenied 标记 RSC 判定注册风控的账号：保持启用但调度永久跳过。
 const RiskStatusRSCDenied = "rsc_denied"
 
+// EgressAssignmentMode 表示账号出口节点的维护方式。手工绑定绝不会被
+// 自动均衡任务迁移，自动绑定才允许在健康或容量变化时重新分配。
+// (上游账号-出口绑定体系;本分支的池路由之外,仓储层仍保留该绑定面。)
+type EgressAssignmentMode string
+
+const (
+	EgressAssignmentManual EgressAssignmentMode = "manual"
+	EgressAssignmentAuto   EgressAssignmentMode = "auto"
+)
+
+func (value EgressAssignmentMode) IsValid() bool {
+	return value == EgressAssignmentManual || value == EgressAssignmentAuto
+}
+
 // Credential 表示持久化的上游 OAuth 账号。
 type Credential struct {
 	ID                        uint64
@@ -181,6 +195,11 @@ type Credential struct {
 	// EgressIdentity 是不含凭据和个人信息的稳定出口身份。
 	// 关联到同一 Web 账号的 Build/Console 只共享该值，不共享任何运行状态。
 	EgressIdentity string
+	// EgressNodeID 是账号显式绑定的出口节点。0 表示沿用当前 scope 的
+	// 池选择逻辑；非零值必须优先使用该节点，不能悄悄回退到其他代理。
+	EgressNodeID         uint64
+	EgressAssignmentMode EgressAssignmentMode
+	EgressAssignedAt     *time.Time
 	// WebNSFWEnabledAt 记录 Grok Web 上游首次确认 NSFW 已成功开启的时间。
 	// 普通导入、额度同步和凭据更新不得清除。
 	WebNSFWEnabledAt *time.Time
@@ -434,6 +453,7 @@ type RoutingCandidate struct {
 	Billing              *Billing
 	QuotaWindow          *QuotaWindow
 	QuotaRecovery        *QuotaRecovery
+	EgressLeaseBlock     *EgressLeaseBlock
 	ModelQuotaBlock      *ModelQuotaBlock
 	ModelCapabilityKnown bool
 	SupportsModel        bool
@@ -442,10 +462,11 @@ type RoutingCandidate struct {
 // RoutingAccountBase contains provider-level routing state reusable across
 // models. Credential material is hydrated only after an account is selected.
 type RoutingAccountBase struct {
-	Credential    Credential
-	Billing       *Billing
-	QuotaRecovery *QuotaRecovery
-	QuotaWindow   *QuotaWindow
+	Credential       Credential
+	Billing          *Billing
+	QuotaRecovery    *QuotaRecovery
+	QuotaWindow      *QuotaWindow
+	EgressLeaseBlock *EgressLeaseBlock
 }
 
 // RoutingAccountOverlay contains model-specific eligibility state.
@@ -469,6 +490,26 @@ type ModelQuotaBlock struct {
 	Reason        string
 	CooldownUntil time.Time
 	UpdatedAt     time.Time
+}
+
+// EgressLeaseBlock temporarily removes one account-bound proxy lease from
+// routing without changing the account's health or disabling the physical
+// egress node shared by other leases.
+type EgressLeaseBlock struct {
+	AccountID     uint64
+	NodeID        uint64
+	Reason        string
+	Version       string
+	CooldownUntil time.Time
+	UpdatedAt     time.Time
+}
+
+// EgressLeaseBlockCursor is the stable keyset position used to scan durable
+// lease state while rows may be renewed or removed concurrently.
+type EgressLeaseBlockCursor struct {
+	CooldownUntil time.Time
+	AccountID     uint64
+	NodeID        uint64
 }
 
 // DeviceSession 表示一次短期 Device OAuth 授权流程。
@@ -527,12 +568,15 @@ func normalizeBillingPlan(value string) string {
 }
 
 func isPaidBillingPlan(value string) bool {
-	switch normalizeBillingPlan(value) {
-	case "super", "supergrok", "supergrokpro", "supergrokheavy", "supergroklite",
+	normalized := normalizeBillingPlan(value)
+	switch normalized {
+	case "super", "supergrok", "supergrokpro", "supergrokheavy", "supergroklite", "supergrokplus",
 		"grokpro", "xpremium", "xpremiumplus", "apikey":
 		return true
 	default:
-		return false
+		// SuperGrok Plus and later SuperGrok* tiers should stay paid even when
+		// weekly numeric limits are zero and the exact plan name is new.
+		return strings.HasPrefix(normalized, "supergrok")
 	}
 }
 

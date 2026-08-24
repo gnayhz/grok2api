@@ -102,9 +102,10 @@ export type AccountDTO = {
   failureCount: number;
   cooldownUntil?: string;
   lastError?: string;
-		/** Last observed upstream model (capability sync). */
-		observedModel?: string;
-		observedModelAt?: string;
+/** Last observed upstream model (capability sync). */
+  observedModel?: string;
+  observedModelAt?: string;
+  enabledDoesNotClearCooldown?: boolean;
   lastUsedAt?: string;
   linkedAccountId?: string;
   linkedAccountName?: string;
@@ -126,7 +127,7 @@ export type LinkedAccountDTO = {
 
 export type AccountUpdateInput = {
   name: string;
-  enabled: boolean;
+  enabled?: boolean;
   priority: number;
   maxConcurrent: number;
   minimumRemaining: number;
@@ -196,7 +197,7 @@ const accountValidator = hasShape({
   enabled: isBoolean, authStatus: isOneOf("active", "reauthRequired"), expiresAt: isOptional(isString), refreshable: isBoolean, cloudflareCookieConfigured: isBoolean,
   buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
   lastRefreshErrorStatus: isOptional(isNumber), lastRefreshErrorCode: isOptional(isString), lastRefreshErrorMessage: isOptional(isString), lastRefreshErrorResponse: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
-  failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), lastUsedAt: isOptional(isString),
+  failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), enabledDoesNotClearCooldown: isOptional(isBoolean), lastUsedAt: isOptional(isString),
   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")), linkedAccounts: isOptional(isArrayOf(linkedAccountValidator)),
   createdAt: isString, billing: isOptional(billingValidator), quota: quotaValidator, quotaWindows: isOptional(isArrayOf(quotaWindowValidator)),
 });

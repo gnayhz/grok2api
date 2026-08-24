@@ -596,7 +596,7 @@ func TestSelectorWebCatalogCapabilityStillEnforcesTier(t *testing.T) {
 }
 
 func TestImageQuotaFinalizationKeepsEffectiveConsumptionFence(t *testing.T) {
-	refreshMode, decrementMode := quotaFinalizationModes(account.QuotaModeWebImagePro, account.QuotaGroupWebImagine)
+	refreshMode, decrementMode, _ := quotaFinalizationModes(account.QuotaModeWebImagePro, account.QuotaGroupWebImagine)
 	if refreshMode != account.QuotaGroupWebImagine || decrementMode != account.QuotaModeWebImagePro {
 		t.Fatalf("refresh=%q decrement=%q", refreshMode, decrementMode)
 	}

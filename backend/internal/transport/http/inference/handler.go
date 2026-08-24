@@ -1349,7 +1349,7 @@ func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProt
 // 流在首个 response 事件前中止时，trailer 的 model 键仍能带上真实值。
 func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func(), fallbackModel string) (metadata responseMetadata, returnErr error) {
 	inspector := &responseInspector{protocol: protocol, onFirstToken: onFirstToken}
-	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolChat}
+	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolChat || protocol == streamProtocolAnthropic}
 	var compat responsesCompatState
 	compat.model = strings.TrimSpace(fallbackModel)
 	buffer := make([]byte, responseCopyBufferBytes)
@@ -1654,13 +1654,17 @@ type responseInspector struct {
 	terminalFailure bool
 }
 
-const reasoningStartSSEComment = ": grok2api-reasoning-start"
+const (
+	reasoningStartSSEComment    = ": grok2api-reasoning-start"
+	reasoningEvidenceSSEComment = ": grok2api-reasoning-evidence"
+)
 
 // internalSSEMarkers 是发往客户端前必须剥除的内部 SSE 注释（转换器的
 // reasoning 时序标记）。新增内部注释必须同步加入此列表，否则会泄漏到
 // 公协议。
 var internalSSEMarkers = [][]byte{
 	[]byte(reasoningStartSSEComment + "\n\n"),
+	[]byte(reasoningEvidenceSSEComment + "\n\n"),
 }
 
 func (i *responseInspector) Inspect(chunk []byte) {
