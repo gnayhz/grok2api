@@ -15,7 +15,7 @@ type quarantineCall struct {
 
 func (r *recordingQuarantiner) ClearDegradeEvidence(uint64) {}
 
-func (r *recordingQuarantiner) QuarantineForExitIP(_ context.Context, nodeID, degradedAccountID uint64) {
+func (r *recordingQuarantiner) OnRscCleanDegrade(_ context.Context, nodeID, degradedAccountID uint64) {
 	r.calls = append(r.calls, quarantineCall{nodeID: nodeID, accountID: degradedAccountID})
 }
 
@@ -29,7 +29,7 @@ func newQuarantineTestService(t *testing.T) *Service {
 	return New(baseTestConfig(), accounts, store, checker, nil)
 }
 
-// RSC clean 结论 + 节点 ID → 交给出口层隔离（IP 嫌疑）。
+// RSC clean 结论 + 节点 ID → 交给出口层(由其确认门槛决定是否升级隔离)。
 func TestCleanVerdictQuarantinesExitIPNode(t *testing.T) {
 	service := newQuarantineTestService(t)
 	quarantiner := &recordingQuarantiner{}

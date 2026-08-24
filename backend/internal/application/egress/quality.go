@@ -310,10 +310,52 @@ func (s *Service) OnEgressDegraded(ctx context.Context, nodeID, accountID uint64
 	}()
 }
 
+// OnRscCleanDegrade 是 RSC clean 判决(账号被还清白,出口 IP 成为唯一嫌疑)的
+// 隔离入口,实现 risk.EgressQuarantiner。单次头迟滞等实时信号偶发误伤健康
+// 节点(冷连接慢头/上游瞬时负载),一次排除法不足以定罪 24h:要求
+// crossAccountWindow 窗口内已有第二次降智观测(不同账号,或同账号再犯——
+// 每次都经 RSC 洗清账号自身)才升级硬隔离。首次只保留 L2 软冷却(由
+// MarkDegradeEvidence 在信号侧即时写入)并记 pending,不隔离。跨账号确认
+// 机制被关闭(threshold<2,窗口不再记录观测)时退回旧行为:立即隔离。
+// 跨账号确认路径(OnEgressDegraded 已集齐两个不同账号)不经此门槛。
+func (s *Service) OnRscCleanDegrade(ctx context.Context, nodeID, degradedAccountID uint64) {
+	if s == nil || s.repository == nil || nodeID == 0 {
+		return
+	}
+	s.mu.RLock()
+	cfg := s.qualityGuard
+	s.mu.RUnlock()
+	cfg = cfg.normalized()
+	if cfg.CrossAccountThreshold < 2 {
+		// 确认机器关闭:RSC clean 仍是一次权威排除,保持立即隔离。
+		s.QuarantineForExitIP(ctx, nodeID, degradedAccountID)
+		return
+	}
+	now := time.Now().UTC()
+	s.qualityMu.Lock()
+	count := 0
+	kept := make([]degradeObservation, 0, len(s.qualityEvidence[nodeID]))
+	for _, observation := range s.qualityEvidence[nodeID] {
+		if now.Sub(observation.at) > cfg.CrossAccountWindow {
+			continue
+		}
+		kept = append(kept, observation)
+		count++
+	}
+	s.qualityEvidence[nodeID] = kept
+	s.qualityMu.Unlock()
+	if count < 2 {
+		perfmetrics.Default.Inc("egress_quality_quarantine_total", perfmetrics.Labels{Subsystem: "egress", Operation: "quarantine", Outcome: "pending_confirmation"})
+		s.qualityLog().Info("egress_quarantine_pending_confirmation", "node_id", nodeID, "account_id", degradedAccountID, "observations", count, "required", 2, "window", cfg.CrossAccountWindow.String())
+		return
+	}
+	s.QuarantineForExitIP(ctx, nodeID, degradedAccountID)
+}
+
 // QuarantineForExitIP isolates a node whose exit IP is quality-degraded,
 // migrates its auto-bound accounts to healthy nodes, and enqueues an exit-IP
-// rotation. It implements risk.EgressQuarantiner (RSC clean verdict) and is
-// idempotent: an already-quarantined node only re-checks the rotation queue.
+// rotation. Idempotent: an already-quarantined node only re-checks the rotation
+// queue.
 func (s *Service) QuarantineForExitIP(ctx context.Context, nodeID, degradedAccountID uint64) {
 	if s == nil || s.repository == nil || nodeID == 0 {
 		return

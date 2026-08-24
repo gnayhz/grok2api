@@ -141,9 +141,11 @@ type Checker interface {
 // EgressQuarantiner takes over exit-IP scoped degradations: the account was
 // exonerated by a clean RSC verdict, so the egress node that served the
 // degraded attempt becomes the suspect. Implemented by the egress application
-// service (quarantine + account migration + rotation enqueue).
+// service as a confirmed quarantine (a second in-window degrade observation is
+// required before the 24h isolation; single events stay on the L2 soft
+// cooldown) plus account migration and rotation enqueue.
 type EgressQuarantiner interface {
-	QuarantineForExitIP(ctx context.Context, nodeID, degradedAccountID uint64)
+	OnRscCleanDegrade(ctx context.Context, nodeID, degradedAccountID uint64)
 	// ClearDegradeEvidence lifts the node's pending soft cooldown when the
 	// verdict incriminates the account instead of the exit IP.
 	ClearDegradeEvidence(nodeID uint64)
@@ -424,10 +426,11 @@ func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint6
 			return
 		}
 		s.logger.Info("account_risk_clean_ip_suspect", "account_id", degradedID, "web_account_id", webID, "egress_node_id", egressNodeID)
-		// Hand the exit-IP suspect to the egress layer: quarantine the node,
-		// migrate its auto-bound accounts, and enqueue an exit-IP rotation.
+		// Hand the exit-IP suspect to the egress layer. The implementation
+		// requires a second in-window degrade observation before the 24h
+		// quarantine: one exonerated degrade is suspicion, not conviction.
 		if egressNodeID != 0 && s.egressQuarantiner != nil {
-			s.egressQuarantiner.QuarantineForExitIP(ctx, egressNodeID, degradedID)
+			s.egressQuarantiner.OnRscCleanDegrade(ctx, egressNodeID, degradedID)
 		}
 	}
 }
