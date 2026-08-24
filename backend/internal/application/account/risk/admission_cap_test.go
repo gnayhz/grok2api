@@ -60,10 +60,10 @@ func TestAdmissionCapDropsAndRecovers(t *testing.T) {
 	// in-flight check deterministically. The old single burst relied on
 	// scheduling luck and failed 4/5 under -count=5 when the second wave
 	// arrived after the leader had cleared the inflight map.
-	service.OnDegraded(context.Background(), accountdomain.Credential{ID: builds[0], Provider: accountdomain.ProviderBuild})
+	service.OnDegraded(context.Background(), accountdomain.Credential{ID: builds[0], Provider: accountdomain.ProviderBuild}, 0)
 	<-checker.leaderSeated
 	for _, id := range builds[1:] {
-		service.OnDegraded(context.Background(), accountdomain.Credential{ID: id, Provider: accountdomain.ProviderBuild})
+		service.OnDegraded(context.Background(), accountdomain.Credential{ID: id, Provider: accountdomain.ProviderBuild}, 0)
 	}
 	// 等到全部已准入的等待者真正停靠到在途检查上：高负载下个别
 	// goroutine 可能延迟到 leader 完成并清理 inflight 之后才执行 LoadOrStore，合法地成为新
@@ -127,7 +127,7 @@ func TestAdmissionCapDropsAndRecovers(t *testing.T) {
 	// settles straight from the cached denied verdict (no extra check).
 	accounts.linkedWeb[200] = 90
 	accounts.linkedBack[90] = append(builds[:n:n], 200)
-	service.OnDegraded(context.Background(), accountdomain.Credential{ID: 200, Provider: accountdomain.ProviderBuild})
+	service.OnDegraded(context.Background(), accountdomain.Credential{ID: 200, Provider: accountdomain.ProviderBuild}, 0)
 	if got := service.pending.Load(); got != 1 {
 		t.Fatalf("post-drain pending = %d, want 1 (cap must recover)", got)
 	}

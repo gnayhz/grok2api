@@ -207,7 +207,7 @@ func (h *Handler) create(c *gin.Context) {
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
 	ids := make([]uint64, 0, len(request.IDs))
@@ -230,7 +230,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + bindErr.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -361,7 +361,7 @@ func (h *Handler) update(c *gin.Context) {
 	}
 	var request updateRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: " + err.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
 	var accountIDs *[]uint64

@@ -48,6 +48,14 @@ func (w *gzipWriter) WriteString(s string) (int, error) {
 	return w.Write([]byte(s))
 }
 
+// Unwrap 把包装链交给 http.ResponseController:没有它, SetWriteDeadline 会在此
+// 层返回 ErrNotSupported, 声明接受 gzip 的客户端(浏览器默认)在 SSE/媒体转发
+// 上失去 30s 写超时保护——停滞的 TCP 接收窗口可把 Write 阻塞到 RequestTimeout。
+// gin 的 responseWriter 同样实现 Unwrap, 链条最终到达真实的 *http.response。
+func (w *gzipWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (w *gzipWriter) Flush() {
 	if w.gz != nil {
 		_ = w.gz.Flush()

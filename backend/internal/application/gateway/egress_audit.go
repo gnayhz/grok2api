@@ -43,6 +43,19 @@ func applyMediaJobEgress(job *media.Job, trace *infraegress.Trace, provider acco
 	}
 }
 
+// degradedEgressNodeID returns the egress node that served the degraded
+// attempt for the provider's primary scope. The trace keeps the most recent
+// selection per scope, which at degrade time is the current attempt's node.
+func degradedEgressNodeID(trace *infraegress.Trace, provider accountdomain.Provider) uint64 {
+	if trace == nil {
+		return 0
+	}
+	if selection, ok := trace.Selection(primaryEgressScope(provider)); ok {
+		return selection.NodeID
+	}
+	return 0
+}
+
 func primaryEgressScope(provider accountdomain.Provider) egressdomain.Scope {
 	switch provider {
 	case accountdomain.ProviderWeb:

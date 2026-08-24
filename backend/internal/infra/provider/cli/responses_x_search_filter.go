@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 // buildXSearchResponseFilter hides internal custom_tool_call items emitted while xAI executes native x_search.
@@ -62,25 +64,26 @@ func (f *buildXSearchResponseFilter) stream(source io.ReadCloser) io.ReadCloser 
 	reader, writer := io.Pipe()
 	go func() {
 		defer func() { _ = source.Close() }()
-		err := consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
-			if !event.HasData() {
+		streampipe.Run(writer, func() error {
+			return consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
+				if !event.HasData() {
+					return event.writeTo(writer)
+				}
+				data := event.Data()
+				if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+					return event.writeTo(writer)
+				}
+				filtered, keep, filterErr := f.filterEvent(data)
+				if filterErr != nil {
+					return filterErr
+				}
+				if !keep {
+					return nil
+				}
+				event.SetData(filtered)
 				return event.writeTo(writer)
-			}
-			data := event.Data()
-			if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-				return event.writeTo(writer)
-			}
-			filtered, keep, filterErr := f.filterEvent(data)
-			if filterErr != nil {
-				return filterErr
-			}
-			if !keep {
-				return nil
-			}
-			event.SetData(filtered)
-			return event.writeTo(writer)
+			})
 		})
-		_ = writer.CloseWithError(err)
 	}()
 	return reader
 }

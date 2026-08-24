@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/gin-gonic/gin"
 )
 
 // faultedSource 先吐一段正常 SSE 数据，随后返回给定错误——精确模拟
@@ -52,12 +52,15 @@ func runClassification(t *testing.T, name string, reqCtx context.Context, source
 
 // TestClientDisconnectClassification 差分回归（2026-08-21 差分复现定案）：
 // A 客户端断开（请求 ctx 已取消 + Read 返回 context.Canceled，生产中
-//   client FIN 的真实形态）→ 必须记 client_disconnected，不得再污染
-//   upstream_stream_interrupted。
+//
+//	client FIN 的真实形态）→ 必须记 client_disconnected，不得再污染
+//	upstream_stream_interrupted。
+//
 // B 上游连接 RST（客户端存活）→ 仍记 upstream_stream_interrupted。
 // C 上游空闲哨兵 → 仍记 upstream_stream_idle_timeout。
 // D 防误判：客户端存活但 Read 返回裸 context.Canceled（上游侧中间层
-//   取消形态）→ 不得判为客户端断开，按上游中断记账。
+//
+//	取消形态）→ 不得判为客户端断开，按上游中断记账。
 func TestClientDisconnectClassification(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

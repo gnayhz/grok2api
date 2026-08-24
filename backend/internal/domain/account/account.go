@@ -131,19 +131,6 @@ func NormalizeHealthMarker(value string) string {
 	}
 }
 
-// EgressAssignmentMode 表示账号出口节点的维护方式。手工绑定绝不会被
-// 自动均衡任务迁移，自动绑定才允许在健康或容量变化时重新分配。
-type EgressAssignmentMode string
-
-const (
-	EgressAssignmentManual EgressAssignmentMode = "manual"
-	EgressAssignmentAuto   EgressAssignmentMode = "auto"
-)
-
-func (value EgressAssignmentMode) IsValid() bool {
-	return value == EgressAssignmentManual || value == EgressAssignmentAuto
-}
-
 // RiskStatusRSCDenied 标记 RSC 判定注册风控的账号：保持启用但调度永久跳过。
 const RiskStatusRSCDenied = "rsc_denied"
 
@@ -194,11 +181,6 @@ type Credential struct {
 	// EgressIdentity 是不含凭据和个人信息的稳定出口身份。
 	// 关联到同一 Web 账号的 Build/Console 只共享该值，不共享任何运行状态。
 	EgressIdentity string
-	// EgressNodeID 是账号显式绑定的出口节点。0 表示沿用当前 scope 的
-	// 池选择逻辑；非零值必须优先使用该节点，不能悄悄回退到其他代理。
-	EgressNodeID         uint64
-	EgressAssignmentMode EgressAssignmentMode
-	EgressAssignedAt     *time.Time
 	// WebNSFWEnabledAt 记录 Grok Web 上游首次确认 NSFW 已成功开启的时间。
 	// 普通导入、额度同步和凭据更新不得清除。
 	WebNSFWEnabledAt *time.Time

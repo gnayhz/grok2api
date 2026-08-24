@@ -59,7 +59,41 @@ var (
 	detailsPattern = regexp.MustCompile(`botFlagDetails"\s*:\s*(?:null|"([^"]*)")`)
 	// The account payload nests one level deeper than the flag itself.
 	sourceValuePattern = regexp.MustCompile(`botFlagSource"\s*:\s*(null|-?\d+)`)
+	// 用户载荷对象的稳定邻居字段(2026-08-24 双账号实测: botFlagSource 与
+	// botFlagDetails 总是相邻出现在同一 user 对象里, 前后有 emailConfirmed/
+	// experienceAcls/createTime)。锚定防止未来页面改版把字段名挪到营销文案
+	// 或组件枚举时被误读为风险状态。
+	userPayloadAnchors  = []string{"emailConfirmed", "experienceAcls", "canUseDebugTools"}
+	payloadAnchorWindow = 600
 )
+
+// anchoredBotFlagMatch 在所有 botFlagSource 出现点中挑选落在用户载荷对象里
+// 的那一个: 要求同窗内存在 botFlagDetails 与至少一个邻居锚字段。全部出现点
+// 都不满足锚定时返回 nil——调用方按 error 处理(结构突变时宁可重试也不误判)。
+func anchoredBotFlagMatch(normalized string) (source []string, details []string) {
+	for _, loc := range sourceValuePattern.FindAllStringSubmatchIndex(normalized, -1) {
+		windowStart := max(0, loc[0]-payloadAnchorWindow)
+		windowEnd := min(len(normalized), loc[1]+payloadAnchorWindow)
+		window := normalized[windowStart:windowEnd]
+		if !strings.Contains(window, "botFlagDetails") {
+			continue
+		}
+		anchored := false
+		for _, anchor := range userPayloadAnchors {
+			if strings.Contains(window, anchor) {
+				anchored = true
+				break
+			}
+		}
+		if !anchored {
+			continue
+		}
+		source = sourceValuePattern.FindStringSubmatch(normalized[loc[0]:windowEnd])
+		details = detailsPattern.FindStringSubmatch(normalized[loc[0]:windowEnd])
+		return source, details
+	}
+	return nil, nil
+}
 
 // looksComplete reports whether the body carries terminal evidence that the
 // render finished: a closing </html> for document renders or a closed inline
@@ -88,8 +122,10 @@ func looksLikeGrokHome(normalized string) bool {
 // homepage and exposes no bot-flag fields.
 func ParseRisk(body string) Result {
 	normalized := strings.ReplaceAll(body, "\\\"", "\"")
-	sourceMatch := sourceValuePattern.FindStringSubmatch(normalized)
-	detailsMatch := detailsPattern.FindStringSubmatch(normalized)
+	sourceMatch, detailsMatch := anchoredBotFlagMatch(normalized)
+	// 出现过 botFlagSource 字样但没有一处满足载荷锚: 视为结构突变, 交由
+	// error 重试语义而不是把无锚匹配当 clean/风险。
+	unanchored := sourceMatch == nil && strings.Contains(normalized, "botFlagSource")
 
 	result := Result{Verdict: VerdictClean}
 	found := sourceMatch != nil || detailsMatch != nil
@@ -118,6 +154,11 @@ func ParseRisk(body string) Result {
 	}
 	if result.Verdict == VerdictClean && (result.BotFlagSource == 1 || result.BotFlagSource == 2) {
 		result.Verdict = VerdictFlagged
+	}
+	if unanchored {
+		result.Verdict = VerdictError
+		result.Error = "botFlagSource present but no occurrence sits inside a recognizable user payload (page structure changed?)"
+		return result
 	}
 	if !found {
 		// A flag-less body is only trustworthy when it is a real homepage AND

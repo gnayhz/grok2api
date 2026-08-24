@@ -93,10 +93,21 @@ func NewServiceWithTickets(assets repository.MediaAssetRepository, jobs reposito
 func (s *Service) UpdateConfig(cfg Config) {
 	s.configMu.Lock()
 	s.publicBaseURL = strings.TrimRight(strings.TrimSpace(cfg.PublicBaseURL), "/")
-	s.maxImageBytes = cfg.MaxImageBytes
-	s.maxTotalBytes = cfg.MaxTotalBytes
-	s.cleanupAt = cfg.CleanupThresholdPercent
-	s.cleanupEvery = cfg.CleanupInterval
+	if cfg.MaxImageBytes > 0 {
+		s.maxImageBytes = cfg.MaxImageBytes
+	}
+	// 钳制与启动加载校验同口径(热更新路径此前无校验):0 容量会让每次保存
+	// 触发清理信号风暴并把全部未保护资产删到阈值之下; 0 间隔会让
+	// ticker.Reset panic; 非法百分比保留旧值。
+	if cfg.MaxTotalBytes > 0 {
+		s.maxTotalBytes = cfg.MaxTotalBytes
+	}
+	if cfg.CleanupThresholdPercent >= 1 && cfg.CleanupThresholdPercent <= 100 {
+		s.cleanupAt = cfg.CleanupThresholdPercent
+	}
+	if cfg.CleanupInterval >= time.Minute {
+		s.cleanupEvery = cfg.CleanupInterval
+	}
 	s.configMu.Unlock()
 	select {
 	case s.configChanged <- struct{}{}:
@@ -594,7 +605,11 @@ func (s *Service) Cleanup(ctx context.Context) (int, error) {
 			}
 			if err := s.objects.Delete(ctx, asset.StorageKey); err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					return deleted, fmt.Errorf("媒体对象缺失，已保留共享元数据: %s: %w", asset.StorageKey, err)
+					// 对象文件缺失(非事务两步删除的崩溃残留/运维手工删除):保留共享
+					// 元数据(多实例共享存储语义, 见 TestCleanupPreservesMetadata-
+					// WhenLocalObjectIsMissing), 跳过该行继续回收——此前在此中止
+					// 会让容量清理永久卡死在同一行上, SaveInput 持续 ErrMediaCapacity。
+					continue
 				}
 				return deleted, err
 			}

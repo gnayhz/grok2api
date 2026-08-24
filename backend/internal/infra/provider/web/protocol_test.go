@@ -656,7 +656,7 @@ func TestWebNonStreamingResponseStillProtectsGatewayStream(t *testing.T) {
 
 type egressRepositoryStub struct{}
 
-func (egressRepositoryStub) ListEgressNodes(context.Context, egressdomain.Scope, repository.SortQuery) ([]egressdomain.Node, error) {
+func (egressRepositoryStub) ListEgressNodes(context.Context, repository.SortQuery) ([]egressdomain.Node, error) {
 	return nil, nil
 }
 

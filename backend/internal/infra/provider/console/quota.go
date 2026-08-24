@@ -10,6 +10,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
@@ -47,6 +48,8 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 	if err != nil {
 		return nil, time.Time{}, err
 	}
+	// 额度查询按账单语义路由。
+	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassBilling)
 	requestCtx, cancel := context.WithTimeout(ctx, consoleQuotaTimeout)
 	defer cancel()
 	lease, err := a.egress.AcquireCredential(requestCtx, egressdomain.ScopeConsole, credential)

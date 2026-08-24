@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -298,7 +298,6 @@ type ListFilter struct {
 	Provider  string
 	QuotaType string
 	Status    string
-	Egress    string
 	Renewal   string
 	Risk      string
 	// Agreement applies only to grok_web accounts.
@@ -437,6 +436,7 @@ type Service struct {
 	autoCleanWake          chan struct{}
 	excludeBuildBotFlagged bool
 	buildBotFlagCache      *resultcache.Cache[string, []uint64]
+	riskVerdictClearer     riskVerdictClearer
 	logger                 *slog.Logger
 	now                    func() time.Time
 }
@@ -541,11 +541,9 @@ func (s *Service) ProviderDefinition(value accountdomain.Provider) (provider.Def
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]View, int64, error) {
 	page, pageSize = normalizePage(page, pageSize)
-	egressMode, egressNodeID, egressSourceID, egressValid := parseEgressFilter(filter.Egress)
 	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) ||
 		!oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") ||
 		!oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing", "risk") ||
-		!egressValid ||
 		!oneOf(filter.Renewal, "", "refreshable", "unrefreshable") ||
 		!oneOf(filter.Risk, "", "flagged", "normal") ||
 		!oneOf(filter.Agreement, "", "nsfwEnabled", "nsfwDisabled", "termsAccepted", "termsNotAccepted", "allAccepted", "allNotAccepted") ||
@@ -560,8 +558,7 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 		refreshable = &value
 	}
 	repositoryFilter := repository.AccountListFilter{
-		Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Egress: egressMode,
-		EgressNodeID: egressNodeID, EgressSourceID: egressSourceID,
+		Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status,
 		Refreshable: refreshable, Agreement: filter.Agreement, Association: filter.Association, Now: s.now(),
 	}
 	if filter.Risk != "" {
@@ -726,35 +723,6 @@ func (s *Service) RebuildBuildBotFlagIndex(ctx context.Context) error {
 func (s *Service) invalidateBuildBotFlagCache() {
 	if s.buildBotFlagCache != nil {
 		s.buildBotFlagCache.Delete(buildBotFlagCacheKey)
-	}
-}
-
-// parseEgressFilter splits the account egress filter into its bound/unbound mode
-// and an optional narrowing target. Accepted values are "", "bound", "unbound",
-// "node:<id>" and "source:<id>"; the last two are "bound" narrowed to one egress
-// node or to every node owned by one subscription source.
-func parseEgressFilter(value string) (mode string, nodeID uint64, sourceID uint64, ok bool) {
-	if oneOf(value, "", "bound", "unbound") {
-		return value, 0, 0, true
-	}
-	prefix, raw, found := strings.Cut(value, ":")
-	if !found {
-		return "", 0, 0, false
-	}
-	// Relational account and egress IDs are stored in signed BIGINT/INTEGER
-	// columns. Reject values outside that range here so malformed filters cannot
-	// reach database/sql as unsupported high-bit uint64 arguments and become 500s.
-	id, err := strconv.ParseUint(raw, 10, 63)
-	if err != nil || id == 0 {
-		return "", 0, 0, false
-	}
-	switch prefix {
-	case "node":
-		return "bound", id, 0, true
-	case "source":
-		return "bound", 0, id, true
-	default:
-		return "", 0, 0, false
 	}
 }
 
@@ -2237,11 +2205,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		}
 		value.MinimumRemaining = *input.MinimumRemaining
 	}
+	previousRiskStatus := ""
 	if input.RiskStatus != nil {
 		status := strings.TrimSpace(*input.RiskStatus)
 		if status != "" && status != accountdomain.RiskStatusRSCDenied {
 			return View{}, invalidInput("riskStatus 仅支持空值或 rsc_denied")
 		}
+		previousRiskStatus = value.RiskStatus
 		value.RiskStatus = status
 	}
 	if input.ClearCloudflareCookies {
@@ -2254,7 +2224,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 			return View{}, invalidInput("Cloudflare Cookie 不能超过 16 KiB")
 		}
 		if strings.TrimSpace(*input.CloudflareCookies) != "" {
-			cookies := egressapp.SanitizeCloudflareCookies(*input.CloudflareCookies)
+			cookies := cfcookies.Sanitize(*input.CloudflareCookies)
 			if cookies == "" {
 				return View{}, invalidInput("Cloudflare Cookie 中没有有效字段")
 			}
@@ -2291,6 +2261,11 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		// Save 语义变化时覆盖并发定向写。
 		if err := s.accounts.UpdateRiskStatus(ctx, updated.ID, strings.TrimSpace(*input.RiskStatus)); err != nil {
 			return View{}, mapRepositoryError(err)
+		}
+		// 人工解除(此前被标记→现在清空)时级联删除身份组 verdict:
+		// denied/flagged 永久 fresh, 不删会被启动对账与后续降智自动回滚。
+		if previousRiskStatus != "" && strings.TrimSpace(*input.RiskStatus) == "" {
+			s.clearIdentityVerdicts(ctx, updated)
 		}
 	}
 	if !updated.Enabled && s.sticky != nil {
@@ -2501,7 +2476,6 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 				"account_id", latest.ID,
 				"provider", latest.Provider,
 				"refresh_token_rotated", refreshed.RefreshTokenRotated,
-				"egress_node_id", latest.EgressNodeID,
 				"build_api_fallback_marked", latest.BuildAPIFallback,
 				"distributed_lock", release != nil,
 				"error", err,
@@ -2670,7 +2644,6 @@ func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential
 		"retry_at", retryAt,
 		"access_token_alive", accessTokenAlive,
 		"refresh_token_rotated", false,
-		"egress_node_id", credential.EgressNodeID,
 		"build_api_fallback_marked", credential.BuildAPIFallback,
 		"distributed_lock", distributedLock,
 	)
@@ -3135,6 +3108,11 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	value, err := s.accounts.Get(ctx, id)
 	if err != nil {
 		return quotaRefreshResult{}, mapRepositoryError(err)
+	}
+	// 停用/待重登账号不再发起上游探测(与 credential_scheduler 的纪律对齐):
+	// 每次探测都消耗出口与 SSO 请求, 401 还会触发状态写入。
+	if !value.Enabled || value.AuthStatus == accountdomain.AuthStatusReauthRequired {
+		return quotaRefreshResult{Credential: value}, nil
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
@@ -3950,6 +3928,11 @@ func (s *Service) BatchRefreshTokens(ctx context.Context, ids []uint64) (int, in
 	for _, id := range values {
 		value, getErr := s.accounts.Get(ctx, id)
 		if getErr != nil {
+			// 管理端并发删除下 ID 消失是常态:与 BatchDelete 的容错语义对齐,
+			// 跳过而非中止整批(一个消失的 ID 不该让其他健康账号都不续期)。
+			if errors.Is(getErr, repository.ErrNotFound) {
+				continue
+			}
 			return 0, 0, 0, getErr
 		}
 		if !s.providers.SupportsCredentialRefresh(value.Provider) || !value.Enabled || value.EncryptedRefreshToken == "" {
@@ -3957,6 +3940,7 @@ func (s *Service) BatchRefreshTokens(ctx context.Context, ids []uint64) (int, in
 		}
 		refreshableIDs = append(refreshableIDs, id)
 	}
+	// 预检消失 + 不可续期的账号都计入 skipped。
 	skipped := len(values) - len(refreshableIDs)
 	succeeded, failed, err := s.refreshTokens(ctx, refreshableIDs, nil)
 	return succeeded, failed, skipped, err
@@ -4465,7 +4449,7 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	}
 	cloudflareEncrypted := ""
 	if strings.TrimSpace(seed.CloudflareCookies) != "" {
-		cookies := egressapp.SanitizeCloudflareCookies(seed.CloudflareCookies)
+		cookies := cfcookies.Sanitize(seed.CloudflareCookies)
 		if cookies == "" {
 			return accountdomain.Credential{}, invalidInput("Cloudflare Cookie 中没有有效字段")
 		}
@@ -4629,6 +4613,31 @@ func (s *Service) SetAccountEnabled(ctx context.Context, id uint64, enabled bool
 		return err
 	}
 	return nil
+}
+
+// riskVerdictClearer 级联清除身份组的 RSC verdict(denied/flagged 永不过期,
+// 人工解除 risk_status 时必须一并删除, 否则会被对账与降智事件回滚)。
+// 由装配层注入 risk 服务; 未注入时人工清除仅作用于 risk_status 列。
+type riskVerdictClearer interface {
+	ClearIdentityVerdicts(ctx context.Context, credential accountdomain.Credential) error
+}
+
+// SetRiskVerdictClearer wires the RSC verdict cascade-clear hook.
+func (s *Service) SetRiskVerdictClearer(clearer riskVerdictClearer) {
+	s.riskVerdictClearer = clearer
+}
+
+func (s *Service) clearIdentityVerdicts(ctx context.Context, credential accountdomain.Credential) {
+	if s.riskVerdictClearer == nil {
+		return
+	}
+	clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.riskVerdictClearer.ClearIdentityVerdicts(clearCtx, credential); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("account_risk_verdict_clear_failed", "account_id", credential.ID, "error", err.Error())
+		}
+	}
 }
 
 // SetAccountRiskStatus flags or unflags one account's long-term risk state

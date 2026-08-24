@@ -225,7 +225,13 @@ type Service struct {
 	markBuildChatDeniedAsReauth atomic.Bool
 	qualityRetry                atomic.Pointer[QualityRetryRuntime]
 	// accountRisk receives withhold events for RSC attribution; nil disables.
-	accountRisk atomic.Value // risk.Attributor
+	// egressGuard receives exit-IP degradation evidence (nodeID+accountID) for
+	// cross-account confirmation and node quarantine; nil disables.
+	egressGuard atomic.Value // EgressDegradationObserver
+	// egressCanary is the exit-IP verification configuration (model route +
+	// first-event budget); zero ModelPublicID disables verification.
+	egressCanary atomic.Value // EgressCanaryRuntime
+	accountRisk  atomic.Value // risk.Attributor
 }
 
 type teamModelRateLimit struct {
@@ -888,7 +894,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		if errors.Is(err, ErrNoAvailableAccount) {
 			return nil, err
 		}
-		return nil, ErrModelNotFound
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrModelNotFound
+		}
+		// DB 瞬态故障(超时/busy)原样上抛→503:此前与"模型不存在"一起被扁平成
+		// 404, SDK 会把暂时性不可服务当成永久性配置错误放弃重试。
+		return nil, err
 	}
 	// Select an initial route only to preserve the existing stateful/stateless
 	// previous_response_id boundary. The actual target is chosen from the eligible
@@ -932,6 +943,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 					candidate.UpstreamModel,
 					input.PromptCacheKey,
 					input.PromptCacheSeed,
+					input.RequestID,
 					input.Body,
 				)
 				identity = ensureBuildComposerSessionIdentity(identity, input.ClientKey.ID, candidate.Provider, candidate.UpstreamModel, requestSessionScope)
@@ -1019,6 +1031,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				route.UpstreamModel,
 				input.PromptCacheKey,
 				input.PromptCacheSeed,
+				input.RequestID,
 				input.Body,
 			)
 		}
@@ -1040,6 +1053,35 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return nil, ErrNoAvailableAccount
 	}
 	physicalCallCtx := infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
+	// degradedNodes 收集本请求内被守卫判定降智的出口节点。注入
+	// WithNodeExclusions 后,后续 attempt(含同号重试)会换到其他固定出口
+	// IP;账号绑定不变,仅本请求绕开。空流/扣留/头预算三条降智路径共用。
+	degradedNodes := make(map[uint64]struct{})
+	markDegradedEgress := func() uint64 {
+		nodeID := degradedEgressNodeID(egressTrace, route.Provider)
+		if nodeID == 0 {
+			return 0
+		}
+		if _, exists := degradedNodes[nodeID]; !exists {
+			degradedNodes[nodeID] = struct{}{}
+			physicalCallCtx = infraegress.WithNodeExclusions(physicalCallCtx, degradedNodes)
+			// L2 软冷却：降智证据立即让全池账号避开该出口(不等归因),
+			// 归因 CLEAN 升级硬隔离 / RISK 解除 / 到期自动回池并指数递增。
+			if observer := s.egressDegradationObserver(); observer != nil {
+				observer.MarkDegradeEvidence(nodeID)
+			}
+		}
+		return nodeID
+	}
+	reportEgressDegradation := func(credential accountdomain.Credential) {
+		nodeID := markDegradedEgress()
+		if nodeID == 0 {
+			return
+		}
+		if observer := s.egressDegradationObserver(); observer != nil {
+			observer.OnEgressDegraded(ctx, nodeID, credential.ID)
+		}
+	}
 	supportsStoredResponses := s.providers.SupportsStoredResponses(route.Provider)
 	if input.PreviousResponseID != "" && !supportsStoredResponses {
 		return nil, ErrResponseStateUnsupported
@@ -1161,7 +1203,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		timing.markCredential(time.Since(started))
 		return result, err
 	}
-	handoffResponse := func(response *provider.Response, lease *accountLease, credential accountdomain.Credential, upstreamStartedAt time.Time) *Result {
+	handoffResponse := func(response *provider.Response, lease *accountLease, credential accountdomain.Credential, upstreamStartedAt time.Time, qualityFailOpen bool) *Result {
 		accountID := credential.ID
 		var once sync.Once
 		// 交付统计由 transport 在转发完成后回填，finalize 时进审计行。
@@ -1195,6 +1237,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				record.AccountID = &accountID
 				record.AccountName = credential.Name
 				record.StatusCode = response.StatusCode
+				record.QualityFailOpen = qualityFailOpen
 				record.InputTokens = usage.InputTokens
 				record.CachedInputTokens = usage.CachedInputTokens
 				record.OutputTokens = usage.OutputTokens
@@ -1396,6 +1439,14 @@ attemptLoop:
 				continue
 			}
 			lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
+			if errors.Is(err, errQualityHeaderBudget) {
+				// 头预算早断是降智路径特征:请求内排除该出口节点,并上报出口降级
+				// 观测(RSC 归因 clean → 出口 IP 嫌疑;关闭 RSC 时走跨账号确认)。
+				reportEgressDegradation(credential)
+				if attributor := s.accountRiskAttributor(); attributor != nil {
+					attributor.OnDegraded(ctx, credential, degradedEgressNodeID(egressTrace, route.Provider))
+				}
+			}
 			if !isRetryableTransportFailure(credential.Provider, err) {
 				break
 			}
@@ -1456,7 +1507,9 @@ attemptLoop:
 			}
 			if response.StatusCode == http.StatusUnauthorized {
 				body, _ := readRetryableBody(response.Body)
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build OAuth credential rejected after refresh")
+				// WithoutCancel+超时:客户端恰在此刻断开时, 失效标记不得静默丢失
+				// (否则该账号留在池中继续被后续请求选中各自撞一次 401)。
+				s.markReauthRequired(ctx, input.RequestID, credential, "Grok Build OAuth credential rejected after refresh")
 				s.selector.MarkQuotaStateChanged(credential.Provider, credential.ID)
 				lease.Release()
 				lastErr = fmt.Errorf("刷新后上游仍返回 401")
@@ -1516,6 +1569,17 @@ attemptLoop:
 			// upstream internals. Convert to a controlled UpstreamFailure that
 			// preserves the status and upstream error code for diagnostics while
 			// serving the client the sanitized protocol envelope.
+			body, _ := readRetryableBody(response.Body)
+			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			_ = response.Body.Close()
+			lease.completeSelectorObservation(false)
+			lease.Release()
+			break attemptLoop
+		} else if response.StatusCode >= 400 && !isRetryableResponse(response, route.Provider) {
+			// 状态本身可重试但上游显式放弃(X-Should-Retry: false, 或该 Provider 从不
+			// 设置该头):与非重试分支同待遇——转受控 UpstreamFailure 脱敏, 而不是把
+			// 原始 body/headers 直通客户端(400 被脱敏而 429+该头泄漏 trace-id 的
+			// 不对称曾在审查中发现)。finalEgressForbidden 仍按原样交付。
 			body, _ := readRetryableBody(response.Body)
 			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 			_ = response.Body.Close()
@@ -1697,8 +1761,12 @@ attemptLoop:
 						// 空流/空闲超时通常与出口 IP 相关而非账号本身。走与扣留路径相同的 RSC 归因：clean
 						// 结论自动解除上面的冷却（IP 嫌疑），denied 结论打风控标记。没有这一步，无辜账号
 						// 只能干等 24h，且同号重试恰好转为空流时会丢失归因。
+						idleNodeID := markDegradedEgress()
+						if observer := s.egressDegradationObserver(); observer != nil && idleNodeID != 0 {
+							observer.OnEgressDegraded(ctx, idleNodeID, credential.ID)
+						}
 						if attributor := s.accountRiskAttributor(); attributor != nil {
-							attributor.OnDegraded(ctx, credential)
+							attributor.OnDegraded(ctx, credential, idleNodeID)
 						}
 					}
 					if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
@@ -1732,8 +1800,9 @@ attemptLoop:
 						s.logger.Info("quality_degraded_same_account_retry", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
 					} else {
 						s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
+						reportEgressDegradation(credential)
 						if attributor := s.accountRiskAttributor(); attributor != nil {
-							attributor.OnDegraded(ctx, credential)
+							attributor.OnDegraded(ctx, credential, degradedEgressNodeID(egressTrace, route.Provider))
 						}
 					}
 				}
@@ -1801,16 +1870,16 @@ attemptLoop:
 			selected := fallback
 			fallback = nil
 			s.logger.Info("quality_degraded_fallback", "request_id", input.RequestID, "account_id", selected.credential.ID, "quality_attempts", qualityAccountAttempts)
-			return handoffResponse(selected.response, selected.lease, selected.credential, selected.upstreamStartedAt), nil
+			return handoffResponse(selected.response, selected.lease, selected.credential, selected.upstreamStartedAt, true), nil
 		}
-		return handoffResponse(response, lease, credential, responseStartedAt), nil
+		return handoffResponse(response, lease, credential, responseStartedAt, false), nil
 	}
 	if fallback != nil {
 		if ctx.Err() == nil && holdCfg.OnExhausted == qualityRetryFailOpen {
 			selected := fallback
 			fallback = nil
 			s.logger.Info("quality_degraded_fallback", "request_id", input.RequestID, "account_id", selected.credential.ID, "quality_attempts", qualityAccountAttempts)
-			return handoffResponse(selected.response, selected.lease, selected.credential, selected.upstreamStartedAt), nil
+			return handoffResponse(selected.response, selected.lease, selected.credential, selected.upstreamStartedAt, true), nil
 		}
 		discardFallback(true)
 	}
@@ -1950,8 +2019,12 @@ func (s *Service) queueAccountModelSync(accountID uint64) {
 }
 
 func rewriteAliasedModel(body []byte, publicModel, reasoningEffort string, operation audit.Operation) ([]byte, error) {
+	// UseNumber 保精度:map[string]any 默认把数字解码为 float64, >2^53 的整数
+	// 字段(seed/id/token)会被静默改成不精确值;json.Number 原样回写。
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := decoder.Decode(&payload); err != nil {
 		return nil, fmt.Errorf("解析兼容模型请求: %w", err)
 	}
 	payload["model"] = publicModel

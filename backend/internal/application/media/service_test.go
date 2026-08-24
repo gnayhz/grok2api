@@ -670,12 +670,29 @@ func TestCleanupPreservesMetadataWhenLocalObjectIsMissing(t *testing.T) {
 	if err := objects.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(repository, relational.NewMediaJobRepository(database), objects, nil, Config{PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: int64(len(raw)), CleanupThresholdPercent: 50, CleanupInterval: 10 * time.Minute})
-	if _, err := service.Cleanup(ctx); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("cleanup error = %v", err)
+	// 第二个资产对象存在:容量清理必须越过孤儿行继续回收, 而不是卡死在中止。
+	aliveID := "img_alive_00000000000002"
+	aliveKey, err := objects.SaveImage(ctx, aliveID, "image/png", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.CreateMediaAsset(ctx, mediadomain.Asset{ID: aliveID, Kind: "image", StorageKey: aliveKey, MIMEType: "image/png", SizeBytes: int64(len(raw)), SHA256: strings.Repeat("b", 64), CreatedAt: time.Now().UTC().Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	// total = 2n > threshold = n:必须越过孤儿行删掉可删资产才能回到阈值之下。
+	service := NewService(repository, relational.NewMediaJobRepository(database), objects, nil, Config{PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 2 * int64(len(raw)), CleanupThresholdPercent: 50, CleanupInterval: 10 * time.Minute})
+	deleted, err := service.Cleanup(ctx)
+	if err != nil {
+		t.Fatalf("cleanup aborted on orphan metadata: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (orphan skipped, alive asset reclaimed)", deleted)
 	}
 	if _, err := repository.GetMediaAsset(ctx, id); err != nil {
 		t.Fatalf("shared metadata was deleted: %v", err)
+	}
+	if _, err := repository.GetMediaAsset(ctx, aliveID); err == nil {
+		t.Fatalf("alive asset was not reclaimed")
 	}
 }
 

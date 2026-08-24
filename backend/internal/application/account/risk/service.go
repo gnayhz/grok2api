@@ -15,6 +15,7 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/rsc"
+	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 )
 
@@ -50,6 +51,9 @@ var ErrNotFound = errors.New("risk verdict not found")
 type Store interface {
 	GetRiskVerdict(ctx context.Context, accountID uint64) (relationalVerdict, error)
 	SaveRiskVerdict(ctx context.Context, accountID uint64, verdict StoredVerdict) error
+	// DeleteRiskVerdict 永久移除一个身份的结论。此前 denied/flagged 既不过期
+	// 也无删除路径, 人工清除 risk_status 会被启动对账与后续降智事件回滚。
+	DeleteRiskVerdict(ctx context.Context, accountID uint64) error
 	// ListRiskyVerdictAccountIDs 列出持有 denied/flagged 结论的账号，供启动
 	// 对账把 risk_status 收敛到 verdict 表。
 	ListRiskyVerdictAccountIDs(ctx context.Context) ([]uint64, error)
@@ -91,6 +95,9 @@ type Service struct {
 	store    Store
 	checker  Checker
 	logger   *slog.Logger
+	// egressQuarantiner receives exit-IP quarantine duty when attribution
+	// exonerates the account (RSC clean); nil keeps the degrade account-scoped.
+	egressQuarantiner EgressQuarantiner
 
 	sem chan struct{}
 	// admissionDedup: credential.ID -> struct{}。仅约束 OnDegraded 入队。
@@ -129,6 +136,28 @@ type CheckResult struct {
 // Checker probes registration risk for one SSO identity.
 type Checker interface {
 	Check(ctx context.Context, ssoToken string) CheckResult
+}
+
+// EgressQuarantiner takes over exit-IP scoped degradations: the account was
+// exonerated by a clean RSC verdict, so the egress node that served the
+// degraded attempt becomes the suspect. Implemented by the egress application
+// service (quarantine + account migration + rotation enqueue).
+type EgressQuarantiner interface {
+	QuarantineForExitIP(ctx context.Context, nodeID, degradedAccountID uint64)
+	// ClearDegradeEvidence lifts the node's pending soft cooldown when the
+	// verdict incriminates the account instead of the exit IP.
+	ClearDegradeEvidence(nodeID uint64)
+}
+
+// EgressEvidenceRemover 是 RISK 归因(账号有罪)的补充撤销面:跨账号证据窗口
+// 里该账号的观测必须移除; 若节点的硬隔离证据全部来自该有罪账号, 隔离本身
+// 也应回滚。由 egress 服务实现; 未实现时仅退化为原有的软冷却解除。
+type EgressEvidenceRemover interface {
+	// RemoveAccountEvidence 从跨账号确认窗口移除指定账号的全部观测。
+	RemoveAccountEvidence(nodeID, accountID uint64)
+	// ReleaseIfEvidenceOnlyFrom 在节点处于质量隔离且窗口内证据仅来自
+	// guiltyAccountID 时解除隔离(证据来自多个账号时保留隔离, 交被动守卫)。
+	ReleaseIfEvidenceOnlyFrom(ctx context.Context, nodeID, guiltyAccountID uint64)
 }
 
 // New builds the service; defaults fill zero fields.
@@ -176,7 +205,7 @@ const riskyVerdictPageLimit = 10000
 // degrade storm cannot accumulate unbounded detached goroutines waiting on the
 // RSC semaphore. Dropped events are safe: the verdict cache plus patrol
 // reconcile converge the same state later.
-func (s *Service) OnDegraded(ctx context.Context, credential accountdomain.Credential) {
+func (s *Service) OnDegraded(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64) {
 	if !s.Enabled() {
 		return
 	}
@@ -196,11 +225,20 @@ func (s *Service) OnDegraded(ctx context.Context, credential accountdomain.Crede
 			s.admissionDedup.Delete(credential.ID)
 			cancel()
 		}()
-		s.attribute(detached, credential)
+		// 归因链路(身份解析/RSC 探测/后果落地)panic 不得击穿进程。
+		if err := batch.Do(detached, func(taskCtx context.Context) error {
+			s.attribute(taskCtx, credential, egressNodeID)
+			return nil
+		}); err != nil {
+			var panicErr *batch.PanicError
+			if errors.As(err, &panicErr) {
+				s.logger.Error("account_risk_attribution_panic", "account_id", credential.ID, "panic", panicErr.Value, "stack", string(panicErr.Stack))
+			}
+		}
 	}()
 }
 
-func (s *Service) attribute(ctx context.Context, credential accountdomain.Credential) {
+func (s *Service) attribute(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64) {
 	webID, linked, err := s.resolveWebIdentity(ctx, credential)
 	if err != nil {
 		s.logger.Warn("account_risk_resolve_failed", "account_id", credential.ID, "error", err.Error())
@@ -211,11 +249,33 @@ func (s *Service) attribute(ctx context.Context, credential accountdomain.Creden
 		return
 	}
 	if verdict, fresh := s.freshVerdict(ctx, webID); fresh {
-		s.applyConsequences(ctx, credential.ID, webID, verdict)
+		s.applyConsequences(ctx, credential.ID, webID, verdict, egressNodeID)
 		return
 	}
 	result := s.checkNow(ctx, webID)
-	s.applyConsequences(ctx, credential.ID, webID, result)
+	s.applyConsequences(ctx, credential.ID, webID, result, egressNodeID)
+}
+
+// ClearIdentityVerdicts removes the persisted verdict behind an operator's
+// manual risk-status clear. Without this, denied/flagged verdicts stay
+// permanently fresh: the next degrade event (or startup reconcile) would
+// instantly re-flag the identity the operator just restored.
+func (s *Service) ClearIdentityVerdicts(ctx context.Context, credential accountdomain.Credential) error {
+	if s == nil {
+		return nil
+	}
+	webID, linked, err := s.resolveWebIdentity(ctx, credential)
+	if err != nil {
+		return err
+	}
+	if !linked {
+		return nil
+	}
+	if err := s.store.DeleteRiskVerdict(ctx, webID); err != nil {
+		return err
+	}
+	s.logger.Info("account_risk_verdict_cleared", "account_id", credential.ID, "web_account_id", webID)
+	return nil
 }
 
 func (s *Service) resolveWebIdentity(ctx context.Context, credential accountdomain.Credential) (uint64, bool, error) {
@@ -330,9 +390,24 @@ func (s *Service) saveVerdictGuarded(ctx context.Context, webID uint64, verdict 
 }
 
 // applyConsequences acts on a verdict for the degraded account.
-func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint64, verdict StoredVerdict) {
+func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint64, verdict StoredVerdict, egressNodeID uint64) {
 	switch {
 	case verdict.Risky():
+		// 账号有罪 → 出口节点无辜。三层撤销:
+		// (1) 清未决软冷却(L2);
+		// (2) 若节点已被质量隔离且窗口内证据确实只来自本有罪账号, 回滚隔离
+		//     (ReleaseEgressQuarantine), 避免整个隔离周期白扣——检查必须在
+		//     观测移除之前:移除后窗口为空,"仅含有罪账号"不可判定,空洞真值
+		//     不得释放跨账号确认的隔离;
+		// (3) 从跨账号证据窗口移除该账号的观测——残留观测会在窗口期内与另一
+		//     账号的一次瞬时降智凑满阈值, 错杀无辜节点。
+		if egressNodeID != 0 && s.egressQuarantiner != nil {
+			s.egressQuarantiner.ClearDegradeEvidence(egressNodeID)
+			if remover, ok := s.egressQuarantiner.(EgressEvidenceRemover); ok {
+				remover.ReleaseIfEvidenceOnlyFrom(ctx, egressNodeID, degradedID)
+				remover.RemoveAccountEvidence(egressNodeID, degradedID)
+			}
+		}
 		switch s.cfg.OnDenied {
 		case "flag":
 			s.flagIdentity(ctx, webID, verdict)
@@ -348,8 +423,22 @@ func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint6
 			s.logger.Warn("account_risk_clean_clear_failed", "account_id", degradedID, "error", err.Error())
 			return
 		}
-		s.logger.Info("account_risk_clean_ip_suspect", "account_id", degradedID, "web_account_id", webID)
+		s.logger.Info("account_risk_clean_ip_suspect", "account_id", degradedID, "web_account_id", webID, "egress_node_id", egressNodeID)
+		// Hand the exit-IP suspect to the egress layer: quarantine the node,
+		// migrate its auto-bound accounts, and enqueue an exit-IP rotation.
+		if egressNodeID != 0 && s.egressQuarantiner != nil {
+			s.egressQuarantiner.QuarantineForExitIP(ctx, egressNodeID, degradedID)
+		}
 	}
+}
+
+// SetEgressQuarantiner installs the exit-IP quarantine bridge; nil keeps
+// degrades account-scoped only.
+func (s *Service) SetEgressQuarantiner(quarantiner EgressQuarantiner) {
+	if s == nil || quarantiner == nil {
+		return
+	}
+	s.egressQuarantiner = quarantiner
 }
 
 // flagIdentity marks the web identity and its linked Build accounts with the
@@ -457,7 +546,7 @@ func (s *Service) ReconcileRiskyVerdicts(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			s.applyConsequences(ctx, webID, webID, verdict)
+			s.applyConsequences(ctx, webID, webID, verdict, 0)
 			reconciled++
 		}
 		if len(ids) < riskyVerdictPageLimit {
@@ -484,6 +573,6 @@ func (s *Service) PatrolTick(ctx context.Context, dueIDs []uint64) {
 		default:
 		}
 		verdict := s.checkNow(ctx, webID)
-		s.applyConsequences(ctx, webID, webID, verdict)
+		s.applyConsequences(ctx, webID, webID, verdict, 0)
 	}
 }

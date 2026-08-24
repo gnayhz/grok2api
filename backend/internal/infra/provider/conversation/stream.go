@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 const (
@@ -28,12 +30,16 @@ func ConvertResponseStreamWithOptions(source io.ReadCloser, operation string, op
 	reader, writer := io.Pipe()
 	go func() {
 		defer func() { _ = source.Close() }()
-		converter := newStreamConverter(writer, operation, options)
-		err := consumeSSE(source, converter.handle)
-		if err == nil {
-			err = converter.finish()
-		}
-		_ = writer.CloseWithError(err)
+		// 转换器直接解析上游字节流, panic 不得击穿进程:streampipe 捕获后以
+		// 错误关闭 pipe, 客户端得到可重试的流错误而非进程崩溃。
+		streampipe.Run(writer, func() error {
+			converter := newStreamConverter(writer, operation, options)
+			err := consumeSSE(source, converter.handle)
+			if err == nil {
+				err = converter.finish()
+			}
+			return err
+		})
 	}()
 	return reader
 }
@@ -648,10 +654,17 @@ func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
 	reader := bufio.NewReaderSize(source, 64<<10)
 	var event string
 	var data strings.Builder
+	firstLine := true
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
+			if firstLine {
+				// 与 semantic streamidle 检测器同口径:剥离开场 UTF-8 BOM,
+				// 否则首个事件的 data 行解析失败、首事件被静默丢弃。
+				line = strings.TrimPrefix(line, "\ufeff")
+				firstLine = false
+			}
 			switch {
 			case strings.HasPrefix(line, "event:"):
 				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
@@ -660,6 +673,11 @@ func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
 					data.WriteByte('\n')
 				}
 				data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+				// 事件缓冲上限, 与 cli 侧 maxCompatibleSSEEventBytes(8MiB)同口径:
+				// 无上限时上游单行超长会使内存无界增长。
+				if data.Len() > 8<<20 {
+					return fmt.Errorf("SSE 单事件超过 8 MiB")
+				}
 			case line == "":
 				if data.Len() > 0 {
 					if handleErr := handle(event, []byte(data.String())); handleErr != nil {
