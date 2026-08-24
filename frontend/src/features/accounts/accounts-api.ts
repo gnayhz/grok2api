@@ -88,8 +88,6 @@ export type AccountDTO = {
   riskStatus?: string;
   /** Numeric bot_flag_source/bfs claim when risk-flagged: 1 or 2. */
   buildBotFlagSource?: number;
-  egressNodeId?: string;
-  egressAssignmentMode?: "manual" | "auto";
   modelSyncFailed?: boolean;
   refreshDueAt?: string;
   lastRefreshAt?: string;
@@ -197,7 +195,6 @@ const accountValidator = hasShape({
   webTierSyncedAt: isOptional(isString), nsfwEnabledAt: isOptional(isString), termsAcceptedAt: isOptional(isString), name: isString, email: isOptional(isString), userId: isOptional(isString), teamId: isOptional(isString),
   enabled: isBoolean, authStatus: isOneOf("active", "reauthRequired"), expiresAt: isOptional(isString), refreshable: isBoolean, cloudflareCookieConfigured: isBoolean,
   buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
-  egressNodeId: isOptional(isString), egressAssignmentMode: isOptional(isOneOf("manual", "auto")),
   lastRefreshErrorStatus: isOptional(isNumber), lastRefreshErrorCode: isOptional(isString), lastRefreshErrorMessage: isOptional(isString), lastRefreshErrorResponse: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
   failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), lastUsedAt: isOptional(isString),
   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")), linkedAccounts: isOptional(isArrayOf(linkedAccountValidator)),
@@ -226,7 +223,6 @@ type ListAccountsInput = {
   search?: string;
   type?: string;
   status?: string;
-  egress?: string;
   renewal?: string;
   risk?: string;
   agreement?: string;
@@ -237,12 +233,11 @@ type ListAccountsInput = {
   sortOrder?: SortOrder;
 };
 
-export function listAccounts(input: ListAccountsInput): Promise<PaginatedDTO<AccountDTO>> {
+export function listAccounts(input: ListAccountsInput, signal?: AbortSignal): Promise<PaginatedDTO<AccountDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
   if (input.search) query.set("search", input.search);
   if (input.type) query.set("type", input.type);
   if (input.status) query.set("status", input.status);
-  if (input.egress) query.set("egress", input.egress);
   if (input.renewal) query.set("renewal", input.renewal);
   if (input.risk) query.set("risk", input.risk);
   if (input.agreement) query.set("agreement", input.agreement);
@@ -252,7 +247,7 @@ export function listAccounts(input: ListAccountsInput): Promise<PaginatedDTO<Acc
     query.set("sortOrder", input.sortOrder);
   }
   if (input.provider) query.set("provider", input.provider);
-  return apiRequest(`/api/admin/v1/accounts?${query}`, {}, decodeAccountPage);
+  return apiRequest(`/api/admin/v1/accounts?${query}`, { signal }, decodeAccountPage);
 }
 
 export function getAccountSummary(): Promise<AccountSummaryDTO> {

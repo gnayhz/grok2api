@@ -47,7 +47,7 @@ export function VideoGalleryPage() {
 
   const videosQuery = useQuery({
     queryKey: ["media", "videos", page, pageSize, statusFilter, normalizedSearch, sort.field, sort.order],
-    queryFn: () => listVideos({ page, pageSize, status: statusFilter, search: normalizedSearch || undefined, sortBy: sort.field, sortOrder: sort.order }),
+    queryFn: ({ signal }) => listVideos({ page, pageSize, status: statusFilter, search: normalizedSearch || undefined, sortBy: sort.field, sortOrder: sort.order }, signal),
   });
   const statsQuery = useQuery({
     queryKey: ["media", "videos", "stats"],
