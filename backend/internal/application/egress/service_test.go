@@ -107,7 +107,7 @@ func TestPublicNodeProxyMetadataIsStableAcrossEncryptionNonces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, cipher, "")
+	service := NewService(nil, cipher)
 	proxyURL := "http://user:secret@proxy.example:8080"
 	firstEncrypted, err := cipher.Encrypt(proxyURL)
 	if err != nil {
@@ -117,8 +117,8 @@ func TestPublicNodeProxyMetadataIsStableAcrossEncryptionNonces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := service.publicNode(domain.Node{EncryptedProxyURL: firstEncrypted})
-	second := service.publicNode(domain.Node{EncryptedProxyURL: secondEncrypted})
+	first := service.publicNode(domain.Node{EncryptedProxyURL: firstEncrypted}, nil)
+	second := service.publicNode(domain.Node{EncryptedProxyURL: secondEncrypted}, nil)
 	if first.ProxyDisplay == "" || first.ProxyFingerprint == "" || first.ProxyFingerprint != second.ProxyFingerprint {
 		t.Fatalf("proxy metadata first=%#v second=%#v", first, second)
 	}
@@ -127,67 +127,37 @@ func TestPublicNodeProxyMetadataIsStableAcrossEncryptionNonces(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsRemovedAllScope(t *testing.T) {
+// 节点不再绑定 scope：任何节点可被任何路由目标引用，Input 只校验名称。
+func TestApplyInputValidatesName(t *testing.T) {
 	service := &Service{}
-	_, err := service.applyInput(domain.Node{}, Input{Name: "legacy", Scope: domain.Scope("all"), Enabled: true}, true)
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("all scope error = %v", err)
+	if _, err := service.applyInput(domain.Node{}, Input{Name: "", Enabled: true}, true); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty name error = %v", err)
+	}
+	if _, err := service.applyInput(domain.Node{}, Input{Name: strings.Repeat("x", 161), Enabled: true}, true); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("oversized name error = %v", err)
 	}
 }
 
-func TestBuildNodeAlwaysUsesProviderUserAgent(t *testing.T) {
+// 浏览器凭证不再属于节点输入：管理员编辑绝不改写托管 Clearance 状态。
+func TestApplyInputNeverTouchesManagedClearance(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, cipher, "browser-agent")
-	value, err := service.applyInput(domain.Node{UserAgent: "legacy-build-agent"}, Input{
-		Name: "build", Scope: domain.ScopeBuild, Enabled: true, UserAgent: "custom-build-agent",
-	}, false)
+	existingCookie, err := cipher.Encrypt("cf_clearance=managed")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.UserAgent != "" || service.publicNode(value).UserAgent != "" {
-		t.Fatalf("build node userAgent = %q", value.UserAgent)
-	}
-	if defaults := service.DefaultUserAgents(); defaults[string(domain.ScopeBuild)] != "" || defaults[string(domain.ScopeWeb)] != "browser-agent" || defaults[string(domain.ScopeConsole)] != "browser-agent" || defaults[string(domain.ScopeWebAsset)] != "browser-agent" || defaults[string(domain.ScopeConsoleAsset)] != "browser-agent" {
-		t.Fatalf("default user agents = %#v", defaults)
-	}
-}
-
-func TestConsoleNodeUsesBrowserDefaultUserAgent(t *testing.T) {
-	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	service := NewService(nil, cipher)
+	value, err := service.applyInput(domain.Node{UserAgent: "solved-agent", EncryptedCloudflareCookie: existingCookie}, Input{Name: "node", Enabled: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, cipher, "browser-agent")
-	value, err := service.applyInput(domain.Node{}, Input{Name: "console", Scope: domain.ScopeConsole, Enabled: true}, true)
-	if err != nil {
-		t.Fatal(err)
+	if value.UserAgent != "solved-agent" {
+		t.Fatalf("managed userAgent must survive admin edits, got %q", value.UserAgent)
 	}
-	if value.UserAgent != "browser-agent" {
-		t.Fatalf("console node userAgent = %q", value.UserAgent)
-	}
-}
-
-func TestConsoleAssetNodeUsesBrowserAgentButDropsClearanceCookie(t *testing.T) {
-	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-	if err != nil {
-		t.Fatal(err)
-	}
-	existingCookie, err := cipher.Encrypt("cf_clearance=legacy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := NewService(nil, cipher, "browser-agent")
-	value, err := service.applyInput(domain.Node{EncryptedCloudflareCookie: existingCookie}, Input{
-		Name: "console-assets", Scope: domain.ScopeConsoleAsset, Enabled: true,
-	}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value.UserAgent != "browser-agent" || value.EncryptedCloudflareCookie != "" {
-		t.Fatalf("Console asset node identity = %#v", value)
+	if value.EncryptedCloudflareCookie != existingCookie {
+		t.Fatal("managed clearance cookie must survive admin edits")
 	}
 }
 
@@ -200,12 +170,12 @@ func TestPublicNodeReportsAccountBoundProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, cipher, "browser-agent")
+	service := NewService(nil, cipher)
 	cooldown := time.Now().UTC().Add(time.Minute)
 	public := service.publicNode(domain.Node{
-		Scope: domain.ScopeWeb, EncryptedProxyURL: encryptedProxy, Health: 0.2,
+		EncryptedProxyURL: encryptedProxy, Health: 0.2,
 		FailureCount: 3, CooldownUntil: &cooldown, LastError: "legacy failure",
-	})
+	}, nil)
 	if !public.AccountBoundProxy {
 		t.Fatal("Resin proxy was not reported as account-bound")
 	}
@@ -215,7 +185,7 @@ func TestPublicNodeReportsAccountBoundProxy(t *testing.T) {
 	if public.Health != 1 || public.FailureCount != 0 || public.CooldownUntil != nil || public.LastError != "" {
 		t.Fatalf("proxy pool exposed obsolete node health: %#v", public)
 	}
-	if service.publicNode(domain.Node{Scope: domain.ScopeWeb}).AccountBoundProxy {
+	if service.publicNode(domain.Node{}, nil).AccountBoundProxy {
 		t.Fatal("direct node was reported as account-bound")
 	}
 }
@@ -225,14 +195,14 @@ func TestApplyInputResetsHealthOnlyWhenEgressConfigurationChanges(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, cipher, "browser-agent")
+	service := NewService(nil, cipher)
 	cooldown := time.Now().UTC().Add(time.Minute)
 	base := domain.Node{
-		Name: "node", Scope: domain.ScopeWeb, Enabled: true, Health: 0.2,
+		Name: "node", Enabled: true, Health: 0.2,
 		FailureCount: 4, CooldownUntil: &cooldown, LastError: "transport error",
 	}
 
-	renamed, err := service.applyInput(base, Input{Name: "renamed", Scope: domain.ScopeWeb, Enabled: true}, false)
+	renamed, err := service.applyInput(base, Input{Name: "renamed", Enabled: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +215,7 @@ func TestApplyInputResetsHealthOnlyWhenEgressConfigurationChanges(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	preserved, err := service.applyInput(legacyPool, Input{Name: "renamed", Scope: domain.ScopeWeb, Enabled: true}, false)
+	preserved, err := service.applyInput(legacyPool, Input{Name: "renamed", Enabled: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +225,7 @@ func TestApplyInputResetsHealthOnlyWhenEgressConfigurationChanges(t *testing.T) 
 
 	proxyURL := "socks5h://proxy.example:1080"
 	proxyPool := true
-	changed, err := service.applyInput(base, Input{Name: "node", Scope: domain.ScopeWeb, Enabled: true, ProxyPool: &proxyPool, ProxyURL: &proxyURL}, false)
+	changed, err := service.applyInput(base, Input{Name: "node", Enabled: true, ProxyPool: &proxyPool, ProxyURL: &proxyURL}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,12 +239,47 @@ func TestProxyPoolRequiresConfiguredProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, cipher, "browser-agent")
+	service := NewService(nil, cipher)
 	proxyPool := true
 	_, err = service.applyInput(domain.Node{}, Input{
-		Name: "pool", Scope: domain.ScopeBuild, Enabled: true, ProxyPool: &proxyPool,
+		Name: "pool", Enabled: true, ProxyPool: &proxyPool,
 	}, true)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("proxy pool without a proxy error = %v", err)
+	}
+}
+
+// publicNode 的"代理池模式"投影必须与 domain 唯一判定一致,
+// 不得在应用层重新发明规则。
+func TestPublicNodePoolModeMatchesDomainRule(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{cipher: cipher}
+	templateURL, err := cipher.Encrypt("http://{account}:secret@gw.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainURL, err := cipher.Encrypt("http://plain.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		node domain.Node
+		want bool
+	}{
+		{"plain node", domain.Node{ID: 1, EncryptedProxyURL: plainURL}, false},
+		{"flag node", domain.Node{ID: 2, EncryptedProxyURL: plainURL, ProxyPool: true}, true},
+		{"template node", domain.Node{ID: 3, EncryptedProxyURL: templateURL}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			public := s.publicNode(tc.node, nil)
+			if public.ProxyPool != tc.want {
+				t.Fatalf("publicNode.ProxyPool = %v, want %v", public.ProxyPool, tc.want)
+			}
+		})
 	}
 }

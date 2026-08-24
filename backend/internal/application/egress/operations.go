@@ -13,11 +13,9 @@ import (
 )
 
 const (
-	defaultProbeIntervalSeconds      = 900
-	defaultAssignmentIntervalSeconds = 300
-	maxEgressAccountCapacity         = 100000
-	maxManualProbeNodes              = 200
-	maxConcurrentProbes              = 8
+	defaultProbeIntervalSeconds = 900
+	maxManualProbeNodes         = 200
+	maxConcurrentProbes         = 8
 )
 
 var ErrOperationsUnavailable = errors.New("代理运营功能不可用")
@@ -48,31 +46,39 @@ type NodeProber interface {
 	ProbeEgressNode(context.Context, domain.Node) (domain.ProbeResult, error)
 }
 
+// OperationsConfigCASWriter is the optional compare-and-write capability for
+// operations-config writers whose snapshot may race concurrent administrators.
+// Background writers (subscription-sync hygiene) must use it so a stale
+// snapshot can never overwrite a concurrent admin commit; repositories without
+// it fall back to the unconditional save with unchanged-snapshot skip.
+type OperationsConfigCASWriter interface {
+	SaveEgressOperationsConfigIfCurrent(ctx context.Context, value domain.OperationsConfig, since time.Time) (domain.OperationsConfig, error)
+}
+
 type OperationsConfigInvalidator interface {
 	InvalidateOperationsConfig()
 }
 
+// PoolCacheInvalidator drops the infrastructure manager's pool/member/rotation
+// caches. Pool configuration changes must not wait out the snapshot TTL to
+// become visible to scheduling.
+type PoolCacheInvalidator interface {
+	InvalidatePoolCache()
+}
+
 type SubscriptionSourceInput struct {
 	Name                   string
-	Scope                  domain.Scope
 	Enabled                bool
 	URL                    *string
 	ClearURL               bool
 	ProxyURL               *string
 	ClearProxyURL          bool
 	RefreshIntervalSeconds *int
-	DefaultAccountCapacity *int
-}
-
-type SourceListFilter struct {
-	Scope domain.Scope
 }
 
 type ImportInput struct {
-	Name            string
-	Scope           domain.Scope
-	AccountCapacity int
-	Content         string
+	Name    string
+	Content string
 }
 
 type ImportResult struct {
@@ -86,39 +92,26 @@ type ProbeBatchResult struct {
 	Unhealthy int
 }
 
+// OperationsConfigInput is the administrative update payload. Routing
+// fields are pointers so a nil keeps the stored value (sparse updates).
 type OperationsConfigInput struct {
-	ProbeProvider             domain.ProbeProvider
-	ProbeIntervalSeconds      int
-	AutoAssignEnabled         bool
-	AutoBalanceEnabled        bool
-	AssignmentIntervalSeconds int
-	Fallbacks                 map[domain.Scope]FallbackConfigInput
-	// RouteRules carries per-traffic-class egress rules. A nil slice keeps the
-	// stored rules unchanged, mirroring sparse fallback update semantics.
-	RouteRules []RouteRuleInput
+	ProbeProvider        domain.ProbeProvider
+	ProbeIntervalSeconds int
+	DefaultTarget        *RoutingTargetInput
+	ScopeTargets         map[domain.Scope]RoutingTargetInput
+	ClassTargets         map[domain.TrafficClass]RoutingTargetInput
 }
 
-type FallbackConfigInput struct {
-	Mode   domain.FallbackMode
+// RoutingTargetInput is one routing decision. Mode "auto" resets the level
+// to follow the next level down (a scope target of auto follows 总出口).
+type RoutingTargetInput struct {
+	Mode   domain.RoutingTargetMode
 	NodeID uint64
+	PoolID uint64
 }
 
-type RouteRuleInput struct {
-	Scope        domain.Scope
-	Class        domain.TrafficClass
-	TargetMode   domain.RouteRuleTargetMode
-	TargetNodeID uint64
-	Enabled      bool
-}
-
-func (input RouteRuleInput) toDomain() domain.RouteRule {
-	return domain.RouteRule{
-		Scope:        input.Scope,
-		Class:        input.Class,
-		TargetMode:   input.TargetMode,
-		TargetNodeID: input.TargetNodeID,
-		Enabled:      input.Enabled,
-	}
+func (input RoutingTargetInput) toDomain() domain.RoutingTarget {
+	return domain.RoutingTarget{Mode: input.Mode, NodeID: input.NodeID, PoolID: input.PoolID}
 }
 
 func (s *Service) operationsRepository() (OperationsRepository, error) {
@@ -138,6 +131,24 @@ func (s *Service) SetOperationsConfigInvalidator(value OperationsConfigInvalidat
 	s.mu.Lock()
 	s.operationsCache = value
 	s.mu.Unlock()
+}
+
+// SetPoolCacheInvalidator wires the infrastructure pool cache flush. The
+// manager implements both invalidator interfaces; pools must flush their own
+// cache because pool rows and memberships do not ride the operations config.
+func (s *Service) SetPoolCacheInvalidator(value PoolCacheInvalidator) {
+	s.mu.Lock()
+	s.poolCache = value
+	s.mu.Unlock()
+}
+
+func (s *Service) invalidatePoolCache() {
+	s.mu.RLock()
+	value := s.poolCache
+	s.mu.RUnlock()
+	if value != nil {
+		value.InvalidatePoolCache()
+	}
 }
 
 func (s *Service) invalidateOperationsConfig() {
@@ -171,18 +182,14 @@ func (s *Service) ListSources(ctx context.Context) ([]domain.PublicSubscriptionS
 	return result, nil
 }
 
-func (s *Service) ListSourcePage(ctx context.Context, page, pageSize int, search string, filter SourceListFilter) ([]domain.PublicSubscriptionSource, int64, error) {
+func (s *Service) ListSourcePage(ctx context.Context, page, pageSize int, search string) ([]domain.PublicSubscriptionSource, int64, error) {
 	page, pageSize = repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
-	if !validListScope(filter.Scope) {
-		return nil, 0, ErrInvalidFilter
-	}
 	operations, err := s.operationsRepository()
 	if err != nil {
 		return nil, 0, err
 	}
 	values, total, err := operations.ListEgressSourcePage(ctx, repository.EgressSourceListQuery{
-		Page:   repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: strings.TrimSpace(search)},
-		Filter: repository.EgressSourceListFilter{Scope: filter.Scope},
+		Page: repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: strings.TrimSpace(search)},
 	})
 	if err != nil {
 		return nil, 0, err
@@ -222,15 +229,9 @@ func (s *Service) UpdateSource(ctx context.Context, id uint64, input Subscriptio
 	if err != nil {
 		return domain.PublicSubscriptionSource{}, err
 	}
-	previousScope := value.Scope
 	value, err = s.applySourceInput(value, input, false)
 	if err != nil {
 		return domain.PublicSubscriptionSource{}, err
-	}
-	if previousScope != value.Scope {
-		if err := s.validateSourceBindingScope(ctx, value.ID, value.Scope); err != nil {
-			return domain.PublicSubscriptionSource{}, err
-		}
 	}
 	updated, err := operations.UpdateEgressSource(ctx, value)
 	if errors.Is(err, repository.ErrNotFound) {
@@ -288,8 +289,8 @@ func (s *Service) ImportText(ctx context.Context, input ImportInput) (ImportResu
 			return ImportResult{}, encryptErr
 		}
 		nodes = append(nodes, domain.Node{
-			Name: sourceNodeName(input.Name, index), Scope: input.Scope, Enabled: true,
-			AccountCapacity: input.AccountCapacity, EncryptedProxyURL: encryptedProxy, Health: 1,
+			Name: sourceNodeName(input.Name, index), Enabled: true,
+			EncryptedProxyURL: encryptedProxy, Health: 1,
 			ProbeStatus: domain.ProbeStatusUnknown,
 		})
 	}
@@ -345,7 +346,7 @@ func (s *Service) TestNode(ctx context.Context, id uint64) (domain.ProbeResult, 
 
 func (s *Service) TestNodes(ctx context.Context, ids []uint64) (ProbeBatchResult, error) {
 	if len(ids) == 0 {
-		nodes, err := s.repository.ListEgressNodes(ctx, "", repository.SortQuery{})
+		nodes, err := s.repository.ListEgressNodes(ctx, repository.SortQuery{})
 		if err != nil {
 			return ProbeBatchResult{}, err
 		}
@@ -405,13 +406,15 @@ func (s *Service) OperationsConfig(ctx context.Context) (domain.OperationsConfig
 	return operations.GetEgressOperationsConfig(ctx)
 }
 
+// UpdateOperationsConfig replaces probe scheduling and routing. Nil routing
+// levels keep their stored value; an explicit auto target resets that level.
 func (s *Service) UpdateOperationsConfig(ctx context.Context, input OperationsConfigInput) (domain.OperationsConfig, error) {
 	operations, err := s.operationsRepository()
 	if err != nil {
 		return domain.OperationsConfig{}, err
 	}
-	if input.ProbeIntervalSeconds < 60 || input.ProbeIntervalSeconds > 86400 || input.AssignmentIntervalSeconds < 60 || input.AssignmentIntervalSeconds > 86400 {
-		return domain.OperationsConfig{}, fmt.Errorf("%w: 自动任务间隔必须在 60 到 86400 秒之间", ErrInvalidInput)
+	if input.ProbeIntervalSeconds < 60 || input.ProbeIntervalSeconds > 86400 {
+		return domain.OperationsConfig{}, fmt.Errorf("%w: 节点检测间隔必须在 60 到 86400 秒之间", ErrInvalidInput)
 	}
 	current, err := operations.GetEgressOperationsConfig(ctx)
 	if err != nil {
@@ -424,39 +427,38 @@ func (s *Service) UpdateOperationsConfig(ctx context.Context, input OperationsCo
 	if !probeProvider.IsValid() {
 		return domain.OperationsConfig{}, fmt.Errorf("%w: 不支持的代理探测服务", ErrInvalidInput)
 	}
-	fallbacks := current.Fallbacks
-	if input.Fallbacks != nil {
-		fallbacks, err = s.validateFallbacks(ctx, current, input.Fallbacks)
-		if err != nil {
-			return domain.OperationsConfig{}, err
+	config := domain.OperationsConfig{
+		ProbeProvider: probeProvider, ProbeIntervalSeconds: input.ProbeIntervalSeconds,
+		DefaultTarget: current.DefaultTarget, ScopeTargets: current.ScopeTargets, ClassTargets: current.ClassTargets,
+	}
+	if input.DefaultTarget != nil {
+		config.DefaultTarget = input.DefaultTarget.toDomain()
+	}
+	if input.ScopeTargets != nil {
+		config.ScopeTargets = make(map[domain.Scope]domain.RoutingTarget, len(input.ScopeTargets))
+		for scope, target := range input.ScopeTargets {
+			config.ScopeTargets[scope] = target.toDomain()
 		}
 	}
-	routeRules := current.RouteRules
-	if input.RouteRules != nil {
-		routeRules = make([]domain.RouteRule, 0, len(input.RouteRules))
-		for _, rule := range input.RouteRules {
-			routeRules = append(routeRules, rule.toDomain())
-		}
-		if err := domain.ValidateRouteRules(routeRules); err != nil {
-			return domain.OperationsConfig{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
-		}
-		if err := s.validateRouteRuleTargets(ctx, routeRules); err != nil {
-			return domain.OperationsConfig{}, err
+	if input.ClassTargets != nil {
+		config.ClassTargets = make(map[domain.TrafficClass]domain.RoutingTarget, len(input.ClassTargets))
+		for class, target := range input.ClassTargets {
+			config.ClassTargets[class] = target.toDomain()
 		}
 	}
-	saved, err := operations.SaveEgressOperationsConfig(ctx, domain.OperationsConfig{
-		ProbeProvider: probeProvider, ProbeIntervalSeconds: input.ProbeIntervalSeconds, AutoAssignEnabled: input.AutoAssignEnabled,
-		AutoBalanceEnabled: input.AutoBalanceEnabled, AssignmentIntervalSeconds: input.AssignmentIntervalSeconds,
-		Fallbacks: fallbacks, RouteRules: routeRules, UpdatedAt: time.Now().UTC(),
-	})
-	if errors.Is(err, repository.ErrEgressFallbackInUse) {
-		return domain.OperationsConfig{}, fmt.Errorf("%w: 固定回退节点必须保持启用且可用", ErrInvalidInput)
+	if err := domain.ValidateRoutingTargets(config.DefaultTarget, config.ScopeTargets, config.ClassTargets); err != nil {
+		return domain.OperationsConfig{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	if errors.Is(err, repository.ErrEgressRouteRuleNodeInUse) {
-		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由规则的目标节点必须存在、启用且兼容对应作用域", ErrInvalidInput)
+	if err := s.validateRoutingTargets(ctx, config); err != nil {
+		return domain.OperationsConfig{}, err
 	}
-	if errors.Is(err, repository.ErrInvalidRecord) {
-		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由规则无效", ErrInvalidInput)
+	config.UpdatedAt = time.Now().UTC()
+	saved, err := operations.SaveEgressOperationsConfig(ctx, config)
+	if errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
+		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由的固定目标节点必须保持启用且可用", ErrInvalidInput)
+	}
+	if errors.Is(err, repository.ErrEgressRoutingInvalid) {
+		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由目标代理池不存在", ErrInvalidInput)
 	}
 	if err == nil {
 		s.invalidateOperationsConfig()
@@ -464,96 +466,43 @@ func (s *Service) UpdateOperationsConfig(ctx context.Context, input OperationsCo
 	return saved, err
 }
 
-// validateRouteRuleTargets rejects fixed route rules that point at sticky
-// per-account proxy templates. Such nodes rotate their exit with the caller
-// identity, which contradicts the "fixed target" contract the same way they
-// contradict fixed fallbacks.
-func (s *Service) validateRouteRuleTargets(ctx context.Context, rules []domain.RouteRule) error {
-	seen := make(map[uint64]struct{}, len(rules))
-	for _, rule := range rules {
-		if !rule.Enabled || rule.TargetMode.Normalized() != domain.RouteRuleTargetFixed {
-			continue
+// validateRoutingTargets checks that referenced nodes and pools exist and
+// remain schedulable. Sticky per-account proxy templates are rejected: they
+// rotate their exit with the caller identity, contradicting a fixed target.
+func (s *Service) validateRoutingTargets(ctx context.Context, config domain.OperationsConfig) error {
+	nodeIDs := make(map[uint64]struct{})
+	poolIDs := make(map[uint64]struct{})
+	collect := func(target domain.RoutingTarget) {
+		switch target.Mode.Normalized() {
+		case domain.RoutingTargetNode:
+			nodeIDs[target.NodeID] = struct{}{}
+		case domain.RoutingTargetPool:
+			poolIDs[target.PoolID] = struct{}{}
 		}
-		if _, checked := seen[rule.TargetNodeID]; checked {
-			continue
-		}
-		seen[rule.TargetNodeID] = struct{}{}
-		node, err := s.repository.GetEgressNode(ctx, rule.TargetNodeID)
+	}
+	collect(config.DefaultTarget)
+	for _, target := range config.ScopeTargets {
+		collect(target)
+	}
+	for _, target := range config.ClassTargets {
+		collect(target)
+	}
+	for id := range nodeIDs {
+		node, err := s.repository.GetEgressNode(ctx, id)
 		if err != nil {
-			return fmt.Errorf("%w: 读取出口路由规则目标节点失败", ErrInvalidInput)
+			return fmt.Errorf("%w: 出口路由的固定目标节点不存在", ErrInvalidInput)
 		}
-		proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL)
-		if err != nil {
-			return fmt.Errorf("%w: 出口路由规则目标节点的代理配置无效", ErrInvalidInput)
-		}
-		if strings.Contains(proxyURL, ProxyAccountPlaceholder) {
-			return fmt.Errorf("%w: 出口路由规则的目标节点 %q 是账号代理模板，不能作为固定出口", ErrInvalidInput, node.Name)
+		if err := s.validateFixedTargetNode(node); err != nil {
+			return err
 		}
 	}
-	return nil
-}
-
-func (s *Service) validateFallbacks(ctx context.Context, current domain.OperationsConfig, input map[domain.Scope]FallbackConfigInput) (map[domain.Scope]domain.FallbackConfig, error) {
-	result := make(map[domain.Scope]domain.FallbackConfig, len(allOperationScopes()))
-	for _, scope := range allOperationScopes() {
-		result[scope] = current.FallbackFor(scope)
-	}
-	for scope, fallback := range input {
-		if !validScope(scope) {
-			return nil, fmt.Errorf("%w: 回退作用域无效", ErrInvalidInput)
+	for id := range poolIDs {
+		if s.poolsRepository() == nil {
+			return fmt.Errorf("%w: 代理池存储不可用", ErrOperationsUnavailable)
 		}
-		mode := fallback.Mode.Normalized()
-		if !mode.IsValid() {
-			return nil, fmt.Errorf("%w: 回退模式无效", ErrInvalidInput)
+		if _, err := s.poolsRepository().GetEgressPool(ctx, id); err != nil {
+			return fmt.Errorf("%w: 出口路由目标代理池不存在", ErrInvalidInput)
 		}
-		switch mode {
-		case domain.FallbackModeNone, domain.FallbackModeDirect:
-			if fallback.NodeID != 0 {
-				return nil, fmt.Errorf("%w: 仅固定代理回退可以指定节点", ErrInvalidInput)
-			}
-		case domain.FallbackModeFixed:
-			if fallback.NodeID == 0 {
-				return nil, fmt.Errorf("%w: 固定代理回退必须指定节点", ErrInvalidInput)
-			}
-			node, err := s.repository.GetEgressNode(ctx, fallback.NodeID)
-			if errors.Is(err, repository.ErrNotFound) {
-				return nil, fmt.Errorf("%w: 固定回退节点不存在", ErrInvalidInput)
-			}
-			if err != nil {
-				return nil, err
-			}
-			if err := s.validateFixedFallbackNode(scope, node, true); err != nil {
-				return nil, err
-			}
-		}
-		result[scope] = domain.FallbackConfig{Mode: mode, NodeID: fallback.NodeID}
-	}
-	return result, nil
-}
-
-func (s *Service) validateFixedFallbackNode(scope domain.Scope, node domain.Node, rejectCooldown bool) error {
-	if !domain.SupportsScope(node.Scope, scope) {
-		return fmt.Errorf("%w: 固定回退节点与 %s 作用域不兼容", ErrInvalidInput, scope)
-	}
-	if !node.Enabled || strings.TrimSpace(node.EncryptedProxyURL) == "" {
-		return fmt.Errorf("%w: 固定回退节点必须启用且配置代理地址", ErrInvalidInput)
-	}
-	if node.ProxyPool {
-		return fmt.Errorf("%w: 固定回退节点不能使用代理池模式", ErrInvalidInput)
-	}
-	if rejectCooldown && node.CooldownUntil != nil && time.Now().UTC().Before(*node.CooldownUntil) {
-		return fmt.Errorf("%w: 固定回退节点正在冷却", ErrInvalidInput)
-	}
-	proxyURL, err := s.cipher.Decrypt(node.EncryptedProxyURL)
-	if err != nil {
-		return fmt.Errorf("%w: 固定回退节点代理配置无效", ErrInvalidInput)
-	}
-	proxyURL, err = NormalizeProxyURL(proxyURL)
-	if err != nil || proxyURL == "" {
-		return fmt.Errorf("%w: 固定回退节点代理地址无效", ErrInvalidInput)
-	}
-	if strings.Contains(proxyURL, ProxyAccountPlaceholder) {
-		return fmt.Errorf("%w: 固定回退节点不能使用账号代理模板", ErrInvalidInput)
 	}
 	return nil
 }
@@ -563,10 +512,7 @@ func (s *Service) applySourceInput(value domain.SubscriptionSource, input Subscr
 	if name == "" || len(name) > 160 {
 		return domain.SubscriptionSource{}, fmt.Errorf("%w: 订阅名称必须在 1 到 160 个字符之间", ErrInvalidInput)
 	}
-	if !validScope(input.Scope) {
-		return domain.SubscriptionSource{}, fmt.Errorf("%w: 订阅作用域无效", ErrInvalidInput)
-	}
-	value.Name, value.Scope, value.Enabled = name, input.Scope, input.Enabled
+	value.Name, value.Enabled = name, input.Enabled
 	if input.RefreshIntervalSeconds != nil {
 		if *input.RefreshIntervalSeconds < 60 || *input.RefreshIntervalSeconds > 86400 {
 			return domain.SubscriptionSource{}, fmt.Errorf("%w: 订阅刷新间隔必须在 60 到 86400 秒之间", ErrInvalidInput)
@@ -575,12 +521,6 @@ func (s *Service) applySourceInput(value domain.SubscriptionSource, input Subscr
 	}
 	if value.RefreshIntervalSeconds == 0 {
 		value.RefreshIntervalSeconds = defaultProbeIntervalSeconds
-	}
-	if input.DefaultAccountCapacity != nil {
-		if *input.DefaultAccountCapacity < 0 || *input.DefaultAccountCapacity > maxEgressAccountCapacity {
-			return domain.SubscriptionSource{}, fmt.Errorf("%w: 每个代理的账号容量必须在 0 到 %d 之间", ErrInvalidInput, maxEgressAccountCapacity)
-		}
-		value.DefaultAccountCapacity = *input.DefaultAccountCapacity
 	}
 	if input.ClearURL {
 		value.EncryptedURL = ""
@@ -608,7 +548,7 @@ func (s *Service) applySourceInput(value domain.SubscriptionSource, input Subscr
 		if proxyURL == "" {
 			return domain.SubscriptionSource{}, fmt.Errorf("%w: 订阅代理地址不能为空", ErrInvalidInput)
 		}
-		if strings.Contains(proxyURL, ProxyAccountPlaceholder) {
+		if domain.IsAccountTemplateProxy(proxyURL) {
 			return domain.SubscriptionSource{}, fmt.Errorf("%w: 订阅代理地址不能包含账号占位符", ErrInvalidInput)
 		}
 		encryptedProxyURL, err := s.cipher.Encrypt(proxyURL)
@@ -617,34 +557,73 @@ func (s *Service) applySourceInput(value domain.SubscriptionSource, input Subscr
 		}
 		value.EncryptedProxyURL = encryptedProxyURL
 	}
-	if create || input.URL != nil || input.ClearURL || input.ProxyURL != nil || input.ClearProxyURL {
-		value.NextSyncAt = nil
-		value.LastSyncError = ""
-	}
+	// 配置变更时的调度重置(next_sync_at 清空、last_sync_error 清空)由持久层
+	// 在 UPDATE 语句内对当前行原子判定(仅当订阅地址/拉取代理真的变化)——
+	// 应用层快照不再写这两列,避免读-改-写窗口回滚维护循环的同步进度。
 	return value, nil
 }
 
 func publicSource(value domain.SubscriptionSource) domain.PublicSubscriptionSource {
 	return domain.PublicSubscriptionSource{
-		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled, URLConfigured: value.EncryptedURL != "",
+		ID: value.ID, Name: value.Name, Enabled: value.Enabled, URLConfigured: value.EncryptedURL != "",
 		ProxyConfigured:        value.EncryptedProxyURL != "",
-		RefreshIntervalSeconds: value.RefreshIntervalSeconds, DefaultAccountCapacity: value.DefaultAccountCapacity,
-		LastSyncedAt: value.LastSyncedAt, NextSyncAt: value.NextSyncAt, LastSyncImported: value.LastSyncImported, LastSyncError: value.LastSyncError,
+		RefreshIntervalSeconds: value.RefreshIntervalSeconds,
+		LastSyncedAt:           value.LastSyncedAt, NextSyncAt: value.NextSyncAt, LastSyncImported: value.LastSyncImported, LastSyncError: value.LastSyncError,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 }
 
-func validScope(scope domain.Scope) bool {
-	return scope == domain.ScopeBuild || scope == domain.ScopeWeb || scope == domain.ScopeConsole || scope == domain.ScopeWebAsset || scope == domain.ScopeConsoleAsset
-}
-
-func allOperationScopes() []domain.Scope {
-	return []domain.Scope{domain.ScopeBuild, domain.ScopeWeb, domain.ScopeConsole, domain.ScopeWebAsset, domain.ScopeConsoleAsset}
-}
-
 func validateImportInput(input ImportInput) error {
-	if strings.TrimSpace(input.Name) == "" || len(strings.TrimSpace(input.Name)) > 150 || !validScope(input.Scope) || input.AccountCapacity < 0 || input.AccountCapacity > maxEgressAccountCapacity || strings.TrimSpace(input.Content) == "" {
+	if strings.TrimSpace(input.Name) == "" || len(strings.TrimSpace(input.Name)) > 150 || strings.TrimSpace(input.Content) == "" {
 		return fmt.Errorf("%w: 批量导入参数无效", ErrInvalidInput)
 	}
 	return nil
+}
+
+// SourceURL reveals the stored subscription URL so operators can edit or
+// clear it later; the list API only exposes a configured flag. Write-only
+// remains the rule for ordinary listings.
+func (s *Service) SourceURL(ctx context.Context, id uint64) (string, error) {
+	operations, err := s.operationsRepository()
+	if err != nil {
+		return "", err
+	}
+	source, err := operations.GetEgressSource(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(source.EncryptedURL) == "" {
+		return "", fmt.Errorf("%w: 订阅未配置地址", ErrInvalidInput)
+	}
+	urlValue, err := s.cipher.Decrypt(source.EncryptedURL)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(urlValue), nil
+}
+
+// SourceProxyURL reveals the stored fetch proxy URL for the same reason.
+func (s *Service) SourceProxyURL(ctx context.Context, id uint64) (string, error) {
+	operations, err := s.operationsRepository()
+	if err != nil {
+		return "", err
+	}
+	source, err := operations.GetEgressSource(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(source.EncryptedProxyURL) == "" {
+		return "", fmt.Errorf("%w: 订阅未配置拉取代理", ErrInvalidInput)
+	}
+	proxyURL, err := s.cipher.Decrypt(source.EncryptedProxyURL)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(proxyURL), nil
 }

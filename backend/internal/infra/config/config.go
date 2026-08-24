@@ -70,6 +70,7 @@ type Config struct {
 	RequestRetry      RequestRetryConfig      `yaml:"requestRetry"`
 	AccountRisk       AccountRiskConfig       `yaml:"accountRisk"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
+	Egress            EgressConfig            `yaml:"egress"`
 	Accounts          AccountsConfig          `yaml:"-"`
 }
 
@@ -81,6 +82,9 @@ type ServerConfig struct {
 	ReadTimeout           Duration `yaml:"readTimeout"`
 	RequestTimeout        Duration `yaml:"requestTimeout"`
 	SwaggerEnabled        bool     `yaml:"swaggerEnabled"`
+	// UpdateCheckEnabled 控制出网检查 GitHub Release(nil=默认开启)。内网/离线
+	// 或合规敏感部署可显式关闭——此前无任何开关, 启动即联网。
+	UpdateCheckEnabled *bool `yaml:"updateCheckEnabled"`
 }
 
 type FrontendConfig struct {
@@ -230,18 +234,6 @@ type RoutingConfig struct {
 	ReasoningReplayEnabled      bool     `yaml:"reasoningReplayEnabled"`
 	ReasoningReplayTTL          Duration `yaml:"reasoningReplayTTL"`
 	ReasoningReplayMaxEntries   int      `yaml:"reasoningReplayMaxEntries"`
-	// AutoAssignMaxNodeShare optionally caps how many active accounts one
-	// healthy node may absorb during auto assignment. 0 keeps the historical
-	// unbounded first-pass evacuation. Values in [0.05, 1] are a fraction of
-	// the active provider pool. GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE overrides
-	// this field when set to a valid value.
-	AutoAssignMaxNodeShare float64 `yaml:"autoAssignMaxNodeShare"`
-	// AutoAssignMaxMigrationShare optionally caps how many already-bound
-	// accounts may move in one maintenance cycle. 0 keeps the historical
-	// unbounded first-pass evacuation and the existing 200-move ceiling for
-	// capacity/rebalance repair. GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE
-	// overrides this field when set to a valid value.
-	AutoAssignMaxMigrationShare float64 `yaml:"autoAssignMaxMigrationShare"`
 }
 
 type AuditConfig struct {
@@ -289,7 +281,7 @@ type RequestRetryConfig struct {
 	// clean 首 created 0.8-2.2s（与提示词复杂度无关），降智 68-125s——
 	// 5s 截止有 2.3 倍安全边际，比证据截止更早（4-5s vs 15s）。
 	CreatedTimeout Duration `yaml:"createdTimeout"`
-	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 24h），独立于
+	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 15m），独立于
 	// missing-thinking 的 AccountCooldown；上下限与 AccountCooldown 相同。
 	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
 }
@@ -363,6 +355,11 @@ func Load(path string) (Config, error) {
 			decoder := yaml.NewDecoder(bytes.NewReader(data))
 			decoder.KnownFields(true)
 			if err := decoder.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+				// 旧配置定向迁移提示:本分支删除了 routing.autoAssign* 键,
+				// 从旧版本升级且未清理配置的部署会得到不可读的 unknown field 报错。
+				if strings.Contains(err.Error(), "autoAssignMax") {
+					return Config{}, fmt.Errorf("解析配置文件: %w（routing.autoAssignMaxNodeShare/autoAssignMaxMigrationShare 已随账号-代理绑定功能删除，请从 config.yaml 中移除这两行）", err)
+				}
 				return Config{}, fmt.Errorf("解析配置文件: %w", err)
 			}
 			var extra any
@@ -674,9 +671,6 @@ func (c Config) Validate() error {
 	if c.Routing.ReasoningReplayMaxEntries < 100 || c.Routing.ReasoningReplayMaxEntries > 1000000 {
 		return errors.New("routing.reasoningReplayMaxEntries 必须在 100 到 1000000 之间")
 	}
-	if !validAutoAssignShare(c.Routing.AutoAssignMaxNodeShare) || !validAutoAssignShare(c.Routing.AutoAssignMaxMigrationShare) {
-		return errors.New("routing.autoAssignMaxNodeShare 与 autoAssignMaxMigrationShare 必须为 0 或 0.05 到 1 之间")
-	}
 	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize || c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize || c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
 		return errors.New("audit 队列和批量写入配置无效")
 	}
@@ -702,6 +696,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.AccountRisk.Validate(); err != nil {
+		return err
+	}
+	if err := c.Egress.Validate(); err != nil {
 		return err
 	}
 	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
@@ -752,7 +749,7 @@ func validateRequestRetry(value RequestRetryConfig) error {
 		return errors.New("requestRetry.accountCooldown 必须在 1m 到 168h 之间")
 	}
 	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
-		return errors.New("requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间（0 表示默认 24h）")
+		return errors.New("requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间（0 表示默认 15m）")
 	}
 	if d := value.EvidenceTimeout.Value(); d != 0 && (d < 3*time.Second || d > 5*time.Minute) {
 		return errors.New("requestRetry.evidenceTimeout 必须在 3s 到 5m 之间（0 表示默认 15s）")
@@ -761,10 +758,6 @@ func validateRequestRetry(value RequestRetryConfig) error {
 		return errors.New("requestRetry.createdTimeout 必须在 1s 到 2m 之间（0 表示默认 5s）")
 	}
 	return nil
-}
-
-func validAutoAssignShare(value float64) bool {
-	return value == 0 || (value >= 0.05 && value <= 1)
 }
 
 // validateAPIBaseURL 仅允许无凭据、query、fragment 的 HTTP(S) API 根地址。
@@ -843,6 +836,7 @@ func defaultConfig() Config {
 			ImportConcurrency: 25, ConversionConcurrency: 25, SyncConcurrency: 25,
 			RefreshConcurrency: 25, RandomDelay: Duration(500 * time.Millisecond),
 		},
+		Egress: DefaultEgressConfig(),
 		Media: MediaConfig{
 			Driver: "local", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 			CleanupThresholdPercent: 80, CleanupInterval: Duration(10 * time.Minute),

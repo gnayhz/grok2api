@@ -7,9 +7,48 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
+	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
+
+// dialWebSocket 的池模式安全失败重试环此前只有 sticky_retry 的 HTTP 版
+// 测试覆盖,WebSocket 拨号路径零覆盖。坏代理(连接拒绝,安全失败标记)
+// 必须:重试至 proxyPoolRetryLimit 后如实返回错误,而不是死循环或吞错。
+func TestDialWebSocketPoolModeRetriesBoundedOnSafeFailure(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 端口 1 (tcpmux) 恒拒绝连接 —— "connection refused" 是安全失败标记。
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "pool-ws", Enabled: true, ProxyPool: true, Health: 1,
+		EncryptedProxyURL: encryptedProxy(t, cipher, "socks5://127.0.0.1:1"),
+	}}
+	manager := NewManager(repository, cipher)
+	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "acct")
+	if err != nil || lease == nil {
+		t.Fatalf("web pool lease: lease=%v err=%v", lease, err)
+	}
+	defer lease.Release()
+	if lease.browser == nil {
+		t.Fatal("web lease must carry a browser transport for websocket dialing")
+	}
+	startedAt := time.Now()
+	_, _, dialErr := lease.DialWebSocket(context.Background(), "wss://example.invalid", nil, 2*time.Second)
+	if dialErr == nil {
+		t.Fatal("dial through a dead proxy must fail")
+	}
+	// 每次尝试都是立即拒绝(无握手等待),界内重试总耗时应远小于逐次满超时。
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("bounded retry took %v; refusal must be immediate per attempt", elapsed)
+	}
+	if !safeProxyConnectionFailure(dialErr, nil) {
+		t.Fatalf("surfaced error must stay a safe connection failure, got: %v", dialErr)
+	}
+}
 
 func TestToFHTTPRequestPreservesRequestFraming(t *testing.T) {
 	payload := []byte(`{"message":"hello"}`)
