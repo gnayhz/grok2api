@@ -61,8 +61,10 @@ func TestPeekWithholdsStreamBeforeLateCiphertext(t *testing.T) {
 	}
 }
 
-// hosted 工具重放边界。
-func TestHostedToolsNotHeld(t *testing.T) {
+// 工具声明不影响 hold 门控(2026-08-25 回归锁定):质量判决只看流特征。
+// 上游按"hosted 工具/在途工具结果"豁免整轮的规则已移除——扣留的响应从不
+// 发给客户端,客户端无从重放;纯语义输出(工具调用形态)按流特征 Deliver。
+func TestToolDeclarationsStillHeld(t *testing.T) {
 	t.Parallel()
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6"}
 	cfg := QualityRetryRuntime{Enabled: true}
@@ -79,21 +81,12 @@ func TestHostedToolsNotHeld(t *testing.T) {
 		{name: "unknown tool type defaults unsafe", body: `{"tools":[{"type":"future_native_tool"}]}`},
 		{name: "namespace nested hosted", body: `{"tools":[{"type":"namespace","tools":[{"type":"code_interpreter"}]}]}`},
 		{name: "additional_tools in input", body: `{"input":[{"type":"additional_tools","tools":[{"type":"shell"}]}]}`},
-	} {
-		if gate(tc.body) {
-			t.Errorf("[%s] hosted 工具请求被 hold（重放重复服务端副作用）: %s", tc.name, tc.body)
-		}
-	}
-	for _, tc := range []struct {
-		name string
-		body string
-	}{
 		{name: "client function tool", body: `{"tools":[{"type":"function","function":{"name":"charge"}}]}`},
 		{name: "local shell", body: `{"tools":[{"type":"shell","environment":{"type":"local"}}]}`},
 		{name: "apply_patch", body: `{"tools":[{"type":"apply_patch"}]}`},
 	} {
 		if !gate(tc.body) {
-			t.Errorf("[%s] 客户端执行工具应照常 hold: %s", tc.name, tc.body)
+			t.Errorf("[%s] 工具声明不得豁免 hold: %s", tc.name, tc.body)
 		}
 	}
 }
