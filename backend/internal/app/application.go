@@ -706,6 +706,19 @@ func (a *Application) Run(ctx context.Context) error {
 			return a.audits.RunRetention(taskCtx, a.auditRetention)
 		})
 	}
+	// SQLite freelist 页归还：retention/媒体作业删除产生的空闲页只有
+	// 周期 incremental_vacuum 才真正缩小文件（auto_vacuum=INCREMENTAL
+	// 仅启用机制）。日频足够（页增速慢），非 SQLite 方言内部 no-op。
+	startBackground("sqlite_incremental_vacuum", func(taskCtx context.Context) error {
+		a.runPeriodicTask(taskCtx, 24*time.Hour, "sqlite_incremental_vacuum", func(runCtx context.Context) error {
+			trimmed, err := a.database.SQLiteIncrementalVacuum(runCtx)
+			if err == nil && trimmed {
+				a.logger.Info("sqlite_incremental_vacuum_trimmed", "hint", "freelist pages returned to the filesystem")
+			}
+			return err
+		})
+		return nil
+	})
 	startBackground("model_cooldown_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 10*time.Minute, "model_cooldown_cleanup", func(runCtx context.Context) error {
 			_, err := a.accountRepo.PruneExpiredModelQuotaBlocks(runCtx, time.Now().UTC(), 1000)
@@ -840,7 +853,7 @@ func (a *Application) Run(ctx context.Context) error {
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
 				// 长流（requestTimeout 上限 2h）永远等不完：排空超时是预期。
-			// 记 WARN 后按操作员意图正常退出（exit 0）——此前返回错误会让
+				// 记 WARN 后按操作员意图正常退出（exit 0）——此前返回错误会让
 				// SIGTERM 停止以 exit 1 结束，语义错误且污染失败率统计。
 				a.logger.Warn("server_shutdown_drain_timeout", "error", err)
 			} else {
