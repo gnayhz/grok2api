@@ -650,6 +650,7 @@ func (a *Application) Run(ctx context.Context) error {
 		a.egressOps.RunRotationWorker(runCtx)
 	}()
 	errCh := make(chan error, 1)
+	servedAt := time.Now()
 	go func() {
 		a.logger.Info("server_started", "listen", a.server.Addr)
 		errCh <- a.server.ListenAndServe()
@@ -831,11 +832,26 @@ func (a *Application) Run(ctx context.Context) error {
 	a.queueDueWebQuotaRefresh(runCtx)
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// compose stop_grace_period 为 30s：排空 15s + 审计收尾 10s 预算
+		// + DB 关闭，最坏 ~26s 仍在宽限内（此前 10s 排空浪费了 20s 可用窗口）。
+		drainStart := time.Now()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("关闭 HTTP 服务: %w", err)
+			if errors.Is(err, context.DeadlineExceeded) {
+				// 长流（requestTimeout 上限 2h）永远等不完：排空超时是预期。
+			// 记 WARN 后按操作员意图正常退出（exit 0）——此前返回错误会让
+				// SIGTERM 停止以 exit 1 结束，语义错误且污染失败率统计。
+				a.logger.Warn("server_shutdown_drain_timeout", "error", err)
+			} else {
+				return fmt.Errorf("关闭 HTTP 服务: %w", err)
+			}
 		}
+		// server_started 的对账本事件：日志即监控面时，运维据此在日志流中
+		// 区分「干净停止」与「崩溃后静默」。
+		a.logger.Info("server_stopped",
+			"uptime_ms", time.Since(servedAt).Milliseconds(),
+			"drain_ms", time.Since(drainStart).Milliseconds())
 		return nil
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
