@@ -34,12 +34,12 @@ type Adapter struct {
 	mu     sync.RWMutex
 	cfg    Config
 	egress *infraegress.Manager
-	cipher *security.Cipher
+	cipher security.Cryptor
 	assets provider.ImageAssetStore
 	dpop   *dpopSessionManager
 }
 
-func NewAdapter(cfg Config, egress *infraegress.Manager, cipher *security.Cipher, assets provider.ImageAssetStore) *Adapter {
+func NewAdapter(cfg Config, egress *infraegress.Manager, cipher security.Cryptor, assets provider.ImageAssetStore) *Adapter {
 	cfg = normalizedConfig(cfg)
 	return &Adapter{cfg: cfg, egress: egress, cipher: cipher, assets: assets, dpop: newDPoPSessionManager()}
 }

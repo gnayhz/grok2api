@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -152,6 +153,36 @@ type AccountsConfig struct {
 	ExcludeBuildBotFlaggedFromSchedulingProvided bool
 }
 
+// RequestRetryEditable 是管理接口使用的实时路由守卫输入（时长为字符串）。
+type RequestRetryEditable struct {
+	Enabled             bool
+	MaxAttempts         int
+	HoldTimeout         string
+	MinOutputTokens     int
+	OnExhausted         string
+	AccountCooldown     string
+	EarlyHeaderAbort    string
+	SameAccountRetry    bool
+	EvidenceTimeout     string
+	CreatedTimeout      string
+	IdleAccountCooldown string
+}
+
+// EgressRotationEditable 是管理接口使用的出口轮换输入（时长为字符串）。
+type EgressRotationEditable struct {
+	Enabled                  bool
+	MaxAttemptsPerQuarantine int
+	MinNodeInterval          string
+	MaxGlobalPerHour         int
+	WebhookTimeout           string
+	WebhookRetries           int
+	SettleDelay              string
+	ProbeTimeout             string
+	ProbeInterval            string
+	CanaryModelPublicID      string
+	CanaryCreatedTimeout     string
+}
+
 // EditableConfig 聚合管理端允许修改的运行参数。
 type EditableConfig struct {
 	Server            ServerConfig
@@ -167,6 +198,12 @@ type EditableConfig struct {
 	Accounts          AccountsConfig
 	// AccountsProvided 区分旧管理端未发送 accounts 与显式提交默认值。
 	AccountsProvided bool
+	RequestRetry     RequestRetryEditable
+	// RequestRetryProvided 区分旧管理端未发送该节与显式提交零值。
+	RequestRetryProvided bool
+	EgressRotation       EgressRotationEditable
+	// EgressRotationProvided 同上。
+	EgressRotationProvided bool
 }
 
 // Snapshot 表示当前运行设置和需要重启才能生效的字段。
@@ -190,6 +227,8 @@ type Service struct {
 	// 而 revision 已推进——此后 ReloadPersisted 因 revision 未变直接返回, 运行
 	// 态与持久化配置长期不一致。记录已应用版本让重载/周期同步能重放差距。
 	lastAppliedRevision    uint64
+	fileCfg                config.Config
+	fileCfgSet             bool
 	activeBufferSize       int
 	activeMediaConcurrency int
 	repository             repository.RuntimeSettingsRepository
@@ -301,13 +340,58 @@ func (s *Service) Update(ctx context.Context, expectedRevision uint64, input Edi
 	return result, nil
 }
 
+// SetFileConfig 记录「文件默认」基线，供 ResetToDefaults 恢复。
+// 在装配层加载持久化覆盖前调用一次。
+func (s *Service) SetFileConfig(base config.Config) {
+	s.mu.Lock()
+	s.fileCfg = base
+	s.fileCfgSet = true
+	s.mu.Unlock()
+}
+
+// ResetToDefaults 删除持久化运行设置并恢复到 config.yaml 基线：
+// 解决「后台保存过设置后，config.yaml 对可编辑字段的修改被静默
+// 忽略」（round 87 文档化的陷阱）——此前唯一恢复路径是手删
+// runtime_settings 行。语义：删除行（幂等）→ 内存切换回文件基线
+// （revision 前进）→ apply 扇出 → 通知其他实例重载（它们重载后
+// 发现无行，同样回到各自进程的文件基线）。
+func (s *Service) ResetToDefaults(ctx context.Context) (Snapshot, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	if err := s.repository.Delete(ctx); err != nil {
+		return Snapshot{}, err
+	}
+	s.mu.Lock()
+	base := s.fileCfg
+	if !s.fileCfgSet {
+		base = s.cfg
+	}
+	nextRevision := s.revision + 1
+	s.cfg = base
+	s.updatedAt = time.Now().UTC()
+	s.revision = nextRevision
+	result := s.snapshotLocked()
+	s.mu.Unlock()
+	s.runApply(base, nextRevision)
+	if s.notify != nil {
+		s.notify(ctx)
+	}
+	return result, nil
+}
+
 // ReloadPersisted 在收到其他实例的变更通知后，从主数据库重载并应用运行设置。
+// 持久化行不存在（其他实例 ResetToDefaults 删除了覆盖）时，本实例回退到
+// 文件基线——否则远端副本会无限期保留已被删除的旧覆盖值。
 func (s *Service) ReloadPersisted(ctx context.Context) error {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 	value, updatedAt, revision, found, err := s.repository.Get(ctx)
-	if err != nil || !found {
+	if err != nil {
 		return err
+	}
+	if !found {
+		s.revertToBaseline()
+		return nil
 	}
 	s.mu.RLock()
 	current := s.cfg
@@ -333,6 +417,27 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 	s.mu.Unlock()
 	s.runApply(next, revision)
 	return nil
+}
+
+// revertToBaseline 将进程内配置回退到文件基线（调用方持 updateMu），用于
+// 收到其他实例的重置通知且持久化行已删除的场景。仅在确实偏离基线时动作，
+// 重复通知不会推进 revision（幂等）。
+func (s *Service) revertToBaseline() {
+	if !s.fileCfgSet {
+		return
+	}
+	base := s.fileCfg
+	s.mu.Lock()
+	if reflect.DeepEqual(s.cfg, base) {
+		s.mu.Unlock()
+		return
+	}
+	nextRevision := s.revision + 1
+	s.cfg = base
+	s.updatedAt = time.Now().UTC()
+	s.revision = nextRevision
+	s.mu.Unlock()
+	s.runApply(base, nextRevision)
 }
 
 func applyDomainConfig(base config.Config, value settingsdomain.Config) config.Config {
@@ -466,6 +571,27 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		base.Accounts.BuildForbiddenReauthCodes = append([]string(nil), value.Accounts.BuildForbiddenReauthCodes...)
 	}
 	base.Accounts.ExcludeBuildBotFlaggedFromScheduling = value.Accounts.ExcludeBuildBotFlaggedFromScheduling
+	// RequestRetry/EgressRotation:指针节,nil(旧载荷/未保存过)沿用文件基线。
+	if value.RequestRetry != nil {
+		base.RequestRetry = config.RequestRetryConfig{
+			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
+			HoldTimeout: config.Duration(value.RequestRetry.HoldTimeout), MinOutputTokens: value.RequestRetry.MinOutputTokens,
+			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: config.Duration(value.RequestRetry.AccountCooldown),
+			EarlyHeaderAbort: config.Duration(value.RequestRetry.EarlyHeaderAbort), SameAccountRetry: value.RequestRetry.SameAccountRetry,
+			EvidenceTimeout: config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
+			IdleAccountCooldown: config.Duration(value.RequestRetry.IdleAccountCooldown),
+		}
+	}
+	if value.EgressRotation != nil {
+		base.Egress.Rotation = config.EgressRotationConfig{
+			Enabled: value.EgressRotation.Enabled, MaxAttemptsPerQuarantine: value.EgressRotation.MaxAttemptsPerQuarantine,
+			MinNodeInterval: config.Duration(value.EgressRotation.MinNodeInterval), MaxGlobalPerHour: value.EgressRotation.MaxGlobalPerHour,
+			WebhookTimeout: config.Duration(value.EgressRotation.WebhookTimeout), WebhookRetries: value.EgressRotation.WebhookRetries,
+			SettleDelay: config.Duration(value.EgressRotation.SettleDelay), ProbeTimeout: config.Duration(value.EgressRotation.ProbeTimeout),
+			ProbeInterval: config.Duration(value.EgressRotation.ProbeInterval), CanaryModelPublicID: value.EgressRotation.CanaryModelPublicID,
+			CanaryCreatedTimeout: config.Duration(value.EgressRotation.CanaryCreatedTimeout),
+		}
+	}
 	return base
 }
 
@@ -535,6 +661,32 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			AutoCleanReauthInterval:              value.Accounts.AutoCleanReauthInterval.Value(),
 			AutoCleanReauthMinAge:                value.Accounts.AutoCleanReauthMinAge.Value(),
 			AutoCleanIncludeDisabled:             value.Accounts.AutoCleanIncludeDisabled,
+		},
+		RequestRetry: &settingsdomain.RequestRetryConfig{
+			Enabled:             value.RequestRetry.Enabled,
+			MaxAttempts:         value.RequestRetry.MaxAttempts,
+			HoldTimeout:         value.RequestRetry.HoldTimeout.Value(),
+			MinOutputTokens:     value.RequestRetry.MinOutputTokens,
+			OnExhausted:         value.RequestRetry.OnExhausted,
+			AccountCooldown:     value.RequestRetry.AccountCooldown.Value(),
+			EarlyHeaderAbort:    value.RequestRetry.EarlyHeaderAbort.Value(),
+			SameAccountRetry:    value.RequestRetry.SameAccountRetry,
+			EvidenceTimeout:     value.RequestRetry.EvidenceTimeout.Value(),
+			CreatedTimeout:      value.RequestRetry.CreatedTimeout.Value(),
+			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown.Value(),
+		},
+		EgressRotation: &settingsdomain.EgressRotationConfig{
+			Enabled:                  value.Egress.Rotation.Enabled,
+			MaxAttemptsPerQuarantine: value.Egress.Rotation.MaxAttemptsPerQuarantine,
+			MinNodeInterval:          value.Egress.Rotation.MinNodeInterval.Value(),
+			MaxGlobalPerHour:         value.Egress.Rotation.MaxGlobalPerHour,
+			WebhookTimeout:           value.Egress.Rotation.WebhookTimeout.Value(),
+			WebhookRetries:           value.Egress.Rotation.WebhookRetries,
+			SettleDelay:              value.Egress.Rotation.SettleDelay.Value(),
+			ProbeTimeout:             value.Egress.Rotation.ProbeTimeout.Value(),
+			ProbeInterval:            value.Egress.Rotation.ProbeInterval.Value(),
+			CanaryModelPublicID:      value.Egress.Rotation.CanaryModelPublicID,
+			CanaryCreatedTimeout:     value.Egress.Rotation.CanaryCreatedTimeout.Value(),
 		},
 	}
 }
@@ -635,6 +787,20 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		next.Accounts.AutoCleanReauthEnabled = input.Accounts.AutoCleanReauthEnabled
 		next.Accounts.AutoCleanIncludeDisabled = input.Accounts.AutoCleanIncludeDisabled
 	}
+	if input.RequestRetryProvided {
+		next.RequestRetry.Enabled = input.RequestRetry.Enabled
+		next.RequestRetry.MaxAttempts = input.RequestRetry.MaxAttempts
+		next.RequestRetry.MinOutputTokens = input.RequestRetry.MinOutputTokens
+		next.RequestRetry.OnExhausted = strings.TrimSpace(input.RequestRetry.OnExhausted)
+		next.RequestRetry.SameAccountRetry = input.RequestRetry.SameAccountRetry
+	}
+	if input.EgressRotationProvided {
+		next.Egress.Rotation.Enabled = input.EgressRotation.Enabled
+		next.Egress.Rotation.MaxAttemptsPerQuarantine = input.EgressRotation.MaxAttemptsPerQuarantine
+		next.Egress.Rotation.MaxGlobalPerHour = input.EgressRotation.MaxGlobalPerHour
+		next.Egress.Rotation.WebhookRetries = input.EgressRotation.WebhookRetries
+		next.Egress.Rotation.CanaryModelPublicID = strings.TrimSpace(input.EgressRotation.CanaryModelPublicID)
+	}
 
 	type durationInput struct {
 		path  string
@@ -679,6 +845,26 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		durations = append(durations,
 			durationInput{"accounts.autoCleanReauthInterval", input.Accounts.AutoCleanReauthInterval, func(value config.Duration) { next.Accounts.AutoCleanReauthInterval = value }},
 			durationInput{"accounts.autoCleanReauthMinAge", input.Accounts.AutoCleanReauthMinAge, func(value config.Duration) { next.Accounts.AutoCleanReauthMinAge = value }},
+		)
+	}
+	if input.RequestRetryProvided {
+		durations = append(durations,
+			durationInput{"requestRetry.holdTimeout", input.RequestRetry.HoldTimeout, func(value config.Duration) { next.RequestRetry.HoldTimeout = value }},
+			durationInput{"requestRetry.accountCooldown", input.RequestRetry.AccountCooldown, func(value config.Duration) { next.RequestRetry.AccountCooldown = value }},
+			durationInput{"requestRetry.earlyHeaderAbort", input.RequestRetry.EarlyHeaderAbort, func(value config.Duration) { next.RequestRetry.EarlyHeaderAbort = value }},
+			durationInput{"requestRetry.evidenceTimeout", input.RequestRetry.EvidenceTimeout, func(value config.Duration) { next.RequestRetry.EvidenceTimeout = value }},
+			durationInput{"requestRetry.createdTimeout", input.RequestRetry.CreatedTimeout, func(value config.Duration) { next.RequestRetry.CreatedTimeout = value }},
+			durationInput{"requestRetry.idleAccountCooldown", input.RequestRetry.IdleAccountCooldown, func(value config.Duration) { next.RequestRetry.IdleAccountCooldown = value }},
+		)
+	}
+	if input.EgressRotationProvided {
+		durations = append(durations,
+			durationInput{"egressRotation.minNodeInterval", input.EgressRotation.MinNodeInterval, func(value config.Duration) { next.Egress.Rotation.MinNodeInterval = value }},
+			durationInput{"egressRotation.webhookTimeout", input.EgressRotation.WebhookTimeout, func(value config.Duration) { next.Egress.Rotation.WebhookTimeout = value }},
+			durationInput{"egressRotation.settleDelay", input.EgressRotation.SettleDelay, func(value config.Duration) { next.Egress.Rotation.SettleDelay = value }},
+			durationInput{"egressRotation.probeTimeout", input.EgressRotation.ProbeTimeout, func(value config.Duration) { next.Egress.Rotation.ProbeTimeout = value }},
+			durationInput{"egressRotation.probeInterval", input.EgressRotation.ProbeInterval, func(value config.Duration) { next.Egress.Rotation.ProbeInterval = value }},
+			durationInput{"egressRotation.canaryCreatedTimeout", input.EgressRotation.CanaryCreatedTimeout, func(value config.Duration) { next.Egress.Rotation.CanaryCreatedTimeout = value }},
 		)
 	}
 	for _, item := range durations {
@@ -772,7 +958,25 @@ func toEditable(cfg config.Config) EditableConfig {
 			AutoCleanReauthMinAge:                        cfg.Accounts.AutoCleanReauthMinAge.String(),
 			AutoCleanIncludeDisabled:                     cfg.Accounts.AutoCleanIncludeDisabled,
 		},
-		AccountsProvided: true,
+		RequestRetry: RequestRetryEditable{
+			Enabled: cfg.RequestRetry.Enabled, MaxAttempts: cfg.RequestRetry.MaxAttempts,
+			HoldTimeout: cfg.RequestRetry.HoldTimeout.String(), MinOutputTokens: cfg.RequestRetry.MinOutputTokens,
+			OnExhausted: cfg.RequestRetry.OnExhausted, AccountCooldown: cfg.RequestRetry.AccountCooldown.String(),
+			EarlyHeaderAbort: cfg.RequestRetry.EarlyHeaderAbort.String(), SameAccountRetry: cfg.RequestRetry.SameAccountRetry,
+			EvidenceTimeout: cfg.RequestRetry.EvidenceTimeout.String(), CreatedTimeout: cfg.RequestRetry.CreatedTimeout.String(),
+			IdleAccountCooldown: cfg.RequestRetry.IdleAccountCooldown.String(),
+		},
+		RequestRetryProvided: true,
+		EgressRotation: EgressRotationEditable{
+			Enabled: cfg.Egress.Rotation.Enabled, MaxAttemptsPerQuarantine: cfg.Egress.Rotation.MaxAttemptsPerQuarantine,
+			MinNodeInterval: cfg.Egress.Rotation.MinNodeInterval.String(), MaxGlobalPerHour: cfg.Egress.Rotation.MaxGlobalPerHour,
+			WebhookTimeout: cfg.Egress.Rotation.WebhookTimeout.String(), WebhookRetries: cfg.Egress.Rotation.WebhookRetries,
+			SettleDelay: cfg.Egress.Rotation.SettleDelay.String(), ProbeTimeout: cfg.Egress.Rotation.ProbeTimeout.String(),
+			ProbeInterval: cfg.Egress.Rotation.ProbeInterval.String(), CanaryModelPublicID: cfg.Egress.Rotation.CanaryModelPublicID,
+			CanaryCreatedTimeout: cfg.Egress.Rotation.CanaryCreatedTimeout.String(),
+		},
+		EgressRotationProvided: true,
+		AccountsProvided:       true,
 	}
 }
 

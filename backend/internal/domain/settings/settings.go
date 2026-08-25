@@ -30,11 +30,46 @@ type Config struct {
 	Audit             AuditConfig
 	ClientKeyDefaults ClientKeyDefaultsConfig
 	Accounts          AccountsConfig
+	// RequestRetry/EgressRotation 为指针节：旧持久化载荷整段缺失时保持
+	// nil,applyDomainConfig 沿用文件基线,而不是把零值当作"全部关闭"。
+	RequestRetry   *RequestRetryConfig
+	EgressRotation *EgressRotationConfig
 }
 
 // ServerConfig 定义可热更新的推理入口容量参数。
 type ServerConfig struct {
 	MaxConcurrentRequests int
+}
+
+// RequestRetryConfig 定义实时路由守卫（质量扣留/重试/截止预算）的可热更新
+// 参数。时长语义与 config.RequestRetryConfig 一致：0 表示使用代码默认。
+type RequestRetryConfig struct {
+	Enabled             bool
+	MaxAttempts         int
+	HoldTimeout         time.Duration
+	MinOutputTokens     int
+	OnExhausted         string
+	AccountCooldown     time.Duration
+	EarlyHeaderAbort    time.Duration
+	SameAccountRetry    bool
+	EvidenceTimeout     time.Duration
+	CreatedTimeout      time.Duration
+	IdleAccountCooldown time.Duration
+}
+
+// EgressRotationConfig 定义出口换 IP 轮换调度的可热更新参数。
+type EgressRotationConfig struct {
+	Enabled                  bool
+	MaxAttemptsPerQuarantine int
+	MinNodeInterval          time.Duration
+	MaxGlobalPerHour         int
+	WebhookTimeout           time.Duration
+	WebhookRetries           int
+	SettleDelay              time.Duration
+	ProbeTimeout             time.Duration
+	ProbeInterval            time.Duration
+	CanaryModelPublicID      string
+	CanaryCreatedTimeout     time.Duration
 }
 
 // FrontendConfig 定义公开 API 地址的运行时覆盖值；留空时使用配置文件值。

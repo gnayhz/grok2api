@@ -22,7 +22,7 @@ ROTATE_INSTANCES 格式：逗号分隔的 "别名=容器名"。别名通常是 g
 
 请求形式（grok2api 发出 POST，JSON 空 body）：
   POST /rotate/<别名或容器名>?token=<TOKEN>
-  GET  /healthz   存活检查；GET /  实例列表（不含 token）
+  GET  /healthz   存活检查；GET /?token=…  实例列表（需 token）
 返回：202 已触发重启 / 404 未知实例或 token 错误 / 429 冷却中（Retry-After 头）
 """
 
@@ -153,6 +153,15 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(200, {"ok": True})
             return
         if parsed.path == "/":
+            # 实例拓扑(容器名/别名)对未鉴权调用方是免费的基础设施侦察面。
+            # 网关只消费 POST /rotate/<别名>;合法运维查看同样带 token:
+            #   GET /?token=<ROTATE_TOKEN>
+            token = (parse_qs(parsed.query).get("token") or [""])[0]
+            token_bytes = token.encode("utf-8", "replace")
+            if not token or not hmac.compare_digest(
+                    token_bytes, CONFIG["token"].encode("utf-8")):
+                self._deny(404)
+                return
             self._respond(200, {"instances": [
                 {"name": name, "aliases": entry.get("aliases", [])}
                 for name, entry in sorted(CONFIG["instances"].items())]})

@@ -49,7 +49,7 @@ func newRouteRuleTestManager(t *testing.T, node domain.Node, config domain.Opera
 	return manager
 }
 
-func mustEncryptRouteRuleProxy(t *testing.T, cipher *security.Cipher, value string) string {
+func mustEncryptRouteRuleProxy(t *testing.T, cipher security.Cryptor, value string) string {
 	t.Helper()
 	encrypted, err := cipher.Encrypt(value)
 	if err != nil {

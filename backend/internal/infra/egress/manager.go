@@ -137,9 +137,27 @@ func (l *Lease) Release() {
 	}
 }
 
+// errOnlyCryptor 表示「未配置凭据加密器」：空值幂等、非空一律
+// 明确报错。此前 nil *Cipher 直传会在非空密文上 panic。
+type errOnlyCryptor struct{}
+
+func (errOnlyCryptor) Encrypt(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	return "", fmt.Errorf("出口管理器未配置凭据加密器")
+}
+
+func (errOnlyCryptor) Decrypt(encoded string) (string, error) {
+	if encoded == "" {
+		return "", nil
+	}
+	return "", fmt.Errorf("出口管理器未配置凭据加密器，无法解密已存储的出口凭据")
+}
+
 type Manager struct {
 	repository   repository.EgressRepository
-	cipher       *security.Cipher
+	cipher       security.Cryptor
 	logger       *slog.Logger
 	nodeMu       sync.RWMutex
 	clientMu     sync.RWMutex
@@ -275,7 +293,15 @@ type cachedOperationsConfig struct {
 	expiresAt time.Time
 }
 
-func NewManager(repository repository.EgressRepository, cipher *security.Cipher) *Manager {
+func NewManager(repository repository.EgressRepository, cipher security.Cryptor) *Manager {
+	// cipher 为 nil 时归一化为「无凭据加解密能力」占位：对空串与
+	// *Cipher 一致（幂等返回空），对非空密文返回明确错误而非 panic。
+	// HEAD 上 nil *Cipher + 非空密文会在 Decrypt 内 nil deref panic
+	// （stickyFlagMemoized 等路径的地雷，Cryptor 接线后 race 套件
+	// 捕获）；显式错误让「无出口凭据部署/测试传 nil」语义安全。
+	if cipher == nil {
+		cipher = errOnlyCryptor{}
+	}
 	manager := &Manager{
 		repository: repository, cipher: cipher,
 		clients: make(map[clientCacheKey]cachedClient),

@@ -13,13 +13,14 @@ type adminModel struct {
 func (adminModel) TableName() string { return "admins" }
 
 type adminSessionModel struct {
-	ID               uint64    `gorm:"primaryKey;autoIncrement"`
-	AdminID          uint64    `gorm:"not null"`
-	RefreshTokenHash string    `gorm:"size:64;uniqueIndex;not null;check:chk_admin_sessions_token_hash,length(refresh_token_hash) = 64"`
-	ExpiresAt        time.Time `gorm:"not null"`
-	LastUsedAt       *time.Time
-	CreatedAt        time.Time   `gorm:"not null"`
-	Admin            *adminModel `gorm:"foreignKey:AdminID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	ID                       uint64    `gorm:"primaryKey;autoIncrement"`
+	AdminID                  uint64    `gorm:"not null"`
+	RefreshTokenHash         string    `gorm:"size:64;uniqueIndex;not null;check:chk_admin_sessions_token_hash,length(refresh_token_hash) = 64"`
+	PreviousRefreshTokenHash string    `gorm:"size:64;not null;default:'';check:chk_admin_sessions_prev_hash,previous_refresh_token_hash = '' OR length(previous_refresh_token_hash) = 64"`
+	ExpiresAt                time.Time `gorm:"not null"`
+	LastUsedAt               *time.Time
+	CreatedAt                time.Time   `gorm:"not null"`
+	Admin                    *adminModel `gorm:"foreignKey:AdminID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 }
 
 func (adminSessionModel) TableName() string { return "admin_sessions" }
@@ -366,11 +367,11 @@ type requestAuditModel struct {
 	QualityFailOpen bool `gorm:"not null;default:false"`
 	// 请求诊断载荷(#983):写入前经 sanitizeRequestMetadata 脱敏(query 全丢、
 	// 长度封顶),用于排查客户端/路径/请求头问题。
-	RequestMethod      string `gorm:"size:16;not null;default:'';check:chk_request_audits_request_method,length(request_method) <= 16"`
-	RequestPath        string `gorm:"type:text;not null;default:'';check:chk_request_audits_request_path,length(request_path) <= 2048"`
-	RequestHeadersJSON string `gorm:"type:text;not null;default:'{}';check:chk_request_audits_request_headers,length(request_headers_json) <= 65536"`
-	AttemptCount       int    `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
-	CreatedAt       time.Time `gorm:"not null"`
+	RequestMethod      string    `gorm:"size:16;not null;default:'';check:chk_request_audits_request_method,length(request_method) <= 16"`
+	RequestPath        string    `gorm:"type:text;not null;default:'';check:chk_request_audits_request_path,length(request_path) <= 2048"`
+	RequestHeadersJSON string    `gorm:"type:text;not null;default:'{}';check:chk_request_audits_request_headers,length(request_headers_json) <= 65536"`
+	AttemptCount       int       `gorm:"not null;default:0;check:chk_request_audits_attempt_count,attempt_count >= 0"`
+	CreatedAt          time.Time `gorm:"not null"`
 }
 
 func (requestAuditModel) TableName() string { return "request_audits" }
@@ -517,8 +518,8 @@ type runtimeSettingsModel struct {
 func (runtimeSettingsModel) TableName() string { return "runtime_settings" }
 
 type egressSubscriptionSourceModel struct {
-	ID                     uint64 `gorm:"primaryKey;autoIncrement"`
-	Name                   string `gorm:"size:160;not null;uniqueIndex;check:chk_egress_subscription_sources_name,length(trim(name)) BETWEEN 1 AND 160"`
+	ID   uint64 `gorm:"primaryKey;autoIncrement"`
+	Name string `gorm:"size:160;not null;uniqueIndex;check:chk_egress_subscription_sources_name,length(trim(name)) BETWEEN 1 AND 160"`
 	// Enabled 无 default 标签:GORM 会把带 default 的零值字段在 INSERT 时静默
 	// 代入默认值——显式 Enabled=false(管理员“暂不启用”的源)会被 default:true
 	// 复活并被维护循环立即拉取。
@@ -537,8 +538,8 @@ type egressSubscriptionSourceModel struct {
 func (egressSubscriptionSourceModel) TableName() string { return "egress_subscription_sources" }
 
 type egressNodeModel struct {
-	ID                          uint64  `gorm:"primaryKey;autoIncrement"`
-	Name                        string  `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
+	ID   uint64 `gorm:"primaryKey;autoIncrement"`
+	Name string `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
 	// Enabled 无 default 标签:GORM 会把带 default 的零值字段在 INSERT 时静默
 	// 代入默认值——显式 Enabled=false(管理员创建停用节点)会被 default:true
 	// 复活,未验证代理立即进入调度。其余 default 列的零值均由 from*Domain
@@ -588,8 +589,8 @@ type egressNodeModel struct {
 func (egressNodeModel) TableName() string { return "egress_nodes" }
 
 type egressPoolModel struct {
-	ID             uint64 `gorm:"primaryKey;autoIncrement"`
-	Name           string `gorm:"size:160;not null;uniqueIndex:uidx_egress_pools_name;check:chk_egress_pools_name,length(trim(name)) BETWEEN 1 AND 160"`
+	ID   uint64 `gorm:"primaryKey;autoIncrement"`
+	Name string `gorm:"size:160;not null;uniqueIndex:uidx_egress_pools_name;check:chk_egress_pools_name,length(trim(name)) BETWEEN 1 AND 160"`
 	// Enabled 无 default 标签:同 egress_nodes——停用池不得被列默认 true 复活,
 	// 否则“已停用池不承流、回退链在停用池终止”的语义在创建瞬间即被破坏。
 	Enabled        bool   `gorm:"not null"`

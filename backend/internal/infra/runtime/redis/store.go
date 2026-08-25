@@ -37,8 +37,12 @@ const (
 var rateScript = redisclient.NewScript(`
 local current = redis.call('INCR', KEYS[1])
 if current == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[2]) end
-if current > tonumber(ARGV[1]) then return 0 end
-return 1
+if current > tonumber(ARGV[1]) then
+  local pttl = redis.call('PTTL', KEYS[1])
+  if pttl < 0 then pttl = ARGV[2] end
+  return {0, pttl}
+end
+return {1, 0}
 `)
 
 var acquireLeaseScript = redisclient.NewScript(`
@@ -449,12 +453,25 @@ func (s *Store) ListenSettingsChanges(ctx context.Context, handler func(context.
 	}
 }
 
-func (s *Store) Allow(ctx context.Context, key string, limit int, _ time.Time) (bool, error) {
+func (s *Store) Allow(ctx context.Context, key string, limit int, _ time.Time) (bool, time.Duration, error) {
 	if limit <= 0 {
-		return true, nil
+		return true, 0, nil
 	}
-	result, err := rateScript.Run(ctx, s.client, []string{s.key("rate", key)}, limit, time.Minute.Milliseconds()).Int()
-	return result == 1, err
+	result, err := rateScript.Run(ctx, s.client, []string{s.key("rate", key)}, limit, time.Minute.Milliseconds()).Int64Slice()
+	if err != nil {
+		return false, 0, err
+	}
+	if len(result) < 2 || result[0] != 1 {
+		retryAfter := time.Duration(0)
+		if len(result) > 1 && result[1] > 0 {
+			retryAfter = time.Duration(result[1]) * time.Millisecond
+			if retryAfter < time.Second {
+				retryAfter = time.Second
+			}
+		}
+		return false, retryAfter, nil
+	}
+	return true, 0, nil
 }
 
 func (s *Store) acquireConcurrency(ctx context.Context, key string, limit int) (func(), bool, error) {

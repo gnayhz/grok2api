@@ -84,8 +84,11 @@ func (c EgressConfig) Validate() error {
 	if rot.MaxAttemptsPerQuarantine < 0 || rot.MaxAttemptsPerQuarantine > 100 {
 		return errors.New("egress.rotation.maxAttemptsPerQuarantine 必须在 0 到 100 之间（0=默认 3）")
 	}
-	if v := rot.MinNodeInterval.Value(); v != 0 && (v < time.Minute || v > 24*time.Hour) {
-		return errors.New("egress.rotation.minNodeInterval 必须在 1 分钟到 24 小时之间（0=默认 10m）")
+	// minNodeInterval 下限放到 10s:该值纯配置驱动("配置多久就是多久"),
+	// 防重启风暴由 maxGlobalPerHour(全局每小时上限)兜底,分钟级下限只会
+	// 阻止运维按需配置亚分钟间隔。
+	if v := rot.MinNodeInterval.Value(); v != 0 && (v < 10*time.Second || v > 24*time.Hour) {
+		return errors.New("egress.rotation.minNodeInterval 必须在 10 秒到 24 小时之间（0=默认 3m）")
 	}
 	if rot.MaxGlobalPerHour < 0 || rot.MaxGlobalPerHour > 10000 {
 		return errors.New("egress.rotation.maxGlobalPerHour 必须在 0 到 10000 之间（0=默认 6）")
@@ -128,7 +131,7 @@ func DefaultEgressConfig() EgressConfig {
 		Rotation: EgressRotationConfig{
 			Enabled:                  true,
 			MaxAttemptsPerQuarantine: 3,
-			MinNodeInterval:          Duration(10 * time.Minute),
+			MinNodeInterval:          Duration(3 * time.Minute),
 			MaxGlobalPerHour:         6,
 			WebhookTimeout:           Duration(15 * time.Second),
 			WebhookRetries:           2,

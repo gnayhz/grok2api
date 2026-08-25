@@ -283,50 +283,50 @@ type accountImportResponse struct {
 }
 
 type accountResponse struct {
-	ID                         uint64                  `json:"id,string"`
-	Provider                   string                  `json:"provider"`
-	AuthType                   string                  `json:"authType"`
-	WebTier                    string                  `json:"webTier,omitempty"`
-	WebTierSyncedAt            *time.Time              `json:"webTierSyncedAt,omitempty"`
-	WebNSFWEnabledAt           *time.Time              `json:"nsfwEnabledAt,omitempty"`
-	WebTermsAcceptedAt         *time.Time              `json:"termsAcceptedAt,omitempty"`
-	Name                       string                  `json:"name"`
-	Email                      string                  `json:"email,omitempty"`
-	UserID                     string                  `json:"userId,omitempty"`
-	TeamID                     string                  `json:"teamId,omitempty"`
-	Enabled                    bool                    `json:"enabled"`
-	AuthStatus                 string                  `json:"authStatus"`
-	ExpiresAt                  *time.Time              `json:"expiresAt,omitempty"`
-	Refreshable                bool                    `json:"refreshable"`
-	RefreshDueAt               *time.Time              `json:"refreshDueAt,omitempty"`
-	LastRefreshAt              *time.Time              `json:"lastRefreshAt,omitempty"`
-	RefreshFailures            int                     `json:"refreshFailureCount"`
-	LastRefreshErrorStatus     int                     `json:"lastRefreshErrorStatus,omitempty"`
-	LastRefreshError           string                  `json:"lastRefreshErrorCode,omitempty"`
-	LastRefreshErrorMessage    string                  `json:"lastRefreshErrorMessage,omitempty"`
-	LastRefreshErrorResponse   string                  `json:"lastRefreshErrorResponse,omitempty"`
-	Priority                   int                     `json:"priority"`
-	MaxConcurrent              int                     `json:"maxConcurrent"`
-	MinimumRemaining           float64                 `json:"minimumRemaining"`
-	FailureCount               int                     `json:"failureCount"`
-	CooldownUntil              *time.Time              `json:"cooldownUntil,omitempty"`
-	LastError                  string                  `json:"lastError,omitempty"`
+	ID                       uint64     `json:"id,string"`
+	Provider                 string     `json:"provider"`
+	AuthType                 string     `json:"authType"`
+	WebTier                  string     `json:"webTier,omitempty"`
+	WebTierSyncedAt          *time.Time `json:"webTierSyncedAt,omitempty"`
+	WebNSFWEnabledAt         *time.Time `json:"nsfwEnabledAt,omitempty"`
+	WebTermsAcceptedAt       *time.Time `json:"termsAcceptedAt,omitempty"`
+	Name                     string     `json:"name"`
+	Email                    string     `json:"email,omitempty"`
+	UserID                   string     `json:"userId,omitempty"`
+	TeamID                   string     `json:"teamId,omitempty"`
+	Enabled                  bool       `json:"enabled"`
+	AuthStatus               string     `json:"authStatus"`
+	ExpiresAt                *time.Time `json:"expiresAt,omitempty"`
+	Refreshable              bool       `json:"refreshable"`
+	RefreshDueAt             *time.Time `json:"refreshDueAt,omitempty"`
+	LastRefreshAt            *time.Time `json:"lastRefreshAt,omitempty"`
+	RefreshFailures          int        `json:"refreshFailureCount"`
+	LastRefreshErrorStatus   int        `json:"lastRefreshErrorStatus,omitempty"`
+	LastRefreshError         string     `json:"lastRefreshErrorCode,omitempty"`
+	LastRefreshErrorMessage  string     `json:"lastRefreshErrorMessage,omitempty"`
+	LastRefreshErrorResponse string     `json:"lastRefreshErrorResponse,omitempty"`
+	Priority                 int        `json:"priority"`
+	MaxConcurrent            int        `json:"maxConcurrent"`
+	MinimumRemaining         float64    `json:"minimumRemaining"`
+	FailureCount             int        `json:"failureCount"`
+	CooldownUntil            *time.Time `json:"cooldownUntil,omitempty"`
+	LastError                string     `json:"lastError,omitempty"`
 	// EnabledDoesNotClearCooldown is set on PATCH when enabled was changed
 	// while the account is still cooling. Toggling enabled is not a health reset.
-	EnabledDoesNotClearCooldown bool `json:"enabledDoesNotClearCooldown,omitempty"`
-	LastUsedAt                 *time.Time              `json:"lastUsedAt,omitempty"`
-	LinkedAccountID            uint64                  `json:"linkedAccountId,omitempty,string"`
-	LinkedName                 string                  `json:"linkedAccountName,omitempty"`
-	LinkedProvider             string                  `json:"linkedProvider,omitempty"`
-	LinkedAccounts             []linkedAccountResponse `json:"linkedAccounts,omitempty"`
-	CreatedAt                  time.Time               `json:"createdAt"`
-	ObservedModel              string                  `json:"observedModel,omitempty"`
-	ObservedModelAt            *time.Time              `json:"observedModelAt,omitempty"`
-	CloudflareCookieConfigured bool                    `json:"cloudflareCookieConfigured"`
-	BuildSuperEntitled         bool                    `json:"buildSuperEntitled"`
-	BuildRouteMode             string                  `json:"buildRouteMode"`
-	BuildBotFlagged            bool                    `json:"buildBotFlagged"`
-	BuildBotFlagSource         int                     `json:"buildBotFlagSource,omitempty"`
+	EnabledDoesNotClearCooldown bool                    `json:"enabledDoesNotClearCooldown,omitempty"`
+	LastUsedAt                  *time.Time              `json:"lastUsedAt,omitempty"`
+	LinkedAccountID             uint64                  `json:"linkedAccountId,omitempty,string"`
+	LinkedName                  string                  `json:"linkedAccountName,omitempty"`
+	LinkedProvider              string                  `json:"linkedProvider,omitempty"`
+	LinkedAccounts              []linkedAccountResponse `json:"linkedAccounts,omitempty"`
+	CreatedAt                   time.Time               `json:"createdAt"`
+	ObservedModel               string                  `json:"observedModel,omitempty"`
+	ObservedModelAt             *time.Time              `json:"observedModelAt,omitempty"`
+	CloudflareCookieConfigured  bool                    `json:"cloudflareCookieConfigured"`
+	BuildSuperEntitled          bool                    `json:"buildSuperEntitled"`
+	BuildRouteMode              string                  `json:"buildRouteMode"`
+	BuildBotFlagged             bool                    `json:"buildBotFlagged"`
+	BuildBotFlagSource          int                     `json:"buildBotFlagSource,omitempty"`
 	// RiskStatus 非空表示长期风控标记（当前 rsc_denied = RSC 注册风控）。
 	RiskStatus      string                `json:"riskStatus,omitempty"`
 	ModelSyncFailed bool                  `json:"modelSyncFailed,omitempty"`
@@ -1410,19 +1410,17 @@ func (h *Handler) refreshToken(c *gin.Context) {
 	response.Success(c, http.StatusOK, newAccountResponse(value))
 }
 
-// clearCooldownUnconditional 是操作员显式接管的无条件清除(含 strike 标记)。
+// clearCooldownUnconditional 是 clear-cooldown 的兼容别名路由：两者共享
+// Service.ClearCooldown（保留 missing-thinking 打击标记，只清瞬态冷却），
+// 失效事件同样携带保留后的标记，路由覆盖层与数据库终态一致。
 func (h *Handler) clearCooldownUnconditional(c *gin.Context) {
 	id, ok := pathID(c)
 	if !ok {
 		return
 	}
-	if err := h.service.ClearCooldownUnconditional(c.Request.Context(), id); err != nil {
-		h.writeServiceError(c, "accountCooldownClearFailed", err, http.StatusInternalServerError, "解除账号冷却失败")
-		return
-	}
-	value, err := h.service.Get(c.Request.Context(), id)
+	value, err := h.service.ClearCooldown(c.Request.Context(), id)
 	if err != nil {
-		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "读取账号失败")
+		h.writeServiceError(c, "accountCooldownClearFailed", err, http.StatusInternalServerError, "解除账号冷却失败")
 		return
 	}
 	response.Success(c, http.StatusOK, newAccountResponse(value))

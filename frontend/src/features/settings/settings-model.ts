@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { SettingsConfigDTO } from "@/features/settings/settings-api";
+import { defaultEgressRotationConfig, defaultRequestRetryConfig, type SettingsConfigDTO } from "@/features/settings/settings-api";
 
 export type DurationUnit = "s" | "m" | "h" | "d";
 export type DurationValue = { value: number; unit: DurationUnit };
@@ -12,6 +12,8 @@ export const UNLIMITED_ROUTING_ATTEMPTS = -1;
 
 
 const durationSchema = z.object({ value: z.number().positive(), unit: z.enum(["s", "m", "h", "d"]) });
+// 0 是有意义值(关闭)的时长字段(如 earlyHeaderAbort)。
+const nonNegativeDurationSchema = z.object({ value: z.number().nonnegative(), unit: z.enum(["s", "m", "h", "d"]) });
 const positiveInteger = z.number().int().positive();
 const byteSizeSchema = z.object({ value: z.number().positive(), unit: z.enum(["MiB", "GiB"]) });
 const routingTTLDuration = durationSchema.refine((value) => durationSeconds(value) <= 30 * 86_400);
@@ -182,11 +184,77 @@ export const settingsSchema = z.object({
     }),
     autoCleanIncludeDisabled: z.boolean(),
   }),
+  // 实时路由守卫(质量扣留/截止预算)。边界与后端 validateRequestRetry 对齐。
+  requestRetry: z.object({
+    enabled: z.boolean(),
+    createdTimeout: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 1 && seconds <= 120;
+    }),
+    evidenceTimeout: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 3 && seconds <= 300;
+    }),
+    holdTimeout: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 0.2 && seconds <= 30;
+    }),
+    earlyHeaderAbort: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 3 && seconds <= 60);
+    }),
+    maxAttempts: z.number().int().min(1).max(6),
+    minOutputTokens: z.number().int().min(1).max(256),
+    sameAccountRetry: z.boolean(),
+    onExhausted: z.enum(["fail_closed", "fail_open"]),
+    accountCooldown: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 60 && seconds <= 168 * 3_600;
+    }),
+    idleAccountCooldown: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
+    }),
+  }),
+  // 出口换 IP 轮换调度。边界与后端 EgressRotationConfig 校验对齐。
+  egressRotation: z.object({
+    enabled: z.boolean(),
+    minNodeInterval: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 10 && seconds <= 86_400);
+    }),
+    maxAttemptsPerQuarantine: z.number().int().min(0).max(100),
+    maxGlobalPerHour: z.number().int().min(0).max(10_000),
+    webhookTimeout: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 1 && seconds <= 600);
+    }),
+    webhookRetries: z.number().int().min(0).max(10),
+    settleDelay: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || seconds <= 3_600;
+    }),
+    probeTimeout: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 1 && seconds <= 3_600);
+    }),
+    probeInterval: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 1 && seconds <= 600);
+    }),
+    canaryModelPublicId: z.string().trim().max(255),
+    canaryCreatedTimeout: nonNegativeDurationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 1 && seconds <= 600);
+    }),
+  }),
 });
 
 export type SettingsForm = z.infer<typeof settingsSchema>;
 
 export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
+  const requestRetry = config.requestRetry ?? defaultRequestRetryConfig();
+  const egressRotation = config.egressRotation ?? defaultEgressRotationConfig();
   return {
     server: config.server,
     providerBuild: { ...config.providerBuild, responseHeaderTimeout: parseDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: parseDuration(config.providerBuild.streamIdleTimeout) },
@@ -232,6 +300,32 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       autoCleanReauthInterval: parseDuration(config.accounts.autoCleanReauthInterval),
       autoCleanReauthMinAge: parseDuration(config.accounts.autoCleanReauthMinAge),
       autoCleanIncludeDisabled: config.accounts.autoCleanIncludeDisabled,
+    },
+    requestRetry: {
+      enabled: requestRetry.enabled,
+      maxAttempts: requestRetry.maxAttempts,
+      holdTimeout: parseDuration(requestRetry.holdTimeout),
+      minOutputTokens: requestRetry.minOutputTokens,
+      onExhausted: requestRetry.onExhausted === "fail_open" ? "fail_open" : "fail_closed",
+      accountCooldown: parseDuration(requestRetry.accountCooldown),
+      earlyHeaderAbort: parseDuration(requestRetry.earlyHeaderAbort),
+      sameAccountRetry: requestRetry.sameAccountRetry,
+      evidenceTimeout: parseDuration(requestRetry.evidenceTimeout),
+      createdTimeout: parseDuration(requestRetry.createdTimeout),
+      idleAccountCooldown: parseDuration(requestRetry.idleAccountCooldown),
+    },
+    egressRotation: {
+      enabled: egressRotation.enabled,
+      maxAttemptsPerQuarantine: egressRotation.maxAttemptsPerQuarantine,
+      minNodeInterval: parseDuration(egressRotation.minNodeInterval),
+      maxGlobalPerHour: egressRotation.maxGlobalPerHour,
+      webhookTimeout: parseDuration(egressRotation.webhookTimeout),
+      webhookRetries: egressRotation.webhookRetries,
+      settleDelay: parseDuration(egressRotation.settleDelay),
+      probeTimeout: parseDuration(egressRotation.probeTimeout),
+      probeInterval: parseDuration(egressRotation.probeInterval),
+      canaryModelPublicId: egressRotation.canaryModelPublicId,
+      canaryCreatedTimeout: parseDuration(egressRotation.canaryCreatedTimeout),
     },
   };
 }
@@ -282,6 +376,32 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       autoCleanReauthMinAge: formatDuration(config.accounts.autoCleanReauthMinAge),
       autoCleanIncludeDisabled: config.accounts.autoCleanIncludeDisabled,
     },
+    requestRetry: {
+      enabled: config.requestRetry.enabled,
+      maxAttempts: config.requestRetry.maxAttempts,
+      holdTimeout: formatDuration(config.requestRetry.holdTimeout),
+      minOutputTokens: config.requestRetry.minOutputTokens,
+      onExhausted: config.requestRetry.onExhausted,
+      accountCooldown: formatDuration(config.requestRetry.accountCooldown),
+      earlyHeaderAbort: formatNonNegativeDuration(config.requestRetry.earlyHeaderAbort),
+      sameAccountRetry: config.requestRetry.sameAccountRetry,
+      evidenceTimeout: formatDuration(config.requestRetry.evidenceTimeout),
+      createdTimeout: formatDuration(config.requestRetry.createdTimeout),
+      idleAccountCooldown: formatNonNegativeDuration(config.requestRetry.idleAccountCooldown),
+    },
+    egressRotation: {
+      enabled: config.egressRotation.enabled,
+      maxAttemptsPerQuarantine: config.egressRotation.maxAttemptsPerQuarantine,
+      minNodeInterval: formatNonNegativeDuration(config.egressRotation.minNodeInterval),
+      maxGlobalPerHour: config.egressRotation.maxGlobalPerHour,
+      webhookTimeout: formatNonNegativeDuration(config.egressRotation.webhookTimeout),
+      webhookRetries: config.egressRotation.webhookRetries,
+      settleDelay: formatNonNegativeDuration(config.egressRotation.settleDelay),
+      probeTimeout: formatNonNegativeDuration(config.egressRotation.probeTimeout),
+      probeInterval: formatNonNegativeDuration(config.egressRotation.probeInterval),
+      canaryModelPublicId: config.egressRotation.canaryModelPublicId.trim(),
+      canaryCreatedTimeout: formatNonNegativeDuration(config.egressRotation.canaryCreatedTimeout),
+    },
   };
 }
 
@@ -310,6 +430,12 @@ function durationSeconds(value: DurationValue): number {
 function formatDuration(value: DurationValue): string {
   if (value.unit === "d") return `${value.value * 24}h`;
   return `${value.value}${value.unit}`;
+}
+
+// 0 是有意义值(关闭/默认)的时长字段:0 必须序列化为 "0s" 而不是被抹掉。
+function formatNonNegativeDuration(value: DurationValue): string {
+  if (durationSeconds(value) === 0) return "0s";
+  return formatDuration(value);
 }
 
 function parseDuration(value: string): DurationValue {

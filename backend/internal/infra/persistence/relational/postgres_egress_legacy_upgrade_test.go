@@ -80,12 +80,10 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 	if err := database.db.WithContext(ctx).Raw("SELECT id FROM egress_pools WHERE scope = 'grok_console' AND name = ?", "pg-shared-pool-"+unique).Scan(&consolePoolID).Error; err != nil || consolePoolID == 0 {
 		t.Fatalf("console pool id=%d err=%v", consolePoolID, err)
 	}
-	// 节点带单池绑定与账号绑定（外键约束按旧库命名，验证约束删除路径）。
+	// provider_accounts 绑定列是活功能（模型保留、升级后必须在且数据无损），
+	// 无需造旧形状；egress_nodes/pools/sources 的旧列退化已在上方完成。
 	exec("UPDATE egress_nodes SET pool_id = ?, scope = 'grok_build', account_capacity = 5 WHERE id = ?", buildPoolID, fixedNode.ID)
-	exec("ALTER TABLE provider_accounts ADD COLUMN egress_node_id bigint, ADD COLUMN egress_assignment_mode text, ADD COLUMN egress_pool_id bigint, ADD COLUMN egress_assigned_at timestamptz")
-	exec("ALTER TABLE provider_accounts ADD CONSTRAINT fk_provider_accounts_egress_node FOREIGN KEY (egress_node_id) REFERENCES egress_nodes(id)")
-	exec("ALTER TABLE provider_accounts ADD CONSTRAINT chk_accounts_egress_assignment_mode CHECK (egress_assignment_mode IN ('auto','fixed','pool'))")
-	exec("UPDATE provider_accounts SET egress_node_id = ?, egress_assignment_mode = 'fixed', egress_assigned_at = now() WHERE id = ?", fixedNode.ID, credential.ID)
+	exec("UPDATE provider_accounts SET egress_assignment_mode = 'auto' WHERE id = ?", credential.ID)
 	exec("ALTER TABLE egress_subscription_sources ADD COLUMN scope text NOT NULL DEFAULT 'grok_build', ADD COLUMN default_account_capacity int NOT NULL DEFAULT 0, ADD COLUMN pool_id bigint NOT NULL DEFAULT 0")
 	routeRules := `[{"scope":"grok_build","class":"inference","targetMode":"pool","targetPoolId":` + strconv.FormatUint(buildPoolID, 10) + `,"enabled":true},` +
 		`{"scope":"grok_build","class":"billing","targetMode":"fixed","targetNodeId":` + strconv.FormatUint(otherNode.ID, 10) + `,"enabled":false},` +
@@ -97,11 +95,23 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatalf("legacy upgrade failed on PostgreSQL: %v", err)
 	}
+	// 真实升级以新进程（新连接池）连库；同时规避 pgx 在同连接上 DDL 后的
+	// prepared-statement 缓存（cached plan must not change result type）。
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = OpenPostgres(ctx, os.Getenv("TEST_POSTGRES_DSN"), 10, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	// 升级后的校验全部走新连接（真实升级语义）：重建仓储绑定。
+	nodes = NewEgressRepository(database)
+	accounts = NewAccountRepository(database)
 
 	migrator := database.db.WithContext(ctx).Migrator()
 	for table, columns := range map[string][]string{
 		"egress_nodes":                {"scope", "pool_id", "account_capacity", "proxy_profile_id"},
-		"provider_accounts":           {"egress_node_id", "egress_assignment_mode", "egress_pool_id", "egress_assigned_at"},
 		"egress_pools":                {"scope"},
 		"egress_subscription_sources": {"scope", "default_account_capacity", "pool_id"},
 		"egress_operations_config":    {"build_fallback_mode", "build_fallback_node_id", "web_asset_fallback_mode", "route_rules", "auto_assign_enabled"},
@@ -112,11 +122,11 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 			}
 		}
 	}
-	if migrator.HasConstraint(&accountModel{}, "fk_provider_accounts_egress_node") {
-		t.Error("legacy egress binding foreign key survived the upgrade")
-	}
-	if migrator.HasConstraint(&accountModel{}, "chk_accounts_egress_assignment_mode") {
-		t.Error("legacy egress assignment check constraint survived the upgrade")
+	// 账号-出口绑定列是活功能面：升级后必须仍然存在且数据无损。
+	for _, column := range []string{"egress_node_id", "egress_assignment_mode", "egress_assigned_at"} {
+		if !migrator.HasColumn("provider_accounts", column) {
+			t.Errorf("live binding column provider_accounts.%s missing after upgrade", column)
+		}
 	}
 
 	// 单池绑定回填为成员关系。

@@ -146,7 +146,7 @@ func auditRecordForWeb(trace *infraegress.Trace) audit.Record {
 	return record
 }
 
-func encryptedFor(t *testing.T, cipher *security.Cipher, value string) string {
+func encryptedFor(t *testing.T, cipher security.Cryptor, value string) string {
 	t.Helper()
 	encrypted, err := cipher.Encrypt(value)
 	if err != nil {

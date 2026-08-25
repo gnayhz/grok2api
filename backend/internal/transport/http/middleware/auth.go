@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
@@ -97,6 +99,7 @@ func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 		}
 		value, release, err := service.Authenticate(c.Request.Context(), raw)
 		if err != nil {
+			writeRateLimitRetryAfter(c, err)
 			writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
 			return
 		}
@@ -146,6 +149,17 @@ func clientErrorMessage(err error) string {
 		return "网关运行态暂不可用，请稍后重试"
 	}
 	return err.Error()
+}
+
+// writeRateLimitRetryAfter 在 RPM 固定窗口被拒时透出 Retry-After
+// （RFC 9110 §10.2.3）：客户端 SDK 可按窗口剩余时间精确退避，而非
+// 盲目指数重试。其他错误（并发上限/用量上限/鉴权失败）不带该头——
+// 它们的重试时机不可由窗口推导。
+func writeRateLimitRetryAfter(c *gin.Context, err error) {
+	var rateLimited *clientkeyapp.RateLimitedError
+	if errors.As(err, &rateLimited) && rateLimited.RetryAfter > 0 {
+		c.Header("Retry-After", strconv.FormatInt(max(1, int64(rateLimited.RetryAfter.Round(time.Second)/time.Second)), 10))
+	}
 }
 
 func writeOpenAIError(c *gin.Context, status int, code, message string) {

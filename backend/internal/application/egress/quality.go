@@ -471,7 +471,7 @@ type rotationURLWriter interface {
 
 // resolveRotationTemplate substitutes {name}/{host}/{port} for one node. The
 // second return is false when the template needs a port the proxy URL lacks.
-func resolveRotationTemplate(template string, node domain.Node, cipher *security.Cipher) (string, bool) {
+func resolveRotationTemplate(template string, node domain.Node, cipher security.Cryptor) (string, bool) {
 	proxyURL := ""
 	if cipher != nil && strings.TrimSpace(node.EncryptedProxyURL) != "" {
 		if decrypted, err := cipher.Decrypt(node.EncryptedProxyURL); err == nil {
