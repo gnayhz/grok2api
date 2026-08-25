@@ -35,6 +35,17 @@ export type SettingsConfigDTO = {
     autoCleanReauthMinAge: string;
     autoCleanIncludeDisabled: boolean;
   };
+  // 旧后端不返回这两节;withSettingsDefaults 提供本地默认。
+  requestRetry?: {
+    enabled: boolean; maxAttempts: number; holdTimeout: string; minOutputTokens: number; onExhausted: string;
+    accountCooldown: string; earlyHeaderAbort: string; sameAccountRetry: boolean;
+    evidenceTimeout: string; createdTimeout: string; idleAccountCooldown: string;
+  };
+  egressRotation?: {
+    enabled: boolean; maxAttemptsPerQuarantine: number; minNodeInterval: string; maxGlobalPerHour: number;
+    webhookTimeout: string; webhookRetries: number; settleDelay: string; probeTimeout: string; probeInterval: string;
+    canaryModelPublicId: string; canaryCreatedTimeout: string;
+  };
 };
 
 export type ClearanceMode = "manual" | "flaresolverr" | "on_demand";
@@ -152,6 +163,16 @@ const settingsConfigValidator = hasShape({
     autoCleanReauthMinAge: isString,
     autoCleanIncludeDisabled: isBoolean,
   })),
+  requestRetry: isOptional(hasShape({
+    enabled: isBoolean, maxAttempts: isNumber, holdTimeout: isString, minOutputTokens: isNumber, onExhausted: isString,
+    accountCooldown: isString, earlyHeaderAbort: isString, sameAccountRetry: isBoolean,
+    evidenceTimeout: isString, createdTimeout: isString, idleAccountCooldown: isString,
+  })),
+  egressRotation: isOptional(hasShape({
+    enabled: isBoolean, maxAttemptsPerQuarantine: isNumber, minNodeInterval: isString, maxGlobalPerHour: isNumber,
+    webhookTimeout: isString, webhookRetries: isNumber, settleDelay: isString, probeTimeout: isString, probeInterval: isString,
+    canaryModelPublicId: isString, canaryCreatedTimeout: isString,
+  })),
 });
 const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
   markBuildForbiddenReauth: false,
@@ -162,8 +183,20 @@ const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
   autoCleanReauthMinAge: "1h",
   autoCleanIncludeDisabled: false,
 });
+export const defaultRequestRetryConfig = (): NonNullable<SettingsConfigDTO["requestRetry"]> => ({
+  enabled: true, maxAttempts: 6, holdTimeout: "3s", minOutputTokens: 32, onExhausted: "fail_closed",
+  accountCooldown: "24h", earlyHeaderAbort: "0s", sameAccountRetry: true,
+  evidenceTimeout: "15s", createdTimeout: "5s", idleAccountCooldown: "15m",
+});
+export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["egressRotation"]> => ({
+  enabled: true, maxAttemptsPerQuarantine: 3, minNodeInterval: "3m", maxGlobalPerHour: 6,
+  webhookTimeout: "15s", webhookRetries: 2, settleDelay: "20s", probeTimeout: "2m", probeInterval: "5s",
+  canaryModelPublicId: "", canaryCreatedTimeout: "10s",
+});
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();
+  const requestRetry = snapshot.config.requestRetry ?? defaultRequestRetryConfig();
+  const egressRotation = snapshot.config.egressRotation ?? defaultEgressRotationConfig();
   const segmentedSelector = snapshot.config.routing.segmentedSelector ?? { enabled: true, minCandidates: 3000, windowSize: 64 };
   return {
     ...snapshot,
@@ -201,6 +234,8 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
         autoCleanReauthMinAge: accounts.autoCleanReauthMinAge || "1h",
         autoCleanIncludeDisabled: accounts.autoCleanIncludeDisabled ?? false,
       },
+      requestRetry,
+      egressRotation,
     },
   };
 }
@@ -370,6 +405,12 @@ export function getSettings(): Promise<SettingsSnapshotDTO> {
 
 export function updateSettings(revision: string, config: SettingsConfigDTO): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", { method: "PUT", body: { revision, config } }, decodeSettingsSnapshot);
+}
+
+// resetSettings 删除持久化运行设置：可编辑字段恢复以 config.yaml
+// 为默认（后台保存过的覆盖被移除），返回重置后的快照。
+export function resetSettings(): Promise<SettingsSnapshotDTO> {
+  return apiRequest("/api/admin/v1/settings", { method: "DELETE" }, decodeSettingsSnapshot);
 }
 
 type ListEgressNodesInput = {
