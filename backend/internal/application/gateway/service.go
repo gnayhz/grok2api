@@ -98,6 +98,11 @@ const nonAccountFailureFingerprintLimit = 16
 // Stream idle failures are commonly provider-wide rather than account-wide.
 // Allow one compensating account switch, then stop to prevent a silent
 // upstream from multiplying a long idle deadline across the whole pool.
+// 首事件/零证据截止(quality_created_timeout/quality_evidence_timeout)与
+// 流空闲同族——service.go 的 idle 处理路径对五者一视同仁(短冷却+RSC 归因),
+// 指纹阈值也必须一致:排队期超时是 provider/出口段级现象,换号无法补偿,
+// 不封顶会把 CreatedTimeout 预算乘遍整个凭证池(线上实测 6 次 ×10s ≈ 66s
+// 死寂才 fail-closed)。
 const streamIdleFailureFingerprintLimit = 2
 
 var freeQuotaUsagePattern = regexp.MustCompile(`(?i)tokens\s*\(actual/limit\)\s*:\s*([0-9]+)\s*/\s*([0-9]+)`)
@@ -1126,6 +1131,24 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// sameAccountRetried marks that the quality withhold path already used its
 	// single same-account retry for this request (see QualityRetryRuntime).
 	sameAccountRetried := false
+	// firstGuardSignal 记录本请求首个触发的守卫特征(请求级结局归因:
+	// 该特征触发的请求最终被救回还是失败——量化每个规则对降智的拦截价值)。
+	firstGuardSignal := GuardSignal("")
+	noteGuardSignal := func(signal GuardSignal) {
+		guardStats.recordSignal(signal)
+		if firstGuardSignal == "" {
+			firstGuardSignal = signal
+			guardStats.recordRequestSignal(signal)
+		}
+	}
+	finishGuardOutcome := func(rescued bool) {
+		if firstGuardSignal != "" {
+			guardStats.recordOutcome(firstGuardSignal, rescued)
+		}
+		if rescued && sameAccountRetried {
+			guardStats.recordSameAccountRescued()
+		}
+	}
 	// headerBudgetArmed 保留单发机制的装填位（helper 参数），但预算现已
 	// 对每次流式尝试持续生效（见下方 fired 分支）：实测健康流式的响应头
 	// 恒定秒级返回（0.7-2.2s 含代理），而降智复杂生成的头要等整个生成
@@ -1449,6 +1472,7 @@ attemptLoop:
 			}
 			lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 			if errors.Is(err, errQualityHeaderBudget) {
+				noteGuardSignal(GuardSignalHeaderBudget)
 				// 头预算早断是降智路径特征:请求内排除该出口节点,并上报出口降级
 				// 观测(RSC 归因 clean → 出口 IP 嫌疑;关闭 RSC 时走跨账号确认)。
 				reportEgressDegradation(credential)
@@ -1756,6 +1780,14 @@ attemptLoop:
 						break
 					}
 					lastFailure = newTransportUpstreamFailure(peekErr, credential.ID, credential.Name)
+					switch {
+					case errors.Is(peekErr, errQualityCreatedTimeout):
+						noteGuardSignal(GuardSignalCreatedTimeout)
+					case errors.Is(peekErr, errQualityEvidenceTimeout):
+						noteGuardSignal(GuardSignalEvidenceTimeout)
+					case errors.Is(peekErr, errQualityEmptyStream):
+						noteGuardSignal(GuardSignalEmptyStream)
+					}
 					if neterrorpkg.IsUpstreamStreamIdleTimeout(peekErr) || neterrorpkg.IsUpstreamStreamIdleTimeout(context.Cause(ctx)) || errors.Is(peekErr, errQualityEmptyStream) || errors.Is(peekErr, errQualityEvidenceTimeout) || errors.Is(peekErr, errQualityCreatedTimeout) {
 						// 守卫空闲路径的尝试进审计明细（round 41：此前多账号轮换
 						// 轨迹在 attempts 里不可见；对照 quality_hold 路径有明细）。
@@ -1806,8 +1838,10 @@ attemptLoop:
 				}
 				commit := CommitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
 				if verdict == QualityWithhold {
+					noteGuardSignal(GuardSignalWithhold)
 					if sameAccountEligible && commit.Action == QualityActionRetry {
 						sameAccountRetried = true
+						guardStats.recordSameAccountRetry()
 						delete(excluded, credential.ID)
 						selection.RetryAccount(credential.ID)
 						s.logger.Info("quality_degraded_same_account_retry", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
@@ -1844,6 +1878,7 @@ attemptLoop:
 					s.logger.Info("quality_degraded_retry", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
 					continue
 				case QualityActionReject:
+					guardStats.recordExhausted(false)
 					_ = response.Body.Close()
 					lease.Release()
 					lastErr = errQualityDegraded
@@ -1855,6 +1890,7 @@ attemptLoop:
 					s.logger.Info("quality_degraded_rejected", "request_id", input.RequestID, "account_id", credential.ID)
 					break attemptLoop
 				case QualityActionDeliverLast:
+					guardStats.recordExhausted(true)
 					discardFallback(true)
 					s.logger.Info("quality_degraded_deliver_last", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
 				case QualityActionDeliver:
@@ -1883,8 +1919,10 @@ attemptLoop:
 			selected := fallback
 			fallback = nil
 			s.logger.Info("quality_degraded_fallback", "request_id", input.RequestID, "account_id", selected.credential.ID, "quality_attempts", qualityAccountAttempts)
+			finishGuardOutcome(true)
 			return handoffResponse(selected.response, selected.lease, selected.credential, selected.upstreamStartedAt, true), nil
 		}
+		finishGuardOutcome(true)
 		return handoffResponse(response, lease, credential, responseStartedAt, false), nil
 	}
 	if fallback != nil {
@@ -1892,6 +1930,7 @@ attemptLoop:
 			selected := fallback
 			fallback = nil
 			s.logger.Info("quality_degraded_fallback", "request_id", input.RequestID, "account_id", selected.credential.ID, "quality_attempts", qualityAccountAttempts)
+			finishGuardOutcome(true)
 			return handoffResponse(selected.response, selected.lease, selected.credential, selected.upstreamStartedAt, true), nil
 		}
 		discardFallback(true)
@@ -1914,6 +1953,7 @@ attemptLoop:
 		if err := s.audits.Create(persistCtx, record); err != nil {
 			s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", input.RequestID, "error", err)
 		}
+		finishGuardOutcome(false)
 		return nil, lastFailure
 	}
 	if lastErr == nil {
@@ -1936,6 +1976,7 @@ attemptLoop:
 	if err := s.audits.Create(persistCtx, record); err != nil {
 		s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", input.RequestID, "error", err)
 	}
+	finishGuardOutcome(false)
 	return nil, fmt.Errorf("%w: %w", ErrNoAvailableAccount, lastErr)
 }
 
@@ -2274,10 +2315,21 @@ func shouldStopForNonAccountFingerprint(fingerprints map[string]int, failure *Up
 	}
 	fingerprints[failure.Fingerprint]++
 	limit := nonAccountFailureFingerprintLimit
-	if failure.Code == "upstream_stream_idle_timeout" || failure.Fingerprint == "upstream_stream_idle_timeout" || failure.Code == "upstream_stream_empty" || failure.Fingerprint == "upstream_stream_empty" {
+	if isStreamIdleClassFailure(failure.Code) || isStreamIdleClassFailure(failure.Fingerprint) {
 		limit = streamIdleFailureFingerprintLimit
 	}
 	return fingerprints[failure.Fingerprint] >= limit
+}
+
+// isStreamIdleClassFailure 报告失败码是否属于"上游静默/排队"族:流空闲、
+// 空流,以及实时守卫的首事件/零证据截止。族内失败与 idle 处理路径的分组
+// (短冷却+RSC 归因)保持一致,共享 streamIdleFailureFingerprintLimit 封顶。
+func isStreamIdleClassFailure(value string) bool {
+	switch value {
+	case "upstream_stream_idle_timeout", "upstream_stream_empty", "quality_created_timeout", "quality_evidence_timeout":
+		return true
+	}
+	return false
 }
 
 func isRetryable(status int) bool {

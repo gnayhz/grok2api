@@ -291,7 +291,7 @@ egress:
     # 单次隔离周期内每节点最多换 IP 尝试次数（耗尽后保持隔离并告警）。
     maxAttemptsPerQuarantine: 3
     # 同一节点两次换 IP 的最小间隔。
-    minNodeInterval: 10m
+    minNodeInterval: 3m
     # 全局每小时换 IP 次数上限（所有节点合计）。
     maxGlobalPerHour: 6
     webhookTimeout: 15s
