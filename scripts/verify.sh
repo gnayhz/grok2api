@@ -79,6 +79,15 @@ resolve_bin() {
 }
 
 stage_build() { go build ./...; }
+# gofmt 漂移检查：交付门此前不含 fmt，17 个文件带着未格式化内容入库
+# （round 37 清零）。非空输出即失败，白名单仅限 vendored 测试替身目录。
+stage_fmt() {
+	drift=$(gofmt -l . | grep -v '^gateway.test/' || true)
+	if [ -n "$drift" ]; then
+		echo "gofmt drift detected:"; echo "$drift"
+		return 1
+	fi
+}
 stage_vet() { go vet ./...; }
 stage_staticcheck() {
 	if have staticcheck; then
@@ -92,7 +101,11 @@ stage_staticcheck() {
 }
 stage_race() { go test -race -count=1 ./...; }
 stage_fuzz_seeds() {
+	# 全部 8 个 fuzz 目标的种子回归：rsc/gateway 质量链 + egress 订阅/代理
+	# 解析与 provider URL 规范化（后两组处理外部不可信输入，round 35 补入）。
 	go test -count=1 -run 'FuzzParseRisk|FuzzObserveQualityChunk|FuzzPeekQualityBody' ./internal/infra/rsc/ ./internal/application/gateway/
+	go test -count=1 -run 'FuzzNormalizeURL' ./internal/infra/provider/searchresult/
+	go test -count=1 -run 'FuzzParseClashSubscription|FuzzResolveRotationTemplate|FuzzParseProxySubscription|FuzzNormalizeProxyURL' ./internal/application/egress/
 }
 stage_govulncheck() {
 	if have govulncheck; then
@@ -111,9 +124,16 @@ stage_fuzz_engines() {
 	go test -fuzz FuzzParseRisk -fuzztime 30s -run xxx ./internal/infra/rsc/
 	go test -fuzz FuzzPeekQualityBody -fuzztime 30s -run xxx ./internal/application/gateway/
 	go test -fuzz FuzzObserveQualityChunk -fuzztime 30s -run xxx ./internal/application/gateway/
+	# 外部不可信输入解析面（round 35 补入；此前 fuzz tier 只覆盖质量链）。
+	go test -fuzz FuzzParseClashSubscription -fuzztime 30s -run xxx ./internal/application/egress/
+	go test -fuzz FuzzParseProxySubscription -fuzztime 30s -run xxx ./internal/application/egress/
+	go test -fuzz FuzzNormalizeProxyURL -fuzztime 30s -run xxx ./internal/application/egress/
+	go test -fuzz FuzzResolveRotationTemplate -fuzztime 30s -run xxx ./internal/application/egress/
+	go test -fuzz FuzzNormalizeURL -fuzztime 30s -run xxx ./internal/infra/provider/searchresult/
 }
 
 stage "build" stage_build
+stage "gofmt" stage_fmt
 stage "vet" stage_vet
 stage "staticcheck" stage_staticcheck
 stage "race suite" stage_race

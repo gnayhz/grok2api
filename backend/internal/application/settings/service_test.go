@@ -40,6 +40,14 @@ func (r *runtimeSettingsRepositoryStub) Save(_ context.Context, value settingsdo
 	return r.updatedAt, r.revision, nil
 }
 
+func (r *runtimeSettingsRepositoryStub) Delete(context.Context) error {
+	r.value = settingsdomain.Config{}
+	r.updatedAt = time.Time{}
+	r.revision = 0
+	r.found = false
+	return nil
+}
+
 func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
@@ -570,6 +578,42 @@ func TestReloadPersistedAppliesOnlyNewerVersion(t *testing.T) {
 	}
 	if applyCount != 1 || service.Get().Config.Routing.MaxAttempts != cfg.Routing.MaxAttempts+1 {
 		t.Fatalf("newer settings were not applied")
+	}
+}
+
+func TestReloadPersistedRevertsToBaselineWhenRowDeleted(t *testing.T) {
+	baseline := testConfig(t)
+	override := baseline
+	override.Frontend.PublicAPIBaseURL = "https://edge.example.test"
+	repository := &runtimeSettingsRepositoryStub{}
+	applyCount := 0
+	service := NewService(override, time.Now().UTC(), 0, repository, nil, func(config.Config) { applyCount++ })
+	service.SetFileConfig(baseline)
+
+	// 远端实例重置：持久化行被删除，通知本实例重载。
+	if err := service.ReloadPersisted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := service.Get()
+	if got.Config.Frontend.PublicAPIBaseURL != "" {
+		t.Fatalf("override survived remote reset: %q", got.Config.Frontend.PublicAPIBaseURL)
+	}
+	if got.Revision != 1 {
+		t.Fatalf("revision = %d, want 1 after revert", got.Revision)
+	}
+	if applyCount != 1 {
+		t.Fatalf("apply count = %d, want 1", applyCount)
+	}
+
+	// 重复通知（30s reconcile + 总线事件）必须幂等：不再推进 revision/apply。
+	for i := 0; i < 2; i++ {
+		if err := service.ReloadPersisted(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got = service.Get()
+	if got.Revision != 1 || applyCount != 1 {
+		t.Fatalf("idempotency broken: revision=%d apply=%d", got.Revision, applyCount)
 	}
 }
 

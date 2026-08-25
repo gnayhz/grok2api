@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -484,6 +486,8 @@ func (s *Service) RunCleanup(ctx context.Context, onError func(error)) {
 	}
 	ticker := time.NewTicker(cfg.CleanupInterval)
 	defer ticker.Stop()
+	// 零值让首个清理 tick 即执行一次孤儿对账；此后按 orphanSweepInterval 节流。
+	lastSweep := time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -496,10 +500,35 @@ func (s *Service) RunCleanup(ctx context.Context, onError func(error)) {
 		}
 		cfg = s.runtimeConfig()
 		cleanupCtx, cancel := context.WithTimeout(ctx, min(cfg.CleanupInterval, 5*time.Minute))
-		_, err := s.Cleanup(cleanupCtx)
+		pruned, err := s.Cleanup(cleanupCtx)
 		cancel()
+		// 周期清理的可观测性：心跳计数（每周期 +1，证明循环存活）+
+		// 仅在确有删除时叠加 pruned 量（Add 对 0 增量不落样本，零删除
+		// 周期不应制造噪声行——round 96 首版用 Add(pruned) 在零媒体
+		// 流量实例上永无输出，验收即踩此坑）。
+		outcome := "success"
+		if err != nil {
+			outcome = "failed"
+		}
+		heartbeatLabels := perfmetrics.Labels{Subsystem: "media", Operation: "cleanup", Outcome: outcome}
+		perfmetrics.Default.Inc("media_cleanup_pass_total", heartbeatLabels)
+		if pruned > 0 {
+			perfmetrics.Default.Add("media_cleanup_assets_pruned", heartbeatLabels, int64(pruned))
+		}
 		if err != nil && onError != nil {
 			onError(err)
+		}
+		if time.Since(lastSweep) >= orphanSweepInterval {
+			sweepCtx, sweepCancel := context.WithTimeout(ctx, min(cfg.CleanupInterval, 5*time.Minute))
+			deleted, sweepErr := s.sweepOrphanObjects(sweepCtx, time.Now().UTC())
+			sweepCancel()
+			if sweepErr != nil && onError != nil {
+				onError(sweepErr)
+			}
+			if deleted > 0 {
+				slog.Info("media_orphan_objects_swept", "deleted", deleted)
+			}
+			lastSweep = time.Now()
 		}
 	}
 }
@@ -632,6 +661,81 @@ func (s *Service) Cleanup(ctx context.Context) (int, error) {
 		offset = 0
 	}
 	s.totalBytes.Store(total)
+	return deleted, nil
+}
+
+// mediaObjectLister 是对象存储的可选枚举能力（本地驱动实现）。不支持时
+// 孤儿回收静默跳过，存储后端行为不变。
+type mediaObjectLister interface {
+	ListMediaObjectFiles(ctx context.Context) (objects, temps map[string]time.Time, err error)
+}
+
+const (
+	// orphanSweepInterval 孤儿对账频率：崩溃残留积累速率极低，日频足够。
+	orphanSweepInterval = 24 * time.Hour
+	// orphanGracePeriod 是文件修改时间宽限期：覆盖多实例共享存储下
+	// 「对象已硬链接提交、元数据行对其他实例尚未可见」的竞态窗口
+	// （实际为毫秒级），同时容忍时钟偏移。
+	orphanGracePeriod = 24 * time.Hour
+)
+
+// sweepOrphanObjects 对账文件系统与元数据，回收硬链接提交后、元数据行
+// 写入前崩溃残留的孤儿对象与过期临时文件。Cleanup 只枚举 DB 行，这类
+// 文件对其不可见且不计入容量统计——不回收则永久泄漏并绕过 MaxTotalBytes。
+// 有 DB 行的对象与宽限期内的文件一律保留；删除幂等（ErrNotExist 容忍），
+// 多实例并发对账安全。返回删除的文件数。
+func (s *Service) sweepOrphanObjects(ctx context.Context, now time.Time) (int, error) {
+	lister, ok := s.objects.(mediaObjectLister)
+	if !ok {
+		return 0, nil
+	}
+	objects, temps, err := lister.ListMediaObjectFiles(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(objects) == 0 && len(temps) == 0 {
+		return 0, nil
+	}
+	known := make(map[string]struct{})
+	for offset := 0; ; {
+		values, err := s.assets.ListOldestMediaAssets(ctx, offset, cleanupAssetBatchSize)
+		if err != nil {
+			return 0, err
+		}
+		for _, asset := range values {
+			known[asset.StorageKey] = struct{}{}
+		}
+		if len(values) < cleanupAssetBatchSize {
+			break
+		}
+		offset += len(values)
+	}
+	deleted := 0
+	cutoff := now.Add(-orphanGracePeriod)
+	remove := func(key string) error {
+		if err := s.objects.Delete(ctx, key); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	for key, modified := range objects {
+		if _, live := known[key]; live || modified.After(cutoff) {
+			continue
+		}
+		if err := remove(key); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	for key, modified := range temps {
+		if modified.After(cutoff) {
+			continue
+		}
+		if err := remove(key); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
 	return deleted, nil
 }
 

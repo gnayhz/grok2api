@@ -57,7 +57,7 @@ type Adapter struct {
 	cfg            Config
 	http           *http.Client
 	oauth          *oauthClient
-	cipher         *security.Cipher
+	cipher         security.Cryptor
 	base           *buildDirectTransport
 	agentID        string
 	modelsMu       sync.Mutex
@@ -69,7 +69,7 @@ type Adapter struct {
 	logger         *slog.Logger
 }
 
-func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
+func NewAdapter(cfg Config, cipher security.Cryptor) *Adapter {
 	cfg.ResponseHeaderTimeout = normalizeBuildResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
 	cfg.StreamIdleTimeout = normalizeBuildStreamIdleTimeout(cfg.StreamIdleTimeout)
 	transport := newBuildDirectTransport(cfg.ResponseHeaderTimeout)

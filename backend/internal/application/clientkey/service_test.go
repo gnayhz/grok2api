@@ -323,7 +323,7 @@ func TestAccountScopePersistsAndAuthCacheInvalidatesOnChange(t *testing.T) {
 	}
 }
 
-func testCipher(t *testing.T) *security.Cipher {
+func testCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {
@@ -334,14 +334,14 @@ func testCipher(t *testing.T) *security.Cipher {
 
 type failingRateLimiter struct{}
 
-func (failingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
-	return false, errors.New("redis unavailable")
+func (failingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, time.Duration, error) {
+	return false, 0, errors.New("redis unavailable")
 }
 
 type successfulRateLimiter struct{}
 
-func (successfulRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
-	return true, nil
+func (successfulRateLimiter) Allow(context.Context, string, int, time.Time) (bool, time.Duration, error) {
+	return true, 0, nil
 }
 
 type failingConcurrencyLimiter struct{}

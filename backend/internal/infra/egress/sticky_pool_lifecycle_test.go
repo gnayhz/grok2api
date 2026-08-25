@@ -65,11 +65,11 @@ func (p *authRecordingProxy) usernames() []string {
 }
 
 // 粘性 {account} 模板节点作为池成员的组合生命周期:
-//   1. 同一账号多次获取 → 亲和稳定落同一成员, 渲染出的账号子身份出现在
-//      租约 ProxyURL 与真实线路(代理 Basic 用户名)上;
-//   2. 另一账号 → 自己的子身份, 与账号 77 的互不串扰;
-//   3. 无账号身份且 affinity 为空 → 显式失败("粘性代理需要有效的账号
-//      身份"), 不产生租约、不静默回退。
+//  1. 同一账号多次获取 → 亲和稳定落同一成员, 渲染出的账号子身份出现在
+//     租约 ProxyURL 与真实线路(代理 Basic 用户名)上;
+//  2. 另一账号 → 自己的子身份, 与账号 77 的互不串扰;
+//  3. 无账号身份且 affinity 为空 → 显式失败("粘性代理需要有效的账号
+//     身份"), 不产生租约、不静默回退。
 func TestStickyAccountTemplatePoolMemberLifecycle(t *testing.T) {
 	ctx := context.Background()
 	cipher := testCipher(t)

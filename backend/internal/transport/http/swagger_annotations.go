@@ -267,3 +267,122 @@ func swaggerExtendVideo() {}
 // @Failure 404 {object} map[string]any
 // @Router /v1/videos/{request_id} [get]
 func swaggerGetVideo() {}
+
+// swaggerTTS godoc
+// @Summary 文本转语音（OpenAI 兼容）
+// @Tags Audio
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Router /v1/tts [post]
+func swaggerTTS() {}
+
+// swaggerTTSVoices godoc
+// @Summary 列出可用语音
+// @Tags Audio
+// @Security BearerAuth
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Router /v1/tts/voices [get]
+func swaggerTTSVoices() {}
+
+// swaggerTTSVoiceDetail godoc
+// @Summary 查询单个语音
+// @Tags Audio
+// @Security BearerAuth
+// @Produce json
+// @Param voice_id path string true "Voice ID"
+// @Success 200 {object} map[string]any
+// @Failure 404 {object} map[string]any
+// @Router /v1/tts/voices/{voice_id} [get]
+func swaggerTTSVoiceDetail() {}
+
+// swaggerAudioSpeech godoc
+// @Summary 文本转语音（/v1/audio/speech 别名）
+// @Tags Audio
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Router /v1/audio/speech [post]
+func swaggerAudioSpeech() {}
+
+// swaggerSTT godoc
+// @Summary 语音转文本
+// @Tags Audio
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Router /v1/stt [post]
+func swaggerSTT() {}
+
+// swaggerSTTWebSocket godoc
+// @Summary 语音转文本（流式 WebSocket）
+// @Tags Audio
+// @Security BearerAuth
+// @Success 101 {string} string "Switching Protocols"
+// @Router /v1/stt [get]
+func swaggerSTTWebSocket() {}
+
+// swaggerAudioTranscriptions godoc
+// @Summary 语音转文本（/v1/audio/transcriptions 别名）
+// @Tags Audio
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Router /v1/audio/transcriptions [post]
+func swaggerAudioTranscriptions() {}
+
+// swaggerRealtime godoc
+// @Summary 实时语音会话（WebSocket）
+// @Tags Realtime
+// @Security BearerAuth
+// @Param model query string false "模型"
+// @Success 101 {string} string "Switching Protocols"
+// @Failure 400 {object} map[string]any
+// @Router /v1/realtime [get]
+func swaggerRealtime() {}
+
+// swaggerMediaUpload godoc
+// @Summary 媒体分片上传（凭票据 PUT）
+// @Tags Media
+// @Accept octet-stream
+// @Produce json
+// @Param token path string true "上传票据 token"
+// @Success 200 {object} map[string]any
+// @Failure 404 {object} map[string]any
+// @Failure 410 {object} map[string]any
+// @Failure 429 {object} map[string]any
+// @Router /v1/media/uploads/{token} [put]
+func swaggerMediaUpload() {}
+
+// swaggerMediaImport godoc
+// @Summary 导入外部媒体为临时输入
+// @Tags Media
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Success 201 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Router /v1/media/inputs/import [post]
+func swaggerMediaImport() {}
+
+// swaggerMediaInputUpload godoc
+// @Summary 上传临时媒体输入（multipart）
+// @Tags Media
+// @Security BearerAuth
+// @Accept multipart/form-data
+// @Produce json
+// @Success 201 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Failure 413 {object} map[string]any
+// @Failure 503 {object} map[string]any
+// @Router /v1/media/inputs/upload [post]
+func swaggerMediaInputUpload() {}

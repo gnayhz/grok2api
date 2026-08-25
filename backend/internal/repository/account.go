@@ -158,9 +158,6 @@ type AccountRepository interface {
 	// ClearMissingThinkingCooldown 仅解除 missing-thinking 打击产生的惩罚；
 	// 其他来源（空流/429/5xx）的冷却保持原样。
 	ClearMissingThinkingCooldown(ctx context.Context, id uint64) error
-	// ClearCooldown 是人工运维逃生门：无条件清零请求路径健康（failure_count /
-	// cooldown_until / last_error），不按 last_error 限定范围。enabled 不动。
-	ClearCooldown(ctx context.Context, id uint64) error
 	// TouchLastUsed persists request activity without changing routing health or
 	// invalidating candidate snapshots.
 	TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error

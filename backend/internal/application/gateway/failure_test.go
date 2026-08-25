@@ -224,6 +224,19 @@ func TestNonAccountFailureFingerprintStopsAtLimit(t *testing.T) {
 	if idleFingerprints[idle.Fingerprint] != streamIdleFailureFingerprintLimit {
 		t.Fatalf("idle fingerprint count = %d", idleFingerprints[idle.Fingerprint])
 	}
+
+	// 守卫截止指纹(首事件/零证据)与流空闲同族:同样两次封顶,不得落入
+	// 16 次的通用阈值(线上实测排队期 6×10s 死寂即来源于此遗漏)。
+	for _, code := range []string{"quality_created_timeout", "quality_evidence_timeout"} {
+		deadlineFingerprints := map[string]int{}
+		deadline := &UpstreamFailure{HTTPStatus: http.StatusGatewayTimeout, Code: code, Fingerprint: code}
+		if shouldStopForNonAccountFingerprint(deadlineFingerprints, deadline) {
+			t.Fatalf("first %s should allow one compensating account switch", code)
+		}
+		if !shouldStopForNonAccountFingerprint(deadlineFingerprints, deadline) {
+			t.Fatalf("%s should stop after %d attempts", code, streamIdleFailureFingerprintLimit)
+		}
+	}
 }
 
 func TestHTTPUpstreamFailureLeavesPaymentRecoveryKindToBilling(t *testing.T) {

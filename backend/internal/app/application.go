@@ -31,6 +31,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
+	"github.com/chenyme/grok2api/backend/internal/infra/observability"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
@@ -109,7 +110,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, err
 	}
-	cipher, err := security.NewCipher(cfg.Secrets.CredentialEncryptionKey)
+	// VersionedCipher：轮换 credentialEncryptionKey 后把旧密钥配置进
+	// secrets.legacyCredentialEncryptionKeys，存量凭据经回退继续可解。
+	cipher, err := security.NewVersionedCipher(cfg.Secrets.CredentialEncryptionKey, cfg.Secrets.LegacyEncryptionKeys)
 	if err != nil {
 		database.Close()
 		return nil, err
@@ -128,6 +131,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	mediaJobRepo := relational.NewMediaJobRepository(database)
 	mediaAssetRepo := relational.NewMediaAssetRepository(database)
 	mediaUploadTicketRepo := relational.NewMediaUploadTicketRepository(database)
+	// 文件基线在持久化覆盖前留存，供设置「恢复文件默认」使用。
+	fileCfg := cfg
 	loadedConfig, settingsUpdatedAt, settingsRevision, err := settingsapp.LoadPersisted(ctx, cfg, runtimeSettingsRepo)
 	if err != nil {
 		database.Close()
@@ -433,6 +438,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
 		accountService.UpdateAutoCleanConfig(accountAutoCleanConfig(next.Accounts))
 	})
+	settingsService.SetFileConfig(fileCfg)
 	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
 
 	startup := newStartupState(len(windows))
@@ -440,6 +446,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
 	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService})
+	logSecureCookiesHint(logger, cfg)
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
@@ -643,6 +650,7 @@ func (a *Application) Run(ctx context.Context) error {
 		a.egressOps.RunRotationWorker(runCtx)
 	}()
 	errCh := make(chan error, 1)
+	servedAt := time.Now()
 	go func() {
 		a.logger.Info("server_started", "listen", a.server.Addr)
 		errCh <- a.server.ListenAndServe()
@@ -698,6 +706,19 @@ func (a *Application) Run(ctx context.Context) error {
 			return a.audits.RunRetention(taskCtx, a.auditRetention)
 		})
 	}
+	// SQLite freelist 页归还：retention/媒体作业删除产生的空闲页只有
+	// 周期 incremental_vacuum 才真正缩小文件（auto_vacuum=INCREMENTAL
+	// 仅启用机制）。日频足够（页增速慢），非 SQLite 方言内部 no-op。
+	startBackground("sqlite_incremental_vacuum", func(taskCtx context.Context) error {
+		a.runPeriodicTask(taskCtx, 24*time.Hour, "sqlite_incremental_vacuum", func(runCtx context.Context) error {
+			trimmed, err := a.database.SQLiteIncrementalVacuum(runCtx)
+			if err == nil && trimmed {
+				a.logger.Info("sqlite_incremental_vacuum_trimmed", "hint", "freelist pages returned to the filesystem")
+			}
+			return err
+		})
+		return nil
+	})
 	startBackground("model_cooldown_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 10*time.Minute, "model_cooldown_cleanup", func(runCtx context.Context) error {
 			_, err := a.accountRepo.PruneExpiredModelQuotaBlocks(runCtx, time.Now().UTC(), 1000)
@@ -784,7 +805,9 @@ func (a *Application) Run(ctx context.Context) error {
 	})
 	startBackground("media_cleanup", func(taskCtx context.Context) error {
 		a.media.RunCleanup(taskCtx, func(err error) {
-			a.logger.Warn("media_cleanup_failed", "error", err)
+			if !observability.IsShutdownCancellation(taskCtx, err) {
+				a.logger.Warn("media_cleanup_failed", "error", err)
+			}
 		})
 		return nil
 	})
@@ -801,7 +824,7 @@ func (a *Application) Run(ctx context.Context) error {
 		return nil
 	})
 	startBackground("egress_operations", func(taskCtx context.Context) error {
-		if err := a.egressOps.RunMaintenance(taskCtx); err != nil {
+		if err := a.egressOps.RunMaintenance(taskCtx); err != nil && !observability.IsShutdownCancellation(taskCtx, err) {
 			a.logger.Warn("egress_operations_initial_run_failed", "error", err)
 		}
 		a.runPeriodicTask(taskCtx, time.Minute, "egress_operations", a.egressOps.RunMaintenance)
@@ -822,11 +845,26 @@ func (a *Application) Run(ctx context.Context) error {
 	a.queueDueWebQuotaRefresh(runCtx)
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// compose stop_grace_period 为 30s：排空 15s + 审计收尾 10s 预算
+		// + DB 关闭，最坏 ~26s 仍在宽限内（此前 10s 排空浪费了 20s 可用窗口）。
+		drainStart := time.Now()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("关闭 HTTP 服务: %w", err)
+			if errors.Is(err, context.DeadlineExceeded) {
+				// 长流（requestTimeout 上限 2h）永远等不完：排空超时是预期。
+				// 记 WARN 后按操作员意图正常退出（exit 0）——此前返回错误会让
+				// SIGTERM 停止以 exit 1 结束，语义错误且污染失败率统计。
+				a.logger.Warn("server_shutdown_drain_timeout", "error", err)
+			} else {
+				return fmt.Errorf("关闭 HTTP 服务: %w", err)
+			}
 		}
+		// server_started 的对账本事件：日志即监控面时，运维据此在日志流中
+		// 区分「干净停止」与「崩溃后静默」。
+		a.logger.Info("server_stopped",
+			"uptime_ms", time.Since(servedAt).Milliseconds(),
+			"drain_ms", time.Since(drainStart).Milliseconds())
 		return nil
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -944,7 +982,7 @@ func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duratio
 			runCtx, cancel := context.WithTimeout(ctx, minDuration(interval, 5*time.Minute))
 			err := task(runCtx)
 			cancel()
-			if err != nil {
+			if err != nil && !observability.IsShutdownCancellation(ctx, err) {
 				a.logger.Warn(name+"_failed", "error", err)
 			}
 			resetTimer(timer, interval)
@@ -987,6 +1025,20 @@ func resetTimer(timer *time.Timer, interval time.Duration) {
 		}
 	}
 	timer.Reset(interval)
+}
+
+// logSecureCookiesHint 在 secureCookies=true 时提示 HTTP 直连陷阱：浏览器
+// 拒收 Secure cookie 表现为登录循环，且服务端此前无任何可观测线索。
+// 配置了可信反向代理时大概率由代理终结 TLS（合法部署），降级为 INFO。
+func logSecureCookiesHint(logger *slog.Logger, cfg config.Config) {
+	if !cfg.Auth.SecureCookies {
+		return
+	}
+	if len(cfg.Server.TrustedProxies) == 0 {
+		logger.Warn("secure_cookies_over_plain_http", "hint", "auth.secureCookies=true 且未配置 server.trustedProxies：浏览器经 HTTP 直连将拒收 Secure cookie（登录循环）；若由 HTTPS 反向代理终结 TLS，请配置 trustedProxies 以降级本提示")
+		return
+	}
+	logger.Info("secure_cookies_enabled_behind_proxy", "hint", "假定 TLS 由可信反向代理终结；直连 HTTP 时浏览器将拒收会话 cookie")
 }
 
 func minDuration(left, right time.Duration) time.Duration {

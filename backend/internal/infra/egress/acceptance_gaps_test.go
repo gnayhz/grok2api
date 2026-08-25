@@ -60,7 +60,7 @@ func TestPinnedNodeRejectsSoftCooledTarget(t *testing.T) {
 
 // ---- helpers ----
 
-func testCipher(t *testing.T) *security.Cipher {
+func testCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {

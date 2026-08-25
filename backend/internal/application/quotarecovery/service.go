@@ -7,6 +7,7 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/observability"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -126,7 +127,9 @@ func (s *Service) runOne(ctx context.Context, now time.Time, value accountdomain
 func (s *Service) reconcileDue(ctx context.Context, now time.Time) {
 	windows, err := s.syncer.ListDueQuotaWindows(ctx, now, recoveryReconcileLimit)
 	if err != nil {
-		s.logger.Warn("quota_recovery_reconcile_failed", "error", err)
+		if !observability.IsShutdownCancellation(ctx, err) {
+			s.logger.Warn("quota_recovery_reconcile_failed", "error", err)
+		}
 		return
 	}
 	for _, window := range windows {

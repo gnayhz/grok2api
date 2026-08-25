@@ -23,12 +23,21 @@ var (
 	ErrConcurrencyLimit   = errors.New("客户端 API Key 已达到并发上限")
 	ErrBillingLimit       = errors.New("客户端 API Key 已达到用量上限")
 	ErrRuntimeUnavailable = errors.New("运行态存储暂不可用")
-	ErrInvalidFilter      = errors.New("客户端 Key 筛选条件无效")
-	ErrInvalidInput       = errors.New("客户端 Key 参数无效")
-	ErrNotFound           = errors.New("客户端 Key 不存在")
-	ErrConflict           = errors.New("客户端 Key 冲突")
-	ErrSecretUnavailable  = errors.New("客户端 Key 明文不可用")
-	ErrSystemManaged      = errors.New("系统托管 Client Key 不允许人工操作")
+)
+
+// RateLimitedError 携带固定窗口剩余时间，供 429 响应渲染 Retry-After。
+type RateLimitedError struct{ RetryAfter time.Duration }
+
+func (e *RateLimitedError) Error() string { return ErrRateLimited.Error() }
+func (e *RateLimitedError) Unwrap() error { return ErrRateLimited }
+
+var (
+	ErrInvalidFilter     = errors.New("客户端 Key 筛选条件无效")
+	ErrInvalidInput      = errors.New("客户端 Key 参数无效")
+	ErrNotFound          = errors.New("客户端 Key 不存在")
+	ErrConflict          = errors.New("客户端 Key 冲突")
+	ErrSecretUnavailable = errors.New("客户端 Key 明文不可用")
+	ErrSystemManaged     = errors.New("系统托管 Client Key 不允许人工操作")
 )
 
 type CreateInput struct {
@@ -80,7 +89,7 @@ type Service struct {
 	defaultMax    atomic.Int64
 	authCache     *authKeyCache
 	touches       *touchTracker
-	cipher        *security.Cipher
+	cipher        security.Cryptor
 	activeMu      sync.RWMutex
 	activeBilling map[string]struct{}
 	// mediaJobs 可选：装配时注入。删除 client key 时预检活跃媒体作业
@@ -99,7 +108,7 @@ type internalKeyInspector interface {
 	CountInternalKeys(context.Context, []uint64) (int64, error)
 }
 
-func NewService(keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher *security.Cipher) *Service {
+func NewService(keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher security.Cryptor) *Service {
 	service := &Service{keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, activeBilling: make(map[string]struct{})}
 	service.UpdateDefaults(defaultRPM, defaultMax)
 	return service
@@ -423,14 +432,14 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		}
 	}
 	if value.RPMLimit > 0 {
-		allowed, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client:%d", value.ID), value.RPMLimit, now)
+		allowed, retryAfter, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client:%d", value.ID), value.RPMLimit, now)
 		if err != nil {
 			release()
 			return clientkeydomain.Key{}, nil, fmt.Errorf("%w: RPM 限流器: %v", ErrRuntimeUnavailable, err)
 		}
 		if !allowed {
 			release()
-			return clientkeydomain.Key{}, nil, ErrRateLimited
+			return clientkeydomain.Key{}, nil, &RateLimitedError{RetryAfter: retryAfter}
 		}
 	}
 	if s.touches.shouldTouch(value.ID, now) {

@@ -24,7 +24,7 @@ func (r *rotationURLStubRepo) UpdateEgressNodeRotationURL(_ context.Context, id 
 	return nil
 }
 
-func newBatchRotationService(t *testing.T) (*Service, *rotationURLStubRepo, *security.Cipher) {
+func newBatchRotationService(t *testing.T) (*Service, *rotationURLStubRepo, security.Cryptor) {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -48,7 +48,7 @@ func newBatchRotationService(t *testing.T) (*Service, *rotationURLStubRepo, *sec
 	return service, repo, cipher
 }
 
-func decryptForTest(t *testing.T, cipher *security.Cipher, encrypted string) string {
+func decryptForTest(t *testing.T, cipher security.Cryptor, encrypted string) string {
 	t.Helper()
 	value, err := cipher.Decrypt(encrypted)
 	if err != nil {

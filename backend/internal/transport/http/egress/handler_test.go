@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-
 type proxyRevealRepository struct {
 	node egressdomain.Node
 }
@@ -324,6 +323,7 @@ func TestSetPoolMembersRequiresExplicitIDs(t *testing.T) {
 		})
 	}
 }
+
 type missingPoolStubRepo struct {
 	egressapp.ServiceRepository
 }
@@ -398,6 +398,7 @@ func TestCreatePoolFallbackModePoolWithoutIDRejected(t *testing.T) {
 		t.Fatalf("body = %s, want invalidEgressNode code", body)
 	}
 }
+
 // RotateNode 对不存在的节点曾把 repository.ErrNotFound 透传到 writeError
 // 的 default 分支返回 500;必须与其他节点路由一致地归一为 404。
 func TestRotateNodeMissingNodeMapsTo404(t *testing.T) {

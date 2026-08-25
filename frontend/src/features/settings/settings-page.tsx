@@ -1,30 +1,29 @@
 import { RotateCcw, Sparkles } from "lucide-react";
-import { type ReactNode, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Controller } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { VersionUpdateSection } from "@/features/system/version-update";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { isByteSizeUnit, isDurationUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, type DurationValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/features/settings/settings-model";
+import { isByteSizeUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/features/settings/settings-model";
 import { useSettings } from "@/features/settings/use-settings";
+import { DurationInput, SettingsField, SettingsPane, SettingsSection } from "@/features/settings/settings-ui";
 import { ErrorState } from "@/shared/components/data-state";
-import { cn } from "@/shared/lib/cn";
 
 export function SettingsPage() {
   const { t } = useTranslation();
-  const { form, settingsQuery, updateMutation, reset } = useSettings();
+  const { form, settingsQuery, updateMutation, resetDefaultsMutation, reset } = useSettings();
   const [autoCleanConfirm, setAutoCleanConfirm] = useState<"enabled" | "includeDisabled" | null>(null);
   const [unlimitedAttemptsConfirm, setUnlimitedAttemptsConfirm] = useState(false);
+  const [resetDefaultsConfirm, setResetDefaultsConfirm] = useState(false);
   const limitedRoutingAttemptsRef = useRef(3);
   const limitedVideoRoutingAttemptsRef = useRef(999);
   const autoCleanEnabled = form.watch("accounts.autoCleanReauthEnabled") === true;
@@ -70,6 +69,9 @@ export function SettingsPage() {
           </Tooltip>
           <Button type="submit" size="sm" disabled={loading || updateMutation.isPending || !form.formState.isDirty}>
             {updateMutation.isPending ? <Spinner /> : null}{t("common.save")}
+          </Button>
+          <Button type="button" variant="outline" size="sm" disabled={loading || updateMutation.isPending || resetDefaultsMutation.isPending} onClick={() => setResetDefaultsConfirm(true)}>
+            {resetDefaultsMutation.isPending ? <Spinner /> : null}{t("settings.resetToDefaults")}
           </Button>
         </div>
       </header>
@@ -483,15 +485,6 @@ export function SettingsPage() {
               </div>
             </SettingsSection>
 
-            <SettingsSection title={t("settings.accounts.guardConfigTitle")}>
-              <p className="text-xs leading-5 text-muted-foreground">{t("settings.accounts.guardConfigHelp")}</p>
-              <ul className="list-disc space-y-1 pl-4 text-xs leading-5 text-muted-foreground">
-                <li>{t("settings.accounts.guardConfigRequestRetry")}</li>
-                <li>{t("settings.accounts.guardConfigRscCheck")}</li>
-                <li>{t("settings.accounts.guardConfigRestart")}</li>
-              </ul>
-            </SettingsSection>
-
             <SettingsSection title={t("settings.accounts.cleanupTitle")}>
               <div className="space-y-0">
                 <SettingsField controlId="accounts-auto-clean-reauth-enabled" label={t("settings.accounts.autoCleanReauthEnabled")} description={t("settings.accounts.autoCleanReauthEnabledHelp")}>
@@ -582,6 +575,26 @@ export function SettingsPage() {
           </div>
         </Tabs>
       ) : null}
+      <AlertDialog open={resetDefaultsConfirm} onOpenChange={setResetDefaultsConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("settings.resetToDefaultsTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("settings.resetToDefaultsDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={() => {
+                setResetDefaultsConfirm(false);
+                resetDefaultsMutation.mutate();
+              }}
+            >
+              {t("settings.resetToDefaultsConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </form>
   );
 }
@@ -613,71 +626,3 @@ function ByteSizeInput({ id, value, onChange }: { id: string; value?: ByteSizeVa
   );
 }
 
-function DurationInput({ id, value, onChange, disabled }: { id: string; value?: DurationValue; onChange: (value: DurationValue) => void; disabled?: boolean }) {
-  const { t } = useTranslation();
-  const unit = value?.unit ?? "s";
-  return (
-    <div className="flex min-w-0">
-      <Input
-        id={id}
-        type="number"
-        min="0.001"
-        step="any"
-        disabled={disabled}
-        className="min-w-0 rounded-r-none"
-        value={Number.isFinite(value?.value) ? value?.value : ""}
-        onChange={(event) => onChange({ value: event.target.value === "" ? Number.NaN : Number(event.target.value), unit })}
-      />
-      <Select value={unit} disabled={disabled} onValueChange={(nextUnit) => { if (isDurationUnit(nextUnit)) onChange({ value: value?.value ?? 1, unit: nextUnit }); }}>
-        <SelectTrigger className="w-24 shrink-0 rounded-l-none bg-secondary/55" aria-label={t("settings.durationUnit")}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="s">{t("settings.units.seconds")}</SelectItem>
-          <SelectItem value="m">{t("settings.units.minutes")}</SelectItem>
-          <SelectItem value="h">{t("settings.units.hours")}</SelectItem>
-          <SelectItem value="d">{t("settings.units.days")}</SelectItem>
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
-function SettingsPane({ value, children }: { value: string; children: ReactNode }) {
-  return (
-    <TabsContent value={value} forceMount className="m-0 space-y-8 data-[state=inactive]:hidden">
-      {children}
-    </TabsContent>
-  );
-}
-
-function SettingsSection({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
-  return (
-    <section className="space-y-3">
-      <div className="flex min-h-8 items-center justify-between gap-3 px-1">
-        <h2 className="text-sm font-medium tracking-tight">{title}</h2>
-        {action}
-      </div>
-      <div className="min-w-0 w-full">{children}</div>
-    </section>
-  );
-}
-
-function SettingsField({ controlId, label, badge, description, error, className, children }: { controlId: string; label: string; badge?: string; description?: string; error?: string; className?: string; children: ReactNode }) {
-  const { t } = useTranslation();
-  return (
-    <div className={cn("min-w-0 py-4", className)}>
-      <div className="grid min-w-0 gap-2.5 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] sm:items-center sm:gap-8">
-        <div className="min-w-0">
-          <div className="flex min-h-5 items-center gap-2">
-            <Label htmlFor={controlId} className="text-xs font-medium">{label}</Label>
-            {badge ? <Badge variant="secondary" className="shrink-0 text-[10px]">{badge}</Badge> : null}
-          </div>
-          {description ? <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">{description}</p> : null}
-          {error ? <p className="mt-1 text-xs text-destructive">{t("settings.invalidValue")}</p> : null}
-        </div>
-        <div className="min-w-0">{children}</div>
-      </div>
-    </div>
-  );
-}

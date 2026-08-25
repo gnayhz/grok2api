@@ -14,12 +14,25 @@ import (
 func registerFrontend(router *gin.Engine, staticPath string) {
 	root, indexPath, ok := frontendRoot(staticPath)
 	if !ok {
+		// 无构建产物（纯后端部署）：后端路径仍返回统一错误信封（含
+		// requestId），非后端路径保持朴素 404。
+		router.NoRoute(func(c *gin.Context) {
+			if isBackendPath(c.Request.URL.Path) {
+				writeRouteError(c, http.StatusNotFound)
+				return
+			}
+			c.Status(http.StatusNotFound)
+		})
 		return
 	}
 	files := http.FileServer(http.Dir(root))
 	router.NoRoute(func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
-		if (c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead) || isBackendPath(requestPath) {
+		if isBackendPath(requestPath) {
+			writeRouteError(c, http.StatusNotFound)
+			return
+		}
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
 			c.Status(http.StatusNotFound)
 			return
 		}

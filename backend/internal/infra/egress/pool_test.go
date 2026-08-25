@@ -36,7 +36,7 @@ func (r *poolStubRepo) ListEgressNodesByPool(_ context.Context, poolID uint64) (
 	return append([]domain.Node(nil), r.member[poolID]...), nil
 }
 
-func encryptedProxy(t *testing.T, cipher *security.Cipher, value string) string {
+func encryptedProxy(t *testing.T, cipher security.Cryptor, value string) string {
 	t.Helper()
 	encrypted, err := cipher.Encrypt(value)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/observability"
 	"github.com/chenyme/grok2api/backend/internal/infra/rsc"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
@@ -538,7 +539,9 @@ func (s *Service) ReconcileRiskyVerdicts(ctx context.Context) {
 	for {
 		ids, err := s.store.ListRiskyVerdictAccountIDsAfter(ctx, after)
 		if err != nil {
-			s.logger.Warn("account_risk_reconcile_list_failed", "cursor", after, "error", err.Error())
+			if !observability.IsShutdownCancellation(ctx, err) {
+				s.logger.Warn("account_risk_reconcile_list_failed", "cursor", after, "error", err.Error())
+			}
 			return
 		}
 		for _, webID := range ids {

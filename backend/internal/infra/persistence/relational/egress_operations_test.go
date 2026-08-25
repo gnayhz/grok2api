@@ -674,7 +674,7 @@ func (stub egressProbeStub) ProbeEgressNode(context.Context, egress.Node) (egres
 	return stub.result, stub.err
 }
 
-func egressOperationsCipher(t *testing.T) *security.Cipher {
+func egressOperationsCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -683,7 +683,7 @@ func egressOperationsCipher(t *testing.T) *security.Cipher {
 	return cipher
 }
 
-func createHealthyEgressNode(t *testing.T, ctx context.Context, repository *EgressRepository, cipher *security.Cipher, name string) egress.Node {
+func createHealthyEgressNode(t *testing.T, ctx context.Context, repository *EgressRepository, cipher security.Cryptor, name string) egress.Node {
 	t.Helper()
 	proxy, err := cipher.Encrypt("http://" + name + ".example:8080")
 	if err != nil {

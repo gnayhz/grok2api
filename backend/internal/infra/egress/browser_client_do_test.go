@@ -13,7 +13,8 @@ import (
 // 此前 0%——没有任何测试真实穿过 Do 完成一次 HTTP 往返。锁定:
 // (1) 真实请求经 tls-client(直连)到 httptest 源站,方法/头/体保真;
 // (2) gzip 解压响应(Uncompressed=true)剥除 Content-Encoding/Length 且
-//     ContentLength=-1——下游不得二次解码,这是防重复解压的契约。
+//
+//	ContentLength=-1——下游不得二次解码,这是防重复解压的契约。
 func TestBrowserClientDoRoundTrip(t *testing.T) {
 	var seenMethod, seenHeader, seenBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"path"
+	"strings"
 	"time"
 
 	_ "github.com/chenyme/grok2api/backend/docs"
@@ -19,12 +21,14 @@ import (
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
+	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
 	clientkeyhttp "github.com/chenyme/grok2api/backend/internal/transport/http/clientkey"
 	dashboardhttp "github.com/chenyme/grok2api/backend/internal/transport/http/dashboard"
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
+	guardstatshttp "github.com/chenyme/grok2api/backend/internal/transport/http/guardstats"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/inference"
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -116,6 +120,10 @@ func New(deps Dependencies) *gin.Engine {
 		panic("httpserver: trustedProxies 配置无效: " + err.Error())
 	}
 	router.Use(gin.Recovery(), middleware.RequestID(), middleware.ClientIP(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.Gzip(), middleware.AccessLog(deps.Logger))
+	// 错误方法此前落到 gin 默认 NoRoute（404 裸文本）：API 消费方无法区分
+	// 「路径不存在」与「方法不对」。405 + 统一信封让两类错误可判别。
+	router.HandleMethodNotAllowed = true
+	router.NoMethod(func(c *gin.Context) { writeRouteError(c, http.StatusMethodNotAllowed) })
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 	router.GET("/readyz", func(c *gin.Context) {
 		if deps.Readiness != nil {
@@ -155,6 +163,7 @@ func New(deps Dependencies) *gin.Engine {
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egressHandler := egresshttp.NewHandler(deps.Egress)
 	egressHandler.Register(adminProtected)
+	guardstatshttp.NewHandler().Register(adminProtected)
 	systemhttp.NewHandler(func() string {
 		if deps.Settings != nil {
 			return deps.Settings.PublicAPIBaseURL()
@@ -189,4 +198,29 @@ func New(deps Dependencies) *gin.Engine {
 	inferenceHandler.Register(v1)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router
+}
+
+// writeRouteError 以调用方所属面（OpenAI 兼容 /v1 或管理 API）的信封返回
+// 路由级 404/405。/v1 与 middleware.writeOpenAIError 同口径；管理面复用
+// response.Error（含 requestId，便于日志关联）。非后端路径不经过此函数。
+func writeRouteError(c *gin.Context, status int) {
+	if strings.HasPrefix(path.Clean("/"+c.Request.URL.Path), "/v1/") || c.Request.URL.Path == "/v1" {
+		errorType := "invalid_request_error"
+		if status >= 500 {
+			errorType = "server_error"
+		}
+		code := "not_found"
+		message := "未知请求路径: " + c.Request.URL.Path
+		if status == http.StatusMethodNotAllowed {
+			code = "method_not_allowed"
+			message = "请求方法不被允许: " + c.Request.Method + " " + c.Request.URL.Path
+		}
+		c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": errorType, "code": code, "param": nil}})
+		return
+	}
+	code, message := "notFound", "请求路径不存在: "+c.Request.URL.Path
+	if status == http.StatusMethodNotAllowed {
+		code, message = "methodNotAllowed", "请求方法不被允许: "+c.Request.Method+" "+c.Request.URL.Path
+	}
+	response.Error(c, status, code, message)
 }

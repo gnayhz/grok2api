@@ -381,7 +381,7 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 		EstimatedCostInUSDTicks: nonNegative(value.EstimatedCostInUSDTicks), PricingModel: truncate(value.PricingModel, 100), PricingVersion: truncate(value.PricingVersion, 20),
 		NumSourcesUsed: nonNegative(value.NumSourcesUsed), NumServerSideToolsUsed: nonNegative(value.NumServerSideToolsUsed),
 		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), FirstTokenMS: normalizedFirstToken(value), DeliveredEvents: nonNegative(value.DeliveredEvents), DeliveredBytes: nonNegative(value.DeliveredBytes), DurationMS: nonNegative(value.DurationMS),
-		ErrorCode:          truncate(value.ErrorCode, 100), QualityFailOpen: value.QualityFailOpen,
+		ErrorCode: truncate(value.ErrorCode, 100), QualityFailOpen: value.QualityFailOpen,
 		RequestMethod:      truncate(value.RequestMethod, 16),
 		RequestPath:        truncate(value.RequestPath, 2048),
 		RequestHeadersJSON: truncate(requestHeadersJSON, 65536),
@@ -834,4 +834,3 @@ func (r *AuditRepository) PurgeOlderThan(ctx context.Context, cutoff time.Time) 
 		}
 	}
 }
-
