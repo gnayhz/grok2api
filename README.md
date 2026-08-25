@@ -466,7 +466,7 @@ socks5h://Default.{account}:RESIN_PROXY_TOKEN@resin:2260
 
 The placeholder becomes a stable anonymous identity. Linked Web, Build, and Console accounts can share it; raw tokens and email addresses are not used.
 
-For managed Web/Console Cloudflare Clearance:
+For managed Web/Console Cloudflare Clearance (uncomment the `flaresolverr` service block in `docker-compose.yml` first — it ships commented as an optional template):
 
 ```bash
 docker compose --profile flaresolverr up -d

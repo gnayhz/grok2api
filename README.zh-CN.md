@@ -478,7 +478,7 @@ socks5h://Default.{account}:RESIN_PROXY_TOKEN@resin:2260
 
 占位符会替换为稳定的匿名身份。已关联的 Web、Build、Console 可共享该身份，不直接使用 Token 或 Email。
 
-如需自动维护 Web/Console Cloudflare Clearance：
+如需自动维护 Web/Console Cloudflare Clearance（请先在 `docker-compose.yml` 中取消 `flaresolverr` 服务块的注释——默认以可选模板形式注释提供）：
 
 ```bash
 docker compose --profile flaresolverr up -d
