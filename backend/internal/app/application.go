@@ -131,6 +131,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	mediaJobRepo := relational.NewMediaJobRepository(database)
 	mediaAssetRepo := relational.NewMediaAssetRepository(database)
 	mediaUploadTicketRepo := relational.NewMediaUploadTicketRepository(database)
+	// 文件基线在持久化覆盖前留存，供设置「恢复文件默认」使用。
+	fileCfg := cfg
 	loadedConfig, settingsUpdatedAt, settingsRevision, err := settingsapp.LoadPersisted(ctx, cfg, runtimeSettingsRepo)
 	if err != nil {
 		database.Close()
@@ -436,6 +438,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
 		accountService.UpdateAutoCleanConfig(accountAutoCleanConfig(next.Accounts))
 	})
+	settingsService.SetFileConfig(fileCfg)
 	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
 
 	startup := newStartupState(len(windows))

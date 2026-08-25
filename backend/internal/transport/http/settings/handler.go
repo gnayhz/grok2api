@@ -18,6 +18,7 @@ func NewHandler(service *settingsapp.Service) *Handler { return &Handler{service
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/settings", h.get)
 	router.PUT("/settings", h.update)
+	router.DELETE("/settings", h.reset)
 }
 
 type settingsConfigDTO struct {
@@ -32,6 +33,38 @@ type settingsConfigDTO struct {
 	Audit             auditConfigDTO             `json:"audit"`
 	ClientKeyDefaults clientKeyDefaultsConfigDTO `json:"clientKeyDefaults"`
 	Accounts          *accountsConfigDTO         `json:"accounts,omitempty"`
+	// RequestRetry/EgressRotation 为指针节：旧管理端未发送时保持 nil，
+	// 服务端沿用当前值而非清零。
+	RequestRetry   *requestRetryConfigDTO   `json:"requestRetry,omitempty"`
+	EgressRotation *egressRotationConfigDTO `json:"egressRotation,omitempty"`
+}
+
+type requestRetryConfigDTO struct {
+	Enabled             bool   `json:"enabled"`
+	MaxAttempts         int    `json:"maxAttempts"`
+	HoldTimeout         string `json:"holdTimeout"`
+	MinOutputTokens     int    `json:"minOutputTokens"`
+	OnExhausted         string `json:"onExhausted"`
+	AccountCooldown     string `json:"accountCooldown"`
+	EarlyHeaderAbort    string `json:"earlyHeaderAbort"`
+	SameAccountRetry    bool   `json:"sameAccountRetry"`
+	EvidenceTimeout     string `json:"evidenceTimeout"`
+	CreatedTimeout      string `json:"createdTimeout"`
+	IdleAccountCooldown string `json:"idleAccountCooldown"`
+}
+
+type egressRotationConfigDTO struct {
+	Enabled                  bool   `json:"enabled"`
+	MaxAttemptsPerQuarantine int    `json:"maxAttemptsPerQuarantine"`
+	MinNodeInterval          string `json:"minNodeInterval"`
+	MaxGlobalPerHour         int    `json:"maxGlobalPerHour"`
+	WebhookTimeout           string `json:"webhookTimeout"`
+	WebhookRetries           int    `json:"webhookRetries"`
+	SettleDelay              string `json:"settleDelay"`
+	ProbeTimeout             string `json:"probeTimeout"`
+	ProbeInterval            string `json:"probeInterval"`
+	CanaryModelPublicID      string `json:"canaryModelPublicId"`
+	CanaryCreatedTimeout     string `json:"canaryCreatedTimeout"`
 }
 
 type serverConfigDTO struct {
@@ -182,6 +215,18 @@ func (h *Handler) update(c *gin.Context) {
 	response.Success(c, http.StatusOK, newSettingsResponse(result))
 }
 
+// reset 删除持久化运行设置，恢复「以 config.yaml 为默认」的优先级
+// 语义（round 87 文档化陷阱的一键恢复路径，替代手删 runtime_settings
+// 行）。响应返回重置后的快照（即文件基线）。
+func (h *Handler) reset(c *gin.Context) {
+	result, err := h.service.ResetToDefaults(c.Request.Context())
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "settingsResetFailed", "恢复文件默认设置失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newSettingsResponse(result))
+}
+
 func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 	clearanceProvided := value.ProviderWeb.ClearanceMode != nil || value.ProviderWeb.FlareSolverrURL != nil ||
 		value.ProviderWeb.ClearanceTimeout != nil || value.ProviderWeb.ClearanceRefresh != nil
@@ -262,6 +307,28 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		}
 		result.AccountsProvided = true
 	}
+	if value.RequestRetry != nil {
+		result.RequestRetry = settingsapp.RequestRetryEditable{
+			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
+			HoldTimeout: value.RequestRetry.HoldTimeout, MinOutputTokens: value.RequestRetry.MinOutputTokens,
+			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: value.RequestRetry.AccountCooldown,
+			EarlyHeaderAbort: value.RequestRetry.EarlyHeaderAbort, SameAccountRetry: value.RequestRetry.SameAccountRetry,
+			EvidenceTimeout: value.RequestRetry.EvidenceTimeout, CreatedTimeout: value.RequestRetry.CreatedTimeout,
+			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown,
+		}
+		result.RequestRetryProvided = true
+	}
+	if value.EgressRotation != nil {
+		result.EgressRotation = settingsapp.EgressRotationEditable{
+			Enabled: value.EgressRotation.Enabled, MaxAttemptsPerQuarantine: value.EgressRotation.MaxAttemptsPerQuarantine,
+			MinNodeInterval: value.EgressRotation.MinNodeInterval, MaxGlobalPerHour: value.EgressRotation.MaxGlobalPerHour,
+			WebhookTimeout: value.EgressRotation.WebhookTimeout, WebhookRetries: value.EgressRotation.WebhookRetries,
+			SettleDelay: value.EgressRotation.SettleDelay, ProbeTimeout: value.EgressRotation.ProbeTimeout,
+			ProbeInterval: value.EgressRotation.ProbeInterval, CanaryModelPublicID: value.EgressRotation.CanaryModelPublicID,
+			CanaryCreatedTimeout: value.EgressRotation.CanaryCreatedTimeout,
+		}
+		result.EgressRotationProvided = true
+	}
 	return result
 }
 
@@ -332,6 +399,22 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				AutoCleanReauthInterval:              config.Accounts.AutoCleanReauthInterval,
 				AutoCleanReauthMinAge:                config.Accounts.AutoCleanReauthMinAge,
 				AutoCleanIncludeDisabled:             config.Accounts.AutoCleanIncludeDisabled,
+			},
+			RequestRetry: &requestRetryConfigDTO{
+				Enabled: config.RequestRetry.Enabled, MaxAttempts: config.RequestRetry.MaxAttempts,
+				HoldTimeout: config.RequestRetry.HoldTimeout, MinOutputTokens: config.RequestRetry.MinOutputTokens,
+				OnExhausted: config.RequestRetry.OnExhausted, AccountCooldown: config.RequestRetry.AccountCooldown,
+				EarlyHeaderAbort: config.RequestRetry.EarlyHeaderAbort, SameAccountRetry: config.RequestRetry.SameAccountRetry,
+				EvidenceTimeout: config.RequestRetry.EvidenceTimeout, CreatedTimeout: config.RequestRetry.CreatedTimeout,
+				IdleAccountCooldown: config.RequestRetry.IdleAccountCooldown,
+			},
+			EgressRotation: &egressRotationConfigDTO{
+				Enabled: config.EgressRotation.Enabled, MaxAttemptsPerQuarantine: config.EgressRotation.MaxAttemptsPerQuarantine,
+				MinNodeInterval: config.EgressRotation.MinNodeInterval, MaxGlobalPerHour: config.EgressRotation.MaxGlobalPerHour,
+				WebhookTimeout: config.EgressRotation.WebhookTimeout, WebhookRetries: config.EgressRotation.WebhookRetries,
+				SettleDelay: config.EgressRotation.SettleDelay, ProbeTimeout: config.EgressRotation.ProbeTimeout,
+				ProbeInterval: config.EgressRotation.ProbeInterval, CanaryModelPublicID: config.EgressRotation.CanaryModelPublicID,
+				CanaryCreatedTimeout: config.EgressRotation.CanaryCreatedTimeout,
 			},
 		},
 		RecommendedProviderBuild: providerBuildRecommendationDTO{

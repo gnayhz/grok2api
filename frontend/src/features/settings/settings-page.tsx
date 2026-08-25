@@ -22,9 +22,10 @@ import { cn } from "@/shared/lib/cn";
 
 export function SettingsPage() {
   const { t } = useTranslation();
-  const { form, settingsQuery, updateMutation, reset } = useSettings();
+  const { form, settingsQuery, updateMutation, resetDefaultsMutation, reset } = useSettings();
   const [autoCleanConfirm, setAutoCleanConfirm] = useState<"enabled" | "includeDisabled" | null>(null);
   const [unlimitedAttemptsConfirm, setUnlimitedAttemptsConfirm] = useState(false);
+  const [resetDefaultsConfirm, setResetDefaultsConfirm] = useState(false);
   const limitedRoutingAttemptsRef = useRef(3);
   const limitedVideoRoutingAttemptsRef = useRef(999);
   const autoCleanEnabled = form.watch("accounts.autoCleanReauthEnabled") === true;
@@ -70,6 +71,9 @@ export function SettingsPage() {
           </Tooltip>
           <Button type="submit" size="sm" disabled={loading || updateMutation.isPending || !form.formState.isDirty}>
             {updateMutation.isPending ? <Spinner /> : null}{t("common.save")}
+          </Button>
+          <Button type="button" variant="outline" size="sm" disabled={loading || updateMutation.isPending || resetDefaultsMutation.isPending} onClick={() => setResetDefaultsConfirm(true)}>
+            {resetDefaultsMutation.isPending ? <Spinner /> : null}{t("settings.resetToDefaults")}
           </Button>
         </div>
       </header>
@@ -582,6 +586,26 @@ export function SettingsPage() {
           </div>
         </Tabs>
       ) : null}
+      <AlertDialog open={resetDefaultsConfirm} onOpenChange={setResetDefaultsConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("settings.resetToDefaultsTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("settings.resetToDefaultsDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={() => {
+                setResetDefaultsConfirm(false);
+                resetDefaultsMutation.mutate();
+              }}
+            >
+              {t("settings.resetToDefaultsConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </form>
   );
 }
