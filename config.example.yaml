@@ -182,7 +182,10 @@ audit:
   commitDelay: 5ms
   # [按需修改] 自动清理超过该天数的请求审计与尝试诊断；0 表示永久保留。
   retentionDays: 7
-  # [通常不要修改] enforce 会在异常持续超过宽限期后暂停新的推理请求；确认发生数据丢失时会立即暂停。
+  # [通常不要修改] enforce 会在异常持续超过宽限期后暂停新的推理请求；
+  # 确认发生数据丢失（队列溢出丢行）时立即暂停，且该状态不可自愈——
+  # 恢复推理需重启进程（设计语义：宁可拒绝服务也不静默丢账）。observe
+  # 只记日志不拦截。该开关对所有推理入口生效（文本/图像/视频/语音）。
   ledgerMode: enforce # observe | enforce
   ledgerFailureThreshold: 1
   ledgerUnhealthyGrace: 10s
