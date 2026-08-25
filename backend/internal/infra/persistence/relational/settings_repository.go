@@ -22,10 +22,10 @@ type runtimeSettingsPayload struct {
 
 type RuntimeSettingsRepository struct {
 	database *Database
-	cipher   *security.Cipher
+	cipher   security.Cryptor
 }
 
-func NewRuntimeSettingsRepository(database *Database, cipher *security.Cipher) *RuntimeSettingsRepository {
+func NewRuntimeSettingsRepository(database *Database, cipher security.Cryptor) *RuntimeSettingsRepository {
 	return &RuntimeSettingsRepository{database: database, cipher: cipher}
 }
 

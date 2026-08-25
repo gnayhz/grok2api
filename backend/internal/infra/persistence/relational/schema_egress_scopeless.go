@@ -47,9 +47,12 @@ var legacyEgressOperationsColumns = []string{
 }
 
 // legacyEgressColumnsByTable lists every retired column per table: resource
-// scopes, account→proxy bindings, and shared proxy profiles.
+// scopes and shared proxy profiles. provider_accounts 的账号-出口绑定列
+// （egress_node_id/egress_assignment_mode/egress_assigned_at）不在其列——
+// 它们是仍在活跃使用的功能面（路由排除、绑定列举、手工指派）。删除后
+// AutoMigrate 会按当前模型重建空列，管理员已有绑定即被清空（round 41：
+// TestEgressBindingSurvivesSchemaReinit 复现过该数据丢失）。
 var legacyEgressColumnsByTable = map[string][]string{
-	"provider_accounts":           {"egress_node_id", "egress_assignment_mode", "egress_pool_id", "egress_assigned_at"},
 	"egress_nodes":                {"scope", "pool_id", "account_capacity", "proxy_profile_id"},
 	"egress_pools":                {"scope"},
 	"egress_subscription_sources": {"scope", "default_account_capacity", "pool_id"},
@@ -158,9 +161,10 @@ func (d *Database) dropEgressLegacyColumns(ctx context.Context, table string, co
 }
 
 // legacyEgressConstraintsByTable lists stored constraints that reference the
-// retired columns and therefore must not survive the rebuild.
+// retired columns and therefore must not survive the rebuild. provider_accounts
+// 的绑定列是活功能（见 legacyEgressColumnsByTable 注释），其外键/CHECK 由
+// 当前模型定义并保留。
 var legacyEgressConstraintsByTable = map[string][]string{
-	"provider_accounts":           {"fk_provider_accounts_egress_node", "chk_accounts_egress_assignment_mode"},
 	"egress_nodes":                {"chk_egress_nodes_specific_scope", "chk_egress_nodes_capacity", "fk_egress_nodes_proxy_profile"},
 	"egress_pools":                {"chk_egress_pools_scope", "uidx_egress_pools_scope_name"},
 	"egress_subscription_sources": {"chk_egress_subscription_sources_scope", "chk_egress_subscription_sources_capacity"},

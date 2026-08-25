@@ -31,6 +31,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
+	"github.com/chenyme/grok2api/backend/internal/infra/observability"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
@@ -109,7 +110,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, err
 	}
-	cipher, err := security.NewCipher(cfg.Secrets.CredentialEncryptionKey)
+	// VersionedCipher：轮换 credentialEncryptionKey 后把旧密钥配置进
+	// secrets.legacyCredentialEncryptionKeys，存量凭据经回退继续可解。
+	cipher, err := security.NewVersionedCipher(cfg.Secrets.CredentialEncryptionKey, cfg.Secrets.LegacyEncryptionKeys)
 	if err != nil {
 		database.Close()
 		return nil, err
@@ -440,6 +443,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
 	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService})
+	logSecureCookiesHint(logger, cfg)
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
@@ -784,7 +788,9 @@ func (a *Application) Run(ctx context.Context) error {
 	})
 	startBackground("media_cleanup", func(taskCtx context.Context) error {
 		a.media.RunCleanup(taskCtx, func(err error) {
-			a.logger.Warn("media_cleanup_failed", "error", err)
+			if !observability.IsShutdownCancellation(taskCtx, err) {
+				a.logger.Warn("media_cleanup_failed", "error", err)
+			}
 		})
 		return nil
 	})
@@ -801,7 +807,7 @@ func (a *Application) Run(ctx context.Context) error {
 		return nil
 	})
 	startBackground("egress_operations", func(taskCtx context.Context) error {
-		if err := a.egressOps.RunMaintenance(taskCtx); err != nil {
+		if err := a.egressOps.RunMaintenance(taskCtx); err != nil && !observability.IsShutdownCancellation(taskCtx, err) {
 			a.logger.Warn("egress_operations_initial_run_failed", "error", err)
 		}
 		a.runPeriodicTask(taskCtx, time.Minute, "egress_operations", a.egressOps.RunMaintenance)
@@ -944,7 +950,7 @@ func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duratio
 			runCtx, cancel := context.WithTimeout(ctx, minDuration(interval, 5*time.Minute))
 			err := task(runCtx)
 			cancel()
-			if err != nil {
+			if err != nil && !observability.IsShutdownCancellation(ctx, err) {
 				a.logger.Warn(name+"_failed", "error", err)
 			}
 			resetTimer(timer, interval)
@@ -987,6 +993,20 @@ func resetTimer(timer *time.Timer, interval time.Duration) {
 		}
 	}
 	timer.Reset(interval)
+}
+
+// logSecureCookiesHint 在 secureCookies=true 时提示 HTTP 直连陷阱：浏览器
+// 拒收 Secure cookie 表现为登录循环，且服务端此前无任何可观测线索。
+// 配置了可信反向代理时大概率由代理终结 TLS（合法部署），降级为 INFO。
+func logSecureCookiesHint(logger *slog.Logger, cfg config.Config) {
+	if !cfg.Auth.SecureCookies {
+		return
+	}
+	if len(cfg.Server.TrustedProxies) == 0 {
+		logger.Warn("secure_cookies_over_plain_http", "hint", "auth.secureCookies=true 且未配置 server.trustedProxies：浏览器经 HTTP 直连将拒收 Secure cookie（登录循环）；若由 HTTPS 反向代理终结 TLS，请配置 trustedProxies 以降级本提示")
+		return
+	}
+	logger.Info("secure_cookies_enabled_behind_proxy", "hint", "假定 TLS 由可信反向代理终结；直连 HTTP 时浏览器将拒收会话 cookie")
 }
 
 func minDuration(left, right time.Duration) time.Duration {

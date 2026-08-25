@@ -136,6 +136,7 @@ func TestAdminForceRefreshWaitsForPeerNewGeneration(t *testing.T) {
 		t.Fatalf("cached clearance must be the peer's fresh generation: ok=%v cookies=%q", ok, state.cookies)
 	}
 }
+
 // 锁获取路径的 force 语义护栏:管理员强制刷新拿到锁时,同世代(入口读取
 // 时的同一持久世代)不得被复用——必须真正求解出新 cookie。
 func TestAdminForceRefreshWithLockReSolvesSameGeneration(t *testing.T) {

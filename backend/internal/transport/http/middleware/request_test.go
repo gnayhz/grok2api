@@ -265,6 +265,7 @@ func TestSecurityHeaders(t *testing.T) {
 		}
 	}
 }
+
 // 5xx 必须计入 http_request_server_error_total（方法路径 × 状态码），非 5xx
 // 零计数——管理面曾出现三处 500 仅存于单条日志、无法进入分钟级指标周期的
 // 观测缺口（见 EGRESS-REVIEW-STATUS 审查轮次）。

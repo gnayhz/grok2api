@@ -73,20 +73,23 @@ func (s *Service) observeProbeResult(node domain.Node, result domain.ProbeResult
 	s.probeDead[node.ID] = entry
 	fresh := entry.count == 2
 	act := entry.count >= 2
+	// 捕获当前确认延迟：confirmProbeLater 是异步 goroutine，事后读取
+	// 可变包级变量会与测试的恢复写入构成数据竞争（race detector 已
+	// 抓获）。在调度点取快照即可根治。
+	confirmDelay := probeDeadConfirmDelay
 	s.probeDeadMu.Unlock()
 	if scheduleConfirm {
-		go s.confirmProbeLater(node.ID)
+		go s.confirmProbeLater(node.ID, confirmDelay)
 	}
 	if act {
 		s.markProbeDead(node.ID, fresh)
 	}
 }
 
-
 // confirmProbeLater 在确认延迟后补测一次: 抖动型失败在此窗口内自愈则计数
 // 归零(节点从未被标记), 仍然双族失败则计数到达阈值并触发标记。
-func (s *Service) confirmProbeLater(nodeID uint64) {
-	timer := time.NewTimer(probeDeadConfirmDelay)
+func (s *Service) confirmProbeLater(nodeID uint64, confirmDelay time.Duration) {
+	timer := time.NewTimer(confirmDelay)
 	defer timer.Stop()
 	<-timer.C
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

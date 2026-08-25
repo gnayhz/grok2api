@@ -307,8 +307,12 @@ type AccountsConfig struct {
 }
 
 type Secrets struct {
-	JWTSecret               string `yaml:"jwtSecret"`
-	CredentialEncryptionKey string `yaml:"credentialEncryptionKey"`
+	JWTSecret string `yaml:"jwtSecret"`
+	// CredentialEncryptionKey 是当前主密钥；轮换密钥时把旧密钥列入
+	// LegacyEncryptionKeys，存量凭据经历史密钥回退继续可解（新密文一律
+	// 用主密钥写入）。
+	CredentialEncryptionKey string   `yaml:"credentialEncryptionKey"`
+	LegacyEncryptionKeys    []string `yaml:"legacyCredentialEncryptionKeys"`
 }
 
 type BootstrapAdminConfig struct {
@@ -568,6 +572,17 @@ func (c Config) Validate() error {
 	}
 	if !validCredentialEncryptionKey(c.Secrets.CredentialEncryptionKey) {
 		return errors.New("secrets.credentialEncryptionKey 必须是 Base64 编码的 32 字节密钥")
+	}
+	for index, key := range c.Secrets.LegacyEncryptionKeys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if !validCredentialEncryptionKey(key) {
+			return fmt.Errorf("secrets.legacyCredentialEncryptionKeys[%d] 必须是 Base64 编码的 32 字节密钥", index)
+		}
+		if key == c.Secrets.CredentialEncryptionKey {
+			return fmt.Errorf("secrets.legacyCredentialEncryptionKeys[%d] 与当前主密钥相同（无意义且掩盖配置错误）", index)
+		}
 	}
 	if isExampleSecret(c.BootstrapAdmin.Password) {
 		return errors.New("bootstrapAdmin.password 不能使用示例占位值")
@@ -878,7 +893,7 @@ func defaultConfig() Config {
 		AccountRisk: DefaultAccountRiskConfig(),
 		RequestRetry: RequestRetryConfig{
 			MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed", SameAccountRetry: true,
-			AccountCooldown: Duration(24 * time.Hour),		},
+			AccountCooldown: Duration(24 * time.Hour)},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{
 			MarkBuildForbiddenReauth:             false,

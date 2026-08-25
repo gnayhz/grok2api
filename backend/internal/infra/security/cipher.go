@@ -9,6 +9,14 @@ import (
 	"io"
 )
 
+// Cryptor 是凭据加解密的最小接口；*Cipher 与 *VersionedCipher 均实现。
+// 消费方（仓储/Provider/出口管理器）依赖此面而非具体类型，主密钥
+// 轮换（VersionedCipher 历史密钥回退）对全部存量密文统一生效。
+type Cryptor interface {
+	Encrypt(plaintext string) (string, error)
+	Decrypt(encoded string) (string, error)
+}
+
 // Cipher 使用 AES-256-GCM 加密数据库中的 OAuth 凭据。
 type Cipher struct {
 	aead cipher.AEAD

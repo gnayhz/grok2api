@@ -76,7 +76,7 @@ func TestQuarantineNodeForQualitySkipsPoolNodes(t *testing.T) {
 	}
 }
 
-func newQuarantineTestCipher(t *testing.T) *security.Cipher {
+func newQuarantineTestCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -85,7 +85,7 @@ func newQuarantineTestCipher(t *testing.T) *security.Cipher {
 	return cipher
 }
 
-func encryptedForTest(t *testing.T, cipher *security.Cipher, value string) string {
+func encryptedForTest(t *testing.T, cipher security.Cryptor, value string) string {
 	t.Helper()
 	encrypted, err := cipher.Encrypt(value)
 	if err != nil {

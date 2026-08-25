@@ -61,7 +61,7 @@ type ServiceRepository interface {
 type Service struct {
 	repository      ServiceRepository
 	operations      OperationsRepository
-	cipher          *security.Cipher
+	cipher          security.Cryptor
 	mu              sync.RWMutex
 	clearance       ClearanceManager
 	prober          NodeProber
@@ -109,7 +109,7 @@ type BatchClearanceManager interface {
 	ForgetClearances([]uint64)
 }
 
-func NewService(storage ServiceRepository, cipher *security.Cipher) *Service {
+func NewService(storage ServiceRepository, cipher security.Cryptor) *Service {
 	// qualityEvidence 必须在构造时初始化:OnEgressDegraded 首次写入时 map 为
 	// nil 会 panic, 生产(app.go)与测试直构 Service 字面量的行为从此一致。
 	service := &Service{repository: storage, cipher: cipher, qualityEvidence: map[uint64][]degradeObservation{}}

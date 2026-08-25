@@ -35,8 +35,13 @@ secrets:
   # [必须修改] 至少 32 个字符。快速生成：openssl rand -hex 32
   jwtSecret: "replace-with-at-least-32-characters"
   # [必须修改] Base64 编码的 32 字节密钥。快速生成：openssl rand -base64 32
-  # 首次写入账号后必须长期保留，后续更换会导致已有凭据无法解密。
+  # 轮换流程：1) 生成新密钥填入本字段；2) 把旧密钥放入下方
+  # legacyCredentialEncryptionKeys；3) 重启——存量凭据经历史密钥回退
+  # 继续可解，新写入一律用新主密钥。不轮换则删除该列表。
   credentialEncryptionKey: "replace-with-base64-key"
+  # [按需修改：仅轮换时] 历史密钥列表（按轮换先后排列）。
+  # legacyCredentialEncryptionKeys:
+  #   - "旧的-base64-32字节密钥="
 
 bootstrapAdmin:
   # [按需修改] 仅在数据库中没有管理员时使用。
@@ -53,6 +58,15 @@ frontend:
   # （2026-08-21 实测：设为 http://宿主:38000 后生成→下载全链 200）。
   # 也可在管理端设置面热修改（即时生效）。留空使用默认值。
   # publicApiBaseURL: "http://127.0.0.1:8000"
+
+# 前端运行时覆盖钩子（分离部署用）：镜像内 /app/frontend/dist/
+# runtime-config.js 默认空对象（同源调用 API）。前端与 API 分属不同
+# 域名时，将其挂载覆盖为：
+#   window.__GROK2API_RUNTIME_CONFIG__ = {
+#     apiBaseUrl: "https://api.example.com",      // 管理端 API 基址
+#     publicApiBaseUrl: "https://cdn.example.com" // 媒体资源基址（可省略）
+#   };
+# 同源部署无需任何改动。
 
 database:
   # [按需修改] 单实例使用 sqlite；多实例改为 postgres。
@@ -91,6 +105,42 @@ deployment:
   clusterID: "grok2api"
   # [必须修改：仅 replicas>1] 确认 media.local.path 已挂载为所有实例共享且可读写的存储。
   sharedMedia: false
+
+# 上游 Provider 端点与指纹。留空（整段省略）使用下方内置默认值；仅在做
+# 反代/自托管/出口改造时按需覆盖，普通部署不需要本段。
+provider:
+  build:
+    # [按需修改] Grok Build(CLI) 上游地址。
+    baseURL: "https://cli-chat-proxy.grok.com/v1"
+    # [按需修改] 上游 4xx/5xx 不可用时的回退地址（Build API 直连）。
+    fallbackBaseURL: "https://api.x.ai/v1"
+    # [通常不要修改] 客户端指纹三元组：版本/标识/TokenAuth 头。与真实
+    # grok-cli 发行版保持一致，随意改动可能触发上游风控。
+    clientVersion: "1.0.4"
+    clientIdentifier: "grok-shell"
+    tokenAuth: "xai-grok-cli"
+    # [通常不要修改] 请求 User-Agent，默认随 clientVersion 派生。
+    userAgent: "grok-shell/1.0.4 (linux; x86_64)"
+  web:
+    # [按需修改] Grok Web(SSO Cookie) 上游地址。
+    baseURL: "https://grok.com"
+    # [通常不要修改] 各类上游调用的超时：配额查询/对话/图片/视频。
+    quotaTimeout: 25s
+    chatTimeout: 2m
+    imageTimeout: 3m
+    videoTimeout: 15m
+    # [通常不要修改] 媒体任务并发上限。
+    mediaConcurrency: 4
+    # [按需修改] 是否允许通过管理端为 Web 账号开启 NSFW 开关。
+    allowNSFW: false
+    # [通常不要修改] 配额恢复探测的退避基准与上限。
+    recoveryBackoffBase: 30s
+    recoveryBackoffMax: 30m
+  console:
+    # [按需修改] Grok Console 上游地址。
+    baseURL: "https://console.x.ai"
+    # [通常不要修改] Console 对话超时。
+    chatTimeout: 5m
 
 media:
   # [通常不要修改] 当前仅支持 local；容量和清理策略在管理端设置。
@@ -209,6 +259,14 @@ accountRisk:
     patrol:
       enabled: false      # clean 账号低频巡检（每 15 分钟一批 50 个）
       bucketDays: 30      # clean 结论的有效期（7-90 天）
+
+# 新建客户端 Key 的默认限流值（管理端创建界面仍可逐 Key 覆盖）。
+clientKeyDefaults:
+  # [按需修改] 每分钟请求数默认值（1-100000）。
+  rpmLimit: 120
+  # [按需修改] 并发请求数默认值（1-1024）。
+  maxConcurrent: 8
+
 # 出口 IP 质量守卫与自动换 IP（应对"IP 被标记后路由到降智模型"）。
 # 触发链：请求降智 → 账号 RSC 归因 CLEAN → 该出口节点隔离（后续请求由路由层自动落到其他可用出口）
 # → POST 节点的换 IP webhook（如重启 MicroWARP）→ 探活 + 校验出口 IP 已变化

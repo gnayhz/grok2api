@@ -123,7 +123,6 @@ func TestPoolCRUDServiceInvariants(t *testing.T) {
 	}
 }
 
-
 // validatePoolInput 的回退链校验分支（自回退、A→B→A 环、A→B→C 链合法）
 // 此前只有 stub handler 测试触达 pool-without-id 分支,环走查从未在真实
 // 服务路径上执行——README 明确承诺"保存时拒绝 A→B→A(及更长的环)"。
@@ -177,8 +176,6 @@ func TestPoolFallbackChainValidationOnServicePath(t *testing.T) {
 	// 指向不存在的池:走查终止于 unknown,合法(保存时目标校验由 DB FK/后续检查兜底)
 	_ = ctx
 }
-
-
 
 // 订阅源列表与 reveal 面的覆盖补齐:ListSources/ListSourcePage/SourceProxyURL
 // 此前 0%,SourceURL 35.7%——reveal 的"未配置拒绝/解密往返/缺失 404"语义

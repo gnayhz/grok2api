@@ -727,9 +727,9 @@ func (r *EgressRepository) UpdateEgressSource(ctx context.Context, value egress.
 		"name": row.Name, "enabled": row.Enabled,
 		"encrypted_url": row.EncryptedURL, "encrypted_proxy_url": row.EncryptedProxyURL,
 		"refresh_interval_seconds": row.RefreshIntervalSeconds,
-		"updated_at":              time.Now().UTC(),
-		"next_sync_at": gorm.Expr("CASE WHEN "+configChanged+" THEN NULL ELSE next_sync_at END", row.EncryptedURL, row.EncryptedProxyURL),
-		"last_sync_error": gorm.Expr("CASE WHEN "+configChanged+" THEN '' ELSE last_sync_error END", row.EncryptedURL, row.EncryptedProxyURL),
+		"updated_at":               time.Now().UTC(),
+		"next_sync_at":             gorm.Expr("CASE WHEN "+configChanged+" THEN NULL ELSE next_sync_at END", row.EncryptedURL, row.EncryptedProxyURL),
+		"last_sync_error":          gorm.Expr("CASE WHEN "+configChanged+" THEN '' ELSE last_sync_error END", row.EncryptedURL, row.EncryptedProxyURL),
 	}
 	result := r.db.db.WithContext(ctx).Model(&egressSubscriptionSourceModel{}).Where("id = ?", value.ID).Updates(updates)
 	if result.Error != nil {
@@ -807,17 +807,17 @@ func (r *EgressRepository) UpsertEgressNodesFromSource(ctx context.Context, sour
 				DoUpdates: clause.Assignments(map[string]any{
 					"name": row.Name, "enabled": row.Enabled, "proxy_pool": row.ProxyPool,
 					"encrypted_proxy_url": row.EncryptedProxyURL,
-					"updated_at": time.Now().UTC(),
-					"health": gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.health ELSE 1 END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
-					"failure_count": gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.failure_count ELSE 0 END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
-					"cooldown_until": gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.cooldown_until ELSE NULL END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
-					"last_error": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.last_error ELSE '' END", row.EncryptedProxyURL),
-					"probe_status": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_status ELSE ? END", row.EncryptedProxyURL, egress.ProbeStatusUnknown),
-					"last_probed_at": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.last_probed_at ELSE NULL END", row.EncryptedProxyURL),
-					"probe_latency_ms": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_latency_ms ELSE 0 END", row.EncryptedProxyURL),
-					"exit_ip": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.exit_ip ELSE '' END", row.EncryptedProxyURL),
-					"probe_error": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_error ELSE '' END", row.EncryptedProxyURL),
-					"probe_provider": gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_provider ELSE '' END", row.EncryptedProxyURL),
+					"updated_at":          time.Now().UTC(),
+					"health":              gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.health ELSE 1 END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
+					"failure_count":       gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.failure_count ELSE 0 END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
+					"cooldown_until":      gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.cooldown_until ELSE NULL END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
+					"last_error":          gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.last_error ELSE '' END", row.EncryptedProxyURL),
+					"probe_status":        gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_status ELSE ? END", row.EncryptedProxyURL, egress.ProbeStatusUnknown),
+					"last_probed_at":      gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.last_probed_at ELSE NULL END", row.EncryptedProxyURL),
+					"probe_latency_ms":    gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_latency_ms ELSE 0 END", row.EncryptedProxyURL),
+					"exit_ip":             gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.exit_ip ELSE '' END", row.EncryptedProxyURL),
+					"probe_error":         gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_error ELSE '' END", row.EncryptedProxyURL),
+					"probe_provider":      gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_provider ELSE '' END", row.EncryptedProxyURL),
 				}),
 			}).Create(&row).Error; err != nil {
 				return mapError(err)

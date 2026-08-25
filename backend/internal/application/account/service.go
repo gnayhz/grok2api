@@ -16,11 +16,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -423,7 +423,7 @@ type Service struct {
 	quotaQueue          repository.QuotaRecoveryQueue
 	quotaRefreshState   repository.QuotaRefreshCoordinator
 	providers           *provider.Registry
-	cipher              *security.Cipher
+	cipher              security.Cryptor
 	refreshes           singleflight.Group
 	billingSyncs        singleflight.Group
 	quotaSyncs          singleflight.Group
@@ -493,7 +493,7 @@ func (s *Service) SetObservedModelStore(value repository.ObservedModelStateRepos
 	s.observedModelStore = value
 }
 
-func NewService(accounts repository.AccountRepository, audits repository.AuditRepository, deviceSessions repository.DeviceSessionRepository, sticky repository.StickySessionRepository, providers *provider.Registry, cipher *security.Cipher, refreshLock repository.DistributedLock) *Service {
+func NewService(accounts repository.AccountRepository, audits repository.AuditRepository, deviceSessions repository.DeviceSessionRepository, sticky repository.StickySessionRepository, providers *provider.Registry, cipher security.Cryptor, refreshLock repository.DistributedLock) *Service {
 	return &Service{
 		accounts: accounts, audits: audits, deviceSessions: deviceSessions, sticky: sticky,
 		providers: providers, cipher: cipher, refreshLock: refreshLock,
@@ -4833,20 +4833,6 @@ func (s *Service) SetAccountRiskStatus(ctx context.Context, id uint64, flagged b
 // would let a persistently failing account never cool down.
 func (s *Service) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
 	if err := s.accounts.ClearMissingThinkingCooldown(ctx, id); err != nil {
-		return mapRepositoryError(err)
-	}
-	return nil
-}
-
-// ClearCooldownUnconditional is the manual operator escape hatch: it
-// unconditionally lifts the request-path cooldown (failure_count /
-// cooldown_until / last_error). Unlike ClearMissingThinkingCooldown it is not
-// verdict-scoped — an operator invoking it explicitly takes over the judgment,
-// including generic 5xx cooldowns and the missing-thinking strike marker. The
-// enabled state stays untouched: re-enabling a disabled account remains a
-// separate action.
-func (s *Service) ClearCooldownUnconditional(ctx context.Context, id uint64) error {
-	if err := s.accounts.ClearCooldown(ctx, id); err != nil {
 		return mapRepositoryError(err)
 	}
 	return nil
