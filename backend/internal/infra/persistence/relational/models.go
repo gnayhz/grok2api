@@ -13,13 +13,14 @@ type adminModel struct {
 func (adminModel) TableName() string { return "admins" }
 
 type adminSessionModel struct {
-	ID               uint64    `gorm:"primaryKey;autoIncrement"`
-	AdminID          uint64    `gorm:"not null"`
-	RefreshTokenHash string    `gorm:"size:64;uniqueIndex;not null;check:chk_admin_sessions_token_hash,length(refresh_token_hash) = 64"`
-	ExpiresAt        time.Time `gorm:"not null"`
-	LastUsedAt       *time.Time
-	CreatedAt        time.Time   `gorm:"not null"`
-	Admin            *adminModel `gorm:"foreignKey:AdminID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	ID                       uint64    `gorm:"primaryKey;autoIncrement"`
+	AdminID                  uint64    `gorm:"not null"`
+	RefreshTokenHash         string    `gorm:"size:64;uniqueIndex;not null;check:chk_admin_sessions_token_hash,length(refresh_token_hash) = 64"`
+	PreviousRefreshTokenHash string    `gorm:"size:64;not null;default:'';check:chk_admin_sessions_prev_hash,previous_refresh_token_hash = '' OR length(previous_refresh_token_hash) = 64"`
+	ExpiresAt                time.Time `gorm:"not null"`
+	LastUsedAt               *time.Time
+	CreatedAt                time.Time   `gorm:"not null"`
+	Admin                    *adminModel `gorm:"foreignKey:AdminID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 }
 
 func (adminSessionModel) TableName() string { return "admin_sessions" }

@@ -21,6 +21,9 @@ type AdminSessionRepository interface {
 	Create(ctx context.Context, value admin.Session) (admin.Session, error)
 	GetByID(ctx context.Context, id uint64) (admin.Session, error)
 	GetByTokenHash(ctx context.Context, tokenHash string) (admin.Session, error)
+	// GetByPreviousTokenHash 按上一代 refresh token hash 查找会话：轮换后
+	// 旧 token 再呈上是窃取信号，需要定位并吊销整个 token family。
+	GetByPreviousTokenHash(ctx context.Context, tokenHash string) (admin.Session, error)
 	Rotate(ctx context.Context, id uint64, expectedTokenHash, newTokenHash string, expiresAt time.Time) error
 	Revoke(ctx context.Context, id uint64) error
 	RevokeAllByAdmin(ctx context.Context, adminID uint64) error

@@ -14,9 +14,10 @@ func AccountConcurrencyKey(accountID uint64) string {
 	return "account:" + strconv.FormatUint(accountID, 10)
 }
 
-// RateLimiter 定义客户端 RPM 限制边界。
+// RateLimiter 定义客户端 RPM 限制边界。retryAfter 为被拒后建议的
+// 重试等待（固定窗口剩余时间）；允许时为零值。
 type RateLimiter interface {
-	Allow(ctx context.Context, key string, limit int, now time.Time) (bool, error)
+	Allow(ctx context.Context, key string, limit int, now time.Time) (allowed bool, retryAfter time.Duration, err error)
 }
 
 // ConcurrencyLimiter 定义客户端和账号并发租约边界。

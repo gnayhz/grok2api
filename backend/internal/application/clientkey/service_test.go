@@ -334,14 +334,14 @@ func testCipher(t *testing.T) security.Cryptor {
 
 type failingRateLimiter struct{}
 
-func (failingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
-	return false, errors.New("redis unavailable")
+func (failingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, time.Duration, error) {
+	return false, 0, errors.New("redis unavailable")
 }
 
 type successfulRateLimiter struct{}
 
-func (successfulRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
-	return true, nil
+func (successfulRateLimiter) Allow(context.Context, string, int, time.Time) (bool, time.Duration, error) {
+	return true, 0, nil
 }
 
 type failingConcurrencyLimiter struct{}

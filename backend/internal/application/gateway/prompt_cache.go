@@ -12,7 +12,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 )
 
-const buildSessionIdentityVersion = "v3"
+const buildSessionIdentityVersion = "v4"
 
 type buildSessionIdentity struct {
 	// upstreamID is sent as prompt_cache_key and x-grok-conv-id and must remain stable across turns.
@@ -64,8 +64,12 @@ func resolveBuildSessionIdentity(clientKeyID uint64, provider accountdomain.Prov
 	// 此前按「system+首条 user 前缀」合并, 开头雷同的不同对话会共享同一个上游
 	// 会话, 上游历史互相串扰。客户端显式传 prompt_cache_key/session 的路径不受
 	// 影响(它们的会话连续性来自显式信号)。
-	upstreamSource := fmt.Sprintf("grok2api:build-soft-session:%s:%d:%s:%s:%s:%s:%s", buildSessionIdentityVersion, clientKeyID, provider, model, system, firstUser, strings.TrimSpace(requestScope))
-	affinitySource := fmt.Sprintf("grok2api:build-soft-affinity:%s:%d:%s:%s:%s:%s", buildSessionIdentityVersion, clientKeyID, provider, model, system, firstUser)
+	// 长度前缀编码（v4）：system 与 firstUser 都是客户端可控文本，裸
+	// ":%s:%s" 拼接存在移位歧义——system="a:b"+user="c" 与 system="a"
+	// +user="b:c" 坍缩到同一 affinityKey（round 71 PoC 证实）。前缀长度
+	// 使字段边界唯一，编码可逆。
+	upstreamSource := fmt.Sprintf("grok2api:build-soft-session:%s:%d:%s:%s:%d:%s:%d:%s:%s", buildSessionIdentityVersion, clientKeyID, provider, model, len(system), system, len(firstUser), firstUser, strings.TrimSpace(requestScope))
+	affinitySource := fmt.Sprintf("grok2api:build-soft-affinity:%s:%d:%s:%s:%d:%s:%d:%s", buildSessionIdentityVersion, clientKeyID, provider, model, len(system), system, len(firstUser), firstUser)
 	return buildSessionIdentity{
 		upstreamID:  digestUUID(upstreamSource),
 		affinityKey: hexDigest(affinitySource),

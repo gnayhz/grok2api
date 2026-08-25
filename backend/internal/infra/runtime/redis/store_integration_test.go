@@ -40,11 +40,13 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 	defer store.Close()
 	defer cleanupRedisTestPrefix(t, ctx, store.client, keyPrefix)
 
-	if allowed, err := store.Allow(ctx, "key", 1, time.Now()); err != nil || !allowed {
+	if allowed, _, err := store.Allow(ctx, "key", 1, time.Now()); err != nil || !allowed {
 		t.Fatalf("first rate allowance = %v, err = %v", allowed, err)
 	}
-	if allowed, err := store.Allow(ctx, "key", 1, time.Now()); err != nil || allowed {
+	if allowed, retryAfter, err := store.Allow(ctx, "key", 1, time.Now()); err != nil || allowed {
 		t.Fatalf("second rate allowance = %v, err = %v", allowed, err)
+	} else if retryAfter <= 0 || retryAfter > time.Minute {
+		t.Fatalf("denied call should report window remainder, got %v", retryAfter)
 	}
 
 	limiter := NewConcurrencyLimiter(store)

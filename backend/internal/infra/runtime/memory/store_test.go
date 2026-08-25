@@ -13,11 +13,13 @@ func TestRateAndConcurrencyLimits(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	rate := NewRateLimiter()
-	if allowed, _ := rate.Allow(ctx, "key", 1, now); !allowed {
+	if allowed, _, _ := rate.Allow(ctx, "key", 1, now); !allowed {
 		t.Fatal("第一次请求应被允许")
 	}
-	if allowed, _ := rate.Allow(ctx, "key", 1, now); allowed {
+	if allowed, retryAfter, _ := rate.Allow(ctx, "key", 1, now); allowed {
 		t.Fatal("同一分钟的第二次请求应被拒绝")
+	} else if retryAfter <= 0 || retryAfter > time.Minute {
+		t.Fatalf("被拒时应给出窗口剩余时间，得到 %v", retryAfter)
 	}
 
 	concurrency := NewConcurrencyLimiter()
