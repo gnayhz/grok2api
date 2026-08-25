@@ -32,6 +32,11 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
+      # CI 只保留分钟级快速门(常规测试/vet/文档一致性)。重型门禁
+      # (race 全仓、staticcheck、fuzz 种子、gofmt 漂移)回归本地
+      # scripts/verify.sh 交付门——免费账户 Actions 限额有限,单次 push
+      # 跑 10+ 分钟不划算(实测 race 一个包 324s、总 11 分钟)。
+      # 发布前手动执行 ./scripts/verify.sh full 即可。
       - name: Test backend
         working-directory: backend
         run: go test ./...
@@ -39,34 +44,6 @@ jobs:
       - name: Vet backend
         working-directory: backend
         run: go vet ./...
-
-      # 与 scripts/verify.sh 交付门对齐（round 43 补齐）：格式漂移、
-      # staticcheck、race、fuzz 种子回归此前只在本地门禁执行，CI 绿
-      # 不等于交付门绿。
-      - name: Check gofmt
-        working-directory: backend
-        run: |
-          drift=$(gofmt -l . | grep -v '^gateway.test/' || true)
-          if [ -n "$drift" ]; then
-            echo "gofmt drift detected:"; echo "$drift"; exit 1
-          fi
-
-      - name: Staticcheck
-        working-directory: backend
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
-
-      - name: Race suite
-        working-directory: backend
-        run: go test -race -count=1 ./...
-
-      - name: Fuzz seeds
-        working-directory: backend
-        run: |
-          go test -count=1 -run 'FuzzParseRisk|FuzzObserveQualityChunk|FuzzPeekQualityBody' ./internal/infra/rsc/ ./internal/application/gateway/
-          go test -count=1 -run 'FuzzNormalizeURL' ./internal/infra/provider/searchresult/
-          go test -count=1 -run 'FuzzParseClashSubscription|FuzzResolveRotationTemplate|FuzzParseProxySubscription|FuzzNormalizeProxyURL' ./internal/application/egress/
 
       - name: Verify Swagger document
         run: |
