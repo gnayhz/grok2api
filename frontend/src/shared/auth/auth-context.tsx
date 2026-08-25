@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiError,
@@ -14,6 +15,7 @@ import {
 import { AuthContext, type AuthStatus } from "@/shared/auth/auth-state";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [admin, setAdmin] = useState<AdminDTO | null>(null);
   const [status, setStatus] = useState<AuthStatus>("restoring");
 
@@ -43,6 +45,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const unsubscribe = subscribeSessionInvalidated(() => {
+      // 会话失效即清空查询缓存：react-query 缓存跨页面卸载存活，
+      // 同浏览器后续登录的其他管理员会在 staleTime 窗口内首帧渲染
+      // 上一位管理员的陈旧管理面数据。
+      queryClient.clear();
       setAdmin(null);
       setStatus("anonymous");
     });
@@ -55,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(restoreTimer);
       unsubscribe();
     };
-  }, [restoreSession]);
+  }, [restoreSession, queryClient]);
 
   async function login(username: string, password: string): Promise<void> {
     const response = await apiRequest("/api/admin/v1/auth/login", {
