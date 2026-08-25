@@ -121,9 +121,9 @@ func (r *AdminSessionRepository) Rotate(ctx context.Context, id uint64, expected
 			// 上一代 hash 落入 previous_refresh_token_hash：顺序重用检测
 			// 靠它定位会话（当前 hash 未命中时回查上一代）。
 			"previous_refresh_token_hash": expectedTokenHash,
-			"refresh_token_hash":         newTokenHash,
-			"expires_at":                 expiresAt,
-			"last_used_at":               &now,
+			"refresh_token_hash":          newTokenHash,
+			"expires_at":                  expiresAt,
+			"last_used_at":                &now,
 		})
 	if result.Error != nil {
 		return mapError(result.Error)

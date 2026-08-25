@@ -163,3 +163,24 @@ func (d *Database) sqliteAutoVacuumMode(ctx context.Context) string {
 func (d *Database) sqliteVacuumOnce(ctx context.Context) error {
 	return d.db.WithContext(ctx).Exec("VACUUM").Error
 }
+
+// SQLiteIncrementalVacuum 归还累积的 freelist 页给操作系统。设置
+// auto_vacuum=INCREMENTAL 只启用机制；真正归还页需要周期性执行本
+// pragma（round 61 实证：DELETE 后 freelist 页滞留文件，直到显式
+// incremental_vacuum 才缩小）。非 SQLite 方言为 no-op。
+func (d *Database) SQLiteIncrementalVacuum(ctx context.Context) (bool, error) {
+	if d.dialect != "sqlite" {
+		return false, nil
+	}
+	var freelist int
+	if err := d.db.WithContext(ctx).Raw("PRAGMA freelist_count").Scan(&freelist).Error; err != nil {
+		return false, err
+	}
+	if freelist == 0 {
+		return false, nil
+	}
+	if err := d.db.WithContext(ctx).Exec("PRAGMA incremental_vacuum").Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
