@@ -47,7 +47,10 @@ func (s *Service) egressCanaryConfig() EgressCanaryRuntime {
 // classifier: first SSE event must arrive inside CreatedTimeout and thinking
 // evidence must appear — exactly the signals that separate clean exits
 // (sub-3s first event) from degraded-model routing (minute-scale queueing).
-func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64) egressapp.EgressQualityProbeResult {
+func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64) (result egressapp.EgressQualityProbeResult) {
+	// canary 结论进守卫统计:clean/degraded 的比例直接反映换 IP 验证质量,
+	// 也是排查"canary 分类缺口"的量化依据。
+	defer func() { guardStats.recordCanary(string(result.Outcome)) }()
 	cfg := s.egressCanaryConfig()
 	if cfg.ModelPublicID == "" {
 		return egressapp.EgressQualityProbeResult{Outcome: egressapp.EgressQualityProbeUnconfigured, Reason: "canary model not configured"}
@@ -93,7 +96,11 @@ func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64) egressa
 	callCtx := infraegress.WithQualityVerificationNode(ctx, nodeID)
 	request := provider.ResponseResourceRequest{
 		Credential: credential, Billing: lease.Billing, Method: "POST", Model: route.UpstreamModel,
-		Body: body, Streaming: true, NormalizeBody: true, Operation: "responses",
+		// Path 必须显式指向 /responses:适配器按 urlWithBase(base, Path) 拼 URL,
+		// 空 Path 会 POST 到 base 根路径——cli-chat-proxy 对 /v1/ 恒 404, canary
+		// 因此永远判 degraded, 换 IP 成功也被烧满尝试耗尽隔离(2026-08-25
+		// 线上双节点 rotation exhausted 实测即此因)。
+		Path: "/responses", Body: body, Streaming: true, NormalizeBody: true, Operation: "responses",
 	}
 	response, err := adapter.ForwardResponse(callCtx, request)
 	if err != nil {

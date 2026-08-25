@@ -95,7 +95,7 @@ func TestRotationRateGuardsPreventStorm(t *testing.T) {
 		service.SetNodeProber(prober)
 		cfg := fastRotationConfig()
 		cfg.MaxGlobalPerHour = 2
-		cfg.MinNodeInterval = 0 // 归一为 10m:首个节点无 LastRotatedAt 不受影响
+		cfg.MinNodeInterval = 0 // 归一为默认 3m:首个节点无 LastRotatedAt 不受影响
 		cfg.MaxAttemptsPerQuarantine = 3
 		service.SetRotationConfig(cfg)
 		service.SetEgressQualityProber(canary)

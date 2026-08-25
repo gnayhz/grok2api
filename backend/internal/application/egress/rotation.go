@@ -37,7 +37,7 @@ func DefaultRotationConfig() RotationConfig {
 	return RotationConfig{
 		Enabled:                  true,
 		MaxAttemptsPerQuarantine: 3,
-		MinNodeInterval:          10 * time.Minute,
+		MinNodeInterval:          3 * time.Minute,
 		MaxGlobalPerHour:         6,
 		WebhookTimeout:           15 * time.Second,
 		WebhookRetries:           2,
@@ -52,7 +52,7 @@ func (c RotationConfig) normalized() RotationConfig {
 		c.MaxAttemptsPerQuarantine = 3
 	}
 	if c.MinNodeInterval <= 0 {
-		c.MinNodeInterval = 10 * time.Minute
+		c.MinNodeInterval = 3 * time.Minute
 	}
 	if c.MaxGlobalPerHour <= 0 {
 		c.MaxGlobalPerHour = 6
