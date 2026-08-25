@@ -570,6 +570,30 @@ docker network inspect grok2api_default \
 - 多实例同时使用 PostgreSQL、Redis 与共享媒体。
 - 公网服务前置反向代理与访问控制。
 
+### 备份与恢复
+
+SQLite 数据库运行于 WAL 模式——请用一致性在线快照备份，不要在实例运行时直接拷贝数据库底层文件。源码部署：
+
+```bash
+sqlite3 data/backend.db ".backup 'backups/grok2api-$(date +%F).db'"
+```
+
+Docker 部署的运行时镜像不含 sqlite3，请经临时 sidecar 容器共享卷执行快照（`grok2api` 为 compose 默认容器名）：
+
+```bash
+docker run --rm --volumes-from grok2api -v "$PWD/backups:/backup" alpine:3.23 \
+  sh -c 'apk add --no-cache sqlite >/dev/null \
+    && sqlite3 /app/data/backend.db ".backup /backup/grok2api-$(date +%F).db"'
+```
+
+同时备份：
+
+- `config.yaml`——丢失 `secrets.credentialEncryptionKey` 将使已存账号凭据无法解密；更换 `secrets.jwtSecret` 会使所有已签发会话失效。切勿提交或外传这些值。
+- 使用本地媒体驱动时备份 `data/media/`（Docker 部署位于同一 `/app/data` 卷内）。
+- PostgreSQL 部署改用 `pg_dump`；Redis 运行态存储遵循其标准持久化实践。
+
+恢复：停止实例→替换数据库与媒体文件→保持 `config.yaml` 不变→重新启动。账号凭据也可经管理端导出/导入接口（`GET /api/admin/v1/accounts/export`，按 provider 游标稳定快照）在部署间迁移。
+
 ### 监控
 
 运行时指标以结构化 JSON 日志行输出（`msg="performance_metric"`，每分钟、每个指标族一行）——没有 HTTP `/metrics` 抓取端点。将容器 stdout 接入日志管道，对 `level":"WARN"` 的任务失败与 `upstream_*`/`egress_*` 指标异常配置告警。
