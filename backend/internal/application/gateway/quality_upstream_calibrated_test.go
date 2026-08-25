@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
@@ -153,6 +154,7 @@ func TestClearCooldownPreservesStrikeMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := relational.NewAccountRepository(database)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, nil)
 	created, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "strike", SourceKey: "strike",
 		EncryptedAccessToken: "enc", Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
@@ -164,7 +166,7 @@ func TestClearCooldownPreservesStrikeMarker(t *testing.T) {
 	if err := repo.UpdateHealth(ctx, created.ID, accountdomain.ProviderBuild, 0, nil, accountdomain.LastErrorMissingThinkingDisabled, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.ClearCooldown(ctx, created.ID); err != nil {
+	if _, err := service.ClearCooldown(ctx, created.ID); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := repo.Get(ctx, created.ID)

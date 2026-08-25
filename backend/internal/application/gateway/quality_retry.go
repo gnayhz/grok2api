@@ -410,7 +410,6 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 	return modeldomain.SupportsReasoningForProvider(route.Provider, route.UpstreamModel)
 }
 
-
 func qualityRequestDisablesReasoning(body []byte) bool {
 	var payload map[string]json.RawMessage
 	if json.Unmarshal(body, &payload) != nil {

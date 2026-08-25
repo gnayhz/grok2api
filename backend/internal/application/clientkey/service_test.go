@@ -323,7 +323,7 @@ func TestAccountScopePersistsAndAuthCacheInvalidatesOnChange(t *testing.T) {
 	}
 }
 
-func testCipher(t *testing.T) *security.Cipher {
+func testCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {

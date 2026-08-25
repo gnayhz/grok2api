@@ -33,10 +33,10 @@ type gatewayCompactionEnvelope struct {
 }
 
 type gatewayCompactionCodec struct {
-	cipher *security.Cipher
+	cipher security.Cryptor
 }
 
-func newGatewayCompactionCodec(cipher *security.Cipher) *gatewayCompactionCodec {
+func newGatewayCompactionCodec(cipher security.Cryptor) *gatewayCompactionCodec {
 	if cipher == nil {
 		return nil
 	}

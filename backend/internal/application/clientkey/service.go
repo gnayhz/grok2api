@@ -80,7 +80,7 @@ type Service struct {
 	defaultMax    atomic.Int64
 	authCache     *authKeyCache
 	touches       *touchTracker
-	cipher        *security.Cipher
+	cipher        security.Cryptor
 	activeMu      sync.RWMutex
 	activeBilling map[string]struct{}
 	// mediaJobs 可选：装配时注入。删除 client key 时预检活跃媒体作业
@@ -99,7 +99,7 @@ type internalKeyInspector interface {
 	CountInternalKeys(context.Context, []uint64) (int64, error)
 }
 
-func NewService(keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher *security.Cipher) *Service {
+func NewService(keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher security.Cryptor) *Service {
 	service := &Service{keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, activeBilling: make(map[string]struct{})}
 	service.UpdateDefaults(defaultRPM, defaultMax)
 	return service

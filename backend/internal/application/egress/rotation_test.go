@@ -67,7 +67,7 @@ func (c *canaryStub) ProbeEgressQuality(context.Context, uint64) EgressQualityPr
 	return c.result
 }
 
-func newRotationCipher(t *testing.T) *security.Cipher {
+func newRotationCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {

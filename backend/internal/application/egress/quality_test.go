@@ -160,7 +160,6 @@ func TestQuarantineForExitIPIdempotent(t *testing.T) {
 	}
 }
 
-
 // RSC clean 路径的确认门槛:单次降智(即使账号被 RSC 还清白)不隔离,
 // 只留软冷却;窗口内第二次观测(不同账号或同账号再犯)才升级 24h 隔离。
 // 防的是健康节点的偶发慢头(冷连接/上游瞬时负载)被一次排除法定罪。

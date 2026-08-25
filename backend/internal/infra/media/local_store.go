@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 )
@@ -192,6 +194,50 @@ func (s *LocalStore) Open(ctx context.Context, storageKey string) (io.ReadCloser
 		return nil, fmt.Errorf("打开媒体文件: %w", err)
 	}
 	return file, nil
+}
+
+// ListMediaObjectFiles 枚举已提交对象与残留临时文件，返回存储相对键
+// （正斜杠分隔）→ 修改时间。点前缀的是 saveObject/CommitVideoUpload 的
+// 中间临时文件；其余是已提交对象。孤儿回收用它对账文件系统与元数据。
+func (s *LocalStore) ListMediaObjectFiles(ctx context.Context) (map[string]time.Time, map[string]time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	objects := make(map[string]time.Time)
+	temps := make(map[string]time.Time)
+	for _, kindDir := range []string{"images", "videos"} {
+		base := filepath.Join(s.root, kindDir)
+		err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if errors.Is(walkErr, os.ErrNotExist) {
+					return nil
+				}
+				return walkErr
+			}
+			if !entry.Type().IsRegular() {
+				return nil
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			relative, relErr := filepath.Rel(s.root, path)
+			if relErr != nil {
+				return relErr
+			}
+			key := filepath.ToSlash(relative)
+			if strings.HasPrefix(entry.Name(), ".") {
+				temps[key] = info.ModTime().UTC()
+			} else {
+				objects[key] = info.ModTime().UTC()
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, fmt.Errorf("枚举媒体目录: %w", err)
+		}
+	}
+	return objects, temps, nil
 }
 
 func (s *LocalStore) Delete(ctx context.Context, storageKey string) error {

@@ -4410,7 +4410,7 @@ func (a *failoverAdapter) MarshalCredentials([]provider.CredentialSeed) ([]byte,
 	return nil, nil
 }
 
-func testCipher(t *testing.T) *security.Cipher {
+func testCipher(t *testing.T) security.Cryptor {
 	t.Helper()
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {

@@ -21,7 +21,7 @@ const responseBodyLimit = 64 << 10
 
 // Fetch 通过 Grok Web Session 接口读取 SSO 账号的稳定身份元数据。
 // Web 与 Console 共用该链路，确保代理、Cookie、UA 和 Resin 身份一致。
-func Fetch(ctx context.Context, baseURL string, credential account.Credential, egress *infraegress.Manager, cipher *security.Cipher) (provider.AccountIdentity, error) {
+func Fetch(ctx context.Context, baseURL string, credential account.Credential, egress *infraegress.Manager, cipher security.Cryptor) (provider.AccountIdentity, error) {
 	if credential.AuthType != account.AuthTypeSSO || (credential.Provider != account.ProviderWeb && credential.Provider != account.ProviderConsole) {
 		return provider.AccountIdentity{}, fmt.Errorf("仅 Grok Web 与 Console SSO 账号支持身份同步")
 	}
