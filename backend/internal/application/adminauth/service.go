@@ -21,6 +21,12 @@ var (
 	ErrRuntimeUnavailable = errors.New("管理员认证运行态暂不可用")
 )
 
+// refreshRotationGrace：轮换重用判定的宽限窗。窗内旧 token 再次呈上
+// 视为良性重复刷新（同 token 网络重试、多标签页并发刷新竞速）——不吊销
+// 家族；超窗重用才是窃取信号（OAuth BCP RFC 6819 §5.2.11），吊销整个
+// token family。判据是 Rotate 落写的 last_used_at。
+const refreshRotationGrace = 30 * time.Second
+
 type Tokens struct {
 	AccessToken           string
 	AccessTokenExpiresAt  time.Time
@@ -95,6 +101,17 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 		if !errors.Is(err, repository.ErrNotFound) {
 			return Tokens{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 		}
+		// 当前 hash 未命中：回查上一代。命中 = 已轮换的旧 token 被再次
+		// 呈上（顺序重用）——宽限窗内视为良性重复刷新，超窗按 OAuth BCP
+		// 吊销整个 token family。未命中则是真正的未知 token。
+		stale, staleErr := s.sessions.GetByPreviousTokenHash(ctx, hash)
+		if staleErr == nil {
+			s.revokeSessionIfLateReuse(ctx, stale)
+			return Tokens{}, ErrInvalidSession
+		}
+		if !errors.Is(staleErr, repository.ErrNotFound) {
+			return Tokens{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, staleErr)
+		}
 		return Tokens{}, ErrInvalidSession
 	}
 	if !time.Now().UTC().Before(session.ExpiresAt) {
@@ -117,12 +134,36 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 	}
 	refreshExpiresAt := time.Now().UTC().Add(s.refreshTTL)
 	if err := s.sessions.Rotate(ctx, session.ID, hash, security.HashToken(refreshToken), refreshExpiresAt); err != nil {
-		if errors.Is(err, repository.ErrConflict) || errors.Is(err, repository.ErrNotFound) {
+		if errors.Is(err, repository.ErrConflict) {
+			// 轮换冲突 = 并发竞争中另一方刚刚完成轮换（同 token 重复刷新
+			// 竞速）。session 变量是竞速前的旧快照——按 ID 重取最新行再判
+			// 宽限（赢家的 last_used_at 是此刻）。宽限窗内视为良性；超窗按
+			// OAuth BCP（RFC 6819 §5.2.11 / security-topics §4.14.2）吊销
+			// 整个 token family。
+			if fresh, freshErr := s.sessions.GetByID(ctx, session.ID); freshErr == nil {
+				s.revokeSessionIfLateReuse(ctx, fresh)
+			} else if !errors.Is(freshErr, repository.ErrNotFound) {
+				return Tokens{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, freshErr)
+			}
+			return Tokens{}, ErrInvalidSession
+		}
+		if errors.Is(err, repository.ErrNotFound) {
 			return Tokens{}, ErrInvalidSession
 		}
 		return Tokens{}, err
 	}
 	return Tokens{AccessToken: accessToken, AccessTokenExpiresAt: accessExpiresAt, RefreshToken: refreshToken, RefreshTokenExpiresAt: refreshExpiresAt}, nil
+}
+
+// revokeSessionIfLateReuse 处理轮换后旧 token 重用：session.LastUsedAt
+// 是该会话最近一次 Rotate 的时间。距其不足宽限窗的重用视为良性重复
+// 刷新（不吊销——赢家 token 存活，重复方自行以新 token 重试）；超窗
+// 重用按窃取处理，吊销整个 token family。
+func (s *Service) revokeSessionIfLateReuse(ctx context.Context, session admin.Session) {
+	if session.LastUsedAt != nil && time.Since(*session.LastUsedAt) < refreshRotationGrace {
+		return
+	}
+	_ = s.sessions.Revoke(ctx, session.ID)
 }
 
 // Logout 撤销当前 refresh session。
@@ -219,7 +260,7 @@ func (s *Service) checkLoginRate(ctx context.Context, username, remoteAddress st
 		{key: "admin-login:user:" + security.HashToken(strings.ToLower(username)), limit: 12},
 	}
 	for _, item := range keys {
-		allowed, err := s.loginLimiter.Allow(ctx, item.key, item.limit, now)
+		allowed, _, err := s.loginLimiter.Allow(ctx, item.key, item.limit, now)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 		}

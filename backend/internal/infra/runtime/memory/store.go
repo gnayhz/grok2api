@@ -40,9 +40,9 @@ func NewRateLimiter() *RateLimiter {
 	return limiter
 }
 
-func (r *RateLimiter) Allow(_ context.Context, key string, limit int, now time.Time) (bool, error) {
+func (r *RateLimiter) Allow(_ context.Context, key string, limit int, now time.Time) (bool, time.Duration, error) {
 	if limit <= 0 {
-		return true, nil
+		return true, 0, nil
 	}
 	shard := &r.shards[shardIndex(key)]
 	shard.mu.Lock()
@@ -53,14 +53,18 @@ func (r *RateLimiter) Allow(_ context.Context, key string, limit int, now time.T
 	}
 	if window.count >= limit {
 		shard.windows[key] = window
-		return false, nil
+		remaining := time.Minute - now.Sub(window.startedAt)
+		if remaining < time.Second {
+			remaining = time.Second
+		}
+		return false, remaining, nil
 	}
 	window.count++
 	shard.windows[key] = window
 	if len(shard.windows) > maxEntriesPerShard() {
 		cleanupRateShard(shard, now)
 	}
-	return true, nil
+	return true, 0, nil
 }
 
 func cleanupRateShard(shard *rateShard, now time.Time) {

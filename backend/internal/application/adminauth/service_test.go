@@ -175,8 +175,8 @@ type coordinatedSessionRepository struct {
 
 type rejectingRateLimiter struct{}
 
-func (rejectingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
-	return false, nil
+func (rejectingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, time.Duration, error) {
+	return false, time.Minute, nil
 }
 
 type failingAdminRepository struct{ repository.AdminRepository }
