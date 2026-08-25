@@ -18,6 +18,7 @@ import (
 	"time"
 
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -499,8 +500,21 @@ func (s *Service) RunCleanup(ctx context.Context, onError func(error)) {
 		}
 		cfg = s.runtimeConfig()
 		cleanupCtx, cancel := context.WithTimeout(ctx, min(cfg.CleanupInterval, 5*time.Minute))
-		_, err := s.Cleanup(cleanupCtx)
+		pruned, err := s.Cleanup(cleanupCtx)
 		cancel()
+		// 周期清理的可观测性：心跳计数（每周期 +1，证明循环存活）+
+		// 仅在确有删除时叠加 pruned 量（Add 对 0 增量不落样本，零删除
+		// 周期不应制造噪声行——round 96 首版用 Add(pruned) 在零媒体
+		// 流量实例上永无输出，验收即踩此坑）。
+		outcome := "success"
+		if err != nil {
+			outcome = "failed"
+		}
+		heartbeatLabels := perfmetrics.Labels{Subsystem: "media", Operation: "cleanup", Outcome: outcome}
+		perfmetrics.Default.Inc("media_cleanup_pass_total", heartbeatLabels)
+		if pruned > 0 {
+			perfmetrics.Default.Add("media_cleanup_assets_pruned", heartbeatLabels, int64(pruned))
+		}
 		if err != nil && onError != nil {
 			onError(err)
 		}
