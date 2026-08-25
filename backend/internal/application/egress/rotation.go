@@ -137,11 +137,18 @@ func (s *Service) SetEgressQualityProber(value EgressQualityProber) {
 }
 
 // RotateNode enqueues one node for immediate rotation (manual trigger).
+// 手动轮换重开一个完整周期:尝试账本清零(attempts=0、错误清空),使耗尽
+// (attempts>=max)或间隔未到的节点也能立即重新轮换——EXIT-IP-GUARD 承诺
+// 耗尽后"需人工介入",这个入口就是人工介入本身。护栏保留:全局每小时上限
+// (maxGlobalPerHour)与节点启用/webhook 配置检查不变,防手抖连点打爆隧道。
+// 入队前先做与 processRotation 相同的跳过路径校验,把真实原因返回给操作者,
+// 而不是"已排队"之后在 worker 里静默丢弃。
 func (s *Service) RotateNode(ctx context.Context, nodeID uint64) error {
 	if s == nil || s.repository == nil {
 		return ErrOperationsUnavailable
 	}
-	if _, err := s.repository.GetEgressNode(ctx, nodeID); err != nil {
+	node, err := s.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
 		// 与其他节点路由一致:缺失节点归一为应用层 ErrNotFound(404),
 		// 而不是把 repository 错误透传成 500。
 		if errors.Is(err, repository.ErrNotFound) {
@@ -154,6 +161,21 @@ func (s *Service) RotateNode(ctx context.Context, nodeID uint64) error {
 	s.mu.RUnlock()
 	if !enabled {
 		return errors.New("出口轮换未启用")
+	}
+	if !node.Enabled {
+		return errors.New("节点已停用")
+	}
+	if strings.TrimSpace(node.EncryptedRotationURL) == "" {
+		return errors.New("节点未配置换 IP webhook")
+	}
+	if !node.RotationEnabled {
+		return errors.New("该节点的换 IP 轮换已关闭")
+	}
+	// 重开周期:清尝试账本。LastRotatedAt 不动——MinNodeInterval 仍按上次
+	// 真实换 IP 时间计算,自动轮换的防重启风暴护栏对手动触发同样生效;
+	// 真正的立即执行由 worker 的 requeueAfter 到点驱动,全局限速兜底。
+	if node.RotationAttempts > 0 || node.LastRotationError != "" {
+		s.recordRotationState(ctx, nodeID, 0, "", false)
 	}
 	s.enqueueRotation(nodeID)
 	return nil
