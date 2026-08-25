@@ -560,6 +560,30 @@ Important optional settings:
 - Use PostgreSQL, Redis, and shared media for multiple instances.
 - Put a reverse proxy and access controls in front of public deployments.
 
+### Backup and restore
+
+The SQLite database runs in WAL mode — take a consistent online snapshot instead of copying database files under a running instance. Source deployments:
+
+```bash
+sqlite3 data/backend.db ".backup 'backups/grok2api-$(date +%F).db'"
+```
+
+Docker deployments ship no sqlite3 in the runtime image; snapshot through an ephemeral sidecar that shares the container's volumes (`grok2api` is the default compose container name):
+
+```bash
+docker run --rm --volumes-from grok2api -v "$PWD/backups:/backup" alpine:3.23 \
+  sh -c 'apk add --no-cache sqlite >/dev/null \
+    && sqlite3 /app/data/backend.db ".backup /backup/grok2api-$(date +%F).db"'
+```
+
+Back up together with:
+
+- `config.yaml` — losing `secrets.credentialEncryptionKey` makes stored account credentials undecryptable; changing `secrets.jwtSecret` invalidates every issued session. Never commit or share these values.
+- `data/media/` when using the local media driver (inside Docker it lives in the same `/app/data` volume).
+- PostgreSQL deployments: use `pg_dump`; Redis runtime stores: follow standard Redis persistence practice.
+
+Restore by stopping the instance, replacing the database and media files, keeping `config.yaml` unchanged, then starting again. Account credentials can alternatively be moved between deployments with the admin export/import API (`GET /api/admin/v1/accounts/export`, cursor-stable per provider).
+
 ### Monitoring
 
 Runtime metrics are emitted as structured JSON log lines (`msg="performance_metric"`, one per metric family) every minute — there is no HTTP `/metrics` scrape endpoint. Ship container stdout to your log pipeline and alert on `level":"WARN"` task failures plus `upstream_*`/`egress_*` metric anomalies.
