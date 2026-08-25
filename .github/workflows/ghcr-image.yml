@@ -93,6 +93,12 @@ jobs:
         working-directory: frontend
         run: pnpm lint
 
+      # 与本地 pnpm test 对齐（round 59 补齐）：26 个前端测试（SSE 解析
+      # 契约、错误码 i18n 防漂移等）此前从未在 CI 执行。
+      - name: Test frontend
+        working-directory: frontend
+        run: pnpm test
+
       - name: Build frontend
         working-directory: frontend
         run: pnpm build
