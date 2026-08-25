@@ -560,6 +560,10 @@ Important optional settings:
 - Use PostgreSQL, Redis, and shared media for multiple instances.
 - Put a reverse proxy and access controls in front of public deployments.
 
+### Monitoring
+
+Runtime metrics are emitted as structured JSON log lines (`msg="performance_metric"`, one per metric family) every minute — there is no HTTP `/metrics` scrape endpoint. Ship container stdout to your log pipeline and alert on `level":"WARN"` task failures plus `upstream_*`/`egress_*` metric anomalies.
+
 ## Development
 
 ```bash

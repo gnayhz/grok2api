@@ -570,6 +570,10 @@ docker network inspect grok2api_default \
 - 多实例同时使用 PostgreSQL、Redis 与共享媒体。
 - 公网服务前置反向代理与访问控制。
 
+### 监控
+
+运行时指标以结构化 JSON 日志行输出（`msg="performance_metric"`，每分钟、每个指标族一行）——没有 HTTP `/metrics` 抓取端点。将容器 stdout 接入日志管道，对 `level":"WARN"` 的任务失败与 `upstream_*`/`egress_*` 指标异常配置告警。
+
 ## 开发验证
 
 ```bash
