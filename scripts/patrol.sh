@@ -60,6 +60,15 @@ if [ -n "${TOKEN:-}" ]; then
     | python3 -c "import sys,json; d=json.load(sys.stdin)[\"data\"][\"items\"]; print(sum(1 for it in d if not it.get(\"enabled\")))" 2>/dev/null)
   say "disabled accounts (info)"
   echo "${disabled:-?}（对照换血基线 30，激增需溯源）"
+  # --- 6) 工具密钥残留（r34 教训：删除操作必须验证，探针密钥不许滞留）
+  residue=$(curl -sf -m 5 -H "Authorization: Bearer $TOKEN" "$BASE/api/admin/v1/client-keys?page=1&pageSize=50" 2>/dev/null \
+    | PATROL_TOOL_PATTERNS='probe,drill,load-test,smoke-script' python3 -c 'import sys,json,os
+patterns = os.environ.get("PATROL_TOOL_PATTERNS", "").split(",")
+names = [k.get("name", "") for k in json.load(sys.stdin)["data"]["items"]]
+bad = [n for n in names if any(x in n for x in patterns)]
+print(",".join(bad))' 2>/dev/null)
+  say "probe/tool key residue"
+  [ -z "$residue" ] && ok || bad "$residue（工具密钥滞留，应删除）"
 else
   say "risk surface"; echo "skipped (login failed)"
 fi
