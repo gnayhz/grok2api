@@ -101,6 +101,19 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_audits_error_code_created_id ON request_audits(error_code, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_streaming_created_id ON request_audits(streaming, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_provider_streaming_created_id ON request_audits(provider, streaming, created_at DESC, id DESC)",
+	// 管理端审计列表的可排序列（request-audits-page SortableTableHead + audit_repository
+	// ListCursor 的 sortSpec 表）除 createdAt 外此前全部退化为全表扫描 + TEMP B-TREE
+	// 全排序（100k 行实测 20-27ms，且随保留量线性放大）；status 排序更被既有
+	// idx_audits_status_created_id 诱导为「索引前缀 + 组内重排」的劣化计划（113ms）。
+	// 以下 (expr, id) 复合索引与 applyStableSort 生成的「expr DIR, id DIR」精确对齐
+	// （两列同向，反向排序走索引倒序扫）。若 sortSpec 表达式变更，索引只会静默退回
+	// 全排序（无正确性风险），但请同步维护此处表达式。
+	"CREATE INDEX IF NOT EXISTS idx_audits_tokens_id ON request_audits(total_tokens DESC, id DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_audits_duration_id ON request_audits(duration_ms DESC, id DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_audits_status_id ON request_audits(status_code, id)",
+	"CREATE INDEX IF NOT EXISTS idx_audits_model_id ON request_audits(LOWER(model_public_id), id)",
+	// 表达式索引：外层括号为 PostgreSQL 语法要求（SQLite 同样接受）。
+	"CREATE INDEX IF NOT EXISTS idx_audits_billing_id ON request_audits((CASE WHEN cost_in_usd_ticks > 0 THEN cost_in_usd_ticks ELSE estimated_cost_in_usd_ticks END) DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audit_attempts_audit_number ON request_audit_attempts(audit_id, number)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_expires_id ON response_ownership(expires_at, response_id)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_account ON response_ownership(account_id)",
