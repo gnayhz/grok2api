@@ -20,13 +20,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	application "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/proxyurl"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
 )
@@ -668,7 +669,7 @@ func (m *Manager) prepareEgressProbe(node domain.Node) (preparedEgressProbe, str
 	if err != nil {
 		return target, "decrypt_proxy", "读取代理配置失败", err
 	}
-	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	proxyURL, err = proxyurl.NormalizeProxyURL(proxyURL)
 	if err != nil {
 		return target, "normalize_proxy", "代理地址无效", err
 	}
@@ -1200,13 +1201,13 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 		if decryptErr != nil {
 			return nil, true, decryptErr
 		}
-		credentialCookies = application.SanitizeCloudflareCookies(decryptedCookies)
+		credentialCookies = cfcookies.Sanitize(decryptedCookies)
 	}
 	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
 	if err != nil {
 		return nil, false, err
 	}
-	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	proxyURL, err = proxyurl.NormalizeProxyURL(proxyURL)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1239,7 +1240,7 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 				}
 				cookies = ""
 			}
-			cookies = application.SanitizeCloudflareCookies(cookies)
+			cookies = cfcookies.Sanitize(cookies)
 		}
 	}
 	userAgent := ""
@@ -2280,7 +2281,7 @@ func (m *Manager) loadPersistedClearance(ctx context.Context, nodeID uint64, fin
 	if err != nil {
 		return clearanceSolution{}, time.Time{}, false
 	}
-	cookies = application.SanitizeCloudflareCookies(cookies)
+	cookies = cfcookies.Sanitize(cookies)
 	userAgent := strings.TrimSpace(latest.UserAgent)
 	if userAgent == "" {
 		return clearanceSolution{}, time.Time{}, false
@@ -2405,7 +2406,7 @@ func (m *Manager) RefreshClearance(ctx context.Context, nodeID uint64) error {
 	if domain.IsAccountTemplateProxy(proxyURL) {
 		return fmt.Errorf("出口节点 %q 使用账号粘性代理，将在账号请求时按租约自动刷新 Clearance", node.Name)
 	}
-	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	proxyURL, err = proxyurl.NormalizeProxyURL(proxyURL)
 	if err != nil {
 		return err
 	}
@@ -2573,7 +2574,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 			// for a background task to solve or persist.
 			continue
 		}
-		proxyURL, normalizeErr := application.NormalizeProxyURL(proxyURL)
+		proxyURL, normalizeErr := proxyurl.NormalizeProxyURL(proxyURL)
 		if normalizeErr != nil {
 			refreshErrors = append(refreshErrors, normalizeErr)
 			continue
@@ -2739,7 +2740,7 @@ func BuildSSOCookie(token, cloudflareCookies string) string {
 	}
 	token = strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(token)
 	cookies := "sso=" + token + "; sso-rw=" + token
-	if sanitized := application.SanitizeCloudflareCookies(cloudflareCookies); sanitized != "" {
+	if sanitized := cfcookies.Sanitize(cloudflareCookies); sanitized != "" {
 		cookies += "; " + sanitized
 	}
 	return cookies

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	application "github.com/chenyme/grok2api/backend/internal/application/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/proxyurl"
 )
 
 func TestBuildClientUsesConfiguredResponseHeaderTimeout(t *testing.T) {
@@ -144,7 +144,7 @@ func TestValidatedProxySchemesCreateBuildAndBrowserClients(t *testing.T) {
 		vmess,
 	} {
 		t.Run(raw, func(t *testing.T) {
-			normalized, err := application.NormalizeProxyURL(raw)
+			normalized, err := proxyurl.NormalizeProxyURL(raw)
 			if err != nil {
 				t.Fatal(err)
 			}

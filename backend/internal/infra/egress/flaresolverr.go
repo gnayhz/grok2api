@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	application "github.com/chenyme/grok2api/backend/internal/application/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 )
 
@@ -122,7 +122,7 @@ func (flaresolverrSolver) Solve(ctx context.Context, cfg ClearanceConfig, proxyU
 			parts = append(parts, cookie.Name+"="+cookie.Value)
 		}
 	}
-	cookies := application.SanitizeCloudflareCookies(strings.Join(parts, "; "))
+	cookies := cfcookies.Sanitize(strings.Join(parts, "; "))
 	userAgent := strings.TrimSpace(result.Solution.UserAgent)
 	if userAgent == "" || len(userAgent) > 512 || strings.IndexFunc(userAgent, func(character rune) bool { return character < 0x20 || character == 0x7f }) >= 0 {
 		return clearanceSolution{}, errors.New("FlareSolverr 返回的 User-Agent 无效")
