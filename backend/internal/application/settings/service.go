@@ -168,6 +168,19 @@ type RequestRetryEditable struct {
 	IdleAccountCooldown string
 }
 
+// AccountRiskEditable 是管理接口使用的账号风险归因输入（时长为字符串）。
+type AccountRiskEditable struct {
+	Enabled          bool
+	Method           string
+	Concurrency      int
+	Timeout          string
+	OnDenied         string
+	PatrolEnabled    bool
+	PatrolBucketDays int
+	// BuildProbeEnabled 开关 Build 原生差分兜底(未关联 Build)。
+	BuildProbeEnabled bool
+}
+
 // EgressRotationEditable 是管理接口使用的出口轮换输入（时长为字符串）。
 type EgressRotationEditable struct {
 	Enabled                  bool
@@ -204,6 +217,9 @@ type EditableConfig struct {
 	EgressRotation       EgressRotationEditable
 	// EgressRotationProvided 同上。
 	EgressRotationProvided bool
+	AccountRisk            AccountRiskEditable
+	// AccountRiskProvided 同上。
+	AccountRiskProvided bool
 }
 
 // Snapshot 表示当前运行设置和需要重启才能生效的字段。
@@ -571,7 +587,7 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		base.Accounts.BuildForbiddenReauthCodes = append([]string(nil), value.Accounts.BuildForbiddenReauthCodes...)
 	}
 	base.Accounts.ExcludeBuildBotFlaggedFromScheduling = value.Accounts.ExcludeBuildBotFlaggedFromScheduling
-	// RequestRetry/EgressRotation:指针节,nil(旧载荷/未保存过)沿用文件基线。
+	// RequestRetry/EgressRotation/AccountRisk:指针节,nil(旧载荷/未保存过)沿用文件基线。
 	if value.RequestRetry != nil {
 		base.RequestRetry = config.RequestRetryConfig{
 			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
@@ -580,6 +596,17 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 			EarlyHeaderAbort: config.Duration(value.RequestRetry.EarlyHeaderAbort), SameAccountRetry: value.RequestRetry.SameAccountRetry,
 			EvidenceTimeout: config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
 			IdleAccountCooldown: config.Duration(value.RequestRetry.IdleAccountCooldown),
+		}
+	}
+	if value.AccountRisk != nil {
+		base.AccountRisk.RSCCheck = config.AccountRiskRSCConfig{
+			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
+			Concurrency: value.AccountRisk.Concurrency, Timeout: config.Duration(value.AccountRisk.Timeout),
+			OnDenied: value.AccountRisk.OnDenied,
+			Patrol:   config.AccountRiskPatrolConfig{Enabled: value.AccountRisk.PatrolEnabled, BucketDays: value.AccountRisk.PatrolBucketDays},
+		}
+		if value.AccountRisk.BuildProbeEnabled != nil {
+			base.AccountRisk.RSCCheck.BuildProbe = &config.AccountRiskBuildProbeConfig{Enabled: *value.AccountRisk.BuildProbeEnabled}
 		}
 	}
 	if value.EgressRotation != nil {
@@ -675,6 +702,16 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			CreatedTimeout:      value.RequestRetry.CreatedTimeout.Value(),
 			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown.Value(),
 		},
+		AccountRisk: &settingsdomain.AccountRiskConfig{
+			Enabled:           value.AccountRisk.RSCCheck.Enabled,
+			Method:            value.AccountRisk.RSCCheck.Method,
+			Concurrency:       value.AccountRisk.RSCCheck.Concurrency,
+			Timeout:           value.AccountRisk.RSCCheck.Timeout.Value(),
+			OnDenied:          value.AccountRisk.RSCCheck.OnDenied,
+			PatrolEnabled:     value.AccountRisk.RSCCheck.Patrol.Enabled,
+			PatrolBucketDays:  value.AccountRisk.RSCCheck.Patrol.BucketDays,
+			BuildProbeEnabled: boolPointer(value.AccountRisk.RSCCheck.BuildProbeEnabled()),
+		},
 		EgressRotation: &settingsdomain.EgressRotationConfig{
 			Enabled:                  value.Egress.Rotation.Enabled,
 			MaxAttemptsPerQuarantine: value.Egress.Rotation.MaxAttemptsPerQuarantine,
@@ -692,6 +729,8 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 }
 
 func intPointer(value int) *int { return &value }
+
+func boolPointer(value bool) *bool { return &value }
 
 func (s *Service) snapshotLocked() Snapshot {
 	restartRequired := []string{}
@@ -801,6 +840,20 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		next.Egress.Rotation.WebhookRetries = input.EgressRotation.WebhookRetries
 		next.Egress.Rotation.CanaryModelPublicID = strings.TrimSpace(input.EgressRotation.CanaryModelPublicID)
 	}
+	if input.AccountRiskProvided {
+		next.AccountRisk.RSCCheck.Enabled = input.AccountRisk.Enabled
+		next.AccountRisk.RSCCheck.Method = strings.TrimSpace(input.AccountRisk.Method)
+		next.AccountRisk.RSCCheck.Concurrency = input.AccountRisk.Concurrency
+		next.AccountRisk.RSCCheck.OnDenied = strings.TrimSpace(input.AccountRisk.OnDenied)
+		next.AccountRisk.RSCCheck.Patrol.Enabled = input.AccountRisk.PatrolEnabled
+		next.AccountRisk.RSCCheck.Patrol.BucketDays = input.AccountRisk.PatrolBucketDays
+		buildProbe := next.AccountRisk.RSCCheck.BuildProbe
+		if buildProbe == nil {
+			buildProbe = &config.AccountRiskBuildProbeConfig{}
+		}
+		buildProbe.Enabled = input.AccountRisk.BuildProbeEnabled
+		next.AccountRisk.RSCCheck.BuildProbe = buildProbe
+	}
 
 	type durationInput struct {
 		path  string
@@ -855,6 +908,11 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 			durationInput{"requestRetry.evidenceTimeout", input.RequestRetry.EvidenceTimeout, func(value config.Duration) { next.RequestRetry.EvidenceTimeout = value }},
 			durationInput{"requestRetry.createdTimeout", input.RequestRetry.CreatedTimeout, func(value config.Duration) { next.RequestRetry.CreatedTimeout = value }},
 			durationInput{"requestRetry.idleAccountCooldown", input.RequestRetry.IdleAccountCooldown, func(value config.Duration) { next.RequestRetry.IdleAccountCooldown = value }},
+		)
+	}
+	if input.AccountRiskProvided {
+		durations = append(durations,
+			durationInput{"accountRisk.rscCheck.timeout", input.AccountRisk.Timeout, func(value config.Duration) { next.AccountRisk.RSCCheck.Timeout = value }},
 		)
 	}
 	if input.EgressRotationProvided {
@@ -976,7 +1034,15 @@ func toEditable(cfg config.Config) EditableConfig {
 			CanaryCreatedTimeout: cfg.Egress.Rotation.CanaryCreatedTimeout.String(),
 		},
 		EgressRotationProvided: true,
-		AccountsProvided:       true,
+		AccountRisk: AccountRiskEditable{
+			Enabled: cfg.AccountRisk.RSCCheck.Enabled, Method: cfg.AccountRisk.RSCCheck.Method,
+			Concurrency: cfg.AccountRisk.RSCCheck.Concurrency, Timeout: cfg.AccountRisk.RSCCheck.Timeout.String(),
+			OnDenied: cfg.AccountRisk.RSCCheck.OnDenied, PatrolEnabled: cfg.AccountRisk.RSCCheck.Patrol.Enabled,
+			PatrolBucketDays:  cfg.AccountRisk.RSCCheck.Patrol.BucketDays,
+			BuildProbeEnabled: cfg.AccountRisk.RSCCheck.BuildProbeEnabled(),
+		},
+		AccountRiskProvided: true,
+		AccountsProvided:    true,
 	}
 }
 

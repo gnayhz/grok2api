@@ -17,6 +17,10 @@ type Selection struct {
 	NodeName string
 	Scope    domain.Scope
 	Proxied  bool
+	// Pool marks a proxy-pool (rotating-endpoint) selection: consecutive
+	// requests through the same node leave through DIFFERENT exit IPs, which
+	// the Build risk probe relies on for its differential second attempt.
+	Pool bool
 }
 
 // Trace retains the most recent actual egress selection per scope. When a request retries egress, audit records the final attempt.

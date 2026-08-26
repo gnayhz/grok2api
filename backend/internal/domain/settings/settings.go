@@ -30,10 +30,28 @@ type Config struct {
 	Audit             AuditConfig
 	ClientKeyDefaults ClientKeyDefaultsConfig
 	Accounts          AccountsConfig
-	// RequestRetry/EgressRotation 为指针节：旧持久化载荷整段缺失时保持
-	// nil,applyDomainConfig 沿用文件基线,而不是把零值当作"全部关闭"。
+	// RequestRetry/EgressRotation/AccountRisk 为指针节：旧持久化载荷整段缺失
+	// 时保持 nil,applyDomainConfig 沿用文件基线,而不是把零值当作"全部关闭"。
 	RequestRetry   *RequestRetryConfig
 	EgressRotation *EgressRotationConfig
+	AccountRisk    *AccountRiskConfig
+}
+
+// AccountRiskConfig 定义账号 RSC 风险归因的可热更新参数。Method 取值
+// ssoProbe(默认)/homepage；OnDenied 取值 flag/disable/markOnly；
+// 语义与 config.AccountRiskRSCConfig 一致(0 值表示代码默认)。
+type AccountRiskConfig struct {
+	Enabled          bool
+	Method           string
+	Concurrency      int
+	Timeout          time.Duration
+	OnDenied         string
+	PatrolEnabled    bool
+	PatrolBucketDays int
+	// BuildProbeEnabled gates the Build-native differential fallback for
+	// unlinked Build accounts. Pointer semantics: nil (legacy payloads)
+	// inherits the file baseline.
+	BuildProbeEnabled *bool
 }
 
 // ServerConfig 定义可热更新的推理入口容量参数。

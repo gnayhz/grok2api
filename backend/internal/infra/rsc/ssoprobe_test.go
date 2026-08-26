@@ -1,0 +1,337 @@
+package rsc
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	fhttp "github.com/bogdanfinn/fhttp"
+	fhttptest "github.com/bogdanfinn/fhttp/httptest"
+	"github.com/bogdanfinn/websocket"
+)
+
+const probeTestUserID = "497f19f8-49d4-458a-bee4-43ec3dcaf8ca"
+
+const probeSessionBody = "{\"session\":{\"userId\":\"" + probeTestUserID + "\",\"email\":\"probe@example.com\"}}"
+
+// probeServer drives one fake grok.com serving /api/auth/session plus the
+// mgw websocket. chunks is the scripted gateway event sequence sent after
+// the client response.create arrives.
+type probeServerScript struct {
+	sessionStatus int
+	sessionBody   string
+	handshakeFail int // non-zero: /ws/mgw/ answers this status without upgrading
+	chunks        []map[string]any
+}
+
+func probeServer(t *testing.T, script *probeServerScript) *fhttptest.Server {
+	t.Helper()
+	return fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
+		switch request.URL.Path {
+		case "/api/auth/session":
+			status := script.sessionStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			body := script.sessionBody
+			if body == "" {
+				body = probeSessionBody
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(status)
+			_, _ = writer.Write([]byte(body))
+		case "/ws/mgw/":
+			if script.handshakeFail != 0 {
+				writer.WriteHeader(script.handshakeFail)
+				return
+			}
+			if request.URL.Query().Get("uid") != probeTestUserID {
+				t.Errorf("gateway uid query = %q, want %q", request.URL.Query().Get("uid"), probeTestUserID)
+			}
+			if !strings.Contains(request.Header.Get("Cookie"), "sso=token-1") || !strings.Contains(request.Header.Get("Cookie"), "x-userid="+probeTestUserID) {
+				t.Errorf("gateway cookie = %q", request.Header.Get("Cookie"))
+			}
+			if request.Header.Get("Origin") != "http://"+request.Host {
+				t.Errorf("gateway origin = %q", request.Header.Get("Origin"))
+			}
+			connection, err := (&websocket.Upgrader{CheckOrigin: func(*fhttp.Request) bool { return true }}).Upgrade(writer, request, nil)
+			if err != nil {
+				t.Errorf("upgrade: %v", err)
+				return
+			}
+			defer connection.Close()
+			var create map[string]any
+			if err := connection.ReadJSON(&create); err != nil {
+				t.Errorf("read session.create: %v", err)
+				return
+			}
+			createEvent := create["event"].(map[string]any)
+			createSession := createEvent["session"].(map[string]any)
+			if model, _ := createSession["model"].(string); model != "fast" {
+				t.Errorf("probe session model = %q, want fast", model)
+			}
+			xGrok := createSession["x_grok"].(map[string]any)
+			if temporary, _ := xGrok["is_temporary"].(bool); !temporary {
+				t.Errorf("probe session must be temporary, x_grok=%#v", xGrok)
+			}
+			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "session.created", "client_event_id": createEvent["event_id"]}})
+			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "conversation.attached", "conversation": map[string]any{"id": "conv_1"}}})
+			var turn map[string]any
+			if err := connection.ReadJSON(&turn); err != nil {
+				t.Errorf("read response.create: %v", err)
+				return
+			}
+			turnEvent := turn["event"].(map[string]any)
+			if turnEvent["type"] != "response.create" {
+				t.Fatalf("second client event = %#v, want response.create", turnEvent)
+			}
+			item := turnEvent["item"].(map[string]any)
+			chunks := item["x_grok"].(map[string]any)["input_chunks"].([]any)
+			if prompt, _ := chunks[0].(map[string]any)["text"].(map[string]any)["text"].(string); prompt != "OK" {
+				t.Errorf("probe prompt = %q, want OK", prompt)
+			}
+			for _, chunk := range script.chunks {
+				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": chunk})
+			}
+		default:
+			fhttp.NotFound(writer, request)
+		}
+	}))
+}
+
+func probeChecker(server *fhttptest.Server) *SSOProbeChecker {
+	checker := NewSSOProbeChecker(10 * time.Second)
+	checker.baseURL = server.URL
+	return checker
+}
+
+func chunkEvent(channel, text string) map[string]any {
+	return map[string]any{"type": "response.chunk", "chunk": map[string]any{"text": map[string]any{"text": text, "channel": channel}}}
+}
+
+// A healthy account streams the notetaker header before the answer: clean.
+func TestSSOProbeNotetakerHeaderIsClean(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelNotetakerHeader, "Thinking about your request"),
+		chunkEvent(channelAssistantText, "answer"),
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), " token-1 ")
+	if result.Verdict != VerdictClean {
+		t.Fatalf("notetaker header = %#v, want clean", result)
+	}
+	if !strings.Contains(result.BotFlagDetails, "notetaker=1") {
+		t.Fatalf("details should carry the probe summary, got %q", result.BotFlagDetails)
+	}
+}
+
+// A reasoning chunk also proves the account is healthy.
+func TestSSOProbeReasoningChunkIsClean(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelReasoning, "hmm"),
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictClean {
+		t.Fatalf("reasoning chunk = %#v, want clean", result)
+	}
+	if !strings.Contains(result.BotFlagDetails, "reasoning=1") {
+		t.Fatalf("details = %q", result.BotFlagDetails)
+	}
+}
+
+// The risk-controlled account answers directly with no thinking: denied.
+func TestSSOProbeAnswerWithoutThinkingIsDenied(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelAssistantText, "OK."),
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictDenied {
+		t.Fatalf("bare answer = %#v, want denied", result)
+	}
+	if !strings.Contains(result.BotFlagDetails, "answer_without_thinking") || !strings.Contains(result.BotFlagDetails, "answer=\"OK.\"") {
+		t.Fatalf("details = %q", result.BotFlagDetails)
+	}
+}
+
+// Stream errors are inconclusive: a rate-limited probe must never read as
+// risk (denied) or healthy (clean).
+func TestSSOProbeStreamErrorIsInconclusive(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		{"type": "response.grok.output", "output": map[string]any{"stream_error": map[string]any{"code": "rate_limited"}}},
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError {
+		t.Fatalf("stream error = %#v, want error", result)
+	}
+	if !strings.Contains(result.Error, "rate_limited") {
+		t.Fatalf("error = %q", result.Error)
+	}
+}
+
+// A gateway error event is likewise inconclusive.
+func TestSSOProbeGatewayErrorEventIsInconclusive(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		{"type": "error", "error": map[string]any{"message": "boom"}},
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError {
+		t.Fatalf("gateway error = %#v, want error", result)
+	}
+}
+
+// response.done before any decidable chunk stays inconclusive.
+func TestSSOProbeDoneWithoutDecisionIsInconclusive(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		{"type": "response.done", "response": map[string]any{"status": "completed"}},
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError {
+		t.Fatalf("silent done = %#v, want error", result)
+	}
+}
+
+// An unauthenticated session is a credential problem, never a risk verdict.
+func TestSSOProbeUnauthenticatedSessionIsError(t *testing.T) {
+	server := probeServer(t, &probeServerScript{sessionBody: "{\"status\":\"unauthenticated\"}"})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError || !strings.Contains(result.Error, "unauthenticated") {
+		t.Fatalf("unauthenticated = %#v, want error mentioning unauthenticated", result)
+	}
+}
+
+// Session endpoint without a userId cannot dial the gateway: error.
+func TestSSOProbeSessionWithoutUserIDIsError(t *testing.T) {
+	server := probeServer(t, &probeServerScript{sessionBody: "{\"session\":{}}"})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError || !strings.Contains(result.Error, "userId") {
+		t.Fatalf("missing userId = %#v", result)
+	}
+}
+
+// A non-101 gateway handshake surfaces its HTTP status for the transient
+// retry classification.
+func TestSSOProbeForbiddenHandshakeIsErrorWithStatus(t *testing.T) {
+	server := probeServer(t, &probeServerScript{handshakeFail: http.StatusForbidden})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError {
+		t.Fatalf("403 handshake = %#v, want error", result)
+	}
+	if result.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("HTTPStatus = %d, want 403", result.HTTPStatus)
+	}
+}
+
+func TestSSOProbeEmptyTokenIsError(t *testing.T) {
+	result := NewSSOProbeChecker(time.Second).Check(context.Background(), "   ")
+	if result.Verdict != VerdictError || result.Error != "empty sso token" {
+		t.Fatalf("empty token = %#v", result)
+	}
+}
+
+func TestNewSSOProbeCheckerDefaults(t *testing.T) {
+	checker := NewSSOProbeChecker(0)
+	if checker.Timeout != 45*time.Second {
+		t.Fatalf("default timeout = %v, want 45s", checker.Timeout)
+	}
+	if checker.Model != "fast" || checker.Prompt != "OK" {
+		t.Fatalf("defaults model=%q prompt=%q", checker.Model, checker.Prompt)
+	}
+}
+
+// The channel-vocabulary breaker: consecutive denials with zero clean
+// witnesses must stop trusting "answer without thinking" — that pattern is
+// exactly what a renamed thinking channel would produce, and a false denied
+// permanently flags whole identity groups.
+func TestSSOProbeBreakerSuppressesDeniedAfterAllDeniedWindow(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelAssistantText, "OK."),
+	}})
+	defer server.Close()
+	checker := probeChecker(server)
+	for i := 0; i < probeVitalityMinDenials-1; i++ {
+		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
+			t.Fatalf("denial %d = %#v, want denied (breaker not yet tripped)", i+1, result.Verdict)
+		}
+	}
+	result := checker.Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError {
+		t.Fatalf("denial %d = %#v, want error (breaker must trip)", probeVitalityMinDenials, result.Verdict)
+	}
+	if !strings.Contains(result.Error, "vocabulary suspect") {
+		t.Fatalf("error = %q", result.Error)
+	}
+}
+
+// A clean witness heals the breaker: denied works again afterwards.
+func TestSSOProbeBreakerHealsOnCleanWitness(t *testing.T) {
+	script := &probeServerScript{chunks: []map[string]any{chunkEvent(channelAssistantText, "OK.")}}
+	server := probeServer(t, script)
+	defer server.Close()
+	checker := probeChecker(server)
+	for i := 0; i < probeVitalityMinDenials-1; i++ {
+		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
+			t.Fatalf("denial %d = %#v, want denied (breaker not yet tripped)", i+1, result.Verdict)
+		}
+	}
+	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictError {
+		t.Fatalf("denial %d = %#v, want suppressed error (breaker tripped)", probeVitalityMinDenials, result.Verdict)
+	}
+	// Switch the script to a healthy reply and probe once.
+	script.chunks = []map[string]any{chunkEvent(channelNotetakerHeader, "Thinking"), chunkEvent(channelAssistantText, "OK.")}
+	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictClean {
+		t.Fatalf("healthy probe after breaker = %#v, want clean", result.Verdict)
+	}
+	script.chunks = []map[string]any{chunkEvent(channelAssistantText, "OK.")}
+	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
+		t.Fatalf("denied after clean witness = %#v, want denied", result.Verdict)
+	}
+}
+
+// Error verdicts never enter the breaker window (unreachable upstream must
+// neither trip nor heal it).
+func TestSSOProbeBreakerIgnoresErrorVerdicts(t *testing.T) {
+	server := probeServer(t, &probeServerScript{handshakeFail: http.StatusForbidden})
+	defer server.Close()
+	checker := probeChecker(server)
+	for i := 0; i < probeVitalityWindow+8; i++ {
+		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictError {
+			t.Fatalf("error probe %d = %#v", i, result.Verdict)
+		}
+	}
+	server2 := probeServer(t, &probeServerScript{chunks: []map[string]any{chunkEvent(channelAssistantText, "OK.")}})
+	defer server2.Close()
+	checker.baseURL = server2.URL
+	for i := 0; i < probeVitalityMinDenials-1; i++ {
+		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
+			t.Fatalf("denial %d = %#v, want denied (errors must not have tripped the breaker)", i+1, result.Verdict)
+		}
+	}
+}
+
+// The probe verdicts must ride the shared Result shape the risk service
+// persists (verdict vocabulary identical to the homepage checker).
+func TestSSOProbeVerdictJSONRoundTrip(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelAssistantText, "hi"),
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "\"Verdict\":\"denied\"") {
+		t.Fatalf("marshalled verdict missing denied: %s", encoded)
+	}
+}

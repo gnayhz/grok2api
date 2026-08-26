@@ -373,22 +373,52 @@ requestRetry:
 
 When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, and stored-response requests are unchanged. Changes to this section require a process restart — it is not part of the runtime-settings hot-reload surface (verified: flipping the file without restart leaves the guard behavior unchanged).
 
-### Account risk attribution (RSC)
+### Risk attribution (RSC)
 
 A withheld stream does not by itself prove the account is degraded - the exit
 IP may be the culprit. When `accountRisk.rscCheck` is enabled, a withhold triggers
 an async registration-risk check against grok.com through the linked Web SSO
-identity:
+identity. The check transport is selected by `method` (restart to apply):
 
-- **denied/flagged**: the verdict is cached permanently; `onDenied` (flag by default,
-  or disable / markOnly) marks the whole identity group - Web, Build, and Console
-  accounts - with `rsc_denied`. Flagged accounts stay enabled but are permanently
-  excluded from scheduling until an operator clears the flag in the admin UI.
+- **ssoProbe (default, priority)**: opens one tiny temporary `fast` conversation with the
+  SSO cookie (no persisted chat, no memory writes). A notetaker/thinking channel in
+  the first stream means the account is healthy; answer text arriving with no
+  thinking at all means the account is risk-controlled. grok.com stopped
+  delivering botFlag fields through the homepage RSC payload, so this is the only
+  surviving account-level signal (independent of exit-IP quality). Each check
+  consumes one message of the account's rolling quota; rate limits, challenges,
+  and stream errors always classify as error (retried later), never as risk.
+- **buildProbe (fallback, unlinked Build accounts only)**: accounts linked to a
+  Web identity always use ssoProbe; an unlinked Build that degrades gets one tiny
+  reasoning request through its own credential (classified by the production
+  guard signals). IP pollution is the built-in confound of that signal, so a
+  degraded first attempt triggers a **differential second attempt** (pool node =
+  re-roll for a new exit IP, fixed node = excluded and rerouted, direct-only =
+  inconclusive error, never a denial). A double-degraded verdict additionally
+  requires a recent build-probe clean witness, otherwise it is suppressed to
+  error and retried. Without any reasoning Build model the fallback stays
+  disabled (behavioral penalties only).
+- **homepage (rollback only)**: the legacy grok.com RSC payload parse, dead since
+  the payload change.
+
+- **denied/flagged**: the verdict is cached permanently and consequences are
+  **channel-scoped** - only the account that actually degraded gets `rsc_denied`
+  / disabled (flag by default; disable / markOnly available); other channels of the
+  identity group are never cascaded. Flagged accounts stay enabled but are permanently
+  excluded from scheduling until an operator clears the flag in the admin UI. The probe
+  carries a channel-vocabulary breaker: a denied streak with zero clean witnesses is
+  suppressed and self-heals by re-probing the most recent clean identity, so a grok.com
+  protocol change cannot mass-flag the pool and a genuinely risk-controlled pool cannot
+  deadlock the breaker.
 - **clean**: the degrade was exit-IP scoped; quality cooldowns (missing-thinking,
   empty-stream idle) are lifted so the account stays schedulable. Generic 5xx
   failures are never cleared by a clean verdict.
 - A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`; risky
-  verdicts never recover automatically. Changes to this section require a restart.
+  verdicts never recover automatically. Every field in this section is editable in the
+  admin UI (Guard → Risk attribution) and applies immediately after save
+  (detection method, denied action, concurrency, patrol toggles included); editing
+  config.yaml directly still requires a restart, and once saved in the UI the runtime
+  settings take precedence.
 
 ### Exit-IP quality guard and automatic rotation
 

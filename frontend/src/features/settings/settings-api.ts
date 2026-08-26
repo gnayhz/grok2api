@@ -46,6 +46,11 @@ export type SettingsConfigDTO = {
     webhookTimeout: string; webhookRetries: number; settleDelay: string; probeTimeout: string; probeInterval: string;
     canaryModelPublicId: string; canaryCreatedTimeout: string;
   };
+  // 旧后端不返回该节;withSettingsDefaults 提供本地默认。
+  accountRisk?: {
+    enabled: boolean; method: string; concurrency: number; timeout: string; onDenied: string;
+    patrolEnabled: boolean; patrolBucketDays: number; buildProbeEnabled: boolean;
+  };
 };
 
 export type ClearanceMode = "manual" | "flaresolverr" | "on_demand";
@@ -193,15 +198,31 @@ export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["eg
   webhookTimeout: "15s", webhookRetries: 2, settleDelay: "20s", probeTimeout: "2m", probeInterval: "5s",
   canaryModelPublicId: "", canaryCreatedTimeout: "10s",
 });
+export const defaultAccountRiskConfig = (): NonNullable<SettingsConfigDTO["accountRisk"]> => ({
+  enabled: false, method: "ssoProbe", concurrency: 2, timeout: "30s", onDenied: "flag",
+  patrolEnabled: false, patrolBucketDays: 30, buildProbeEnabled: false,
+});
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();
   const requestRetry = snapshot.config.requestRetry ?? defaultRequestRetryConfig();
   const egressRotation = snapshot.config.egressRotation ?? defaultEgressRotationConfig();
+  const accountRisk = snapshot.config.accountRisk ?? defaultAccountRiskConfig();
   const segmentedSelector = snapshot.config.routing.segmentedSelector ?? { enabled: true, minCandidates: 3000, windowSize: 64 };
   return {
     ...snapshot,
     config: {
       ...snapshot.config,
+      accountRisk: {
+        ...accountRisk,
+        method: accountRisk.method || "ssoProbe",
+        onDenied: accountRisk.onDenied || "flag",
+        concurrency: accountRisk.concurrency || 2,
+        // 后端 0 = 用默认(30s)。"0s" 是非空字符串(真值),必须显式归一,
+        // 否则 zod 正数校验会卡死整个设置表单的保存。
+        timeout: accountRisk.timeout && accountRisk.timeout !== "0s" ? accountRisk.timeout : "30s",
+        patrolBucketDays: accountRisk.patrolBucketDays || 30,
+        buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
+      },
       providerWeb: {
         ...snapshot.config.providerWeb,
         streamIdleTimeout: snapshot.config.providerWeb.streamIdleTimeout || "1m30s",

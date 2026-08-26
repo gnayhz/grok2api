@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { defaultEgressRotationConfig, defaultRequestRetryConfig, type SettingsConfigDTO } from "@/features/settings/settings-api";
+import { defaultAccountRiskConfig, defaultEgressRotationConfig, defaultRequestRetryConfig, type SettingsConfigDTO } from "@/features/settings/settings-api";
 
 export type DurationUnit = "s" | "m" | "h" | "d";
 export type DurationValue = { value: number; unit: DurationUnit };
@@ -216,6 +216,20 @@ export const settingsSchema = z.object({
       return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
     }),
   }),
+  // 账号风险归因(RSC 检测/处置)。边界与后端 AccountRiskRSCConfig 校验对齐。
+  accountRisk: z.object({
+    enabled: z.boolean(),
+    method: z.enum(["ssoProbe", "homepage"]),
+    concurrency: z.number().int().min(1).max(8),
+    timeout: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 5 && seconds <= 60;
+    }),
+    onDenied: z.enum(["flag", "disable", "markOnly"]),
+    patrolEnabled: z.boolean(),
+    patrolBucketDays: z.number().int().min(7).max(90),
+    buildProbeEnabled: z.boolean(),
+  }),
   // 出口换 IP 轮换调度。边界与后端 EgressRotationConfig 校验对齐。
   egressRotation: z.object({
     enabled: z.boolean(),
@@ -255,6 +269,7 @@ export type SettingsForm = z.infer<typeof settingsSchema>;
 export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
   const requestRetry = config.requestRetry ?? defaultRequestRetryConfig();
   const egressRotation = config.egressRotation ?? defaultEgressRotationConfig();
+  const accountRisk = config.accountRisk ?? defaultAccountRiskConfig();
   return {
     server: config.server,
     providerBuild: { ...config.providerBuild, responseHeaderTimeout: parseDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: parseDuration(config.providerBuild.streamIdleTimeout) },
@@ -326,6 +341,16 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       probeInterval: parseDuration(egressRotation.probeInterval),
       canaryModelPublicId: egressRotation.canaryModelPublicId,
       canaryCreatedTimeout: parseDuration(egressRotation.canaryCreatedTimeout),
+    },
+    accountRisk: {
+      enabled: accountRisk.enabled,
+      method: accountRisk.method === "homepage" ? "homepage" : "ssoProbe",
+      concurrency: accountRisk.concurrency,
+      timeout: parseDuration(accountRisk.timeout),
+      onDenied: accountRisk.onDenied === "disable" || accountRisk.onDenied === "markOnly" ? accountRisk.onDenied : "flag",
+      patrolEnabled: accountRisk.patrolEnabled,
+      patrolBucketDays: accountRisk.patrolBucketDays,
+      buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
     },
   };
 }
@@ -401,6 +426,16 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       probeInterval: formatNonNegativeDuration(config.egressRotation.probeInterval),
       canaryModelPublicId: config.egressRotation.canaryModelPublicId.trim(),
       canaryCreatedTimeout: formatNonNegativeDuration(config.egressRotation.canaryCreatedTimeout),
+    },
+    accountRisk: {
+      enabled: config.accountRisk.enabled,
+      method: config.accountRisk.method,
+      concurrency: config.accountRisk.concurrency,
+      timeout: formatDuration(config.accountRisk.timeout),
+      onDenied: config.accountRisk.onDenied,
+      patrolEnabled: config.accountRisk.patrolEnabled,
+      patrolBucketDays: config.accountRisk.patrolBucketDays,
+      buildProbeEnabled: config.accountRisk.buildProbeEnabled,
     },
   };
 }

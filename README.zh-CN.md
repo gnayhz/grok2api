@@ -371,19 +371,35 @@ requestRetry:
 
 开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具和 stored response 钉账号请求。该段修改需重启进程生效——不在管理端运行时设置面内（实测：改文件不重启守卫行为不变）。
 
-### 账号风险归因（RSC）
+### 风险归因（RSC）
 
 
 扣留一条流并不等于账号本身降智——出口 IP 同样可能是元凶。启用 `accountRisk.rscCheck` 后，
-每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查：
+每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查。检测方式由
+`method` 选择（重启生效）：
 
-- **denied/flagged**：结论永久缓存；`onDenied`（默认 flag，可选 disable / markOnly）会标记
-  整个身份组（Web、Build、Console 账号）为 `rsc_denied`。被标记账号保持启用，但永久
-  不参与调度，直到管理员在后台手动解除。
+- **ssoProbe（默认，优先）**：用 SSO Cookie 发起一次临时 `fast` 会话（不落会话、不写记忆），
+  首个流里出现 notetaker/thinking 通道 => 账号健康；答案文本直接到达且全程无 thinking =>
+  已被风控。grok.com 已停止在首页 RSC 载荷中下发 botFlag 字段，这是当前唯一有效的账号级
+  信号（不受出口 IP 质量影响）。每次检查消耗该账号 1 条消息额度；限流/挑战等异常一律按
+  error 处理，绝不误判。
+- **buildProbe（兜底，仅未关联 SSO 的 Build）**：有关联 Web 身份时始终走 ssoProbe；未关联的
+  Build 降智时用其自身凭据发一次微型推理请求（同生产守卫信号判定）。IP 污染是该信号的固有
+  混淆项，因此降智时自动发起**差分第二次尝试**（旋转池节点=重摇新 IP / 固定节点=排除换路 /
+  仅直连=不可差分记 error，绝不定罪）；双路降智还需库内近期 build 探测 clean 见证人才生效，
+  否则压制为 error 重试。无可用推理 Build 模型时功能自动停用（保持行为兜底）。
+- **homepage（回滚用）**：旧版首页 RSC 载荷解析，grok.com 改版后已失效。
+
+- **denied/flagged**：结论永久缓存且**按通道隔离处置**——只有实际降智被抓的那个账号被打
+  `rsc_denied`/停用，身份组其他通道不级联（各自降智时独立归因处置）。被标记账号保持启用
+  （flag 模式），但永久不参与调度，直到管理员在后台手动解除。探针内置通道词汇熔断：连续
+  denied 且零 clean 见证时压制判定并自动用最近 clean 身份复验自愈，防止上游改版误杀整池。
 - **clean**：本次降智与账号无关（出口 IP 嫌疑）；missing-thinking 与空流冷却会被解除，
   账号恢复可调度。泛型 5xx 故障永不因 clean 结论被清除。
 - 巡检循环按 `patrol.bucketDays` 周期复查 clean/error 结论；风险结论永不自动恢复。
-  本段修改需重启进程生效。
+  本段全部参数已进管理后台「守卫 → 风险归因」，保存后立即生效（含检测方式、
+  denied 处置、并发、巡检开关）；直接改 config.yaml 仍需重启，且后台保存过设置后
+  以运行时设置为准。
 
 ### 出口 IP 质量守卫与自动换 IP
 

@@ -60,35 +60,34 @@ const (
 
 // Application 管理后端进程生命周期和本地后台任务。
 type Application struct {
-	logger            *slog.Logger
-	database          *relational.Database
-	server            *http.Server
-	audits            *auditapp.Service
-	auditRetention    time.Duration
-	responses         repository.ResponseRepository
-	cleanupLock       repository.DistributedLock
-	runtime           io.Closer
-	settingsBus       repository.SettingsChangeBus
-	invalidationBus   repository.InvalidationBus
-	settings          *settingsapp.Service
-	gateway           *gateway.Service
-	media             *mediaapp.Service
-	updateCheck       bool
-	quotaRecovery     *quotarecoveryapp.Service
-	accounts          *accountapp.Service
-	models            *modelapp.Service
-	clientKeys        *clientkeyapp.Service
-	updates           *updatecheckapp.Service
-	invalidations     *invalidationapp.Service
-	accountRepo       repository.AccountRepository
-	modelRepo         repository.ModelRepository
-	providers         *provider.Registry
-	web               *webprovider.Adapter
-	egress            *infraegress.Manager
-	egressOps         *egressapp.Service
-	accountRisk       *risk.Service
-	accountRiskPatrol bool
-	startup           *startupState
+	logger          *slog.Logger
+	database        *relational.Database
+	server          *http.Server
+	audits          *auditapp.Service
+	auditRetention  time.Duration
+	responses       repository.ResponseRepository
+	cleanupLock     repository.DistributedLock
+	runtime         io.Closer
+	settingsBus     repository.SettingsChangeBus
+	invalidationBus repository.InvalidationBus
+	settings        *settingsapp.Service
+	gateway         *gateway.Service
+	media           *mediaapp.Service
+	updateCheck     bool
+	quotaRecovery   *quotarecoveryapp.Service
+	accounts        *accountapp.Service
+	models          *modelapp.Service
+	clientKeys      *clientkeyapp.Service
+	updates         *updatecheckapp.Service
+	invalidations   *invalidationapp.Service
+	accountRepo     repository.AccountRepository
+	modelRepo       repository.ModelRepository
+	providers       *provider.Registry
+	web             *webprovider.Adapter
+	egress          *infraegress.Manager
+	egressOps       *egressapp.Service
+	accountRisk     *risk.Service
+	startup         *startupState
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
@@ -352,21 +351,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountRepo.SetInvalidationObserver(invalidationService.Notify)
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
-	var (
-		riskService *risk.Service
-		riskPatrol  bool
-	)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
 	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.RequestRetry))
-	if service := newAccountRiskService(cfg, database, accountService, logger); service != nil {
-		gatewayService.UpdateAccountRisk(service)
-		// RSC 归因 clean → 出口 IP 嫌疑：交给 egress 服务隔离+换 IP。
-		service.SetEgressQuarantiner(egressService)
-		// reconcile 与 patrol 交给 Run() 的 background WaitGroup 托管：进程关闭时
-		riskService, riskPatrol = service, cfg.AccountRisk.RSCCheck.Patrol.Enabled
-		// 人工解除风险标记时级联删除身份组 verdict(否则被对账/降智回滚)。
-		accountService.SetRiskVerdictClearer(service)
-	}
+	// 账号风险归因服务始终构建(含关闭状态)：全部运行入口按 Enabled() 门控，
+	// enabled/patrol.enabled 属运行时设置面，可在管理端即时翻转无需重启。
+	riskService := newAccountRiskService(cfg, database, accountService, logger)
+	gatewayService.UpdateAccountRisk(riskService)
+	// RSC 归因 clean → 出口 IP 嫌疑：交给 egress 服务隔离+换 IP。
+	riskService.SetEgressQuarantiner(egressService)
+	// 未关联 SSO 的 Build 走网关差分探针兜底(有关联时 SSO 探针优先)。
+	riskService.SetBuildProber(buildProberAdapter{Gateway: gatewayService})
+	// 人工解除风险标记时级联删除身份组 verdict(否则被对账/降智回滚)。
+	accountService.SetRiskVerdictClearer(riskService)
+	// 当前探针构建键(method+timeout)：设置回调仅在键变化时重建探针，
+	// 避免无关保存重置 SSO 探针的通道活力熔断窗口。
+	currentRSCCheckerKey := rscCheckerBuildKey(cfg.AccountRisk.RSCCheck)
 	// 出口降级观测（跨账号确认兜底）+ canary 验证都由 gateway 提供。
 	gatewayService.UpdateEgressGuard(egressService)
 	gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(cfg))
@@ -424,6 +423,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressManager.SetDegradeEvidenceCooldowns(next.Egress.QualityGuard.SoftCooldownBase.Value(), next.Egress.QualityGuard.SoftCooldownMax.Value())
 		egressService.SetRotationConfig(egressRotationConfig(next))
 		gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(next))
+		// 账号风险归因热更：enabled/并发/onDenied/巡检即时生效；
+		// method/timeout 变化时按构建键重建探针。
+		riskService.UpdateConfig(accountRiskRuntime(next))
+		if key := rscCheckerBuildKey(next.AccountRisk.RSCCheck); key != currentRSCCheckerKey {
+			currentRSCCheckerKey = key
+			tag := rscCheckerSourceTag(next.AccountRisk.RSCCheck)
+			riskService.UpdateChecker(rscCheckerAdapter{Checker: buildRSCChecker(next.AccountRisk.RSCCheck), Source: tag}, tag)
+			// 方法切换：旧方法的 clean 缓存立即失效（一次性清理，双向生效）。
+			riskService.InvalidateStaleCleanVerdicts(context.WithoutCancel(ctx))
+		}
 		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
@@ -452,7 +461,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		logger: logger, database: database, server: server,
 		audits: auditService, auditRetention: cfg.Audit.Retention.Value(), responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService, updateCheck: serverUpdateCheckEnabled(cfg),
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup, accountRisk: riskService, accountRiskPatrol: riskPatrol,
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup, accountRisk: riskService,
 	}, nil
 }
 
@@ -508,19 +517,60 @@ func gatewayEgressCanaryConfig(cfg config.Config) gateway.EgressCanaryRuntime {
 // config; nil means attribution stays off and the gateway relies on its
 // escalating behavioral penalties alone.
 func newAccountRiskService(cfg config.Config, database *relational.Database, accounts *accountapp.Service, logger *slog.Logger) *risk.Service {
-	rscCfg := cfg.AccountRisk.RSCCheck
-	if !rscCfg.Enabled {
-		return nil
-	}
 	store := riskRelationalStore{Repo: relational.NewRiskRepository(database)}
-	return risk.New(risk.Config{
-		Enabled:        true,
-		Concurrency:    rscCfg.Concurrency,
-		Timeout:        rscCfg.Timeout.Value(),
-		OnDenied:       rscCfg.OnDenied,
-		PatrolInterval: time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
-		ErrorRetry:     time.Hour,
-	}, accounts, store, rscCheckerAdapter{Checker: rsc.NewChecker(rscCfg.Timeout.Value())}, logger)
+	tag := rscCheckerSourceTag(cfg.AccountRisk.RSCCheck)
+	adapter := rscCheckerAdapter{Checker: buildRSCChecker(cfg.AccountRisk.RSCCheck), Source: tag}
+	service := risk.New(accountRiskRuntime(cfg), accounts, store, adapter, logger)
+	// 播种探针溯源标记：freshness 按方法匹配的闸门依赖它。
+	service.UpdateChecker(adapter, tag)
+	return service
+}
+
+// accountRiskRuntime maps the merged (file + persisted runtime) settings onto
+// the risk service configuration. Called at boot and on every settings apply.
+func accountRiskRuntime(cfg config.Config) risk.Config {
+	rscCfg := cfg.AccountRisk.RSCCheck
+	return risk.Config{
+		Enabled:           rscCfg.Enabled,
+		Concurrency:       rscCfg.Concurrency,
+		Timeout:           rscCfg.Timeout.Value(),
+		OnDenied:          rscCfg.OnDenied,
+		PatrolEnabled:     rscCfg.Patrol.Enabled,
+		PatrolInterval:    time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
+		ErrorRetry:        time.Hour,
+		BuildProbeEnabled: rscCfg.BuildProbeEnabled(),
+	}
+}
+
+// buildRSCChecker selects the probe implementation by method: SSO thinking
+// probe by default (grok.com stopped delivering RSC botFlag payload fields);
+// homepage keeps the legacy parse for rollback.
+func buildRSCChecker(rscCfg config.AccountRiskRSCConfig) rsc.Probe {
+	if strings.EqualFold(strings.TrimSpace(rscCfg.Method), "homepage") {
+		return rsc.NewChecker(rscCfg.Timeout.Value())
+	}
+	return rsc.NewSSOProbeChecker(rscCfg.Timeout.Value())
+}
+
+// rscCheckerSourceTag names the probe method for verdict provenance:
+// "rsc" for homepage (identical to every legacy stored verdict, so a
+// rollback keeps its own cache) and "sso_probe" for the new probe.
+func rscCheckerSourceTag(rscCfg config.AccountRiskRSCConfig) string {
+	if strings.EqualFold(strings.TrimSpace(rscCfg.Method), "homepage") {
+		return "rsc"
+	}
+	return "sso_probe"
+}
+
+// rscCheckerBuildKey identifies the built checker (method + timeout); the
+// settings apply chain rebuilds the probe only when this key changes so
+// unrelated saves never reset the SSO probe's channel-vitality breaker.
+func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig) string {
+	method := strings.ToLower(strings.TrimSpace(rscCfg.Method))
+	if method == "" {
+		method = "ssoprobe"
+	}
+	return method + "|" + rscCfg.Timeout.String()
 }
 
 // runAccountRiskPatrol runs the bucketed clean-verdict re-check loop. Each
@@ -537,6 +587,10 @@ func (a *Application) runAccountRiskPatrol(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		// patrol.enabled 是运行时设置：关闭时本 tick 空转（任务常驻，切换免重启）。
+		if !a.accountRisk.PatrolEnabled() {
+			continue
 		}
 		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		patrolDue, errorRetryDue := a.accountRisk.PatrolCutoffs()
@@ -766,18 +820,20 @@ func (a *Application) Run(ctx context.Context) error {
 	if a.accountRisk != nil {
 		startBackground("account_risk_reconcile", func(taskCtx context.Context) error {
 			reconcileCtx, cancel := context.WithTimeout(taskCtx, 2*time.Minute)
+			// 先清理其他检测方法遗留的 clean 缓存（homepage 时代的结论一律
+			// "clean"，会压制新探针整整一个巡检周期），再重放风险结论。
+			a.accountRisk.InvalidateStaleCleanVerdicts(reconcileCtx)
 			a.accountRisk.ReconcileRiskyVerdicts(reconcileCtx)
 			cancel()
 			// runSupervisedTask restarts any task that returns: park until shutdown.
 			<-taskCtx.Done()
 			return nil
 		})
-		if a.accountRiskPatrol {
-			startBackground("account_risk_patrol", func(taskCtx context.Context) error {
-				a.runAccountRiskPatrol(taskCtx)
-				return nil
-			})
-		}
+		// patrol 任务常驻启动，每 tick 按运行时 patrol.enabled 门控。
+		startBackground("account_risk_patrol", func(taskCtx context.Context) error {
+			a.runAccountRiskPatrol(taskCtx)
+			return nil
+		})
 	}
 	startBackground("web_quota_startup_catchup", func(taskCtx context.Context) error {
 		a.runWebQuotaCatchup(taskCtx)

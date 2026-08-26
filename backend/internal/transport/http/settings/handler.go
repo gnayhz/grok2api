@@ -33,10 +33,22 @@ type settingsConfigDTO struct {
 	Audit             auditConfigDTO             `json:"audit"`
 	ClientKeyDefaults clientKeyDefaultsConfigDTO `json:"clientKeyDefaults"`
 	Accounts          *accountsConfigDTO         `json:"accounts,omitempty"`
-	// RequestRetry/EgressRotation 为指针节：旧管理端未发送时保持 nil，
-	// 服务端沿用当前值而非清零。
+	// RequestRetry/EgressRotation/AccountRisk 为指针节：旧管理端未发送时
+	// 保持 nil，服务端沿用当前值而非清零。
 	RequestRetry   *requestRetryConfigDTO   `json:"requestRetry,omitempty"`
 	EgressRotation *egressRotationConfigDTO `json:"egressRotation,omitempty"`
+	AccountRisk    *accountRiskConfigDTO    `json:"accountRisk,omitempty"`
+}
+
+type accountRiskConfigDTO struct {
+	Enabled           bool   `json:"enabled"`
+	Method            string `json:"method"`
+	Concurrency       int    `json:"concurrency"`
+	Timeout           string `json:"timeout"`
+	OnDenied          string `json:"onDenied"`
+	PatrolEnabled     bool   `json:"patrolEnabled"`
+	PatrolBucketDays  int    `json:"patrolBucketDays"`
+	BuildProbeEnabled bool   `json:"buildProbeEnabled"`
 }
 
 type requestRetryConfigDTO struct {
@@ -318,6 +330,16 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		}
 		result.RequestRetryProvided = true
 	}
+	if value.AccountRisk != nil {
+		result.AccountRisk = settingsapp.AccountRiskEditable{
+			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
+			Concurrency: value.AccountRisk.Concurrency, Timeout: value.AccountRisk.Timeout,
+			OnDenied: value.AccountRisk.OnDenied, PatrolEnabled: value.AccountRisk.PatrolEnabled,
+			PatrolBucketDays:  value.AccountRisk.PatrolBucketDays,
+			BuildProbeEnabled: value.AccountRisk.BuildProbeEnabled,
+		}
+		result.AccountRiskProvided = true
+	}
 	if value.EgressRotation != nil {
 		result.EgressRotation = settingsapp.EgressRotationEditable{
 			Enabled: value.EgressRotation.Enabled, MaxAttemptsPerQuarantine: value.EgressRotation.MaxAttemptsPerQuarantine,
@@ -407,6 +429,13 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				EarlyHeaderAbort: config.RequestRetry.EarlyHeaderAbort, SameAccountRetry: config.RequestRetry.SameAccountRetry,
 				EvidenceTimeout: config.RequestRetry.EvidenceTimeout, CreatedTimeout: config.RequestRetry.CreatedTimeout,
 				IdleAccountCooldown: config.RequestRetry.IdleAccountCooldown,
+			},
+			AccountRisk: &accountRiskConfigDTO{
+				Enabled: config.AccountRisk.Enabled, Method: config.AccountRisk.Method,
+				Concurrency: config.AccountRisk.Concurrency, Timeout: config.AccountRisk.Timeout,
+				OnDenied: config.AccountRisk.OnDenied, PatrolEnabled: config.AccountRisk.PatrolEnabled,
+				PatrolBucketDays:  config.AccountRisk.PatrolBucketDays,
+				BuildProbeEnabled: config.AccountRisk.BuildProbeEnabled,
 			},
 			EgressRotation: &egressRotationConfigDTO{
 				Enabled: config.EgressRotation.Enabled, MaxAttemptsPerQuarantine: config.EgressRotation.MaxAttemptsPerQuarantine,

@@ -1,4 +1,4 @@
-import { BarChart3, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
+import { BarChart3, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Controller } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -71,6 +71,10 @@ export function GuardPage() {
                 <RefreshCw className="size-3.5" />
                 <span>{t("settings.egressRotation.title")}</span>
               </TabsTrigger>
+              <TabsTrigger value="accountRisk" className="gap-1.5">
+                <ShieldAlert className="size-3.5" />
+                <span>{t("settings.accountRisk.title")}</span>
+              </TabsTrigger>
             </TabsList>
           </div>
 
@@ -130,6 +134,39 @@ export function GuardPage() {
           </SettingsSection>
           </SettingsPane>
 
+          <SettingsPane value="accountRisk">
+          <SettingsSection title={t("settings.accountRisk.title")}>
+            <div className="space-y-0">
+              <SettingsField controlId="account-risk-enabled" className="sm:col-span-2" label={t("settings.accountRisk.enabled")} description={t("settings.accountRisk.enabledHelp")}><Controller control={form.control} name="accountRisk.enabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="account-risk-enabled" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
+              <SettingsField controlId="account-risk-method" label={t("settings.accountRisk.method")} description={t("settings.accountRisk.methodHelp")} error={form.formState.errors.accountRisk?.method?.message}>
+                <Controller control={form.control} name="accountRisk.method" render={({ field }) => (
+                  <Tabs value={field.value} onValueChange={field.onChange}>
+                    <TabsList id="account-risk-method" className="grid w-full grid-cols-2 bg-muted/55">
+                      <TabsTrigger value="ssoProbe" className="font-normal">{t("settings.accountRisk.methodSSOProbe")}</TabsTrigger>
+                      <TabsTrigger value="homepage" className="font-normal">{t("settings.accountRisk.methodHomepage")}</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                )} />
+              </SettingsField>
+              <SettingsField controlId="account-risk-on-denied" label={t("settings.accountRisk.onDenied")} description={t("settings.accountRisk.onDeniedHelp")} error={form.formState.errors.accountRisk?.onDenied?.message}>
+                <Controller control={form.control} name="accountRisk.onDenied" render={({ field }) => (
+                  <Tabs value={field.value} onValueChange={field.onChange}>
+                    <TabsList id="account-risk-on-denied" className="grid w-full grid-cols-3 bg-muted/55">
+                      <TabsTrigger value="flag" className="font-normal">{t("settings.accountRisk.onDeniedFlag")}</TabsTrigger>
+                      <TabsTrigger value="disable" className="font-normal">{t("settings.accountRisk.onDeniedDisable")}</TabsTrigger>
+                      <TabsTrigger value="markOnly" className="font-normal">{t("settings.accountRisk.onDeniedMarkOnly")}</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                )} />
+              </SettingsField>
+              <SettingsField controlId="account-risk-timeout" label={t("settings.accountRisk.timeout")} description={t("settings.accountRisk.timeoutHelp")} error={form.formState.errors.accountRisk?.timeout?.message}><Controller control={form.control} name="accountRisk.timeout" render={({ field }) => <DurationInput id="account-risk-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
+              <SettingsField controlId="account-risk-concurrency" label={t("settings.accountRisk.concurrency")} description={t("settings.accountRisk.concurrencyHelp")} error={form.formState.errors.accountRisk?.concurrency?.message}><Input id="account-risk-concurrency" type="number" min={1} max={8} {...form.register("accountRisk.concurrency", { valueAsNumber: true })} /></SettingsField>
+              <SettingsField controlId="account-risk-build-probe" className="sm:col-span-2" label={t("settings.accountRisk.buildProbeEnabled")} description={t("settings.accountRisk.buildProbeEnabledHelp")}><Controller control={form.control} name="accountRisk.buildProbeEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="account-risk-build-probe" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
+              <SettingsField controlId="account-risk-patrol-enabled" className="sm:col-span-2" label={t("settings.accountRisk.patrolEnabled")} description={t("settings.accountRisk.patrolEnabledHelp")}><Controller control={form.control} name="accountRisk.patrolEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="account-risk-patrol-enabled" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
+              <SettingsField controlId="account-risk-patrol-days" label={t("settings.accountRisk.patrolBucketDays")} description={t("settings.accountRisk.patrolBucketDaysHelp")} error={form.formState.errors.accountRisk?.patrolBucketDays?.message}><Input id="account-risk-patrol-days" type="number" min={7} max={90} {...form.register("accountRisk.patrolBucketDays", { valueAsNumber: true })} /></SettingsField>
+            </div>
+          </SettingsSection>
+          </SettingsPane>
           </div>
         </Tabs>
       ) : null}

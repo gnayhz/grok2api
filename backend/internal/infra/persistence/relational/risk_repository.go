@@ -53,6 +53,37 @@ func (r *RiskRepository) SaveRiskVerdict(ctx context.Context, verdict AccountRis
 	return r.db.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
 }
 
+// MostRecentCleanVerdict returns the account holding the newest clean verdict
+// for the given probe source (the channel-vocabulary breaker witness), or
+// found=false when none exists.
+func (r *RiskRepository) MostRecentCleanVerdict(ctx context.Context, source string) (uint64, bool, error) {
+	var row accountRiskVerdictModel
+	err := r.db.db.WithContext(ctx).
+		Where("verdict = ? AND source = ?", "clean", source).
+		Order("checked_at DESC").First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, mapError(err)
+	}
+	return row.AccountID, true, nil
+}
+
+// DeleteCleanVerdictsExceptSources removes cached clean verdicts produced by
+// a different probe method (a method switch invalidates the old cache
+// wholesale: e.g. homepage-era cleans read every account as healthy once
+// grok.com stopped delivering botFlag fields). denied/flagged rows are real
+// detections and stay; error rows expire on their own retry window.
+func (r *RiskRepository) DeleteCleanVerdictsExceptSources(ctx context.Context, keepSources ...string) (int64, error) {
+	query := r.db.db.WithContext(ctx).Where("verdict = ?", "clean")
+	if len(keepSources) > 0 {
+		query = query.Where("source NOT IN ?", keepSources)
+	}
+	result := query.Delete(&accountRiskVerdictModel{})
+	return result.RowsAffected, mapError(result.Error)
+}
+
 // DeleteRiskVerdict permanently removes one identity's verdict (operator
 // manual clear). Missing rows are a no-op: the goal is that no verdict stays.
 func (r *RiskRepository) DeleteRiskVerdict(ctx context.Context, accountID uint64) error {

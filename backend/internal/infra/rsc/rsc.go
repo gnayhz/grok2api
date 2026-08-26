@@ -1,11 +1,15 @@
-// Package rsc reads the registration-risk state that grok.com renders into
-// its Next.js RSC payload for a Web SSO identity. It is a Go port of the
-// regc verify --checks rsc implementation.
+// Package rsc classifies registration risk for a Web SSO identity.
 //
-// An account can carry a clean Build token bfs claim while grok.com still
-// renders policy=deny,event=$registration; the RSC payload is the
-// authoritative account-level risk signal. Risk verdicts never recover, so
-// callers may cache a denied/flagged result forever.
+// The primary transport is the SSO thinking probe (SSOProbeChecker, see
+// ssoprobe.go): since grok.com stopped rendering botFlag fields into its
+// Next.js RSC payload, the surviving account-level signal is the reasoning
+// stream of a real (temporary) mgw conversation. The legacy homepage RSC
+// payload parser below is a Go port of the regc verify --checks rsc
+// implementation and stays available for rollback via
+// accountRisk.rscCheck.method=homepage.
+//
+// Risk verdicts never recover, so callers may cache a denied/flagged result
+// forever.
 package rsc
 
 import (
@@ -48,6 +52,10 @@ type Result struct {
 	HTTPStatus     int
 	Error          string
 	CheckedAt      time.Time
+	// Suppressed marks a denied downgraded to error by the SSO probe's
+	// channel-vocabulary breaker; callers may answer with witness
+	// re-validation instead of retrying blindly.
+	Suppressed bool
 }
 
 // Risky reports whether the verdict marks the identity as risk.

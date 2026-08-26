@@ -60,19 +60,32 @@ type Store interface {
 	ListRiskyVerdictAccountIDs(ctx context.Context) ([]uint64, error)
 	// ListRiskyVerdictAccountIDsAfter 以账号 ID 游标分页（大池全量收敛）。
 	ListRiskyVerdictAccountIDsAfter(ctx context.Context, afterID uint64) ([]uint64, error)
+	// DeleteCleanVerdictsExceptSources 删除由其他检测方法产生的 clean 结论
+	// （方法切换后旧缓存一律失效；keepSources 之外全部清除）；
+	// denied/flagged/error 不受影响。
+	DeleteCleanVerdictsExceptSources(ctx context.Context, keepSources ...string) (int64, error)
+	// MostRecentCleanVerdict 返回最近一次 clean 结论的账号（限指定检测
+	// 方法），作为通道词汇熔断的见证人候选；无则 found=false。
+	MostRecentCleanVerdict(ctx context.Context, source string) (uint64, bool, error)
 }
 
 // relationalVerdict decouples the service from the persistence layer shape.
 type relationalVerdict = StoredVerdict
 
-// Config mirrors config.AccountRiskRSCConfig at runtime.
+// Config mirrors config.AccountRiskRSCConfig at runtime. Every field is
+// hot-reloadable via UpdateConfig (settings surface); the probe
+// implementation itself (method/timeout) is swapped via UpdateChecker.
 type Config struct {
 	Enabled        bool
 	Concurrency    int
 	Timeout        time.Duration
 	OnDenied       string // disable | markOnly | flag
+	PatrolEnabled  bool
 	PatrolInterval time.Duration
 	ErrorRetry     time.Duration
+	// BuildProbeEnabled gates the Build-native differential fallback for
+	// unlinked Build accounts (config-switchable, default off).
+	BuildProbeEnabled bool
 }
 
 // Accounts is the account-service surface attribution needs. The concrete
@@ -80,10 +93,6 @@ type Config struct {
 type Accounts interface {
 	DecryptedAccessToken(ctx context.Context, id uint64) (string, error)
 	LinkedWebAccountID(ctx context.Context, buildAccountID uint64) (uint64, bool, error)
-	LinkedBuildAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error)
-	// LinkedConsoleAccountIDs：同一 Web 身份的 Console 账号也属于身份组，
-	// denied 处置必须一并覆盖（否则 Console 仍可被调度）。
-	LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error)
 	SetAccountEnabled(ctx context.Context, id uint64, enabled bool, reason string) error
 	SetAccountRiskStatus(ctx context.Context, id uint64, flagged bool) error
 	ClearMissingThinkingCooldown(ctx context.Context, id uint64) error
@@ -91,14 +100,26 @@ type Accounts interface {
 
 // Service runs event-driven and patrol RSC attribution.
 type Service struct {
+	// cfgMu guards cfg/sem/checker for settings hot-reload (UpdateConfig /
+	// UpdateChecker run on the settings apply chain while checks are in
+	// flight). Reads copy the fields they need into locals and never hold
+	// the lock across blocking work.
+	cfgMu    sync.RWMutex
 	cfg      Config
 	accounts Accounts
 	store    Store
 	checker  Checker
-	logger   *slog.Logger
+	// checkerTag identifies the active probe method ("sso_probe"/"rsc"); see
+	// CheckResult.Source. Empty keeps legacy freshness semantics (all stored
+	// clean verdicts stay eligible), used by tests and pre-tag callers.
+	checkerTag string
+	logger     *slog.Logger
 	// egressQuarantiner receives exit-IP quarantine duty when attribution
 	// exonerates the account (RSC clean); nil keeps the degrade account-scoped.
 	egressQuarantiner EgressQuarantiner
+	// buildProber is the Build-native fallback for unlinked Build accounts;
+	// nil keeps the behavioral-only path (no RSC signal without a Web SSO).
+	buildProber BuildProber
 
 	sem chan struct{}
 	// admissionDedup: credential.ID -> struct{}。仅约束 OnDegraded 入队。
@@ -113,6 +134,54 @@ type Service struct {
 	pending       atomic.Int32
 	// waiters 记录此刻停靠在同身份在途检查上的调用数（测试可等待的确定性观测点）。
 	waiters atomic.Int32
+	// witnessMu 限制通道词汇熔断的见证人复验频率。
+	witnessMu     sync.Mutex
+	lastWitnessAt time.Time
+}
+
+// witnessRetryInterval 限制见证人复验的最低间隔：复验消耗一位健康账号的
+// 一条消息额度，熔断持续触发时也至多每 10 分钟一次。
+const witnessRetryInterval = 10 * time.Minute
+
+// revalidateChannelWitness answers a Suppressed verdict by re-probing the most
+// recently proven-clean identity: a thinking stream from the witness proves the
+// channel vocabulary is alive (which also heals the probe's internal breaker
+// through its own clean record), so the caller may re-run the real verdict. No
+// witness or a non-clean witness keeps the breaker tripped.
+func (s *Service) revalidateChannelWitness(ctx context.Context, checker Checker) bool {
+	now := time.Now().UTC()
+	s.witnessMu.Lock()
+	if now.Sub(s.lastWitnessAt) < witnessRetryInterval {
+		s.witnessMu.Unlock()
+		return false
+	}
+	s.lastWitnessAt = now
+	s.witnessMu.Unlock()
+	source := s.sourceTag()
+	if source == "" {
+		return false
+	}
+	witnessID, found, err := s.store.MostRecentCleanVerdict(ctx, source)
+	if err != nil {
+		s.logger.Warn("account_rsc_witness_lookup_failed", "error", err.Error())
+		return false
+	}
+	if !found {
+		s.logger.Warn("account_rsc_witness_unavailable", "hint", "no clean verdict to prove channel vocabulary; denied stays suppressed")
+		return false
+	}
+	token, err := s.accounts.DecryptedAccessToken(ctx, witnessID)
+	if err != nil {
+		s.logger.Warn("account_rsc_witness_token_failed", "account_id", witnessID, "error", err.Error())
+		return false
+	}
+	witness := checker.Check(ctx, token)
+	if witness.Verdict == VerdictClean {
+		s.logger.Warn("account_rsc_witness_healed", "witness_account_id", witnessID)
+		return true
+	}
+	s.logger.Warn("account_rsc_witness_still_suspect", "witness_account_id", witnessID, "witness_verdict", witness.Verdict)
+	return false
 }
 
 // checkCall 是一次进行中的 RSC 检查：done 关闭后 result 可读。
@@ -132,11 +201,56 @@ type CheckResult struct {
 	HTTPStatus     int
 	Error          string
 	CheckedAt      time.Time
+	// Source identifies the probe implementation that produced this result
+	// (e.g. "sso_probe" / "rsc"). A cached clean verdict is only authoritative
+	// while it came from the method currently in effect — grok.com stopped
+	// delivering the homepage botFlag payload, so legacy homepage-era clean
+	// verdicts read every account as healthy and must never short-circuit the
+	// SSO probe. Set by the adapter; empty keeps legacy semantics.
+	Source string
+	// Suppressed marks a denied downgraded by the channel-vocabulary breaker;
+	// the risk service answers it with witness re-validation.
+	Suppressed bool
 }
 
 // Checker probes registration risk for one SSO identity.
 type Checker interface {
 	Check(ctx context.Context, ssoToken string) CheckResult
+}
+
+// buildProbeSourceTag marks verdicts produced by the Build-native probe
+// (unlinked Build accounts only; the SSO probe stays the primary method).
+const buildProbeSourceTag = "build_probe"
+
+// Build-native probe verdicts (gateway differential probe outcome mapped).
+const (
+	BuildProbeClean        = "clean"
+	BuildProbeDenied       = "denied"
+	BuildProbeError        = "error"
+	BuildProbeUnconfigured = "unconfigured"
+)
+
+// BuildProbeResult is the outcome of one Build-native differential probe.
+type BuildProbeResult struct {
+	// Verdict: clean (thinking seen on any path), denied (degraded on two
+	// distinct exit paths), error (transport trouble / single-path), or
+	// unconfigured (no reasoning build model available — probe disabled).
+	Verdict   string
+	Error     string
+	Details   string
+	CheckedAt time.Time
+}
+
+// BuildProber runs the Build-native risk probe for one unlinked Build
+// account. Implemented by the gateway (tiny reasoning request through the
+// real Build channel with egress differential); wired in the composition
+// root so the risk package stays gateway-free.
+type BuildProber interface {
+	// ProbeBuildThinking runs one differential probe. degradedNodeID is the
+	// egress node that served the degraded attempt (0 = direct): attempt 1
+	// re-pins it to reproduce the degrade path; attempt 2 differentials over
+	// a different exit.
+	ProbeBuildThinking(ctx context.Context, accountID, degradedNodeID uint64) BuildProbeResult
 }
 
 // EgressQuarantiner takes over exit-IP scoped degradations: the account was
@@ -165,6 +279,17 @@ type EgressEvidenceRemover interface {
 
 // New builds the service; defaults fill zero fields.
 func New(cfg Config, accounts Accounts, store Store, checker Checker, logger *slog.Logger) *Service {
+	cfg = normalizeConfig(cfg)
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{
+		cfg: cfg, accounts: accounts, store: store, checker: checker, logger: logger,
+		sem: make(chan struct{}, cfg.Concurrency),
+	}
+}
+
+func normalizeConfig(cfg Config) Config {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 2
 	}
@@ -181,17 +306,96 @@ func New(cfg Config, accounts Accounts, store Store, checker Checker, logger *sl
 	if cfg.ErrorRetry <= 0 {
 		cfg.ErrorRetry = time.Hour
 	}
-	if logger == nil {
-		logger = slog.Default()
+	return cfg
+}
+
+// config returns a snapshot of the runtime configuration.
+func (s *Service) config() Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+// UpdateConfig replaces the runtime configuration (settings hot-reload).
+// A concurrency change swaps the semaphore channel: waiters capture the
+// channel at acquire time and release their token to that same channel, so
+// an in-flight generation never strands or double-counts tokens across a
+// swap.
+func (s *Service) UpdateConfig(next Config) {
+	if s == nil {
+		return
 	}
-	return &Service{
-		cfg: cfg, accounts: accounts, store: store, checker: checker, logger: logger,
-		sem: make(chan struct{}, cfg.Concurrency),
+	next = normalizeConfig(next)
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if cap(s.sem) != next.Concurrency {
+		s.sem = make(chan struct{}, next.Concurrency)
+	}
+	s.cfg = next
+}
+
+// UpdateChecker atomically replaces the RSC probe implementation (check
+// method or timeout changed at runtime). sourceTag names the new method and
+// gates cached-clean freshness (see CheckResult.Source); pass "" to keep
+// legacy semantics.
+func (s *Service) UpdateChecker(checker Checker, sourceTag string) {
+	if s == nil || checker == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	s.checker = checker
+	s.checkerTag = sourceTag
+	s.cfgMu.Unlock()
+}
+
+// sourceTag returns the active probe method tag.
+func (s *Service) sourceTag() string {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.checkerTag
+}
+
+// InvalidateStaleCleanVerdicts deletes cached clean verdicts produced by a
+// different probe method. Called at boot and whenever the check method
+// changes at runtime: those verdicts describe the world as seen through a
+// dead detection method (homepage-era cleans are universally "clean" since
+// grok.com stopped delivering botFlag fields) and would otherwise pin the
+// exit-IP-suspect conclusion for a full patrol interval. denied/flagged
+// verdicts are real detections and stay untouched.
+func (s *Service) InvalidateStaleCleanVerdicts(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	tag := s.sourceTag()
+	if tag == "" {
+		return
+	}
+	// build_probe 的 clean 缓存属于另一套探测体系（未关联 Build），不随
+	// SSO 方法切换失效。
+	removed, err := s.store.DeleteCleanVerdictsExceptSources(ctx, tag, buildProbeSourceTag)
+	if err != nil {
+		if !observability.IsShutdownCancellation(ctx, err) {
+			s.logger.Warn("account_risk_stale_clean_purge_failed", "keep_source", tag, "error", err.Error())
+		}
+		return
+	}
+	if removed > 0 {
+		s.logger.Info("account_risk_stale_cleans_purged", "count", removed, "keep_source", tag)
 	}
 }
 
 // Enabled reports whether attribution is active.
-func (s *Service) Enabled() bool { return s != nil && s.cfg.Enabled }
+func (s *Service) Enabled() bool { return s != nil && s.config().Enabled }
+
+// PatrolEnabled reports whether the bucketed patrol loop should run; the
+// patrol background task always starts and gates each tick here so the
+// setting can flip at runtime without a restart.
+func (s *Service) PatrolEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.config().PatrolEnabled
+}
 
 // maxQueuedAttributions bounds detached attribution goroutines (admission
 // ceiling before per-credential dedup): degrade storms merge/drop instead of
@@ -221,7 +425,7 @@ func (s *Service) OnDegraded(ctx context.Context, credential accountdomain.Crede
 		s.logger.Warn("account_risk_attribution_dropped", "account_id", credential.ID, "queued", n-1)
 		return
 	}
-	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.Timeout*2+10*time.Second)
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.config().Timeout*2+10*time.Second)
 	go func() {
 		defer func() {
 			s.pending.Add(-1)
@@ -248,6 +452,12 @@ func (s *Service) attribute(ctx context.Context, credential accountdomain.Creden
 		return
 	}
 	if !linked {
+		// 未关联 SSO 的 Build 走 Build 原生差分探针兜底（有关联时 SSO 探针
+		// 始终优先：它的信号是账号级的，不受出口 IP 质量影响）。
+		if credential.Provider == accountdomain.ProviderBuild && s.buildProber != nil && s.config().BuildProbeEnabled {
+			s.attributeBuildNative(ctx, credential, egressNodeID)
+			return
+		}
 		s.logger.Info("account_risk_unlinked_behavior_attribution", "account_id", credential.ID)
 		return
 	}
@@ -257,6 +467,86 @@ func (s *Service) attribute(ctx context.Context, credential accountdomain.Creden
 	}
 	result := s.checkNow(ctx, webID)
 	s.applyConsequences(ctx, credential.ID, webID, result, egressNodeID)
+}
+
+// attributeBuildNative runs the Build-native fallback for an unlinked Build
+// account: cached verdict reuse first, then one differential probe. The
+// verdict is keyed by the Build account itself and consequences stay
+// channel-scoped to it.
+func (s *Service) attributeBuildNative(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64) {
+	if verdict, fresh := s.freshVerdictFor(ctx, credential.ID, buildProbeSourceTag); fresh {
+		s.applyConsequences(ctx, credential.ID, credential.ID, verdict, egressNodeID)
+		return
+	}
+	verdict := s.checkNowBuild(ctx, credential, egressNodeID)
+	s.applyConsequences(ctx, credential.ID, credential.ID, verdict, egressNodeID)
+}
+
+// buildWitnessMaxAge bounds how old a build-probe clean witness may be to
+// vouch for the differential verdict vocabulary.
+const buildWitnessMaxAge = 7 * 24 * time.Hour
+
+// checkNowBuild runs one Build-native differential probe under the shared
+// concurrency gate. No singleflight: the per-credential admission dedup
+// upstream already merges concurrent degrade events for the same account.
+// A denied verdict additionally requires a recent build-probe clean witness
+// (differential "both paths degraded" can still be all-dirty-IP); without
+// one it degrades to error and is retried on the next event.
+func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Credential, degradedNodeID uint64) StoredVerdict {
+	now := time.Now().UTC()
+	if s.buildProber == nil {
+		return StoredVerdict{Verdict: VerdictError, Error: "build prober unavailable", Source: buildProbeSourceTag, CheckedAt: now}
+	}
+	// Capture the semaphore generation up front (hot-reload may swap it).
+	s.cfgMu.RLock()
+	sem := s.sem
+	s.cfgMu.RUnlock()
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-ctx.Done():
+		return StoredVerdict{Verdict: VerdictError, Error: "concurrency gate timeout", Source: buildProbeSourceTag, CheckedAt: now}
+	}
+	result := s.buildProber.ProbeBuildThinking(ctx, credential.ID, degradedNodeID)
+	verdict := StoredVerdict{Source: buildProbeSourceTag, CheckedAt: result.CheckedAt}
+	switch result.Verdict {
+	case BuildProbeClean:
+		verdict.Verdict = VerdictClean
+		verdict.BotFlagDtl = "build probe thinking_ok: " + result.Details
+	case BuildProbeDenied:
+		verdict.Verdict = VerdictDenied
+		verdict.BotFlagDtl = "build probe differential_degraded: " + result.Details
+		// 见证人门控：差分双降仍可能是"两条路都脏 IP"，需要近期 clean 见证。
+		witnessID, found, err := s.store.MostRecentCleanVerdict(ctx, buildProbeSourceTag)
+		if err != nil || !found {
+			verdict.Verdict = VerdictError
+			verdict.Error = "denied suppressed: no build-probe clean witness (both paths degraded could be dirty IPs)"
+			verdict.BotFlagDtl = "build probe suppressed: " + result.Details
+			s.logger.Warn("account_rsc_build_denied_suppressed", "account_id", credential.ID, "reason", "no clean witness")
+			break
+		}
+		witness, err := s.store.GetRiskVerdict(ctx, witnessID)
+		if err != nil || time.Now().UTC().Sub(witness.CheckedAt) > buildWitnessMaxAge {
+			verdict.Verdict = VerdictError
+			verdict.Error = "denied suppressed: build-probe clean witness stale"
+			verdict.BotFlagDtl = "build probe suppressed: " + result.Details
+			s.logger.Warn("account_rsc_build_denied_suppressed", "account_id", credential.ID, "reason", "witness stale")
+		}
+	case BuildProbeUnconfigured:
+		// 探针未配置（无可用推理 Build 模型）：不落库不重试，保持行为兜底。
+		s.logger.Info("account_rsc_build_probe_unconfigured", "account_id", credential.ID, "detail", result.Details)
+		return StoredVerdict{Verdict: VerdictError, Error: "build probe unconfigured: " + result.Details, Source: buildProbeSourceTag, CheckedAt: now}
+	default:
+		verdict.Verdict = VerdictError
+		verdict.Error = result.Error
+		verdict.BotFlagDtl = "build probe inconclusive: " + result.Details
+	}
+	s.saveVerdictGuarded(ctx, credential.ID, verdict)
+	perfmetrics.Default.Inc("account_rsc_check_total", perfmetrics.Labels{
+		Subsystem: "account", Operation: "rsc_check", Outcome: verdict.Verdict,
+	})
+	s.logger.Info("account_rsc_checked", "account_id", credential.ID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+	return verdict
 }
 
 // ClearIdentityVerdicts removes the persisted verdict behind an operator's
@@ -272,10 +562,23 @@ func (s *Service) ClearIdentityVerdicts(ctx context.Context, credential accountd
 		return err
 	}
 	if !linked {
+		// 未关联 Build 的原生探针 verdict 挂在账号自身：人工清标时同样要
+		// 删除，否则 denied 永久新鲜会把刚清的标原样打回来。
+		if credential.Provider == accountdomain.ProviderBuild {
+			if err := s.store.DeleteRiskVerdict(ctx, credential.ID); err != nil {
+				return err
+			}
+			s.logger.Info("account_risk_verdict_cleared", "account_id", credential.ID, "web_account_id", 0)
+		}
 		return nil
 	}
 	if err := s.store.DeleteRiskVerdict(ctx, webID); err != nil {
 		return err
+	}
+	if credential.Provider == accountdomain.ProviderBuild {
+		// 通道隔离后 verdict 与 Build 标志分离：清 Build 标也删掉 Build 自身
+		// 可能存在的原生探针 verdict（若有）。
+		_ = s.store.DeleteRiskVerdict(ctx, credential.ID)
 	}
 	s.logger.Info("account_risk_verdict_cleared", "account_id", credential.ID, "web_account_id", webID)
 	return nil
@@ -291,23 +594,38 @@ func (s *Service) resolveWebIdentity(ctx context.Context, credential accountdoma
 	return s.accounts.LinkedWebAccountID(ctx, credential.ID)
 }
 
-// freshVerdict returns a cached verdict when it is still authoritative.
+// freshVerdict returns a cached SSO verdict when still authoritative.
 func (s *Service) freshVerdict(ctx context.Context, webID uint64) (StoredVerdict, bool) {
-	verdict, err := s.store.GetRiskVerdict(ctx, webID)
+	return s.freshVerdictFor(ctx, webID, s.sourceTag())
+}
+
+// freshVerdictFor generalizes freshness over the producing probe tag: a
+// cached clean verdict is only authoritative while it came from the method
+// that owns this identity (SSO tag for web identities, build_probe for
+// unlinked builds).
+func (s *Service) freshVerdictFor(ctx context.Context, id uint64, expectedTag string) (StoredVerdict, bool) {
+	verdict, err := s.store.GetRiskVerdict(ctx, id)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
-			s.logger.Warn("account_risk_read_failed", "account_id", webID, "error", err.Error())
+			s.logger.Warn("account_risk_read_failed", "account_id", id, "error", err.Error())
 		}
 		return StoredVerdict{}, false
 	}
 	now := time.Now().UTC()
+	cfg := s.config()
 	switch verdict.Verdict {
 	case VerdictDenied, VerdictFlagged:
 		return verdict, true
 	case VerdictClean:
-		return verdict, now.Sub(verdict.CheckedAt) < s.cfg.PatrolInterval
+		// Homepage-era cleans were produced after grok.com stopped delivering
+		// botFlag fields — every account read as healthy — and must never
+		// short-circuit the probe of the method now in effect.
+		if expectedTag != "" && verdict.Source != expectedTag {
+			return StoredVerdict{}, false
+		}
+		return verdict, now.Sub(verdict.CheckedAt) < cfg.PatrolInterval
 	case VerdictError:
-		return verdict, now.Sub(verdict.CheckedAt) < s.cfg.ErrorRetry
+		return verdict, now.Sub(verdict.CheckedAt) < cfg.ErrorRetry
 	}
 	return StoredVerdict{}, false
 }
@@ -335,9 +653,16 @@ func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
 		s.checkInflight.Delete(webID)
 		close(call.done)
 	}()
+	// Capture the semaphore/checker generation up front: a concurrent
+	// UpdateConfig/UpdateChecker may swap them, and a token acquired from the
+	// old channel must release to the same channel.
+	s.cfgMu.RLock()
+	sem := s.sem
+	checker := s.checker
+	s.cfgMu.RUnlock()
 	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
 	case <-ctx.Done():
 		call.result = CheckResult{Verdict: VerdictError, Error: "concurrency gate timeout", CheckedAt: time.Now().UTC()}
 		return StoredVerdict{Verdict: VerdictError, Error: call.result.Error, Source: "rsc", CheckedAt: call.result.CheckedAt}
@@ -349,7 +674,16 @@ func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
 		s.saveVerdictGuarded(ctx, webID, verdict)
 		return verdict
 	}
-	result := s.checker.Check(ctx, token)
+	result := checker.Check(ctx, token)
+	// 通道词汇熔断压下 denied 时,尝试见证人复验: 用最近一次 clean 的身份
+	// 再探一次,看到 thinking 即证明通道词汇还活着(熔断随之自愈),随即重跑
+	// 本次判定。否则纯 denied 风暴(整池真被风控)会把熔断器永久锁死——
+	// 清标后的重新归因再也标不上。复验限频一次/10min。
+	if result.Suppressed && s.revalidateChannelWitness(ctx, checker) {
+		if retried := checker.Check(ctx, token); !retried.Suppressed {
+			result = retried
+		}
+	}
 	call.result = result
 	verdict := storedFromCheck(result)
 	if verdict.Verdict == "" {
@@ -369,10 +703,14 @@ func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
 // The leader and the merged waiters must map identical fields: the previous
 // hand-copied second block silently drifted on field additions.
 func storedFromCheck(result CheckResult) StoredVerdict {
+	source := result.Source
+	if source == "" {
+		source = "rsc" // legacy default; the adapter always tags real probes
+	}
 	return StoredVerdict{
 		Verdict: result.Verdict, BotFlagSrc: result.BotFlagSource, BotFlagDtl: result.BotFlagDetails,
 		RiskScore: result.RiskScore, HTTPStatus: result.HTTPStatus, Error: result.Error,
-		Source: "rsc", CheckedAt: result.CheckedAt,
+		Source: source, CheckedAt: result.CheckedAt,
 	}
 }
 
@@ -411,13 +749,17 @@ func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint6
 				remover.RemoveAccountEvidence(egressNodeID, degradedID)
 			}
 		}
-		switch s.cfg.OnDenied {
+		// 处置面收窄到"实际降智被抓的通道账号"(degradedID): Build 通道触发只
+		// 标/停 Build,不级联 Web/Console。verdict 仍以 Web 身份为键持久化
+		// (身份级真值不变); 其他通道账号若也被风控,它们各自的降智事件会
+		// 独立走到这里。patrol/reconcile 传入 degradedID=webID,只处置 Web。
+		switch s.config().OnDenied {
 		case "flag":
-			s.flagIdentity(ctx, webID, verdict)
+			s.flagAccount(ctx, degradedID, webID, verdict)
 		case "disable":
-			s.disableIdentity(ctx, webID, verdict)
+			s.disableAccount(ctx, degradedID, webID, verdict)
 		default:
-			s.logger.Warn("account_risk_marked", "account_id", webID, "verdict", verdict.Verdict, "details", verdict.BotFlagDtl)
+			s.logger.Warn("account_risk_marked", "account_id", degradedID, "web_account_id", webID, "verdict", verdict.Verdict, "details", verdict.BotFlagDtl)
 		}
 	case verdict.Verdict == VerdictClean:
 		// The account is innocent: the degrade was exit-IP scoped. Lift the
@@ -445,72 +787,55 @@ func (s *Service) SetEgressQuarantiner(quarantiner EgressQuarantiner) {
 	s.egressQuarantiner = quarantiner
 }
 
-// flagIdentity marks the web identity and its linked Build accounts with the
-// long-term risk flag (risk_status = rsc_denied). Unlike disableIdentity the
-// accounts stay enabled: the flag reflects the true account state (usable but
-// risk-routed) while permanently excluding them from scheduling until an
-// operator clears it.
-func (s *Service) flagIdentity(ctx context.Context, webID uint64, verdict StoredVerdict) {
-	flagAccount := func(id uint64, webLinked uint64) {
-		if err := s.accounts.SetAccountRiskStatus(ctx, id, true); err != nil {
-			s.logger.Error("account_risk_flag_failed", "account_id", id, "error", err.Error())
-			return
-		}
-		if webLinked != 0 {
-			s.logger.Warn("account_risk_flagged", "account_id", id, "web_account_id", webLinked, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
-			return
-		}
-		s.logger.Warn("account_risk_flagged", "account_id", id, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
-	}
-	flagAccount(webID, 0)
-	builds, err := s.accounts.LinkedBuildAccountIDs(ctx, webID)
-	if err != nil {
-		// Build 查询失败不应阻断 Console 处置：两渠道独立收敛（对账兜底）。
-		s.logger.Warn("account_risk_linked_lookup_failed", "account_id", webID, "channel", "build", "error", err.Error())
-	}
-	for _, buildID := range builds {
-		flagAccount(buildID, webID)
-	}
-	consoles, err := s.accounts.LinkedConsoleAccountIDs(ctx, webID)
-	if err != nil {
-		s.logger.Warn("account_risk_linked_lookup_failed", "account_id", webID, "channel", "console", "error", err.Error())
+// SetBuildProber installs the Build-native probe fallback (unlinked Build
+// accounts); nil keeps the behavioral-only path.
+func (s *Service) SetBuildProber(prober BuildProber) {
+	if s == nil || prober == nil {
 		return
 	}
-	for _, consoleID := range consoles {
-		flagAccount(consoleID, webID)
-	}
+	s.buildProber = prober
 }
 
-func (s *Service) disableIdentity(ctx context.Context, webID uint64, verdict StoredVerdict) {
+// flagAccount 给"实际降智被抓的通道账号"打长期风控标记(risk_status =
+// rsc_denied),不级联身份组其余通道。账号保持启用:标志反映真实账号
+// 状态(可用但被风控路由),并永久排除调度直到人工解除。rsc_denied 已把
+// 账号排除出调度,残留的 missing-thinking 冷却只是 UI 噪音,顺手清掉。
+func (s *Service) flagAccount(ctx context.Context, id, webID uint64, verdict StoredVerdict) {
+	if err := s.accounts.SetAccountRiskStatus(ctx, id, true); err != nil {
+		s.logger.Error("account_risk_flag_failed", "account_id", id, "error", err.Error())
+		return
+	}
+	s.clearCooldownQuietly(ctx, id)
+	if id != webID {
+		s.logger.Warn("account_risk_flagged", "account_id", id, "web_account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
+		return
+	}
+	s.logger.Warn("account_risk_flagged", "account_id", id, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
+}
+
+// disableAccount 停用"实际降智被抓的通道账号"(通道隔离,不级联身份组)。
+func (s *Service) disableAccount(ctx context.Context, id, webID uint64, verdict StoredVerdict) {
 	const reason = "registration risk (RSC)"
-	if err := s.accounts.SetAccountEnabled(ctx, webID, false, reason); err != nil {
-		s.logger.Error("account_risk_disable_failed", "account_id", webID, "error", err.Error())
+	if err := s.accounts.SetAccountEnabled(ctx, id, false, reason); err != nil {
+		s.logger.Error("account_risk_disable_failed", "account_id", id, "error", err.Error())
 		return
 	}
-	s.logger.Warn("account_risk_disabled", "account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
-	builds, err := s.accounts.LinkedBuildAccountIDs(ctx, webID)
-	if err != nil {
-		s.logger.Warn("account_risk_linked_lookup_failed", "account_id", webID, "error", err.Error())
+	// 停用是更强的调度闸,残留冷却只是 UI 噪音。
+	s.clearCooldownQuietly(ctx, id)
+	if id != webID {
+		s.logger.Warn("account_risk_disabled", "account_id", id, "web_account_id", webID, "verdict", verdict.Verdict)
 		return
 	}
-	for _, buildID := range builds {
-		if err := s.accounts.SetAccountEnabled(ctx, buildID, false, reason); err != nil {
-			s.logger.Error("account_risk_disable_failed", "account_id", buildID, "error", err.Error())
-			continue
-		}
-		s.logger.Warn("account_risk_disabled", "account_id", buildID, "web_account_id", webID, "verdict", verdict.Verdict)
-	}
-	consoles, err := s.accounts.LinkedConsoleAccountIDs(ctx, webID)
-	if err != nil {
-		s.logger.Warn("account_risk_linked_lookup_failed", "account_id", webID, "channel", "console", "error", err.Error())
-		return
-	}
-	for _, consoleID := range consoles {
-		if err := s.accounts.SetAccountEnabled(ctx, consoleID, false, reason); err != nil {
-			s.logger.Error("account_risk_disable_failed", "account_id", consoleID, "error", err.Error())
-			continue
-		}
-		s.logger.Warn("account_risk_disabled", "account_id", consoleID, "web_account_id", webID, "verdict", verdict.Verdict)
+	s.logger.Warn("account_risk_disabled", "account_id", id, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", verdict.BotFlagDtl)
+}
+
+// clearCooldownQuietly lifts a missing-thinking/empty-stream cooldown after a
+// risk verdict made it redundant (flag/disable already gate scheduling). A
+// failure only means the cooldown expires on its own; it never blocks the
+// verdict consequences.
+func (s *Service) clearCooldownQuietly(ctx context.Context, id uint64) {
+	if err := s.accounts.ClearMissingThinkingCooldown(ctx, id); err != nil {
+		s.logger.Warn("account_risk_cooldown_clear_failed", "account_id", id, "error", err.Error())
 	}
 }
 
@@ -520,8 +845,9 @@ func (s *Service) disableIdentity(ctx context.Context, webID uint64, verdict Sto
 // PatrolCutoffs returns the freshness bounds the wiring layer feeds into the
 // patrol query.
 func (s *Service) PatrolCutoffs() (patrolInterval, errorRetry time.Time) {
+	cfg := s.config()
 	now := time.Now().UTC()
-	return now.Add(-s.cfg.PatrolInterval), now.Add(-s.cfg.ErrorRetry)
+	return now.Add(-cfg.PatrolInterval), now.Add(-cfg.ErrorRetry)
 }
 
 // ReconcileRiskyVerdicts converges risk_status flags with the verdict table at

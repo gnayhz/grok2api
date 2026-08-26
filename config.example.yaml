@@ -254,17 +254,31 @@ requestRetry:
 
 # [按需启用] 账号级 RSC 风险归因：质量扣留触发异步 RSC 检查（经关联的
 # Web SSO）。clean 账号免于惩罚（出口 IP 嫌疑）；risk 结论永不恢复并
-# 永久缓存，规模安全。注意：本段修改需重启进程生效（不在运行时热更
-# 设置范围内）。
+# 永久缓存，规模安全。本段已进管理后台「守卫」页，保存后立即生效；
+# 直接改文件仍需重启，且后台保存过设置后以运行时设置为准（可在后台
+# 「恢复文件默认」清除运行时覆盖）。
 accountRisk:
   rscCheck:
     enabled: false
+    # 检测方式：ssoProbe（默认）= 用 SSO Cookie 向 grok.com 发起一次临时
+    # fast 会话（不落会话、不写记忆），首个流里有 notetaker/thinking 通道
+    # => 账号健康(clean)；答案文本直接到达且全程无 thinking => 已被风控
+    # (denied)。限流/挑战/断流等异常一律按 error 处理，绝不误判为风控。
+    # 注意：每次检查消耗该账号 1 条消息额度（basic 档约 30 条/24h），
+    # 归因由降智事件触发且并发受限，量级可控。
+    # grok.com 已停止在首页 RSC 载荷中下发 botFlag 字段，homepage 旧方式
+    # 已失效，仅保留作回滚。
+    method: ssoProbe
     concurrency: 2        # RSC 检查全局并发上限（1-8）
     timeout: 30s          # 单次检查超时（5s-60s）
-    # denied 处置：flag = 打风控标记（账号保持启用、调度永久跳过、UI 徽章，
-    # 可人工解除，推荐）；disable = 直接停用（含关联 Build 账号）；
-    # markOnly = 仅记日志。
+    # denied 处置（按通道隔离，只作用于实际降智的账号，不级联身份组）：
+    # flag = 打风控标记（账号保持启用、调度永久跳过、UI 徽章，可人工解除，
+    # 推荐）；disable = 直接停用该账号；markOnly = 仅记日志。
     onDenied: flag
+    # Build 自主探测兜底（默认关闭）：未关联 Web SSO 的 Build 账号降智时，
+    # 用其自身凭据发一次微型推理请求差分判定（有关联时始终优先 SSO 探针）。
+    buildProbe:
+      enabled: false
     patrol:
       enabled: false      # clean 账号低频巡检（每 15 分钟一批 50 个）
       bucketDays: 30      # clean 结论的有效期（7-90 天）

@@ -107,6 +107,39 @@ func (f *fakeStore) DeleteRiskVerdict(_ context.Context, id uint64) error {
 	return nil
 }
 
+func (f *fakeStore) DeleteCleanVerdictsExceptSources(_ context.Context, keepSources ...string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	keep := make(map[string]struct{}, len(keepSources))
+	for _, source := range keepSources {
+		keep[source] = struct{}{}
+	}
+	var removed int64
+	for id, v := range f.verdicts {
+		if v.Verdict != VerdictClean {
+			continue
+		}
+		if _, ok := keep[v.Source]; !ok {
+			delete(f.verdicts, id)
+			removed++
+		}
+	}
+	return removed, nil
+}
+
+func (f *fakeStore) MostRecentCleanVerdict(_ context.Context, source string) (uint64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var bestID uint64
+	var bestAt time.Time
+	for id, v := range f.verdicts {
+		if v.Verdict == VerdictClean && v.Source == source && v.CheckedAt.After(bestAt) {
+			bestID, bestAt = id, v.CheckedAt
+		}
+	}
+	return bestID, bestID != 0, nil
+}
+
 func (f *fakeStore) ListRiskyVerdictAccountIDs(_ context.Context) ([]uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -174,16 +207,21 @@ func TestAttributionDeniedDisablesIdentity(t *testing.T) {
 	if store.verdicts[90].Verdict != VerdictDenied {
 		t.Fatalf("stored verdict = %#v", store.verdicts[90])
 	}
-	for _, id := range []uint64{90, 7, 8} {
-		if reason, disabled := accounts.disabled[id]; !disabled || reason != "registration risk (RSC)" {
-			t.Fatalf("account %d not disabled (%v)", id, reason)
+	// 处置通道隔离：只停用实际降智的 Build 7；Web 90 与另一 Build 8
+	// 不级联（它们的降智事件会独立归因）。
+	if reason, disabled := accounts.disabled[7]; !disabled || reason != "registration risk (RSC)" {
+		t.Fatalf("degraded build 7 not disabled (%v)", reason)
+	}
+	for _, id := range []uint64{90, 8} {
+		if _, disabled := accounts.disabled[id]; disabled {
+			t.Fatalf("account %d must not be cascaded", id)
 		}
 	}
 }
 
-// TestAttributionDeniedFlagsIdentity：onDenied=flag 保留启用状态，仅打
-// 长期风控标记——与 disable 不同，账号真实可用状态不被篡改。
-func TestAttributionDeniedFlagsIdentity(t *testing.T) {
+// TestAttributionDeniedFlagsDegradedChannelOnly：onDenied=flag 保留启用状
+// 态、仅打长期风控标记，且只作用于实际降智的通道账号——不级联身份组。
+func TestAttributionDeniedFlagsDegradedChannelOnly(t *testing.T) {
 	accounts := newFakeAccounts()
 	accounts.token[90] = "sso-token"
 	accounts.linkedWeb[7] = 90
@@ -196,12 +234,15 @@ func TestAttributionDeniedFlagsIdentity(t *testing.T) {
 
 	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
 
-	for _, id := range []uint64{90, 7, 8} {
-		if !accounts.flagged[id] {
-			t.Fatalf("account %d not risk-flagged", id)
+	if !accounts.flagged[7] {
+		t.Fatal("degraded build 7 must be risk-flagged")
+	}
+	for _, id := range []uint64{90, 8} {
+		if accounts.flagged[id] {
+			t.Fatalf("account %d must not be cascaded (channel-scoped flagging)", id)
 		}
 		if _, disabled := accounts.disabled[id]; disabled {
-			t.Fatalf("account %d must stay enabled under flag mode", id)
+			t.Fatalf("account %d must stay enabled", id)
 		}
 	}
 }
@@ -220,8 +261,12 @@ func TestPatrolTickAppliesConsequences(t *testing.T) {
 
 	service.PatrolTick(context.Background(), []uint64{90})
 
-	if !accounts.flagged[90] || !accounts.flagged[7] {
-		t.Fatalf("patrol denied must flag web identity and linked builds: web=%v build=%v", accounts.flagged[90], accounts.flagged[7])
+	// 巡检以 Web 身份为处置对象(通道隔离):只标 Web 90,关联 Build 7 不级联。
+	if !accounts.flagged[90] {
+		t.Fatal("patrol denied must flag the web identity")
+	}
+	if accounts.flagged[7] {
+		t.Fatal("patrol must not cascade the flag onto linked builds (channel-scoped)")
 	}
 }
 
@@ -245,9 +290,14 @@ func TestReconcileRiskyVerdictsFlagsDrifted(t *testing.T) {
 
 	service.ReconcileRiskyVerdicts(context.Background())
 
-	for _, id := range []uint64{90, 7, 8} {
-		if !accounts.flagged[id] {
-			t.Fatalf("drifted account %d must be reconciled", id)
+	// 对账只收敛 Web 账号本身的标志(通道隔离): 关联 Build 的标志由各自
+	// 降智事件独立产生,人工清掉的 Build 标志不会被对账回滚。
+	if !accounts.flagged[90] {
+		t.Fatal("drifted web 90 must be reconciled")
+	}
+	for _, id := range []uint64{7, 8} {
+		if accounts.flagged[id] {
+			t.Fatalf("build %d must not be re-flagged by reconcile (channel-scoped)", id)
 		}
 	}
 	// Console 关联账号同样属于身份组，必须被覆盖。
@@ -260,8 +310,11 @@ func TestReconcileRiskyVerdictsFlagsDrifted(t *testing.T) {
 	}}
 	service2 := New(cfg, accounts2, store2, &fakeChecker{result: cleanResult()}, nil)
 	service2.attribute(context.Background(), accountdomain.Credential{ID: 11, Provider: accountdomain.ProviderBuild}, 0)
-	if !accounts2.flagged[12] {
-		t.Fatal("linked console account must be flagged with the identity group")
+	if !accounts2.flagged[11] {
+		t.Fatal("degraded build 11 must be flagged")
+	}
+	if accounts2.flagged[12] {
+		t.Fatal("linked console must not be cascaded (channel-scoped)")
 	}
 	if !accounts.flagged[91] {
 		t.Fatal("already-flagged identity must stay flagged")
@@ -317,8 +370,12 @@ func TestCachedRiskySkipsCheck(t *testing.T) {
 	if checker.calls.Load() != 0 {
 		t.Fatal("fresh risky verdict must not re-check")
 	}
-	if _, disabled := accounts.disabled[90]; !disabled {
-		t.Fatal("cached denied verdict must still disable")
+	// 通道隔离：缓存结论处置实际降智的 Build 7，不级联 Web 90。
+	if _, disabled := accounts.disabled[7]; !disabled {
+		t.Fatal("cached denied verdict must still disable the degraded build")
+	}
+	if _, disabled := accounts.disabled[90]; disabled {
+		t.Fatal("cached denied verdict must not cascade onto the web identity")
 	}
 }
 

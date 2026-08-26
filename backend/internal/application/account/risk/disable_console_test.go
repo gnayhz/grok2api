@@ -27,9 +27,12 @@ func TestDisableModeCoversConsoleChannel(t *testing.T) {
 
 	accounts.mu.Lock()
 	defer accounts.mu.Unlock()
-	for _, id := range []uint64{90, 7, 55, 56} {
-		if _, disabled := accounts.disabled[id]; !disabled {
-			t.Fatalf("identity-group member %d must be disabled in disable mode (console channel included)", id)
+	if _, disabled := accounts.disabled[7]; !disabled {
+		t.Fatal("degraded build 7 must be disabled")
+	}
+	for _, id := range []uint64{90, 55, 56} {
+		if _, disabled := accounts.disabled[id]; disabled {
+			t.Fatalf("identity-group member %d must not be cascaded in disable mode", id)
 		}
 	}
 }

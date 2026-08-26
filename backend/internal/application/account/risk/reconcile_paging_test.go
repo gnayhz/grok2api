@@ -21,6 +21,14 @@ type pagedStore struct {
 	calls        int
 }
 
+func (p *pagedStore) DeleteCleanVerdictsExceptSources(_ context.Context, _ ...string) (int64, error) {
+	return 0, nil
+}
+
+func (p *pagedStore) MostRecentCleanVerdict(_ context.Context, _ string) (uint64, bool, error) {
+	return 0, false, nil
+}
+
 func (p *pagedStore) GetRiskVerdict(_ context.Context, id uint64) (relationalVerdict, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -115,12 +115,13 @@ func TestAdmissionCapDropsAndRecovers(t *testing.T) {
 			t.Fatalf("admitted build %d must be flagged", id)
 		}
 	}
-	if !accounts.flagged[90] || !accounts.flagged[91] {
-		t.Fatal("web identity and console must be flagged")
+	// 通道隔离：每个准入事件只处置自己（对应 Build）；Web 90 与 Console 91
+	// 不级联，未被任何降智事件涉及就保持未标。
+	if accounts.flagged[90] || accounts.flagged[91] {
+		t.Fatal("web identity and console must not be cascaded (channel-scoped)")
 	}
-	// Note: builds[n] may still be flagged via the identity-group sweep from an
-	// admitted sibling — that is correct identity-level behavior; the drop only
-	// guarantees no EXTRA check (arrivals stays 1 above).
+	// Note: builds[n] was dropped at admission and receives no consequence of
+	// its own; the drop guarantees no EXTRA check (arrivals stays 1 above).
 	accounts.mu.Unlock()
 
 	// (3) recovery: a fresh event for another build is admitted again and

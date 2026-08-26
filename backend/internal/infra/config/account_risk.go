@@ -15,11 +15,30 @@ type AccountRiskConfig struct {
 }
 
 type AccountRiskRSCConfig struct {
-	Enabled     bool                    `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// Method selects the check transport: ssoProbe (default) sends one tiny
+	// temporary mgw conversation with the SSO cookie and classifies by the
+	// presence of the reasoning stream; homepage keeps the legacy grok.com
+	// RSC payload parse (dead since grok.com stopped delivering botFlag
+	// fields — kept only for rollback).
+	Method      string                  `yaml:"method"`
 	Concurrency int                     `yaml:"concurrency"`
 	Timeout     Duration                `yaml:"timeout"`
 	OnDenied    string                  `yaml:"onDenied"`
 	Patrol      AccountRiskPatrolConfig `yaml:"patrol"`
+	// BuildProbe enables the Build-native differential fallback for unlinked
+	// Build accounts (SSO probe stays the priority whenever a Web identity is
+	// linked). Defaults to off.
+	BuildProbe *AccountRiskBuildProbeConfig `yaml:"buildProbe"`
+}
+
+type AccountRiskBuildProbeConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// BuildProbeEnabled reports the effective fallback switch (nil-safe).
+func (c AccountRiskRSCConfig) BuildProbeEnabled() bool {
+	return c.BuildProbe != nil && c.BuildProbe.Enabled
 }
 
 type AccountRiskPatrolConfig struct {
@@ -31,16 +50,23 @@ func DefaultAccountRiskConfig() AccountRiskConfig {
 	return AccountRiskConfig{
 		RSCCheck: AccountRiskRSCConfig{
 			Enabled:     false,
+			Method:      "ssoProbe",
 			Concurrency: 2,
 			Timeout:     Duration(30 * time.Second),
 			OnDenied:    "flag",
 			Patrol:      AccountRiskPatrolConfig{Enabled: false, BucketDays: 30},
+			BuildProbe:  &AccountRiskBuildProbeConfig{Enabled: false},
 		},
 	}
 }
 
 func (c AccountRiskConfig) Validate() error {
 	rsc := c.RSCCheck
+	switch strings.TrimSpace(rsc.Method) {
+	case "", "ssoProbe", "homepage":
+	default:
+		return fmt.Errorf("accountRisk.rscCheck.method 仅支持 ssoProbe 或 homepage")
+	}
 	if rsc.Concurrency != 0 && (rsc.Concurrency < 1 || rsc.Concurrency > 8) {
 		return fmt.Errorf("accountRisk.rscCheck.concurrency 必须在 1 到 8 之间")
 	}

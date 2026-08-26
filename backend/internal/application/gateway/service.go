@@ -1128,6 +1128,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// Count accounts that actually reached the upstream. Credential-only skips
 	// do not consume the quality retry budget; refreshes stay on the same account.
 	qualityAccountAttempts := 0
+	// firstDegradeNode 记录每个账号在本请求内首次质量扣留时的出口节点:
+	// 同号重试/换号会排除该节点,后续扣留落在别的路径;风险归因与 Build
+	// 探针差分需要的是"账号降智发生地",取首次而非最后一次。
+	firstDegradeNode := make(map[uint64]uint64)
 	// sameAccountRetried marks that the quality withhold path already used its
 	// single same-account retry for this request (see QualityRetryRuntime).
 	sameAccountRetried := false
@@ -1839,6 +1843,12 @@ attemptLoop:
 				commit := CommitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
 				if verdict == QualityWithhold {
 					noteGuardSignal(GuardSignalWithhold)
+					// 记录该账号首次扣留时的出口节点:同号重试会排除该节点,
+					// 后续扣留落在别的路径,归因(与 Build 探针差分)需要的是
+					// "账号降智发生地"而非"最后一次尝试的落点"。
+					if _, seen := firstDegradeNode[credential.ID]; !seen {
+						firstDegradeNode[credential.ID] = degradedEgressNodeID(egressTrace, route.Provider)
+					}
 					if sameAccountEligible && commit.Action == QualityActionRetry {
 						sameAccountRetried = true
 						guardStats.recordSameAccountRetry()
@@ -1849,7 +1859,7 @@ attemptLoop:
 						s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
 						reportEgressDegradation(credential)
 						if attributor := s.accountRiskAttributor(); attributor != nil {
-							attributor.OnDegraded(ctx, credential, degradedEgressNodeID(egressTrace, route.Provider))
+							attributor.OnDegraded(ctx, credential, firstDegradeNode[credential.ID])
 						}
 					}
 				}
