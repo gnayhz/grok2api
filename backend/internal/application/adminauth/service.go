@@ -16,10 +16,29 @@ var (
 	ErrInvalidCredentials = errors.New("管理员账号或密码错误")
 	ErrInvalidSession     = errors.New("管理员会话无效")
 	ErrBootstrapRequired  = errors.New("首次启动需要设置管理员账号和密码")
-	ErrInvalidPassword    = errors.New("新密码至少需要 8 个字符")
+	ErrInvalidPassword    = errors.New("新密码长度必须在 8 到 72 字节之间")
 	ErrLoginRateLimited   = errors.New("管理员登录尝试过于频繁")
 	ErrRuntimeUnavailable = errors.New("管理员认证运行态暂不可用")
 )
+
+// LoginRateLimitedError 携带限流器返回的固定窗口剩余时间，供传输层
+// 写出 Retry-After；errors.Is(err, ErrLoginRateLimited) 语义保持不变。
+type LoginRateLimitedError struct{ RetryAfter time.Duration }
+
+func (e *LoginRateLimitedError) Error() string { return ErrLoginRateLimited.Error() }
+func (e *LoginRateLimitedError) Unwrap() error { return ErrLoginRateLimited }
+
+// maxPasswordBytes 与 bcrypt 的硬上限对齐（x/crypto v0.55 起 Generate
+// -FromPassword 对超长密码返回 ErrPasswordTooLong 而非静默截断）。
+// 超限必须在服务层显式拒绝并归类为 ErrInvalidPassword，否则传输层
+// 会把 bcrypt 的原始错误落到 500 分支（round 61 活体复现）。
+const maxPasswordBytes = 72
+
+func validPasswordLength(password string) bool {
+	return len(password) >= minPasswordBytes && len(password) <= maxPasswordBytes
+}
+
+const minPasswordBytes = 8
 
 // refreshRotationGrace：轮换重用判定的宽限窗。窗内旧 token 再次呈上
 // 视为良性重复刷新（同 token 网络重试、多标签页并发刷新竞速）——不吊销
@@ -61,7 +80,7 @@ func (s *Service) Bootstrap(ctx context.Context, username, password string) erro
 	if count > 0 {
 		return nil
 	}
-	if strings.TrimSpace(username) == "" || len(password) < 8 {
+	if strings.TrimSpace(username) == "" || !validPasswordLength(password) {
 		return ErrBootstrapRequired
 	}
 	hash, err := security.HashPassword(password)
@@ -209,7 +228,7 @@ func (s *Service) AuthenticateAccess(ctx context.Context, rawAccessToken string)
 
 // ChangePassword 修改密码并撤销管理员的全部 refresh session。
 func (s *Service) ChangePassword(ctx context.Context, adminID uint64, currentPassword, newPassword string) error {
-	if len(newPassword) < 8 {
+	if !validPasswordLength(newPassword) {
 		return ErrInvalidPassword
 	}
 	value, err := s.admins.GetByID(ctx, adminID)
@@ -260,12 +279,12 @@ func (s *Service) checkLoginRate(ctx context.Context, username, remoteAddress st
 		{key: "admin-login:user:" + security.HashToken(strings.ToLower(username)), limit: 12},
 	}
 	for _, item := range keys {
-		allowed, _, err := s.loginLimiter.Allow(ctx, item.key, item.limit, now)
+		allowed, retryAfter, err := s.loginLimiter.Allow(ctx, item.key, item.limit, now)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 		}
 		if !allowed {
-			return ErrLoginRateLimited
+			return &LoginRateLimitedError{RetryAfter: retryAfter}
 		}
 	}
 	return nil

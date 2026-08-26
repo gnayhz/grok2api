@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,6 +71,11 @@ func (h *Handler) login(c *gin.Context) {
 	adminValue, tokens, err := h.service.Login(c.Request.Context(), request.Username, request.Password, remoteAddress(c.Request))
 	if err != nil {
 		if errors.Is(err, adminapp.ErrLoginRateLimited) {
+			var limited *adminapp.LoginRateLimitedError
+			if errors.As(err, &limited) && limited.RetryAfter > 0 {
+				seconds := max(int64(1), int64((limited.RetryAfter+time.Second-1)/time.Second))
+				c.Header("Retry-After", strconv.FormatInt(seconds, 10))
+			}
 			response.Error(c, http.StatusTooManyRequests, "loginRateLimited", "登录尝试过于频繁，请稍后重试")
 			return
 		}
