@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
@@ -16,6 +17,60 @@ type egressRoutingTargetRow struct {
 	Mode   string `json:"mode"`
 	NodeID uint64 `json:"nodeId,omitempty"`
 	PoolID uint64 `json:"poolId,omitempty"`
+}
+
+// UnmarshalJSON 兼容历史上以 API 合同形状（字符串数字）落库的载荷：
+// 存量数据曾出现 {"default":{"mode":"node","nodeId":"52"}}，按严格
+// uint64 解析会让运营配置整体退化成自动调度（每分钟 WARN 刷屏）。
+// 读入时接受 数字/数字字符串/null 三种形态；写出始终走结构体默认
+// 编码，恒为规范数字。
+func (r *egressRoutingTargetRow) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Mode   string          `json:"mode"`
+		NodeID json.RawMessage `json:"nodeId,omitempty"`
+		PoolID json.RawMessage `json:"poolId,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.Mode = raw.Mode
+	nodeID, err := decodeEgressUintField(raw.NodeID, "nodeId")
+	if err != nil {
+		return err
+	}
+	r.NodeID = nodeID
+	poolID, err := decodeEgressUintField(raw.PoolID, "poolId")
+	if err != nil {
+		return err
+	}
+	r.PoolID = poolID
+	return nil
+}
+
+func decodeEgressUintField(raw json.RawMessage, field string) (uint64, error) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return 0, nil
+	}
+	if text[0] == '"' {
+		var quoted string
+		if err := json.Unmarshal(raw, &quoted); err != nil {
+			return 0, fmt.Errorf("%s: %w", field, err)
+		}
+		if quoted == "" {
+			return 0, nil
+		}
+		value, err := strconv.ParseUint(quoted, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", field, err)
+		}
+		return value, nil
+	}
+	var value uint64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, fmt.Errorf("%s: %w", field, err)
+	}
+	return value, nil
 }
 
 // egressRoutingPayload is the persisted routing configuration: the default
