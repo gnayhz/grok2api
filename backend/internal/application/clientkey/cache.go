@@ -105,13 +105,6 @@ func (c *authKeyCache) putNegative(prefix string, now time.Time) {
 	}
 }
 
-// deleteNegative 在创建新 key 时清掉同前缀的负缓存记录。
-func (c *authKeyCache) deleteNegative(prefix string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.negatives, prefix)
-}
-
 func (c *authKeyCache) deleteID(id uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

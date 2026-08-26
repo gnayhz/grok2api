@@ -264,17 +264,6 @@ func ensureOutputTextAnnotations(node any) bool {
 	return changed
 }
 
-// responsesEventIsTerminal reports whether the event concludes the response
-// stream; only these carry the serde-required model field on failure paths.
-func responsesEventIsTerminal(eventType string) bool {
-	switch eventType {
-	case "response.completed", "response.incomplete", "response.failed":
-		return true
-	default:
-		return false
-	}
-}
-
 func responsesEventCarriesResponseID(eventType string) bool {
 	switch eventType {
 	case "response.created", "response.in_progress", "response.completed", "response.incomplete", "response.failed":

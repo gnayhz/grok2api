@@ -40,17 +40,6 @@ const modelConsoleStaticSupportExpression = `(model_routes.provider = 'grok_cons
 	)
 ))`
 
-const modelConsoleStaticSupportAvailabilityExpression = `(route.provider = 'grok_console' AND (
-	route.origin = 'catalog'
-	OR EXISTS (
-		SELECT 1 FROM model_routes console_catalog_route
-		WHERE console_catalog_route.provider = route.provider
-			AND console_catalog_route.upstream_model = route.upstream_model
-			AND console_catalog_route.capability = route.capability
-			AND console_catalog_route.origin = 'catalog'
-	)
-))`
-
 // These Web media catalog capabilities are available to Basic accounts for
 // their confirmed quota products. Older capability snapshots may predate that
 // support, so catalog routes (and their aliases) remain discoverable while the
@@ -64,19 +53,6 @@ const modelWebBasicMediaStaticSupportExpression = `(model_routes.provider = 'gro
 			WHERE web_catalog_route.provider = model_routes.provider
 				AND web_catalog_route.upstream_model = model_routes.upstream_model
 				AND web_catalog_route.capability = model_routes.capability
-				AND web_catalog_route.origin = 'catalog'
-		)
-	))`
-
-const modelWebBasicMediaStaticSupportAvailabilityExpression = `(route.provider = 'grok_web'
-	AND route.upstream_model IN ('grok-imagine-image-quality', 'grok-imagine-image-2.0', 'imagine-image-edit', 'grok-imagine-video')
-	AND (
-		route.origin = 'catalog'
-		OR EXISTS (
-			SELECT 1 FROM model_routes web_catalog_route
-			WHERE web_catalog_route.provider = route.provider
-				AND web_catalog_route.upstream_model = route.upstream_model
-				AND web_catalog_route.capability = route.capability
 				AND web_catalog_route.origin = 'catalog'
 		)
 	))`
@@ -120,18 +96,6 @@ const modelSharedPaidBuildSupportSortExpression = `(model_routes.provider = 'gro
 		FROM provider_accounts peer
 		JOIN account_model_capabilities peer_capability ON peer_capability.account_id = peer.id AND peer_capability.upstream_model = model_routes.upstream_model
 		WHERE peer.provider = model_routes.provider
-			AND peer.enabled = TRUE
-			AND peer.auth_status = 'active'
-			AND ` + modelPeerBuildSuperPredicate + `
-	))`
-
-const modelSharedPaidBuildSupportAvailabilityExpression = `(route.provider = 'grok_build'
-	AND ` + modelAccountBuildSuperPredicate + `
-	AND EXISTS (
-		SELECT 1
-		FROM provider_accounts peer
-		JOIN account_model_capabilities peer_capability ON peer_capability.account_id = peer.id AND peer_capability.upstream_model = route.upstream_model
-		WHERE peer.provider = route.provider
 			AND peer.enabled = TRUE
 			AND peer.auth_status = 'active'
 			AND ` + modelPeerBuildSuperPredicate + `
@@ -1389,9 +1353,9 @@ func (r *ModelRepository) annotateAvailability(ctx context.Context, values []mod
 	return nil
 }
 
-// consoleCatalogRoutePredicate mirrors the catalog half of
-// modelConsoleStaticSupportAvailabilityExpression (the provider equality is
-// enforced by the caller's CASE branch).
+// consoleCatalogRoutePredicate is the catalog-half static-support check for
+// console routes (the provider equality is enforced by the caller's CASE
+// branch).
 const consoleCatalogRoutePredicate = `(
 	route.origin = 'catalog'
 	OR EXISTS (
@@ -1403,9 +1367,9 @@ const consoleCatalogRoutePredicate = `(
 	)
 )`
 
-// webCatalogRoutePredicate mirrors the catalog half of
-// modelWebBasicMediaStaticSupportAvailabilityExpression for the four basic
-// media upstream models (provider and model-list checks stay in the CASE).
+// webCatalogRoutePredicate is the catalog-half static-support check for the
+// four basic media upstream models (provider and model-list checks stay in the
+// CASE).
 const webCatalogRoutePredicate = `(
 	route.origin = 'catalog'
 	OR EXISTS (
