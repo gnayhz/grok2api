@@ -533,6 +533,10 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 非空的 `GROK2API_DATABASE_URL` 会覆盖 `database.postgres.dsn` 并自动选择 `postgres`；空值不会覆盖 YAML。支持 `postgres://` 和 `postgresql://`，SQLAlchemy 的 `postgresql+asyncpg://` 会返回格式迁移提示。程序不会隐式读取通用的 `DATABASE_URL`；平台只提供该变量时，可在部署清单中显式映射为 `GROK2API_DATABASE_URL: "${DATABASE_URL}"`。数据库配置优先级为：内置默认值 < `config.yaml` < `GROK2API_DATABASE_URL`。当前 CLI 没有数据库覆盖参数。
 
+### 管理端会话安全
+
+管理端 token 为不透明随机值，**每次请求**都会对会话存储校验——吊销会话即刻杀死其访问 token（而非等 JWT 过期）。refresh token 每次使用即轮换，存放于 HttpOnly/Secure/SameSite=Strict 且仅限 auth 路径的 cookie。按 OAuth BCP（RFC 6819 §5.2.11）把已轮换 refresh token 的重放视为窃取信号：30 秒宽限窗内的重放视为良性重复刷新（并发客户端竞速），超窗重放吊销**整个 token family**——两代 token 同时失效。修改密码会吊销该管理员的全部会话。
+
 ### 优雅停机
 
 收到 `SIGTERM`/`SIGINT` 后，监听端口立即关闭——新连接被拒绝——在途请求获得最长 **15 秒**排空窗口。窗口结束仍未完成的请求（长 SSE 流、视频任务）会被切断，记录 `server_shutdown_drain_timeout` WARN，进程仍以退出码 **0** 结束：操作员主动停止属于正常结果，不应污染失败率统计。因此非零退出码必然代表真实故障。

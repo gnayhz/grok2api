@@ -535,6 +535,10 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 A non-empty `GROK2API_DATABASE_URL` overrides `database.postgres.dsn` and automatically selects the `postgres` driver. An empty value is ignored. Supported URL schemes are `postgres://` and `postgresql://`; SQLAlchemy's `postgresql+asyncpg://` form is rejected with a migration hint. The application does not implicitly read the generic `DATABASE_URL`; platforms that provide it can map it explicitly with `GROK2API_DATABASE_URL: "${DATABASE_URL}"`. Database configuration precedence is built-in defaults, `config.yaml`, then `GROK2API_DATABASE_URL`. The current CLI has no database override.
 
+### Admin session security
+
+Admin tokens are opaque and validated against the session store on **every request** — revoking a session kills its access tokens immediately (not at JWT expiry). Refresh tokens rotate on every use in an HttpOnly/Secure/SameSite=Strict cookie scoped to the auth path. Replaying a rotated refresh token is treated as theft per OAuth BCP (RFC 6819 §5.2.11): replays inside a 30 s grace window are tolerated as benign duplicate refreshes (concurrent-client race), while later replays revoke the **entire token family** — both generations stop working at once. Password change revokes all sessions of that admin.
+
 ### Graceful shutdown
 
 On `SIGTERM`/`SIGINT` the listener closes immediately — new connections are refused — while in-flight requests get a **15 s drain window**. Requests still running at the deadline (long SSE streams, video jobs) are cut, a `server_shutdown_drain_timeout` WARN is logged, and the process still exits with code **0**: an operator-initiated stop is a normal outcome and must not pollute failure-rate statistics. A non-zero exit always indicates a real failure.
