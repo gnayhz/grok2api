@@ -34,7 +34,7 @@ func TestUpdateCheckerSwapsProbe(t *testing.T) {
 	accounts := newFakeAccounts()
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	service := New(baseTestConfig(), accounts, store, &fakeChecker{result: cleanResult()}, nil)
-	verdict := service.checkNow(context.Background(), 90)
+	verdict := service.checkNow(context.Background(), 90, 90)
 	if verdict.Verdict != VerdictClean {
 		t.Fatalf("initial probe = %#v, want clean", verdict)
 	}
@@ -42,7 +42,7 @@ func TestUpdateCheckerSwapsProbe(t *testing.T) {
 	if err := store.DeleteRiskVerdict(context.Background(), 90); err != nil {
 		t.Fatal(err)
 	}
-	verdict = service.checkNow(context.Background(), 90)
+	verdict = service.checkNow(context.Background(), 90, 90)
 	if verdict.Verdict != VerdictDenied {
 		t.Fatalf("probe after swap = %#v, want denied", verdict)
 	}

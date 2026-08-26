@@ -40,7 +40,7 @@ func TestSuppressedDeniedHealsViaWitness(t *testing.T) {
 	if err := store.SaveRiskVerdict(context.Background(), 95, StoredVerdict{Verdict: VerdictClean, Source: "sso_probe", CheckedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	verdict := service.checkNow(context.Background(), 90)
+	verdict := service.checkNow(context.Background(), 90, 90)
 	if verdict.Verdict != VerdictDenied {
 		t.Fatalf("verdict = %s, want denied (witness must heal the breaker)", verdict.Verdict)
 	}
@@ -59,7 +59,7 @@ func TestSuppressedDeniedStaysErrorWithoutWitness(t *testing.T) {
 	}}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
 	service.UpdateChecker(checker, "sso_probe")
-	verdict := service.checkNow(context.Background(), 90)
+	verdict := service.checkNow(context.Background(), 90, 90)
 	if verdict.Verdict != VerdictError {
 		t.Fatalf("verdict = %s, want error (no witness available)", verdict.Verdict)
 	}
@@ -82,14 +82,14 @@ func TestWitnessRateLimited(t *testing.T) {
 	if err := store.SaveRiskVerdict(context.Background(), 95, StoredVerdict{Verdict: VerdictClean, Source: "sso_probe", CheckedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if verdict := service.checkNow(context.Background(), 90); verdict.Verdict != VerdictError {
+	if verdict := service.checkNow(context.Background(), 90, 90); verdict.Verdict != VerdictError {
 		t.Fatalf("first verdict = %s, want error (witness checker returns suppressed shape)", verdict.Verdict)
 	}
 	if got := checker.calls.Load(); got != 2 {
 		t.Fatalf("calls after first = %d, want 2 (check + witness)", got)
 	}
 	// 清掉 inflight 让第二次 checkNow 真实执行;限频内不应再探见证人。
-	if verdict := service.checkNow(context.Background(), 90); verdict.Verdict != VerdictError {
+	if verdict := service.checkNow(context.Background(), 90, 90); verdict.Verdict != VerdictError {
 		t.Fatalf("second verdict = %s, want error", verdict.Verdict)
 	}
 	if got := checker.calls.Load(); got != 3 {

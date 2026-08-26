@@ -23,6 +23,8 @@ type AccountRiskVerdict struct {
 	Error      string
 	Source     string
 	CheckedAt  time.Time
+	// OriginAccountID 触发判定的账号(通道隔离重放目标);0=旧数据。
+	OriginAccountID uint64
 }
 
 // RiskRepository persists RSC verdicts for Web SSO identities.

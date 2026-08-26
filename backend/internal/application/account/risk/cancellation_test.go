@@ -45,7 +45,7 @@ func TestWaiterCancelMidWaitReturnsErrorVerdict(t *testing.T) {
 	go func() {
 		defer close(leaderDone)
 		// Leader takes the single concurrency slot and parks inside Check.
-		_ = service.checkNow(context.Background(), 90)
+		_ = service.checkNow(context.Background(), 90, 90)
 	}()
 	// Wait until the leader is inside the checker (arrivals==1), then start
 	// a waiter with an already-canceled context.
@@ -58,7 +58,7 @@ func TestWaiterCancelMidWaitReturnsErrorVerdict(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	verdict := service.checkNow(canceled, 90)
+	verdict := service.checkNow(canceled, 90, 90)
 	if verdict.Verdict != VerdictError {
 		t.Fatalf("canceled waiter verdict = %q, want error", verdict.Verdict)
 	}
@@ -89,7 +89,7 @@ func TestLeaderConcurrencyGateTimeoutErrors(t *testing.T) {
 	go func() {
 		defer close(waiterDone)
 		// This call becomes the leader (first store) but times out at the gate.
-		verdict := service.checkNow(shortCtx(t), 90)
+		verdict := service.checkNow(shortCtx(t), 90, 90)
 		if verdict.Verdict != VerdictError {
 			t.Errorf("gate-timeout verdict = %q, want error", verdict.Verdict)
 		}

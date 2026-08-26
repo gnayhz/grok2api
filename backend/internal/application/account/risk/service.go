@@ -38,6 +38,10 @@ type StoredVerdict struct {
 	Error      string
 	Source     string
 	CheckedAt  time.Time
+	// OriginAccountID 触发本次判定的账号:启动对账/巡检重放后果时只打到
+	// 该账号(通道隔离),不连坐 verdict 键所在的 Web 身份。0=旧数据,重放
+	// 退回 webID 语义。
+	OriginAccountID uint64
 }
 
 // Risky reports a verdict that marks the identity as registration risk.
@@ -465,7 +469,7 @@ func (s *Service) attribute(ctx context.Context, credential accountdomain.Creden
 		s.applyConsequences(ctx, credential.ID, webID, verdict, egressNodeID)
 		return
 	}
-	result := s.checkNow(ctx, webID)
+	result := s.checkNow(ctx, webID, credential.ID)
 	s.applyConsequences(ctx, credential.ID, webID, result, egressNodeID)
 }
 
@@ -508,7 +512,7 @@ func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Cr
 		return StoredVerdict{Verdict: VerdictError, Error: "concurrency gate timeout", Source: buildProbeSourceTag, CheckedAt: now}
 	}
 	result := s.buildProber.ProbeBuildThinking(ctx, credential.ID, degradedNodeID)
-	verdict := StoredVerdict{Source: buildProbeSourceTag, CheckedAt: result.CheckedAt}
+	verdict := StoredVerdict{Source: buildProbeSourceTag, CheckedAt: result.CheckedAt, OriginAccountID: credential.ID}
 	switch result.Verdict {
 	case BuildProbeClean:
 		verdict.Verdict = VerdictClean
@@ -635,7 +639,7 @@ func (s *Service) freshVerdictFor(ctx context.Context, id uint64, expectedTag st
 // first caller's result instead of erroring out (a hard error here used to
 // strand the second degraded account's cooldown forever). A merged (shared)
 // result is returned to every caller but persisted only once by the leader.
-func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
+func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64) StoredVerdict {
 	call := &checkCall{done: make(chan struct{})}
 	if actual, loaded := s.checkInflight.LoadOrStore(webID, call); loaded {
 		// 已有同身份检查在跑：等它完成并共享结果。等待不占并发闸。
@@ -689,6 +693,9 @@ func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
 	if verdict.Verdict == "" {
 		verdict.Verdict = VerdictError
 	}
+	// 记录触发源账号:对账/巡检重放后果时只打到该账号(通道隔离),
+	// 不连坐 verdict 键所在的 Web 身份。Web 自身触发时 origin==webID。
+	verdict.OriginAccountID = originAccountID
 	s.saveVerdictGuarded(ctx, webID, verdict)
 	perfmetrics.Default.Inc("account_rsc_check_total", perfmetrics.Labels{
 		Subsystem: "account", Operation: "rsc_check", Outcome: verdict.Verdict,
@@ -697,6 +704,16 @@ func (s *Service) checkNow(ctx context.Context, webID uint64) StoredVerdict {
 	// 文本，此前仓储层落库前脱敏但日志打原始值——同一载荷两套口径。
 	s.logger.Info("account_rsc_checked", "account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 	return verdict
+}
+
+// verdictOrigin resolves the channel-scoped replay target: the account whose
+// degrade produced the verdict; legacy rows (origin=0) fall back to the web
+// identity key itself.
+func verdictOrigin(verdict StoredVerdict, webID uint64) uint64 {
+	if verdict.OriginAccountID != 0 {
+		return verdict.OriginAccountID
+	}
+	return webID
 }
 
 // storedFromCheck projects a checker result onto the persisted verdict shape.
@@ -878,7 +895,7 @@ func (s *Service) ReconcileRiskyVerdicts(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			s.applyConsequences(ctx, webID, webID, verdict, 0)
+			s.applyConsequences(ctx, verdictOrigin(verdict, webID), webID, verdict, 0)
 			reconciled++
 		}
 		if len(ids) < riskyVerdictPageLimit {
@@ -904,7 +921,14 @@ func (s *Service) PatrolTick(ctx context.Context, dueIDs []uint64) {
 			return
 		default:
 		}
-		verdict := s.checkNow(ctx, webID)
-		s.applyConsequences(ctx, webID, webID, verdict, 0)
+		// 巡检复检保留既有 verdict 的触发源:Build 降智建立的结论到期复检,
+		// 新结论的重放目标仍是当初那个 Build(通道隔离)。无既有记录(异常
+		// 竞态)时退回 webID 语义。
+		origin := webID
+		if existing, err := s.store.GetRiskVerdict(ctx, webID); err == nil {
+			origin = verdictOrigin(existing, webID)
+		}
+		verdict := s.checkNow(ctx, webID, origin)
+		s.applyConsequences(ctx, verdictOrigin(verdict, webID), webID, verdict, 0)
 	}
 }

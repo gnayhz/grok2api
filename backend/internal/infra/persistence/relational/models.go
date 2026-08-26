@@ -640,6 +640,10 @@ type accountRiskVerdictModel struct {
 	Error      string    `gorm:"size:512;not null;default:''"`
 	Source     string    `gorm:"size:32;not null;default:''"`
 	CheckedAt  time.Time `gorm:"not null"`
+	// OriginAccountID 记录触发本次判定的账号(通道隔离重放目标):Build 通道
+	// 降智产生的 verdict 重放后果时只打到该 Build,不连坐 Web 身份本身。
+	// 0 = 旧数据,重放退回 webID。
+	OriginAccountID uint64 `gorm:"not null;default:0"`
 }
 
 func (accountRiskVerdictModel) TableName() string { return "account_risk_verdicts" }

@@ -78,7 +78,7 @@ func (s riskRelationalStore) GetRiskVerdict(ctx context.Context, accountID uint6
 	return risk.StoredVerdict{
 		Verdict: verdict.Verdict, BotFlagSrc: verdict.BotFlagSrc, BotFlagDtl: verdict.BotFlagDtl,
 		RiskScore: verdict.RiskScore, HTTPStatus: verdict.HTTPStatus, Error: verdict.Error,
-		Source: verdict.Source, CheckedAt: verdict.CheckedAt,
+		Source: verdict.Source, CheckedAt: verdict.CheckedAt, OriginAccountID: verdict.OriginAccountID,
 	}, nil
 }
 
@@ -87,6 +87,7 @@ func (s riskRelationalStore) SaveRiskVerdict(ctx context.Context, accountID uint
 		AccountID: accountID, Verdict: verdict.Verdict, BotFlagSrc: verdict.BotFlagSrc,
 		BotFlagDtl: verdict.BotFlagDtl, RiskScore: verdict.RiskScore, HTTPStatus: verdict.HTTPStatus,
 		Error: verdict.Error, Source: verdict.Source, CheckedAt: verdict.CheckedAt,
+		OriginAccountID: verdict.OriginAccountID,
 	})
 }
 
