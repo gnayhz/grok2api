@@ -673,7 +673,9 @@ func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64) S
 	}
 	token, err := s.accounts.DecryptedAccessToken(ctx, webID)
 	if err != nil {
-		verdict := StoredVerdict{Verdict: VerdictError, Error: "decrypt sso: " + err.Error(), Source: "rsc", CheckedAt: time.Now().UTC()}
+		// 与主路径一致盖上触发源章:error verdict 本身不携带后果,但保持
+		// "每条落库 verdict 都记录触发账号"的不变量完整。
+		verdict := StoredVerdict{Verdict: VerdictError, Error: "decrypt sso: " + err.Error(), Source: "rsc", CheckedAt: time.Now().UTC(), OriginAccountID: originAccountID}
 		call.result = CheckResult{Verdict: VerdictError, Error: verdict.Error, CheckedAt: verdict.CheckedAt}
 		s.saveVerdictGuarded(ctx, webID, verdict)
 		return verdict
