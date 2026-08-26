@@ -792,7 +792,12 @@ func (a *Application) Run(ctx context.Context) error {
 			if retentionDays == 0 {
 				return nil
 			}
-			_, err := a.audits.PurgeOutdated(runCtx, retentionDays)
+			deleted, err := a.audits.PurgeOutdated(runCtx, retentionDays)
+			// 保留策略真实删除必须可观测：静默清理会让「配置保留 N 天」与
+			// 「审计里仍有更老数据」的矛盾无法被运维发现。
+			if err == nil && deleted > 0 {
+				a.logger.Info("audit_retention_days_purged", "retentionDays", retentionDays, "deleted", deleted)
+			}
 			return err
 		})
 		return nil

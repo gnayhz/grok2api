@@ -451,7 +451,10 @@ Retention: `audit.retention` (default 0 = keep forever; non-zero 24h-8760h)
 deletes aged audit rows and their attempt details in hourly batched sweeps
 (500 rows/batch, 30s budget per sweep). The task starts only when retention is
 non-zero - the default is byte-identical to upstream behavior. Changes require a
-process restart.
+process restart. Independently, runtime setting `audit.retentionDays` (default
+7; 0 disables) purges rows older than that many days — when both are active the
+effective window is the shorter of the two, and day-scale purges above the
+duration window log `audit_retention_days_purged` on every deletion sweep.
 
 
 ### Verification matrix
