@@ -2,6 +2,11 @@ module github.com/chenyme/grok2api/backend
 
 go 1.26
 
+// 工具链下限：GO-2026-6218/6091/6090/6089/6088/5972 等标准库漏洞在
+// go1.26.6 修复（govulncheck 符号级可达）。钉住补丁版本使本地、CI 与
+// Docker 构建一致地低于该版本即构建失败，防止工具链回退引入已知漏洞。
+toolchain go1.26.7
+
 require (
 	github.com/Asutorufa/yuhaiin v0.3.8
 	github.com/bdandy/go-socks4 v1.2.3
