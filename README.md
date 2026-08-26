@@ -325,6 +325,8 @@ Authorization: Bearer g2a_xxx_xxx
 
 Stored responses and compact depend on the selected Provider. The signed-in admin console provides live examples at `/docs`; Swagger is available only when `server.swaggerEnabled: true`.
 
+Continuing a stored response via `previous_response_id` can be rejected by the upstream organization (HTTP 404, `upstream_server_error_not_found`) — some Grok organizations disallow cross-request conversation reuse. The gateway pins the original account and forwards the session correctly; a 404 here reflects the upstream policy, not lost state. `GET/DELETE /v1/responses/{id}` still work for gateway-stored responses.
+
 `/v1/audio/transcriptions` supports `json` (default), `verbose_json`, and `text`. Video edit/extension routes must resolve to Console `grok-imagine-video`; custom public model names remain supported. Monetary billing is applied only when the gateway can reliably measure the official pricing unit: TTS is reserved and settled from its input character count, while REST and streaming STT are settled from the actual audio duration returned by a successful response. Because STT duration is known only after completion, concurrent requests may briefly take a billing-limited key beyond its spend limit. Realtime, video edits/extensions, and custom routes without a recognized official price are currently audited as unpriced; they remain callable and do not consume the spend limit.
 
 Client keys support model allowlists and optional RPM, concurrency, spend, and expiry limits.

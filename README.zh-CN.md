@@ -323,6 +323,8 @@ Authorization: Bearer g2a_xxx_xxx
 
 stored response 和 compact 取决于最终 Provider。登录管理端后可在 `/docs` 查看当前模型与调用示例；仅在 `server.swaggerEnabled: true` 时提供 Swagger。
 
+通过 `previous_response_id` 续聊可能被上游组织拒绝（HTTP 404、`upstream_server_error_not_found`）——部分 Grok 组织不允许跨请求复用会话。网关会正确固定原账号并转发会话；此处的 404 反映的是上游策略而非状态丢失。网关侧存储的响应仍可用 `GET/DELETE /v1/responses/{id}` 读取或删除。
+
 `/v1/audio/transcriptions` 支持 `json`（默认）、`verbose_json` 和 `text`。视频编辑与延长按实际路由校验 Console `grok-imagine-video`，对外模型名仍可自定义。金额计费以网关能够可靠测量的官方计价单位为准：TTS 按输入字符数预留并结算，REST 与流式 STT 按成功响应返回的实际音频时长结算。STT 时长只能在请求完成后获得，因此并发中的请求可能使有限额 Key 短暂超过金额上限。Realtime、视频编辑与延长，以及未收录官方定价的自定义路由当前记录为“未计费”，保持可调用且不消耗金额额度。
 
 客户端密钥支持模型白名单，以及可选的 RPM、并发、用量和截止日期限制。
