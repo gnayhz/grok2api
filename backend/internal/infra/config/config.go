@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -451,6 +452,14 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return errors.New("server.listen 不能为空")
 	}
+	// 提前到配置校验阶段拒绝畸形地址：此前空格以外的任何值都要等到
+	// ListenAndServe 才失败，报错没有字段名（round 82 活体复现：
+	// "not-an-addr"/"127.0.0.1" 缺端口到 listen tcp 才报）。
+	if host, portText, err := net.SplitHostPort(c.Server.Listen); err != nil {
+		return fmt.Errorf("server.listen %q 必须是 host:port 形式", c.Server.Listen)
+	} else if port, portErr := strconv.Atoi(portText); portErr != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("server.listen 端口无效: %q（host=%s）", portText, host)
+	}
 	if c.Server.MaxBodyBytes <= 0 || c.Server.MaxBodyBytes > maxServerBodyBytes {
 		return fmt.Errorf("server.maxBodyBytes 必须在 1 到 %d 字节之间", maxServerBodyBytes)
 	}
@@ -505,8 +514,11 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.Database.Postgres.DSN) == "" {
 			return errors.New("database.postgres.dsn 不能为空")
 		}
-		if c.Database.Postgres.MaxOpenConns < 1 || c.Database.Postgres.MaxOpenConns > 1000 || c.Database.Postgres.MaxIdleConns < 0 || c.Database.Postgres.MaxIdleConns > c.Database.Postgres.MaxOpenConns {
-			return errors.New("database.postgres 连接池配置无效")
+		if c.Database.Postgres.MaxOpenConns < 1 || c.Database.Postgres.MaxOpenConns > 1000 {
+			return errors.New("database.postgres.maxOpenConns 必须在 1 到 1000 之间")
+		}
+		if c.Database.Postgres.MaxIdleConns < 0 || c.Database.Postgres.MaxIdleConns > c.Database.Postgres.MaxOpenConns {
+			return errors.New("database.postgres.maxIdleConns 必须在 0 到 maxOpenConns 之间")
 		}
 	default:
 		return errors.New("database.driver 必须是 sqlite 或 postgres")
@@ -640,11 +652,17 @@ func (c Config) Validate() error {
 	if c.Provider.Web.ClearanceRefresh.Value() < time.Minute || c.Provider.Web.ClearanceRefresh.Value() > 24*time.Hour {
 		return errors.New("provider.web Clearance 刷新间隔必须在 1 分钟到 24 小时之间")
 	}
-	if c.Provider.Web.QuotaTimeout.Value() < time.Second || c.Provider.Web.QuotaTimeout.Value() > 2*time.Minute ||
-		c.Provider.Web.ChatTimeout.Value() < 5*time.Second || c.Provider.Web.ChatTimeout.Value() > 30*time.Minute ||
-		c.Provider.Web.ImageTimeout.Value() < 5*time.Second || c.Provider.Web.ImageTimeout.Value() > 30*time.Minute ||
-		c.Provider.Web.VideoTimeout.Value() < time.Minute || c.Provider.Web.VideoTimeout.Value() > 2*time.Hour {
-		return errors.New("provider.web 上游超时配置无效")
+	if c.Provider.Web.QuotaTimeout.Value() < time.Second || c.Provider.Web.QuotaTimeout.Value() > 2*time.Minute {
+		return errors.New("provider.web.quotaTimeout 必须在 1 秒到 2 分钟之间")
+	}
+	if c.Provider.Web.ChatTimeout.Value() < 5*time.Second || c.Provider.Web.ChatTimeout.Value() > 30*time.Minute {
+		return errors.New("provider.web.chatTimeout 必须在 5 秒到 30 分钟之间")
+	}
+	if c.Provider.Web.ImageTimeout.Value() < 5*time.Second || c.Provider.Web.ImageTimeout.Value() > 30*time.Minute {
+		return errors.New("provider.web.imageTimeout 必须在 5 秒到 30 分钟之间")
+	}
+	if c.Provider.Web.VideoTimeout.Value() < time.Minute || c.Provider.Web.VideoTimeout.Value() > 2*time.Hour {
+		return errors.New("provider.web.videoTimeout 必须在 1 分钟到 2 小时之间")
 	}
 	if idle := c.Provider.Web.StreamIdleTimeout.Value(); idle < settingsdomain.MinProviderStreamIdleTimeout || idle > settingsdomain.MaxProviderStreamIdleTimeout {
 		return errors.New("Grok Web 流式空闲超时必须在 30 秒到 10 分钟之间")
@@ -674,13 +692,28 @@ func (c Config) Validate() error {
 	if c.Provider.Web.RecoveryBackoffBase.Value() < 5*time.Second || c.Provider.Web.RecoveryBackoffMax.Value() < c.Provider.Web.RecoveryBackoffBase.Value() || c.Provider.Web.RecoveryBackoffMax.Value() > 6*time.Hour {
 		return errors.New("provider.web 恢复退避配置无效")
 	}
-	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL || c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown || c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > maxRoutingCapacityWait || (c.Routing.MaxAttempts < unlimitedRoutingAttempts || c.Routing.MaxAttempts == 0 || c.Routing.MaxAttempts > maxRoutingAttempts) || (c.Routing.VideoMaxAttempts < unlimitedRoutingAttempts || c.Routing.VideoMaxAttempts > maxRoutingAttempts) {
-		return errors.New("routing 配置无效")
+	// routing 各约束拆分校验并指明具体字段：此前 9 个条件合并为一条
+	// 「routing 配置无效」，运维只能通读整块代码定位是哪个字段越界。
+	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL {
+		return fmt.Errorf("routing.stickyTTL 必须在 1 纳秒到 %s 之间", maxRoutingTTL)
 	}
-	if c.Routing.SegmentedMinCandidates < 100 || c.Routing.SegmentedMinCandidates > 1000000 ||
-		c.Routing.SegmentedWindowSize < 8 || c.Routing.SegmentedWindowSize > 256 ||
-		c.Routing.SegmentedWindowSize > c.Routing.SegmentedMinCandidates {
-		return errors.New("routing segmented selector 配置无效")
+	if c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown {
+		return errors.New("routing.cooldownBase/cooldownMax 配置无效: 需要 0 < cooldownBase <= cooldownMax <= 30m")
+	}
+	if c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > maxRoutingCapacityWait {
+		return fmt.Errorf("routing.capacityWait 必须在 1 纳秒到 %s 之间", maxRoutingCapacityWait)
+	}
+	if c.Routing.MaxAttempts < unlimitedRoutingAttempts || c.Routing.MaxAttempts == 0 || c.Routing.MaxAttempts > maxRoutingAttempts {
+		return errors.New("routing.maxAttempts 必须是 -1(不限)、1 到 65535；0 不被接受")
+	}
+	if c.Routing.VideoMaxAttempts < unlimitedRoutingAttempts || c.Routing.VideoMaxAttempts > maxRoutingAttempts {
+		return errors.New("routing.videoMaxAttempts 必须是 -1(不限)、0(默认 3)或 1 到 65535")
+	}
+	if c.Routing.SegmentedMinCandidates < 100 || c.Routing.SegmentedMinCandidates > 1000000 {
+		return errors.New("routing.segmentedMinCandidates 必须在 100 到 1000000 之间")
+	}
+	if c.Routing.SegmentedWindowSize < 8 || c.Routing.SegmentedWindowSize > 256 || c.Routing.SegmentedWindowSize > c.Routing.SegmentedMinCandidates {
+		return errors.New("routing.segmentedWindowSize 必须在 8 到 256 之间且不超过 segmentedMinCandidates")
 	}
 	if c.Routing.ReasoningReplayTTL.Value() <= 0 || c.Routing.ReasoningReplayTTL.Value() > 24*time.Hour {
 		return errors.New("routing.reasoningReplayTTL 必须在 1 纳秒到 24 小时之间")
@@ -688,8 +721,14 @@ func (c Config) Validate() error {
 	if c.Routing.ReasoningReplayMaxEntries < 100 || c.Routing.ReasoningReplayMaxEntries > 1000000 {
 		return errors.New("routing.reasoningReplayMaxEntries 必须在 100 到 1000000 之间")
 	}
-	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize || c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize || c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
-		return errors.New("audit 队列和批量写入配置无效")
+	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize {
+		return errors.New("audit.bufferSize 必须在 1 到 100000 之间")
+	}
+	if c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize {
+		return errors.New("audit.batchSize 必须在 1 到 1000 之间且不超过 bufferSize")
+	}
+	if c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
+		return errors.New("audit.flushInterval 必须在 50ms 到 60s 之间")
 	}
 	if c.Audit.CommitDelay.Value() < minAuditCommitDelay || c.Audit.CommitDelay.Value() > maxAuditCommitDelay {
 		return errors.New("audit.commitDelay 必须在 1ms 到 50ms 之间")
