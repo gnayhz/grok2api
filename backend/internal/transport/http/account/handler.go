@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -46,6 +48,7 @@ const (
 type Handler struct {
 	service *accountapp.Service
 	sync    accountSynchronizer
+	logger  *slog.Logger
 }
 
 type accountSyncPipeline struct {
@@ -59,8 +62,20 @@ type accountSyncPipeline struct {
 	completed  atomic.Int64
 }
 
-func NewHandler(service *accountapp.Service, sync accountSynchronizer) *Handler {
-	return &Handler{service: service, sync: sync}
+func NewHandler(service *accountapp.Service, sync accountSynchronizer, logger ...*slog.Logger) *Handler {
+	instance := &Handler{service: service, sync: sync}
+	if len(logger) > 0 && logger[0] != nil {
+		instance.logger = logger[0]
+	}
+	return instance
+}
+
+// log 返回已注入的 logger；未注入时回退 slog.Default()（测试/零值构造）。
+func (h *Handler) log() *slog.Logger {
+	if h.logger != nil {
+		return h.logger
+	}
+	return slog.Default()
 }
 
 func (h *Handler) startSyncPipeline(parent context.Context, progress func(completed, total int)) *accountSyncPipeline {
@@ -1403,6 +1418,10 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error, fall
 	case errors.Is(err, accountapp.ErrWebAccountScriptBusy):
 		response.Error(c, http.StatusConflict, "webAccountScriptBusy", err.Error())
 	default:
+		// 未分类错误（仓储故障等）此前只返回通用文案且不留痕——运维无从
+		// 定位（round 98 活体复现：手工种子数据触发 500 时服务端零日志）。
+		// 与 round 96 的 egress writeError 处理对齐：真实原因落日志。
+		h.log().Error("account_service_error", "error", err, "code", code, "request_id", c.Value(middleware.RequestIDKey))
 		response.Error(c, fallbackStatus, code, fallbackMessage)
 	}
 }

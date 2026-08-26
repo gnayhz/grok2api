@@ -112,11 +112,18 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		c.Next()
 		status := c.Writer.Status()
 		requestID, _ := c.Get(RequestIDKey)
-		logger.Info("http_request", "request_id", requestID, "method", c.Request.Method, "path", c.FullPath(), "status", status, "duration_ms", time.Since(startedAt).Milliseconds())
+		// c.FullPath() 只返回已注册路由模板；未匹配路由(404/405)为空。
+		// 回退到原始 URL 路径，保证 404 风暴可定位到具体入口（round 7：
+		// 实测未知路径的访问日志 path 为空，无法回答"什么在被打"）。
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
+		logger.Info("http_request", "request_id", requestID, "method", c.Request.Method, "path", path, "status", status, "duration_ms", time.Since(startedAt).Milliseconds())
 		if status >= http.StatusInternalServerError {
 			perfmetrics.Default.Inc("http_request_server_error_total", perfmetrics.Labels{
 				Subsystem: "http",
-				Operation: c.FullPath(),
+				Operation: path,
 				Outcome:   strconv.Itoa(status),
 			})
 		}

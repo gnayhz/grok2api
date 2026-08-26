@@ -153,7 +153,7 @@ func New(deps Dependencies) *gin.Engine {
 	adminProtected := adminRoot.Group("")
 	adminProtected.Use(middleware.AdminAuth(deps.AdminAuth))
 	authHandler.RegisterAuthenticated(adminProtected)
-	accounthttp.NewHandler(deps.Accounts, deps.AccountSync).Register(adminProtected)
+	accounthttp.NewHandler(deps.Accounts, deps.AccountSync, deps.Logger).Register(adminProtected)
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
 	auditHandler := audithttp.NewHandler(deps.Audits)
@@ -161,7 +161,7 @@ func New(deps Dependencies) *gin.Engine {
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
-	egressHandler := egresshttp.NewHandler(deps.Egress)
+	egressHandler := egresshttp.NewHandler(deps.Egress, deps.Logger)
 	egressHandler.Register(adminProtected)
 	guardstatshttp.NewHandler().Register(adminProtected)
 	systemhttp.NewHandler(func() string {

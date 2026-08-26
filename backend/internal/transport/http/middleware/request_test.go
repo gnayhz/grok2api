@@ -266,6 +266,31 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
+// 未匹配路由（404/405）的访问日志必须回退到原始 URL 路径——gin 的
+// FullPath() 只覆盖已注册模板，此前空路径让 404 风暴无法定位入口
+// （round 7 实测修复）。
+func TestAccessLogRecordsRawPathForUnmatchedRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	var logged strings.Builder
+	router.Use(AccessLog(slog.New(slog.NewTextHandler(&logged, nil))))
+	router.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/typo-path", nil))
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodDelete, "/healthz", nil))
+
+	output := logged.String()
+	for _, want := range []string{"path=/healthz", "path=/api/typo-path"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("access log missing %s; output:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "path=\"\"") || strings.Contains(output, "path=: ") {
+		t.Fatalf("access log has empty path; output:\n%s", output)
+	}
+}
+
 // 5xx 必须计入 http_request_server_error_total（方法路径 × 状态码），非 5xx
 // 零计数——管理面曾出现三处 500 仅存于单条日志、无法进入分钟级指标周期的
 // 观测缺口（见 EGRESS-REVIEW-STATUS 审查轮次）。

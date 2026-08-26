@@ -3,6 +3,7 @@ package egress
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,15 +14,29 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
 	service *egressapp.Service
+	logger  *slog.Logger
 }
 
-func NewHandler(service *egressapp.Service) *Handler {
-	return &Handler{service: service}
+func NewHandler(service *egressapp.Service, logger ...*slog.Logger) *Handler {
+	instance := &Handler{service: service}
+	if len(logger) > 0 && logger[0] != nil {
+		instance.logger = logger[0]
+	}
+	return instance
+}
+
+// log 返回已注入的 logger；未注入时回退 slog.Default()（测试/零值构造）。
+func (h *Handler) log() *slog.Logger {
+	if h.logger != nil {
+		return h.logger
+	}
+	return slog.Default()
 }
 
 func (h *Handler) Register(router *gin.RouterGroup) {
@@ -1118,9 +1133,14 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		response.Error(c, http.StatusConflict, "clearanceRefreshUnavailable", err.Error())
 	case strings.Contains(err.Error(), "FlareSolverr") || strings.Contains(err.Error(), "Clearance"):
 		// 固定文案:底层错误可能含 FlareSolverr URL/超时细节/内部地址, 细节
-		// 已在服务端日志, 不透传给管理端响应体。
+		// 在服务端日志留档（round 96 修复：此前承诺"详情见服务端日志"但
+		// RefreshClearance 全链路无任何日志输出，承诺落空）, 不透传给管理端响应体。
+		h.log().Warn("clearance_refresh_failed", "error", err, "request_id", c.Value(middleware.RequestIDKey))
 		response.Error(c, http.StatusBadGateway, "clearanceRefreshFailed", "出口会话 Clearance 刷新失败，详情见服务端日志")
 	default:
+		// 服务层返回的语义化错误（如「出口轮换未启用」「节点未配置换 IP webhook」）
+		// 此前被通用文案吞掉且不留痕——运维无从定位。保留对外通用文案，真实原因落日志。
+		h.log().Error("egress_node_operation_failed", "error", err, "request_id", c.Value(middleware.RequestIDKey))
 		response.Error(c, http.StatusInternalServerError, "egressNodeOperationFailed", "代理节点操作失败")
 	}
 }

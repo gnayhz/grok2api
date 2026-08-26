@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
+
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
@@ -289,7 +291,11 @@ func (h *Handler) sync(c *gin.Context) {
 			return
 		case value := <-result:
 			if value.err != nil {
-				_ = writeModelSyncEvent(c, "error", gin.H{"code": "modelSyncFailed", "message": "同步模型能力失败"})
+				// 服务端保留真实失败原因（此前错误既不落日志也不进 SSE，
+				// 运维只能看到笼统的 modelSyncFailed——round 86 活体复现：
+				// 无账号场景真实原因是「没有可用于模型同步的账号」）。
+				slog.Error("model_sync_failed", "error", value.err)
+				_ = writeModelSyncEvent(c, "error", gin.H{"code": "modelSyncFailed", "message": "同步模型能力失败：" + value.err.Error()})
 				return
 			}
 			_ = writeModelSyncEvent(c, "complete", gin.H{"synced": value.synced})
