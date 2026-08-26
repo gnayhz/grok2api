@@ -437,3 +437,43 @@ func TestStatsigInvalidationOnlyAppliesToURLMode(t *testing.T) {
 		t.Fatal("URL Statsig must be invalidated after anti-bot rejection")
 	}
 }
+
+// TestStatsigStoreEvictsAtCapAndSweepsExpired pins the bounded-cache contract
+// (round 129 audit follow-up): the entry map must never exceed 4096 and the
+// oldest-expiry entry is the eviction victim once expired entries are swept.
+func TestStatsigStoreEvictsAtCapAndSweepsExpired(t *testing.T) {
+	signer := newStatsigSigner()
+	base := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	signer.now = func() time.Time { return base }
+
+	// Fill to the cap with one distinctly-oldest entry plus a uniform-expiry rest.
+	signer.store("key-oldest", "value-oldest", base.Add(30*time.Minute), base)
+	for index := 1; index < statsigCacheMaxEntries; index++ {
+		signer.store(fmt.Sprintf("key-%d", index), fmt.Sprintf("value-%d", index), base.Add(time.Hour), base)
+	}
+	if got := len(signer.entries); got != statsigCacheMaxEntries {
+		t.Fatalf("entries = %d, want %d", got, statsigCacheMaxEntries)
+	}
+
+	// One more store must evict the single oldest (key-0, earliest expiry).
+	signer.store("key-new", "value-new", base.Add(2*time.Hour), base)
+	if got := len(signer.entries); got != statsigCacheMaxEntries {
+		t.Fatalf("entries after cap store = %d, want %d", got, statsigCacheMaxEntries)
+	}
+	if _, exists := signer.entries["key-oldest"]; exists {
+		t.Fatal("oldest-expiry entry key-oldest should have been evicted")
+	}
+	if _, exists := signer.entries["key-new"]; !exists {
+		t.Fatal("new entry should be present after eviction")
+	}
+
+	// Advancing past the uniform expiry (1h) makes the next store sweep them all.
+	late := base.Add(2 * time.Hour)
+	signer.store("key-fresh", "value-fresh", late.Add(time.Hour), late)
+	if got := len(signer.entries); got != 1 {
+		t.Fatalf("entries after full expiry sweep = %d, want 1", got)
+	}
+	if _, exists := signer.entries["key-fresh"]; !exists {
+		t.Fatal("fresh entry should survive the sweep")
+	}
+}

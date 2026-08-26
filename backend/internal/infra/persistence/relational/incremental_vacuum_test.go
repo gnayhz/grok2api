@@ -47,6 +47,18 @@ func TestSQLiteIncrementalVacuumReturnsFreelist(t *testing.T) {
 	if after >= before {
 		t.Fatalf("pages not returned: before=%d after=%d", before, after)
 	}
+	// 增长封顶契约（round 56 实证）：freelist 页被后续写入复用，
+	// 重新写入同等数据后文件页数只允许头部/ptrmap 级别的微小增长。
+	regrow := 0
+	for regrow < 50 && incVacPageCount(t, db) < before {
+		if err := db.db.WithContext(ctx).Exec("INSERT INTO churn (payload) VALUES (?)", payload).Error; err != nil {
+			t.Fatal(err)
+		}
+		regrow++
+	}
+	if grown := incVacPageCount(t, db) - before; grown > 2 {
+		t.Fatalf("freelist pages not reused: page_count grew by %d after reinserting %d rows (before=%d)", grown, regrow, before)
+	}
 }
 
 func incVacPageCount(t *testing.T, db *Database) int {

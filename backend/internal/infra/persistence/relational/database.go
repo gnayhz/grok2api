@@ -164,10 +164,15 @@ func (d *Database) sqliteVacuumOnce(ctx context.Context) error {
 	return d.db.WithContext(ctx).Exec("VACUUM").Error
 }
 
-// SQLiteIncrementalVacuum 归还累积的 freelist 页给操作系统。设置
-// auto_vacuum=INCREMENTAL 只启用机制；真正归还页需要周期性执行本
-// pragma（round 61 实证：DELETE 后 freelist 页滞留文件，直到显式
-// incremental_vacuum 才缩小）。非 SQLite 方言为 no-op。
+// SQLiteIncrementalVacuum 截断文件尾部的空闲页。auto_vacuum=INCREMENTAL
+// 的完整语义是两段式（round 56 实证）：(1) DELETE 释放的页进入 freelist，
+// 后续写入直接复用——增长被「历史最高水位」封顶，这是审计留存类
+// append+purge 负载的主要保护（实测 25 个写入/清理循环后文件完全平稳，
+// 不随删除次数增长）；(2) incremental_vacuum 只额外归还文件末尾连续的
+// 空闲页（实测 interior 空闲页不会被本 pragma 移动/归还，删除全部数据
+// 后 1790 个 freelist 页仅尾部 1 页被截断）。因此不要把它当作「DELETE
+// 多少就缩小多少」的收缩手段；文件回落主要依赖页复用。非 SQLite 方言
+// 为 no-op。
 func (d *Database) SQLiteIncrementalVacuum(ctx context.Context) (bool, error) {
 	if d.dialect != "sqlite" {
 		return false, nil
