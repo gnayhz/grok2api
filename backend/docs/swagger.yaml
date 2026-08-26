@@ -225,6 +225,28 @@ paths:
       summary: 文本转语音（/v1/audio/speech 别名）
       tags:
       - Audio
+  /v1/audio/tasks:
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 文本转语音（/v1/audio/tasks 兼容别名，与 speech 同步处理）
+      tags:
+      - Audio
   /v1/audio/transcriptions:
     post:
       consumes:

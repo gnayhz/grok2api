@@ -502,6 +502,17 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 A non-empty `GROK2API_DATABASE_URL` overrides `database.postgres.dsn` and automatically selects the `postgres` driver. An empty value is ignored. Supported URL schemes are `postgres://` and `postgresql://`; SQLAlchemy's `postgresql+asyncpg://` form is rejected with a migration hint. The application does not implicitly read the generic `DATABASE_URL`; platforms that provide it can map it explicitly with `GROK2API_DATABASE_URL: "${DATABASE_URL}"`. Database configuration precedence is built-in defaults, `config.yaml`, then `GROK2API_DATABASE_URL`. The current CLI has no database override.
 
+### Graceful shutdown
+
+On `SIGTERM`/`SIGINT` the listener closes immediately — new connections are refused — while in-flight requests get a **15 s drain window**. Requests still running at the deadline (long SSE streams, video jobs) are cut, a `server_shutdown_drain_timeout` WARN is logged, and the process still exits with code **0**: an operator-initiated stop is a normal outcome and must not pollute failure-rate statistics. A non-zero exit always indicates a real failure.
+
+After the drain, the audit ledger gets up to 10 s to flush queued records, then the database closes. The worst case (~26 s) fits the `stop_grace_period: 30s` in `docker-compose.yml`. A second `SIGTERM` during the drain is ignored; orchestrators escalate to `SIGKILL` after the grace period.
+
+Shutdown-related logs:
+
+- `server_started` / `server_stopped` (with `uptime_ms`, `drain_ms`) — the pairing distinguishes a clean stop from a crash that died silently.
+- `server_shutdown_drain_timeout` — the drain deadline was hit and long streams were cut by design.
+
 ### Client IPs behind a reverse proxy
 
 Request audits record the normalized client IPv4 or IPv6 address. Direct deployments need no extra configuration. Behind Nginx or another reverse proxy, configure both sides:

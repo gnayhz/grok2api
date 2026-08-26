@@ -514,6 +514,17 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 非空的 `GROK2API_DATABASE_URL` 会覆盖 `database.postgres.dsn` 并自动选择 `postgres`；空值不会覆盖 YAML。支持 `postgres://` 和 `postgresql://`，SQLAlchemy 的 `postgresql+asyncpg://` 会返回格式迁移提示。程序不会隐式读取通用的 `DATABASE_URL`；平台只提供该变量时，可在部署清单中显式映射为 `GROK2API_DATABASE_URL: "${DATABASE_URL}"`。数据库配置优先级为：内置默认值 < `config.yaml` < `GROK2API_DATABASE_URL`。当前 CLI 没有数据库覆盖参数。
 
+### 优雅停机
+
+收到 `SIGTERM`/`SIGINT` 后，监听端口立即关闭——新连接被拒绝——在途请求获得最长 **15 秒**排空窗口。窗口结束仍未完成的请求（长 SSE 流、视频任务）会被切断，记录 `server_shutdown_drain_timeout` WARN，进程仍以退出码 **0** 结束：操作员主动停止属于正常结果，不应污染失败率统计。因此非零退出码必然代表真实故障。
+
+排空结束后，审计账本有最长 10 秒刷写在途记录，随后关闭数据库；最坏情况（约 26 秒）仍在 `docker-compose.yml` 的 `stop_grace_period: 30s` 之内。排空期间的第二个 `SIGTERM` 会被忽略；编排器会在宽限期后升级为 `SIGKILL`。
+
+停机相关日志：
+
+- `server_started` / `server_stopped`（含 `uptime_ms`、`drain_ms`）——成对出现可区分「干净停止」与「崩溃后静默消失」。
+- `server_shutdown_drain_timeout`——排空超时，长流按设计被切断。
+
 ### 反向代理后的客户端 IP
 
 请求审计会记录规范化的客户端 IPv4 或 IPv6 地址。客户端直连 grok2api 时无需额外配置；经过 Nginx 等反向代理时，需要同时配置代理和 grok2api：

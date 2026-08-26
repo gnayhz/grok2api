@@ -310,6 +310,17 @@ func swaggerTTSVoiceDetail() {}
 // @Router /v1/audio/speech [post]
 func swaggerAudioSpeech() {}
 
+// swaggerAudioTask godoc
+// @Summary 文本转语音（/v1/audio/tasks 兼容别名，与 speech 同步处理）
+// @Tags Audio
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]any
+// @Router /v1/audio/tasks [post]
+func swaggerAudioTask() {}
+
 // swaggerSTT godoc
 // @Summary 语音转文本
 // @Tags Audio
