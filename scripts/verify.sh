@@ -123,6 +123,9 @@ stage_fuzz_seeds() {
 }
 stage_govulncheck() {
 	if have govulncheck; then
+		# 已知残留（2026-08 轮审记录）：GO-2026-5932 指 x/crypto/openpgp 上游弃维，
+		# Fixed: N/A 无法通过升级消除。本项目仅用 bcrypt/hkdf/chacha20poly1305，
+		# 符号级 0 可达；x/crypto 被 15+ 传递依赖共享、不可移除——按接受处理。
 		"$(resolve_bin govulncheck)" ./...
 	else
 		echo "govulncheck not installed — skipping (go install golang.org/x/vuln/cmd/govulncheck@latest)"

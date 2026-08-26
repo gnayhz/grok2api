@@ -756,77 +756,62 @@ func applyAuditQuery(query *gorm.DB, search string, start, end time.Time, filter
 	return query
 }
 
-// DeleteOlderThan 分批删除早于 cutoff 的审计及其 attempts 明细。
-// 先按 id 升序圈定本批审计（与 created_at 索引序一致），在单事务内先删
-// attempts 再删审计，保证任何中断不会留下孤儿 attempts。返回删除的审计
-// 条数；调用方以 返回值 < limit 判定本批排空。
+// deleteAuditBatch 是审计清理的唯一事务实现：单事务内按 id 升序圈定最多
+// limit 条早于 cutoff 的审计（与 created_at 索引序一致），先删 attempts 再
+// 带 created_at 复检删除审计，保证任何中断不留下孤儿 attempts。selection
+// 与删除同事务、且多实例并行时各自锁内串行，不存在「圈定后被并行清理
+// 抢删」的窗口；RowsAffected 即真实删除数。返回 0 表示已排空。
+func (r *AuditRepository) deleteAuditBatch(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	var deleted int64
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var ids []uint64
+		if err := tx.Model(&requestAuditModel{}).
+			Select("id").
+			Where("created_at < ?", cutoff).
+			Order("id ASC").
+			Limit(limit).
+			Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if err := tx.Where("audit_id IN ?", ids).Delete(&requestAuditAttemptModel{}).Error; err != nil {
+			return err
+		}
+		res := tx.Where("id IN ? AND created_at < ?", ids, cutoff).Delete(&requestAuditModel{})
+		if res.Error != nil {
+			return res.Error
+		}
+		deleted = res.RowsAffected
+		return nil
+	})
+	return deleted, err
+}
+
+// DeleteOlderThan 单批删除早于 cutoff 的审计及其 attempts 明细。返回实际
+// 删除条数；调用方以 返回值 < limit 判定本批排空（与选择数在单实例下等价，
+// 并行清理竞争下更保守——少算只会让调用方多做一轮排空确认）。
 func (r *AuditRepository) DeleteOlderThan(ctx context.Context, cutoff time.Time, limit int) (int, error) {
 	if limit < 1 {
 		limit = auditRetentionBatchSize
 	}
-	var ids []uint64
-	if err := r.db.db.WithContext(ctx).
-		Model(&requestAuditModel{}).
-		Where("created_at < ?", cutoff.UTC()).
-		Order("id ASC").
-		Limit(limit).
-		Pluck("id", &ids).Error; err != nil {
-		return 0, err
-	}
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("audit_id IN ?", ids).Delete(&requestAuditAttemptModel{}).Error; err != nil {
-			return err
-		}
-		return tx.Where("id IN ?", ids).Delete(&requestAuditModel{}).Error
-	})
-	if err != nil {
-		return 0, err
-	}
-	return len(ids), nil
+	deleted, err := r.deleteAuditBatch(ctx, cutoff, limit)
+	return int(deleted), err
 }
 
-// PurgeOlderThan 循环分批清理早于 cutoff 的审计与 attempts(上游 #983 retention)。
-// 与 DeleteOlderThan 的差异:内部循环到排空,面向天数保留策略的后台任务。
+// PurgeOlderThan 循环分批清理早于 cutoff 的审计与 attempts(上游 #983
+// retention)，直到排空或 ctx 取消。与 DeleteOlderThan 共享 deleteAuditBatch，
+// 差异仅在外层排空循环（天数保留策略的后台任务用）。
 func (r *AuditRepository) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		var batchDeleted int64
-		var batchSelected int
-		err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			var ids []uint64
-			if err := tx.Model(&requestAuditModel{}).
-				Select("id").
-				Where("created_at < ?", cutoff).
-				Order("id ASC").
-				Limit(auditPurgeBatchSize).
-				Pluck("id", &ids).Error; err != nil {
-				return err
-			}
-			if len(ids) == 0 {
-				return nil
-			}
-			batchSelected = len(ids)
-			if err := tx.Where("audit_id IN ?", ids).Delete(&requestAuditAttemptModel{}).Error; err != nil {
-				return err
-			}
-			res := tx.Where("id IN ? AND created_at < ?", ids, cutoff).Delete(&requestAuditModel{})
-			if res.Error != nil {
-				return res.Error
-			}
-			batchDeleted = res.RowsAffected
-			return nil
-		})
+		batchDeleted, err := r.deleteAuditBatch(ctx, cutoff, auditPurgeBatchSize)
 		if err != nil {
 			return totalDeleted, err
 		}
 		totalDeleted += batchDeleted
-		// Use the number selected rather than RowsAffected to decide whether
-		// another batch may exist. In a multi-instance deployment another
-		// cleaner can delete part of this batch between selection and deletion.
-		if batchSelected < auditPurgeBatchSize {
+		if batchDeleted < auditPurgeBatchSize {
 			return totalDeleted, nil
 		}
 		if err := ctx.Err(); err != nil {
