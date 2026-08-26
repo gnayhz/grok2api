@@ -201,6 +201,16 @@ type batchDeleteRequest struct {
 	LinkedDeleteTargets []string `json:"linkedDeleteTargets"`
 }
 
+// batchAccountActionRequest 是 refresh/reset 族批量操作的独立入参：此前
+// 四个 handler 复用 batchDeleteRequest，缺字段时校验错误把操作报成
+// "batchDeleteRequest.Xxx"，且 linkedDeleteTargets 对这些操作毫无意义
+// （round 77 活体复现：POST /accounts/batch/refresh-tokens 缺 provider
+// 返回 Key: 'batchDeleteRequest.Provider'，误导 API 调用方）。
+type batchAccountActionRequest struct {
+	IDs      []string `json:"ids" binding:"required"`
+	Provider string   `json:"provider" binding:"required"`
+}
+
 type credentialExportRequest struct {
 	IDs      []string `json:"ids" binding:"required"`
 	Provider string   `json:"provider" binding:"required"`
@@ -539,7 +549,7 @@ func (h *Handler) previewDeletion(c *gin.Context) {
 }
 
 func (h *Handler) batchRefreshBilling(c *gin.Context) {
-	var request batchDeleteRequest
+	var request batchAccountActionRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
@@ -614,7 +624,7 @@ func (h *Handler) detectBuildAccounts(c *gin.Context) {
 }
 
 func (h *Handler) batchResetQuota(c *gin.Context) {
-	var request batchDeleteRequest
+	var request batchAccountActionRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
@@ -708,7 +718,7 @@ func (h *Handler) cleanupPreview(c *gin.Context) {
 }
 
 func (h *Handler) batchRefreshQuotas(c *gin.Context) {
-	var request batchDeleteRequest
+	var request batchAccountActionRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
@@ -740,7 +750,7 @@ func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 }
 
 func (h *Handler) batchRefreshTokens(c *gin.Context) {
-	var request batchDeleteRequest
+	var request batchAccountActionRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return

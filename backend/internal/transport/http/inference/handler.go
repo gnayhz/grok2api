@@ -309,7 +309,13 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 		return
 	}
 	var request chatCompletionRequest
-	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.Model) == "" {
+	// JSON 语法错误与缺字段分开提示: 合并会让非法 JSON 得到「缺少有效
+	// model」的误导信息(round 64 活体复现), 与 OpenAI 的 parse-error 语义对齐。
+	if unmarshalErr := json.Unmarshal(body, &request); unmarshalErr != nil {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "请求体不是有效的 JSON: "+unmarshalErr.Error())
+		return
+	}
+	if strings.TrimSpace(request.Model) == "" {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Chat Completions 请求缺少有效 model")
 		return
 	}
@@ -356,7 +362,11 @@ func (h *Handler) createMessage(c *gin.Context) {
 		return
 	}
 	var request messagesRequest
-	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.Model) == "" || request.MaxTokens == nil || *request.MaxTokens <= 0 || len(bytes.TrimSpace(request.Messages)) == 0 {
+	if unmarshalErr := json.Unmarshal(body, &request); unmarshalErr != nil {
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "request body is not valid JSON: "+unmarshalErr.Error())
+		return
+	}
+	if strings.TrimSpace(request.Model) == "" || request.MaxTokens == nil || *request.MaxTokens <= 0 || len(bytes.TrimSpace(request.Messages)) == 0 {
 		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "model, max_tokens, and messages are required")
 		return
 	}
@@ -1143,7 +1153,11 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		return
 	}
 	var request responsesRequest
-	if err := json.Unmarshal(body, &request); err != nil || strings.TrimSpace(request.Model) == "" {
+	if unmarshalErr := json.Unmarshal(body, &request); unmarshalErr != nil {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "请求体不是有效的 JSON: "+unmarshalErr.Error())
+		return
+	}
+	if strings.TrimSpace(request.Model) == "" {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Responses 请求缺少有效 model")
 		return
 	}

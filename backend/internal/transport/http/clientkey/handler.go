@@ -58,8 +58,10 @@ type updateRequest struct {
 }
 
 type batchUpdateRequest struct {
-	IDs     []string `json:"ids" binding:"required"`
-	Enabled bool     `json:"enabled"`
+	IDs []string `json:"ids" binding:"required"`
+	// Enabled 用指针并显式校验：bool 零值会把「缺省」与「显式 false」
+	// 混同，API 调用方漏传字段即静默批量禁用（round 69 活体复现）。
+	Enabled *bool `json:"enabled"`
 }
 
 type batchDeleteRequest struct {
@@ -112,7 +114,11 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
 	}
-	updated, err := h.service.BatchSetEnabled(c.Request.Context(), ids, request.Enabled)
+	if request.Enabled == nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "enabled 字段必填")
+		return
+	}
+	updated, err := h.service.BatchSetEnabled(c.Request.Context(), ids, *request.Enabled)
 	if err != nil {
 		h.writeServiceError(c, "clientKeyBatchUpdateFailed", err)
 		return
@@ -342,12 +348,15 @@ func parseTime(value string) (*time.Time, error) {
 	return &parsed, nil
 }
 
+// parseIDs 同时解析客户端 Key ID 与 allowedModelIds；错误消息保持中性，
+// 模型位点的调用方以自己的 invalidModelId 消息覆盖（round 69：Key 批量
+// 操作曾把 Key ID 报成「无效模型 ID」，误导运维）。
 func parseIDs(values []string) ([]uint64, error) {
 	result := make([]uint64, 0, len(values))
 	for _, value := range values {
 		id, err := strconv.ParseUint(value, 10, 64)
 		if err != nil || id == 0 {
-			return nil, fmt.Errorf("无效模型 ID: %s", value)
+			return nil, fmt.Errorf("无效 ID: %s", value)
 		}
 		result = append(result, id)
 	}
