@@ -11,7 +11,7 @@ ADMIN_PASS 以创建/清理临时压测 key。
 
 无破坏: 临时 key 用后即删；请求为普通短流式推理。
 """
-import json, os, sys, threading, time, urllib.request
+import json, os, sys, threading, time, urllib.error, urllib.request
 
 BASE = os.environ.get("BASE", "http://127.0.0.1:38000")
 ADMIN_USER = os.environ.get("ADMIN_USER", "root")
@@ -52,6 +52,11 @@ def one(i, wave):
                 if line.strip() == b"data: [DONE]": done = True
             out = {"status": r.status, "done": done, "ms": int((time.time()-t0)*1000),
                    "first": int((first or time.time()-t0)*1000), "bytes": nbytes}
+    except urllib.error.HTTPError as e:
+        # 读取错误响应体：只有 "HTTP Error 404" 时运维无从判断是
+        # model_not_found 还是账号耗尽（round 84 实测）。
+        detail = e.read().decode(errors="replace")[:120]
+        out = {"status": e.code, "done": False, "err": detail, "ms": int((time.time()-t0)*1000), "first": None, "bytes": 0}
     except Exception as e:
         out = {"status": 0, "done": False, "err": str(e)[:80], "ms": int((time.time()-t0)*1000), "first": None, "bytes": 0}
     with lock: RESULTS.append(out)

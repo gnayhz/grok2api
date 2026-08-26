@@ -12,13 +12,18 @@
 # when absent; the core go toolchain checks are always required.
 #
 # Backend integration tests SKIP without env; run them against ephemeral
-# real backends (optimize round 13 verified both green this way):
-#   docker run -d --rm --name redis-verify --network grok2api redis:7-alpine
-#   TEST_REDIS_ADDRESS=redis-verify:6379 go test ./internal/infra/runtime/redis/ -count=1
-#   docker stop redis-verify
-#   docker run -d --rm --name pg-verify --network grok2api -e POSTGRES_PASSWORD=pgtest #     -e POSTGRES_DB=grok2api_test postgres:16-alpine
-#   TEST_POSTGRES_DSN='postgres://postgres:pgtest@pg-verify:5432/grok2api_test?sslmode=disable' #     go test ./internal/infra/persistence/relational/ -run Integration -count=1
-#   docker stop pg-verify
+# real backends. Publish to 127.0.0.1 ports (round 4 verified green this
+# way): docker-network container names resolve through fake-IP DNS on the
+# host and the TCP handshake fails with EOF, so --network + name addressing
+# only works when the tests themselves run inside the same network.
+#   docker run -d --rm --name redis-verify -p 127.0.0.1:16379:6379 redis:7-alpine
+#   TEST_REDIS_ADDRESS=127.0.0.1:16379 go test ./internal/infra/runtime/redis/ -count=1
+#   docker rm -f redis-verify
+#   docker run -d --rm --name pg-verify -p 127.0.0.1:15432:5432 -e POSTGRES_PASSWORD=pgtest \
+#     -e POSTGRES_DB=grok2api_test postgres:16-alpine
+#   TEST_POSTGRES_DSN='postgres://postgres:pgtest@127.0.0.1:15432/grok2api_test?sslmode=disable' \
+#     TEST_REDIS_ADDRESS=127.0.0.1:16379 go test ./internal/infra/persistence/relational/ -run Integration -count=1
+#   docker rm -f pg-verify
 #
 # Crash-recovery spot check (optimize round 14 verified this way): kill the
 # running instance mid-stream (docker kill, SIGKILL), restart, then confirm
@@ -82,6 +87,15 @@ stage_build() { go build ./...; }
 # gofmt 漂移检查：交付门此前不含 fmt，17 个文件带着未格式化内容入库
 # （round 37 清零）。非空输出即失败，白名单仅限 vendored 测试替身目录。
 stage_fmt() {
+	# gofmt 缺失时命令替换拿不到退出码，空输出会被当成"无漂移"——
+	# 曾经虚报 ok（round 1 复现：PATH 无 gofmt 时 fmt 门静默放行）。
+	# 与 staticcheck 同约定：工具缺失显式 skip，绝不假通过。
+	if ! have gofmt; then
+		echo "gofmt not installed — skipping (part of the Go toolchain: check PATH / go env GOROOT)"
+		SKIPPED+=(gofmt)
+		SKIPPED_NOW="tool missing"
+		return 0
+	fi
 	drift=$(gofmt -l . | grep -v '^gateway.test/' || true)
 	if [ -n "$drift" ]; then
 		echo "gofmt drift detected:"; echo "$drift"
