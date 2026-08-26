@@ -39,7 +39,9 @@ function invalidateSession(): void {
   sessionInvalidatedListeners.forEach((listener) => listener());
 }
 
-function localizedErrorMessage(code: string, fallback: string): string {
+// round 111 导出：创意工作台调用 /v1/* 拿到的 OpenAI 兼容错误码需要同一
+// 套 apiErrors 查找，避免英文界面显示后端中文原文。
+export function localizedErrorMessage(code: string, fallback: string): string {
   const key = `apiErrors.${code}`;
   return i18n.exists(key) ? i18n.t(key) : fallback;
 }
@@ -147,7 +149,15 @@ async function sendApiRequest(path: string, options: RequestOptions): Promise<Re
 
 export async function apiRequest<T>(path: string, options: RequestOptions, decode: ApiDecoder<T>): Promise<T> {
   const { authenticated = true, retryAuth = true } = options;
-  const response = await sendApiRequest(path, options);
+  let response: Response;
+  try {
+    response = await sendApiRequest(path, options);
+  } catch {
+    // fetch 本身抛出（服务不可达/断网/DNS 失败）此前把浏览器原始
+    // TypeError("Failed to fetch") 直接冒泡到 ErrorState——未本地化且
+    // 语言混杂。统一归类为本地化的 networkError。
+    throw new ApiError(0, "networkError", localizedErrorMessage("networkError", "Cannot reach the server. Check the network or retry later."));
+  }
 
   if (response.status === 401 && authenticated && retryAuth) {
     const refreshResult = await refreshAccessToken();
@@ -170,7 +180,12 @@ export type ApiStreamEvent<T> = {
 // apiEventStream 使用现有管理员鉴权发起 POST SSE，并正确处理任意分块边界。
 export async function apiEventStream<T>(path: string, options: RequestOptions, decode: ApiDecoder<T>, onEvent: (value: ApiStreamEvent<T>) => void): Promise<void> {
   const { authenticated = true, retryAuth = true } = options;
-  const response = await sendApiRequest(path, options);
+  let response: Response;
+  try {
+    response = await sendApiRequest(path, options);
+  } catch {
+    throw new ApiError(0, "networkError", localizedErrorMessage("networkError", "Cannot reach the server. Check the network or retry later."));
+  }
   if (response.status === 401 && authenticated && retryAuth) {
     const refreshResult = await refreshAccessToken();
     if (refreshResult === "refreshed") {

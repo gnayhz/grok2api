@@ -1,3 +1,12 @@
+import { localizedErrorMessage } from "../../shared/api/client";
+
+// round 111: /v1/* 的 OpenAI 兼容错误码优先走 apiErrors 本地化查找——
+// 此前直接透传后端 message，英文界面会显示中文原文。
+function localizedCreativeMessage(error: { code?: string; message?: string }, fallback: string): string {
+  const raw = error.message ?? fallback;
+  return error.code ? localizedErrorMessage(error.code, raw) : raw;
+}
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -297,7 +306,7 @@ export async function synthesizeSpeech(input: {
     const responseText = await response.text();
     const payload = parseJSON(responseText);
     const error = readError(payload);
-    throw new CreativeApiError(response.status, error.message ?? (responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
+    throw new CreativeApiError(response.status, localizedCreativeMessage(error, responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
   }
   if (contentType.includes("application/json")) {
     const payload = await response.json();
@@ -340,7 +349,7 @@ export async function transcribeSpeech(input: {
   const payload = parseJSON(responseText);
   if (!response.ok) {
     const error = readError(payload);
-    throw new CreativeApiError(response.status, error.message ?? (responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
+    throw new CreativeApiError(response.status, localizedCreativeMessage(error, responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
   }
   if (!isRecord(payload) || typeof payload.text !== "string") {
     throw new CreativeApiError(200, "The STT response was invalid", "invalid_response");
@@ -389,7 +398,7 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
   if (!response.ok) {
     const error = readError(payload);
     const fallback = responseText.trim() || response.statusText || `HTTP ${response.status}`;
-    throw new CreativeApiError(response.status, error.message ?? fallback, error.code);
+    throw new CreativeApiError(response.status, localizedCreativeMessage(error, fallback), error.code);
   }
   if (payload === null) throw new CreativeApiError(response.status, "The API returned a non-JSON response", "invalid_response");
   return payload;
@@ -406,7 +415,7 @@ async function publicResponsesStream(apiKey: string, body: Record<string, unknow
     const responseText = await response.text();
     const payload = parseJSON(responseText);
     const error = readError(payload);
-    throw new CreativeApiError(response.status, error.message ?? (responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
+    throw new CreativeApiError(response.status, localizedCreativeMessage(error, responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
   }
   if (!response.headers.get("content-type")?.includes("text/event-stream")) {
     const responseText = await response.text();
@@ -501,7 +510,7 @@ async function publicResponsesStream(apiKey: string, body: Record<string, unknow
     }
     if (type === "response.failed" || type === "error") {
       const error = readError(isRecord(payload.response) ? payload.response : payload);
-      throw new CreativeApiError(response.status, error.message ?? "The Responses API stream failed", error.code);
+      throw new CreativeApiError(response.status, localizedCreativeMessage(error, "The Responses API stream failed"), error.code);
     }
   };
 
