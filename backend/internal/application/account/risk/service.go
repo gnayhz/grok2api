@@ -218,9 +218,13 @@ func (s *Service) revalidateChannelWitness(ctx context.Context, checker Checker)
 }
 
 // checkCall 是一次进行中的 RSC 检查：done 关闭后 result 可读。
+// origin/trigger 是 leader 入场时的归因章，waiter 必须原样继承，不得改写成
+// 自己的账号——否则 Build 降智与巡检/Web 撞车时会把通道隔离升级成身份连坐。
 type checkCall struct {
-	done   chan struct{}
-	result CheckResult
+	done    chan struct{}
+	result  CheckResult
+	origin  uint64
+	trigger string
 }
 
 // CheckResult is the application-layer projection of one RSC probe outcome.
@@ -640,13 +644,15 @@ func (s *Service) ClearIdentityVerdicts(ctx context.Context, credential accountd
 	if verr != nil && !errors.Is(verr, ErrNotFound) {
 		return verr
 	}
-	ssoOrigin := verr == nil && (verdict.OriginAccountID == webID || (verdict.OriginAccountID == 0 && credential.Provider == accountdomain.ProviderWeb))
 	buildOrigin := verr == nil && verdict.OriginAccountID == credential.ID && credential.Provider == accountdomain.ProviderBuild
 	if credential.Provider == accountdomain.ProviderBuild {
-		// Build 自己降智产生的结论：清这个 Build 时删掉，避免对账按 origin 打回。
-		// SSO 巡检连坐产生的结论（origin==webID）：也删身份 verdict，否则启动
-		// 对账会把刚清的 Build 再标回去。Web 自己的 clean 缓存不在 denied 路径。
-		if buildOrigin || ssoOrigin {
+		// Build 自己降智产生的结论：清这个 Build 时删掉身份键，避免对账按
+		// origin 把刚清的标打回来。SSO 巡检/Web 降智产生的身份结论
+		// （origin==webID）必须保留：删掉会让身份从 ListPatrolDue 永久消失
+		// （无 verdict 行 = 不巡检），兄弟通道继续挂标却没有可对账的 denied。
+		// 启动对账会按保留的 SSO-origin 把该 Build 再标回去——这是身份级
+		// 定罪的正确收敛；要持久解开整组，清 Web 账号。
+		if buildOrigin {
 			if err := s.store.DeleteRiskVerdict(ctx, webID); err != nil {
 				return err
 			}
@@ -724,7 +730,7 @@ func (s *Service) freshVerdictFor(ctx context.Context, id uint64, expectedTag st
 // strand the second degraded account's cooldown forever). A merged (shared)
 // result is returned to every caller but persisted only once by the leader.
 func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64, trigger string) StoredVerdict {
-	call := &checkCall{done: make(chan struct{})}
+	call := &checkCall{done: make(chan struct{}), origin: originAccountID, trigger: trigger}
 	if actual, loaded := s.checkInflight.LoadOrStore(webID, call); loaded {
 		// 已有同身份检查在跑：等它完成并共享结果。等待不占并发闸。
 		leader := actual.(*checkCall)
@@ -733,8 +739,8 @@ func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64, t
 		select {
 		case <-leader.done:
 			shared := storedFromCheck(leader.result)
-			shared.OriginAccountID = originAccountID
-			shared.Trigger = trigger
+			shared.OriginAccountID = leader.origin
+			shared.Trigger = leader.trigger
 			return shared
 		case <-ctx.Done():
 			return StoredVerdict{Verdict: VerdictError, Error: "wait for in-flight check: " + ctx.Err().Error(), CheckedAt: time.Now().UTC(), OriginAccountID: originAccountID, Trigger: trigger}

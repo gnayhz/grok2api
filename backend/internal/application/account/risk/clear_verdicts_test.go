@@ -23,15 +23,23 @@ func TestClearLinkedBuildKeepsWebOwnedVerdict(t *testing.T) {
 	mustSave(t, store, 91, StoredVerdict{Verdict: VerdictDenied, Source: buildProbeSourceTag, OriginAccountID: 91, CheckedAt: time.Now().UTC()})
 	service := New(baseBuildTestConfig(), accounts, store, &fakeChecker{}, nil)
 
+	accounts.linkedBack[90] = []uint64{91}
+	accounts.flagged[91] = false
+
 	if err := service.ClearIdentityVerdicts(context.Background(), accountdomain.Credential{ID: 91, Provider: accountdomain.ProviderBuild}); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := store.GetRiskVerdict(context.Background(), 90); err == nil {
-		t.Fatal("SSO-origin denied must be deleted so reconcile cannot re-flag the cleared build")
+	if _, err := store.GetRiskVerdict(context.Background(), 90); err != nil {
+		t.Fatal("SSO-origin denied must survive a linked-build clear so patrol/reconcile still see the identity")
 	}
 	if _, err := store.GetRiskVerdict(context.Background(), 91); err == nil {
 		t.Fatal("build's own native verdict must be removed")
+	}
+
+	service.ReconcileRiskyVerdicts(context.Background())
+	if !accounts.flagged[91] {
+		t.Fatal("kept SSO-origin denied must re-flag the cleared build on reconcile; clear Web to unflag the identity")
 	}
 }
 
