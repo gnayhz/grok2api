@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# delete-probe-keys — 按名称删除演练探针密钥并验证响应（r94/r135 教训工具化）。
+#
+# 用法:
+#   ADMIN_TOKEN=<accessToken> scripts/delete-probe-keys name1 name2 ...
+#   （或） BASE=... scripts/delete-probe-keys --login root PASSWORD name1 name2 ...
+#
+# 行为：失败（网络/校验/deleted 数不符）即非零退出；绝不静默吞错。
+set -uo pipefail
+
+BASE="${BASE:-http://127.0.0.1:8000}"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+[ $# -ge 1 ] || fail "用法: $0 [--login USER PASS] <name> [<name>...]"
+
+if [ "$1" = "--login" ]; then
+  LUSER="$2"; LPASS="$3"; shift 3
+  TOKEN=$(curl -sf -m 10 -X POST "$BASE/api/admin/v1/auth/login" \
+    -H 'Content-Type: application/json' -d "{\"username\":\"$LUSER\",\"password\":\"$LPASS\"}" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["tokens"]["accessToken"])') \
+    || fail "登录失败"
+else
+  TOKEN="$1"; shift
+fi
+
+NAMES_JSON=$(printf '%s\n' "$@" | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read().split()))')
+IDS=$(curl -s -m 10 -H "Authorization: Bearer $TOKEN" \
+  "$BASE/api/admin/v1/client-keys?page=1&pageSize=200" \
+  | NAMES="$NAMES_JSON" python3 -c 'import sys, json, os
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)["data"]["items"]
+except Exception:
+    sys.exit(3)
+want = set(json.loads(os.environ["NAMES"]))
+print(json.dumps([str(k["id"]) for k in d if k.get("name") in want]))') \
+  || fail "枚举密钥失败（HTTP 错误或无效响应）"
+
+if [ "$IDS" = "[]" ]; then
+  echo "no matching probe keys (already clean)"
+  exit 0
+fi
+
+PAYLOAD=$(printf '{"ids":%s}' "$IDS")
+RESULT=$(curl -s -m 15 -X DELETE "$BASE/api/admin/v1/client-keys" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "$PAYLOAD") || fail "DELETE 请求失败"
+
+WANT=$(echo "$IDS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')
+GOT=$(echo "$RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d.get("deleted",-1))')
+[ "$GOT" = "$WANT" ] || fail "deleted=$GOT 期望=$WANT"
+echo "deleted:$GOT (期望 $WANT) ✓"
