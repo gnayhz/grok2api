@@ -752,20 +752,39 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var degraded, delivered bool
+	var deliveredID uint64
+	parents := 0
 	for _, rec := range logs {
-		if rec.ErrorCode == ErrorQualityDegraded && rec.AccountID != nil && *rec.AccountID == credentials[1].ID {
-			degraded = true
+		if rec.RequestID != "req-quality-hold" {
+			continue
 		}
-		if rec.RequestID == "req-quality-hold" && rec.ErrorCode == "" && rec.StatusCode == http.StatusOK {
-			delivered = true
+		parents++
+		if rec.ErrorCode == ErrorQualityDegraded {
+			t.Fatalf("withhold must not create a second parent row, got status=%d error=%s", rec.StatusCode, rec.ErrorCode)
+		}
+		if rec.ErrorCode == "" && rec.StatusCode == http.StatusOK {
+			deliveredID = rec.ID
 		}
 	}
-	if !degraded {
-		t.Fatalf("first withhold must write quality_degraded, audits=%d total=%d", len(logs), total)
+	if parents != 1 {
+		t.Fatalf("one request must write one audit parent, got %d (total rows %d)", parents, total)
 	}
-	if !delivered {
-		t.Fatalf("final delivered attempt missing from audits, total=%d", total)
+	if deliveredID == 0 {
+		t.Fatal("final delivered attempt missing from audits")
+	}
+	detail, err := auditRepo.Get(ctx, deliveredID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundHold := false
+	for _, attempt := range detail.Attempts {
+		if attempt.TransportError == ErrorQualityDegraded {
+			foundHold = true
+			break
+		}
+	}
+	if !foundHold {
+		t.Fatalf("withhold must appear as an attempt on the delivered request, attempts=%d", len(detail.Attempts))
 	}
 }
 

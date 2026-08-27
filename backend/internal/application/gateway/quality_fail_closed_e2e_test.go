@@ -139,20 +139,28 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 		}
 	}
 
-	// And no degraded bytes ever reached the caller surface: the error path
-	// carries no body; the audit trail records each withheld attempt plus the
-	// request-level 503 (all carrying the degraded error code).
+	// One parent 503; each withheld account is an attempt on that row.
 	logs, total, listErr := auditRepo.List(ctx, 0, 50)
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
-	degradedRecords := 0
-	for _, record := range logs {
-		if record.ErrorCode == ErrorQualityDegraded {
-			degradedRecords++
+	if total != 1 {
+		t.Fatalf("fail-closed must write one audit parent, got %d", total)
+	}
+	if logs[0].ErrorCode != ErrorQualityDegraded || logs[0].StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("parent = %d/%s, want 503/%s", logs[0].StatusCode, logs[0].ErrorCode, ErrorQualityDegraded)
+	}
+	detail, getErr := auditRepo.Get(ctx, logs[0].ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	holds := 0
+	for _, attempt := range detail.Attempts {
+		if attempt.TransportError == ErrorQualityDegraded {
+			holds++
 		}
 	}
-	if degradedRecords != accounts+1 {
-		t.Fatalf("degraded audit records = %d of %d total, want %d per-attempt plus 1 request-level", degradedRecords, total, accounts)
+	if holds != accounts {
+		t.Fatalf("quality_hold attempts = %d, want %d", holds, accounts)
 	}
 }

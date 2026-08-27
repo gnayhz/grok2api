@@ -1273,6 +1273,11 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				record.AccountID = &accountID
 				record.AccountName = credential.Name
 				record.StatusCode = response.StatusCode
+				if errorCode == "client_disconnected" {
+					// 响应头可能已是 200，但请求结局是客户端断开。用 499
+					// 避免审计列表把取消当成成功（与 nginx 约定一致）。
+					record.StatusCode = 499
+				}
 				record.QualityFailOpen = qualityFailOpen
 				record.InputTokens = usage.InputTokens
 				record.CachedInputTokens = usage.CachedInputTokens
@@ -1386,7 +1391,6 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return
 		}
 		if recordDegraded {
-			s.recordQualityDegraded(ctx, auditBase, fallback.credential, fallback.usage, startedAt, egressTrace, route.Provider)
 			failureAttempts.captureQualityDegraded(fallback.credential, fallback.upstreamStartedAt)
 		}
 		_ = fallback.response.Body.Close()
@@ -1863,9 +1867,11 @@ attemptLoop:
 						}
 					}
 				}
+				// 扣留只记在本请求的 attempt 明细上，不再 Create 第二条主审计。
+				// 线上曾出现同一 requestId 两行 200：一行 quality_degraded
+				// events=0，一行成功放行——列表看起来像「有的抓住有的漏」。
 				deferFailOpenAudit := commit.Action == QualityActionRetry && holdCfg.OnExhausted == qualityRetryFailOpen
-				if commit.Audit && !deferFailOpenAudit {
-					s.recordQualityDegraded(ctx, auditBase, credential, peekUsage, startedAt, egressTrace, route.Provider)
+				if verdict == QualityWithhold && !deferFailOpenAudit {
 					failureAttempts.captureQualityDegraded(credential, responseStartedAt)
 				}
 				switch commit.Action {

@@ -172,6 +172,8 @@ func (r *failureAttemptRecorder) captureStreamFailure(credential accountdomain.C
 }
 
 func (r *failureAttemptRecorder) captureQualityDegraded(credential accountdomain.Credential, startedAt time.Time) {
+	// Upstream HTTP is still 200; the gateway withheld. Parent audit is the
+	// request outcome (success after retry, or 503 if exhausted).
 	status := http.StatusOK
 	r.append(audit.Attempt{
 		Source:             audit.AttemptSourceUpstreamHTTP,

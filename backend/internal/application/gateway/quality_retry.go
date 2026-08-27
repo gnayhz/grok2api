@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"strings"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
@@ -501,30 +499,5 @@ func (s *Service) applyMissingThinkingPenalty(ctx context.Context, requestID str
 		s.logger.Info("quality_degraded_disabled", "request_id", requestID, "account_id", credential.ID)
 	case missingThinkingPenaltyCooled:
 		s.logger.Info("quality_degraded_cooldown", "request_id", requestID, "account_id", credential.ID, "cooldown", cooldown.String())
-	}
-}
-
-func (s *Service) recordQualityDegraded(ctx context.Context, base audit.Record, credential accountdomain.Credential, usage Usage, startedAt time.Time, trace *infraegress.Trace, provider accountdomain.Provider) {
-	record := base
-	record.EventID = newAuditEventID()
-	accountID := credential.ID
-	record.AccountID = &accountID
-	record.AccountName = credential.Name
-	record.StatusCode = http.StatusOK
-	record.ErrorCode = ErrorQualityDegraded
-	record.OutputTokens = usage.OutputTokens
-	record.ReasoningTokens = usage.ReasoningTokens
-	record.TotalTokens = usage.TotalTokens
-	record.InputTokens = usage.InputTokens
-	if usage.Reported {
-		record.UsageSource = audit.UsageSourceUpstream
-	}
-	record.DurationMS = time.Since(startedAt).Milliseconds()
-	record.CreatedAt = time.Now().UTC()
-	applyAuditEgress(&record, trace, provider)
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-	defer cancel()
-	if err := s.audits.Create(writeCtx, record); err != nil {
-		s.logger.Error("quality_degraded_audit_failed", "event_id", record.EventID, "request_id", record.RequestID, "error", err)
 	}
 }
