@@ -11,6 +11,7 @@ fi
 if ./scripts/patrol.sh >>"$LOG" 2>&1; then
   echo "[$(date '+%F %T')] PASS" >>"$LOG"
 else
-  echo "[$(date '+%F %T')] FAIL rc=$?" >>"$LOG"
+  rc=$?
+  echo "[$(date '+%F %T')] FAIL rc=$rc" >>"$LOG"
   touch /tmp/grok2api-patrol-ALERT
 fi
