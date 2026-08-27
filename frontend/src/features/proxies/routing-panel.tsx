@@ -269,8 +269,7 @@ export function RoutingPanel() {
 	}
 
 	// 生效解析:与后端 TargetFor 同规则 —— 类别 → 作用域 → 总出口 → 自动调度。
-	// 实现在 effective-target.ts 纯函数中, 与奇偶性测试共用, 防止两份阶梯
-	// 实现漂移。
+	// 显式 auto 是该层终态（自动调度），不是回落到下一层。
 	function resolveEffective(cls?: (typeof trafficClasses)[number], scope?: (typeof routingScopes)[number]): EgressRoutingTarget {
 		return resolveEffectiveTarget({ defaultTarget, scopeTargets: operations.form.scopeTargets, classTargets: operations.form.classTargets }, cls, scope);
 	}

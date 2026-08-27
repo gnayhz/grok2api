@@ -27,9 +27,9 @@ describe("resolveEffectiveTarget parity with backend TargetFor", () => {
     assert.deepEqual(resolveEffectiveTarget(base, undefined, "grok_build"), node("7"));
   });
 
-  it("explicit auto scope follows the default target", () => {
+  it("explicit auto scope beats the default", () => {
     assert.deepEqual(resolveEffectiveTarget(base, "inference", "grok_web"), pool("3"));
-    assert.deepEqual(resolveEffectiveTarget(base, "credential", "grok_web"), { mode: "direct" });
+    assert.deepEqual(resolveEffectiveTarget(base, "credential", "grok_web"), { mode: "auto" });
   });
 
   it("unconfigured scope uses the default target", () => {
@@ -42,7 +42,7 @@ describe("resolveEffectiveTarget parity with backend TargetFor", () => {
     assert.deepEqual(resolveEffectiveTarget(empty, "inference", "grok_build"), { mode: "auto" });
   });
 
-  it("stored auto entries are treated as unset at every level", () => {
+  it("explicit auto at every level resolves to automatic schedule", () => {
     const allAuto: EffectiveRoutingConfig = {
       defaultTarget: { mode: "auto" },
       scopeTargets: { grok_build: { mode: "auto" } },
