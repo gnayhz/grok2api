@@ -66,6 +66,11 @@ type accountRiskConfigDTO struct {
 	PatrolBucketDays int    `json:"patrolBucketDays"`
 	PatrolInterval   string `json:"patrolInterval,omitempty"`
 	PatrolBatchSize  int    `json:"patrolBatchSize,omitempty"`
+	// 探针出口代理(空=直连)与 denied 定罪策略。整节替换语义与该节
+	// 其余标量字段一致;前端与后端同镜像分发,不存在旧 UI 缺字段的载荷。
+	ProbeProxyURL       string `json:"probeProxyURL"`
+	DeniedConfirmations int    `json:"deniedConfirmations"`
+	DeniedTTL           string `json:"deniedTTL"`
 	// BuildProbeEnabled 指针语义:字段缺省(旧客户端)不覆盖当前值。
 	BuildProbeEnabled *bool `json:"buildProbeEnabled,omitempty"`
 }
@@ -363,15 +368,19 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		result.RequestRetryProvided = true
 	}
 	if value.AccountRisk != nil {
-		result.AccountRisk = settingsapp.AccountRiskEditable{
+		risk := settingsapp.AccountRiskEditable{
 			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
 			Concurrency: value.AccountRisk.Concurrency, Timeout: value.AccountRisk.Timeout,
 			OnDenied: value.AccountRisk.OnDenied, PatrolEnabled: value.AccountRisk.PatrolEnabled,
-			PatrolBucketDays:  value.AccountRisk.PatrolBucketDays,
-			PatrolInterval:    value.AccountRisk.PatrolInterval,
-			PatrolBatchSize:   value.AccountRisk.PatrolBatchSize,
-			BuildProbeEnabled: value.AccountRisk.BuildProbeEnabled,
+			PatrolBucketDays:    value.AccountRisk.PatrolBucketDays,
+			PatrolInterval:      value.AccountRisk.PatrolInterval,
+			PatrolBatchSize:     value.AccountRisk.PatrolBatchSize,
+			ProbeProxyURL:       value.AccountRisk.ProbeProxyURL,
+			DeniedConfirmations: value.AccountRisk.DeniedConfirmations,
+			DeniedTTL:           value.AccountRisk.DeniedTTL,
+			BuildProbeEnabled:   value.AccountRisk.BuildProbeEnabled,
 		}
+		result.AccountRisk = risk
 		result.AccountRiskProvided = true
 	}
 	if value.EgressRotation != nil {
@@ -468,10 +477,13 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				Enabled: config.AccountRisk.Enabled, Method: config.AccountRisk.Method,
 				Concurrency: config.AccountRisk.Concurrency, Timeout: config.AccountRisk.Timeout,
 				OnDenied: config.AccountRisk.OnDenied, PatrolEnabled: config.AccountRisk.PatrolEnabled,
-				PatrolBucketDays:  config.AccountRisk.PatrolBucketDays,
-				PatrolInterval:    config.AccountRisk.PatrolInterval,
-				PatrolBatchSize:   config.AccountRisk.PatrolBatchSize,
-				BuildProbeEnabled: config.AccountRisk.BuildProbeEnabled,
+				PatrolBucketDays:    config.AccountRisk.PatrolBucketDays,
+				PatrolInterval:      config.AccountRisk.PatrolInterval,
+				PatrolBatchSize:     config.AccountRisk.PatrolBatchSize,
+				ProbeProxyURL:       config.AccountRisk.ProbeProxyURL,
+				DeniedConfirmations: config.AccountRisk.DeniedConfirmations,
+				DeniedTTL:           config.AccountRisk.DeniedTTL,
+				BuildProbeEnabled:   config.AccountRisk.BuildProbeEnabled,
 			},
 			EgressRotation: &egressRotationConfigDTO{
 				Enabled: config.EgressRotation.Enabled, MaxAttemptsPerQuarantine: config.EgressRotation.MaxAttemptsPerQuarantine,
