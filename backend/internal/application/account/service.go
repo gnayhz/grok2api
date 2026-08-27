@@ -69,6 +69,7 @@ const (
 	credentialStateWriteTimeout     time.Duration = 5 * time.Second
 	credentialConfigurationRetry    time.Duration = 30 * time.Minute
 	credentialRefreshBatchSize                    = 100
+	credentialRefreshMaxBatches                   = 50
 	credentialUnclassifiedAuthLimit               = 5
 	managedTaskWorkerCeiling                      = 50
 	quotaRefreshQueueSize                         = 4096

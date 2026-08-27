@@ -112,7 +112,7 @@ func (s *Service) refreshDueCredentials(ctx context.Context) error {
 	if _, err := s.ReconcileCredentialSchedules(ctx); err != nil {
 		return err
 	}
-	for {
+	for scan := 1; scan <= credentialRefreshMaxBatches; scan++ {
 		ids, err := s.accounts.ListDueCredentialRefreshIDs(ctx, s.now(), credentialRefreshBatchSize)
 		if err != nil {
 			return err
@@ -145,13 +145,17 @@ func (s *Service) refreshDueCredentials(ctx context.Context) error {
 		if batchErr != nil {
 			return fmt.Errorf("自动刷新批次执行失败: %w", batchErr)
 		}
+		// OAuth 失败会把 refresh_due_at 推到退避点，本批其余账号已处理。
+		// 旧逻辑在 failed>0 时整轮返回，ListDue 的下一页（同刻到期的其余号）
+		// 要等 30s 安全间隔才跑。
 		if failed > 0 {
-			return fmt.Errorf("自动刷新批次失败 %d/%d", failed, len(ids))
+			s.logger.Warn("credential_auto_refresh_partial_failure", "failed", failed, "batch", len(ids), "scan", scan)
 		}
 		if len(ids) < credentialRefreshBatchSize {
 			return nil
 		}
 	}
+	return fmt.Errorf("自动刷新超过 %d 批，停止本轮", credentialRefreshMaxBatches)
 }
 
 func (s *Service) nextCredentialRefreshDelay(ctx context.Context) (time.Duration, error) {

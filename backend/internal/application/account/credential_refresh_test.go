@@ -833,14 +833,15 @@ func newCredentialRefreshTestService(t *testing.T, now time.Time) (*Service, acc
 }
 
 type credentialRefreshAdapter struct {
-	refreshCount atomic.Int64
-	billingCount atomic.Int64
-	delay        time.Duration
-	billingDelay time.Duration
-	billing      accountdomain.Billing
-	billingErr   error
-	refreshErr   error
-	afterRefresh func()
+	refreshCount  atomic.Int64
+	billingCount  atomic.Int64
+	delay         time.Duration
+	billingDelay  time.Duration
+	billing       accountdomain.Billing
+	billingErr    error
+	refreshErr    error
+	failSourceKey string
+	afterRefresh  func()
 }
 
 func (a *credentialRefreshAdapter) Provider() accountdomain.Provider {
@@ -856,7 +857,7 @@ func (a *credentialRefreshAdapter) Definition() provider.Definition {
 	}
 }
 
-func (a *credentialRefreshAdapter) RefreshCredential(ctx context.Context, _ accountdomain.Credential) (provider.RefreshedCredential, error) {
+func (a *credentialRefreshAdapter) RefreshCredential(ctx context.Context, credential accountdomain.Credential) (provider.RefreshedCredential, error) {
 	if a.delay > 0 {
 		timer := time.NewTimer(a.delay)
 		defer timer.Stop()
@@ -869,6 +870,9 @@ func (a *credentialRefreshAdapter) RefreshCredential(ctx context.Context, _ acco
 	count := a.refreshCount.Add(1)
 	if a.refreshErr != nil {
 		return provider.RefreshedCredential{}, a.refreshErr
+	}
+	if a.failSourceKey != "" && credential.SourceKey == a.failSourceKey {
+		return provider.RefreshedCredential{}, &provider.CredentialRefreshError{Status: 503, Code: "oauth_unavailable", Message: "Please retry later"}
 	}
 	if a.afterRefresh != nil {
 		a.afterRefresh()
