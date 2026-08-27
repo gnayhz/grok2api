@@ -87,6 +87,8 @@ type requestRetryConfigDTO struct {
 	EvidenceTimeout     string `json:"evidenceTimeout"`
 	CreatedTimeout      string `json:"createdTimeout"`
 	IdleAccountCooldown string `json:"idleAccountCooldown"`
+	// TerminalBurstThreshold 与该节其余标量一样整节替换;0=默认 3。
+	TerminalBurstThreshold int `json:"terminalBurstThreshold"`
 }
 
 type egressRotationConfigDTO struct {
@@ -363,7 +365,8 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: value.RequestRetry.AccountCooldown,
 			EarlyHeaderAbort: value.RequestRetry.EarlyHeaderAbort, SameAccountRetry: value.RequestRetry.SameAccountRetry,
 			EvidenceTimeout: value.RequestRetry.EvidenceTimeout, CreatedTimeout: value.RequestRetry.CreatedTimeout,
-			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown,
+			IdleAccountCooldown:    value.RequestRetry.IdleAccountCooldown,
+			TerminalBurstThreshold: value.RequestRetry.TerminalBurstThreshold,
 		}
 		result.RequestRetryProvided = true
 	}
@@ -471,7 +474,8 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				OnExhausted: config.RequestRetry.OnExhausted, AccountCooldown: config.RequestRetry.AccountCooldown,
 				EarlyHeaderAbort: config.RequestRetry.EarlyHeaderAbort, SameAccountRetry: config.RequestRetry.SameAccountRetry,
 				EvidenceTimeout: config.RequestRetry.EvidenceTimeout, CreatedTimeout: config.RequestRetry.CreatedTimeout,
-				IdleAccountCooldown: config.RequestRetry.IdleAccountCooldown,
+				IdleAccountCooldown:    config.RequestRetry.IdleAccountCooldown,
+				TerminalBurstThreshold: config.RequestRetry.TerminalBurstThreshold,
 			},
 			AccountRisk: &accountRiskConfigDTO{
 				Enabled: config.AccountRisk.Enabled, Method: config.AccountRisk.Method,

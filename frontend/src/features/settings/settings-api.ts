@@ -40,6 +40,7 @@ export type SettingsConfigDTO = {
     enabled: boolean; maxAttempts: number; holdTimeout: string; minOutputTokens: number; onExhausted: string;
     accountCooldown: string; earlyHeaderAbort: string; sameAccountRetry: boolean;
     evidenceTimeout: string; createdTimeout: string; idleAccountCooldown: string;
+    terminalBurstThreshold?: number;
   };
   egressRotation?: {
     enabled: boolean; maxAttemptsPerQuarantine: number; minNodeInterval: string; maxGlobalPerHour: number;
@@ -173,6 +174,7 @@ const settingsConfigValidator = hasShape({
     enabled: isBoolean, maxAttempts: isNumber, holdTimeout: isString, minOutputTokens: isNumber, onExhausted: isString,
     accountCooldown: isString, earlyHeaderAbort: isString, sameAccountRetry: isBoolean,
     evidenceTimeout: isString, createdTimeout: isString, idleAccountCooldown: isString,
+    terminalBurstThreshold: isOptional(isNumber),
   })),
   accountRisk: isOptional(hasShape({
     enabled: isBoolean, method: isString, concurrency: isNumber, timeout: isString, onDenied: isString,
@@ -199,6 +201,7 @@ export const defaultRequestRetryConfig = (): NonNullable<SettingsConfigDTO["requ
   enabled: true, maxAttempts: 6, holdTimeout: "3s", minOutputTokens: 32, onExhausted: "fail_closed",
   accountCooldown: "24h", earlyHeaderAbort: "0s", sameAccountRetry: true,
   evidenceTimeout: "15s", createdTimeout: "5s", idleAccountCooldown: "15m",
+  terminalBurstThreshold: 3,
 });
 export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["egressRotation"]> => ({
   enabled: true, maxAttemptsPerQuarantine: 3, minNodeInterval: "3m", maxGlobalPerHour: 6,
@@ -212,7 +215,12 @@ export const defaultAccountRiskConfig = (): NonNullable<SettingsConfigDTO["accou
 });
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();
-  const requestRetry = snapshot.config.requestRetry ?? defaultRequestRetryConfig();
+  const requestRetryRaw = snapshot.config.requestRetry ?? defaultRequestRetryConfig();
+  const requestRetry = {
+    ...defaultRequestRetryConfig(),
+    ...requestRetryRaw,
+    terminalBurstThreshold: requestRetryRaw.terminalBurstThreshold ?? 3,
+  };
   const egressRotation = snapshot.config.egressRotation ?? defaultEgressRotationConfig();
   const accountRisk = snapshot.config.accountRisk ?? defaultAccountRiskConfig();
   const segmentedSelector = snapshot.config.routing.segmentedSelector ?? { enabled: true, minCandidates: 3000, windowSize: 64 };

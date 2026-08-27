@@ -124,6 +124,7 @@ export function GuardPage() {
               </SettingsField>
               <SettingsField controlId="request-retry-account-cooldown" label={t("settings.requestRetry.accountCooldown")} description={t("settings.requestRetry.accountCooldownHelp")} error={form.formState.errors.requestRetry?.accountCooldown?.message}><Controller control={form.control} name="requestRetry.accountCooldown" render={({ field }) => <DurationInput id="request-retry-account-cooldown" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="request-retry-idle-cooldown" label={t("settings.requestRetry.idleAccountCooldown")} description={t("settings.requestRetry.idleAccountCooldownHelp")} error={form.formState.errors.requestRetry?.idleAccountCooldown?.message}><Controller control={form.control} name="requestRetry.idleAccountCooldown" render={({ field }) => <DurationInput id="request-retry-idle-cooldown" value={field.value} onChange={field.onChange} />} /></SettingsField>
+              <SettingsField controlId="request-retry-terminal-burst" label={t("settings.requestRetry.terminalBurstThreshold")} description={t("settings.requestRetry.terminalBurstThresholdHelp")} error={form.formState.errors.requestRetry?.terminalBurstThreshold?.message}><Input id="request-retry-terminal-burst" type="number" min={0} max={10} {...form.register("requestRetry.terminalBurstThreshold", { valueAsNumber: true })} /></SettingsField>
             </div>
           </SettingsSection>
           </SettingsPane>

@@ -215,6 +215,7 @@ export const settingsSchema = z.object({
       const seconds = durationSeconds(value);
       return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
     }),
+    terminalBurstThreshold: z.number().int().min(0).max(10),
   }),
   // 账号风险归因(RSC 检测/处置)。边界与后端 AccountRiskRSCConfig 校验对齐。
   accountRisk: z.object({
@@ -348,6 +349,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       evidenceTimeout: parseDuration(requestRetry.evidenceTimeout),
       createdTimeout: parseDuration(requestRetry.createdTimeout),
       idleAccountCooldown: parseDuration(requestRetry.idleAccountCooldown),
+      terminalBurstThreshold: requestRetry.terminalBurstThreshold ?? 3,
     },
     egressRotation: {
       enabled: egressRotation.enabled,
@@ -438,6 +440,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       evidenceTimeout: formatDuration(config.requestRetry.evidenceTimeout),
       createdTimeout: formatDuration(config.requestRetry.createdTimeout),
       idleAccountCooldown: formatNonNegativeDuration(config.requestRetry.idleAccountCooldown),
+      terminalBurstThreshold: config.requestRetry.terminalBurstThreshold,
     },
     egressRotation: {
       enabled: config.egressRotation.enabled,
