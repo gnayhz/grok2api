@@ -32,16 +32,17 @@ say "readyz ready=true"
 [ "$ready" = "True" ] && ok || bad "ready=$ready"
 
 # --- 2/3) 日志面（本地 docker 容器，远端部署时自动跳过）
-if command -v docker >/dev/null 2>&1 && docker inspect grok2api >/dev/null 2>&1; then
-  n=$(docker logs grok2api --since "$SINCE" 2>&1 | grep -c "egress routing payload is corrupt" || true)
+if command -v docker >/dev/null 2>&1 && timeout 10 docker inspect grok2api >/dev/null 2>&1; then
+  # docker 调用全部包 timeout：dockerd 挂起时 cron 不被拖死（15 分钟周期防重叠）。
+  n=$(timeout 30 docker logs grok2api --since "$SINCE" 2>&1 | grep -c "egress routing payload is corrupt" || true)
   say "routing-payload corrupt warns (last $SINCE)"
   [ "$n" -eq 0 ] && ok || bad "$n 次（nodeId 形状回潮？）"
-  m=$(docker logs grok2api --since "$SINCE" 2>&1 | grep -c "audit_retention_days_purged" || true)
+  m=$(timeout 30 docker logs grok2api --since "$SINCE" 2>&1 | grep -c "audit_retention_days_purged" || true)
   say "retention-days purge events (last $SINCE)"
   [ "$m" -eq 0 ] && ok || bad "$m 次（retentionDays 被打开！）"
   # 新 WARN 类哨兵（r19 基线：仅 egress_probe_failed(v6)/egress_operations_failed 两类良性）。
   # 出现其它 WARN 类即巡检发现信号——每类计数非零则列出类名供溯源。
-  novel=$(docker logs grok2api --since "$SINCE" 2>&1 | grep '"level":"WARN"' \
+  novel=$(timeout 30 docker logs grok2api --since "$SINCE" 2>&1 | grep '"level":"WARN"' \
     | grep -vE 'egress_probe_failed|egress_operations_failed' \
     | grep -oE '"msg":"[^"]+"' | sort | uniq -c | sort -rn | head -5 \
     | awk '{printf "%s x%s, ", $2, $1}' 2>/dev/null)
