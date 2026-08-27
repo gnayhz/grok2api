@@ -74,16 +74,43 @@ if [ -n "${TOKEN:-}" ]; then
   say "disabled accounts (info)"
   echo "${disabled:-?}（对照换血基线 30，激增需溯源）"
   # --- 6) 工具密钥残留（r34 教训：删除操作必须验证，探针密钥不许滞留）
-  # pageSize=200 与 delete-probe-keys 的枚举上限对齐:残留检查只扫第一页,
-  # 密钥多于 50 条时探针密钥会静默漏检。
-  residue=$(curl -sf -m 5 -H "Authorization: Bearer $TOKEN" "$BASE/api/admin/v1/client-keys?page=1&pageSize=200" 2>/dev/null \
-    | PATROL_TOOL_PATTERNS='probe,drill,load-test,smoke-script' python3 -c 'import sys,json,os
-patterns = os.environ.get("PATROL_TOOL_PATTERNS", "").split(",")
-names = [k.get("name", "") for k in json.load(sys.stdin)["data"]["items"]]
-bad = [n for n in names if any(x in n for x in patterns)]
-print(",".join(bad))' 2>/dev/null)
+  # 2026-08-28 活体：8 把密钥里 3 把 tool-*（tool-dbg2/tool-rerun-z/tool-test-x）
+  # 旧默认 patterns 只有 probe,drill,load-test,smoke-script，注释写了 tool
+  # 却没进列表，巡检恒 PASS。必须含 tool-，并翻页扫完（total 可能 > pageSize）。
+  residue=$(BASE="$BASE" TOKEN="$TOKEN" PATROL_TOOL_PATTERNS="${PATROL_TOOL_PATTERNS:-probe,drill,load-test,smoke-script,tool-}" python3 -c '
+import json, os, sys, urllib.request
+base = os.environ["BASE"].rstrip("/")
+token = os.environ["TOKEN"]
+patterns = [p for p in os.environ.get("PATROL_TOOL_PATTERNS", "").split(",") if p]
+bad = []
+page = 1
+while page <= 50:
+    req = urllib.request.Request(
+        f"{base}/api/admin/v1/client-keys?page={page}&pageSize=200",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.load(resp)["data"]
+    items = data.get("items") or []
+    for key in items:
+        name = key.get("name") or ""
+        if any(p in name for p in patterns):
+            bad.append(name)
+    total = int(data.get("total") or 0)
+    size = int(data.get("pageSize") or 200)
+    if not items or page * size >= total:
+        break
+    page += 1
+print(",".join(bad))
+') || residue="__enum_failed__"
   say "probe/tool key residue"
-  [ -z "$residue" ] && ok || bad "$residue（工具密钥滞留，应删除）"
+  if [ "$residue" = "__enum_failed__" ]; then
+    bad "枚举密钥失败"
+  elif [ -z "$residue" ]; then
+    ok
+  else
+    bad "$residue（工具密钥滞留，应删除）"
+  fi
   # --- 7) upstream_stream_incomplete 误判哨兵（ce63696b 回归类教训）
   # 取最近一页该 errorCode 审计行数;超基线即告警。基线用于压历史行噪声
   # （行按天老化后应回落到 0,勿长期保留非零基线）。
