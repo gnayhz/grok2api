@@ -10,7 +10,8 @@ import (
 )
 
 // TestListPatrolDueSelection 锁定巡检到期语义：
-//   - denied/flagged 永不到期（不重查，与“风控永不恢复”一致）；
+//   - 已确认 denied/flagged 在 DeniedTTL 内不到期，过期后到期（自愈重探）；
+//   - 未确认 denied 在 ErrorRetry 过期后到期；
 //   - clean 超过 patrolInterval 到期；error 超过 errorRetryAfter 到期；
 //   - 新 clean（未到期）、无 verdict、禁用账号不入选。
 //
@@ -39,10 +40,13 @@ func TestListPatrolDueSelection(t *testing.T) {
 		checked time.Time
 		wantDue bool
 	}{
-		// 已确认 denied(连击≥确认数 2)不进巡检 due——它只在 DeniedTTL
-		// 过期后经 freshVerdict 失效重探。
-		{"denied-confirmed-old", "denied", 2, stale, false},
-		{"flagged-old", "flagged", 0, stale, false},
+		// 已确认 denied/flagged 在 DeniedTTL(24h) 过期后 due,供巡检
+		// 重探;TTL 内仍新鲜,不进 due(rsc_denied 排除调度,只有巡检
+		// 能触发自愈,freshVerdict 过期本身不会重探)。
+		{"denied-confirmed-old", "denied", 2, stale, true},
+		{"denied-confirmed-fresh", "denied", 2, fresh, false},
+		{"flagged-old", "flagged", 0, stale, true},
+		{"flagged-fresh", "flagged", 0, fresh, false},
 		// 未确认 denied(连击 1 < 2)在 ErrorRetry 过期后 due,供下一轮
 		// 巡检补确认或被 clean 覆盖自愈(2026-08-28 误判回归的新语义)。
 		{"denied-unconfirmed-old", "denied", 1, stale, true},
@@ -89,7 +93,7 @@ func TestListPatrolDueSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	due, err := repo.ListPatrolDue(ctx, account.ProviderWeb, now.Add(-24*time.Hour), now.Add(-2*time.Hour), 2, 100)
+	due, err := repo.ListPatrolDue(ctx, account.ProviderWeb, now.Add(-24*time.Hour), now.Add(-2*time.Hour), now.Add(-24*time.Hour), 2, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

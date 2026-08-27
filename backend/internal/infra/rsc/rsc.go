@@ -8,8 +8,8 @@
 // implementation and stays available for rollback via
 // accountRisk.rscCheck.method=homepage.
 //
-// Risk verdicts never recover, so callers may cache a denied/flagged result
-// forever.
+// Confirmed denied/flagged verdicts stay trusted for DeniedTTL; callers
+// must not treat them as permanently fresh.
 package rsc
 
 import (

@@ -192,7 +192,8 @@ type Credential struct {
 	CooldownUntil    *time.Time
 	LastError        string
 	// RiskStatus 为空表示无长期风险标记；rsc_denied 表示 RSC 判定注册风控，
-	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态）。
+	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态），直到人工
+	// 清空或 DeniedTTL 后巡检复测 clean。
 	RiskStatus string
 	// RiskTrigger 记录打标来源：degrade（请求降智）/ patrol（主动巡检）/ manual。
 	RiskTrigger string

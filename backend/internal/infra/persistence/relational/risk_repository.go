@@ -134,17 +134,20 @@ func (r *RiskRepository) listRiskyVerdictAccountIDs(ctx context.Context, afterID
 }
 
 // ListPatrolDue returns enabled Web accounts whose stored verdict is due for
-// a patrol re-check: clean verdicts older than patrolInterval, or error
-// verdicts older than errorRetryAfter. Risky verdicts never re-check.
+// a patrol re-check: clean verdicts older than patrolInterval, error
+// verdicts older than errorRetryAfter, unconfirmed denials older than
+// errorRetryAfter, and confirmed denied/flagged older than deniedTTLAfter.
 // Accounts with no verdict row are not due — first detection is event-driven
 // (OnDegraded). Including them turned a method switch that purged stale
 // cleans into a full-pool scan that permanently flagged healthy identities.
 //
 // Unconfirmed denials (denied_streak < deniedConfirmations) become due after
 // errorRetryAfter so the next patrol re-probes and either confirms (streak
-// grows → consequences) or clears (clean overwrites). Confirmed denials are
-// NOT due here: they re-probe only after DeniedTTL via freshVerdict expiry.
-func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Provider, patrolInterval, errorRetryAfter time.Time, deniedConfirmations int, limit int) ([]uint64, error) {
+// grows → consequences) or clears (clean overwrites). Confirmed denials
+// become due after DeniedTTL so a clean re-read can unflag: rsc_denied
+// excludes the selector, so OnDegraded/freshVerdict expiry alone can never
+// self-heal a false conviction.
+func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Provider, patrolInterval, errorRetryAfter, deniedTTLAfter time.Time, deniedConfirmations int, limit int) ([]uint64, error) {
 	if limit <= 0 {
 		limit = 500
 	}
@@ -157,8 +160,8 @@ func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Pro
 		Joins("JOIN provider_accounts AS account ON account.id = verdict.account_id").
 		Where("account.provider = ? AND account.enabled = ?", provider, true).
 		Where(
-			"(verdict.verdict = 'clean' AND verdict.checked_at <= ?) OR (verdict.verdict = 'error' AND verdict.checked_at <= ?) OR (verdict.verdict = 'denied' AND verdict.denied_streak < ? AND verdict.checked_at <= ?)",
-			patrolInterval, errorRetryAfter, deniedConfirmations, errorRetryAfter,
+			"(verdict.verdict = 'clean' AND verdict.checked_at <= ?) OR (verdict.verdict = 'error' AND verdict.checked_at <= ?) OR (verdict.verdict = 'denied' AND verdict.denied_streak < ? AND verdict.checked_at <= ?) OR ((verdict.verdict = 'flagged' OR (verdict.verdict = 'denied' AND verdict.denied_streak >= ?)) AND verdict.checked_at <= ?)",
+			patrolInterval, errorRetryAfter, deniedConfirmations, errorRetryAfter, deniedConfirmations, deniedTTLAfter,
 		).
 		Order("verdict.checked_at ASC").
 		Limit(limit).

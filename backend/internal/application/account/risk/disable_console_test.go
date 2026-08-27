@@ -38,18 +38,21 @@ func TestDisableModeCoversConsoleChannel(t *testing.T) {
 }
 
 // TestPatrolCutoffsDeriveFromConfig pins the patrol freshness bounds fed into
-// the due-identity query: patrol interval and error retry window derive from
-// configuration (previously 0% covered).
+// the due-identity query: patrol interval, error retry window, and denied TTL
+// derive from configuration (previously 0% covered).
 func TestPatrolCutoffsDeriveFromConfig(t *testing.T) {
-	cfg := baseTestConfig() // PatrolInterval 30d, ErrorRetry 1h
+	cfg := baseTestConfig() // PatrolInterval 30d, ErrorRetry 1h, DeniedTTL default 24h
 	service := New(cfg, nil, &fakeStore{verdicts: map[uint64]StoredVerdict{}}, &fakeChecker{}, nil)
-	patrolDue, errorRetryDue := service.PatrolCutoffs()
+	patrolDue, errorRetryDue, deniedTTLDue := service.PatrolCutoffs()
 	now := time.Now().UTC()
 	if d := now.Sub(patrolDue); d < 29*24*time.Hour || d > 31*24*time.Hour {
 		t.Fatalf("patrol cutoff = %v (~%v), want ~30d before now", patrolDue, d)
 	}
 	if d := now.Sub(errorRetryDue); d < 55*time.Minute || d > 65*time.Minute {
 		t.Fatalf("error-retry cutoff = %v (~%v), want ~1h before now", errorRetryDue, d)
+	}
+	if d := now.Sub(deniedTTLDue); d < 23*time.Hour || d > 25*time.Hour {
+		t.Fatalf("denied-TTL cutoff = %v (~%v), want ~24h before now", deniedTTLDue, d)
 	}
 }
 

@@ -582,10 +582,10 @@ func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig) string {
 	return method + "|" + rscCfg.Timeout.String() + "|" + strings.TrimSpace(rscCfg.ProbeProxyURL)
 }
 
-// runAccountRiskPatrol runs the bucketed clean-verdict re-check loop. Each
-// tick re-checks a bounded batch; at the default cadence a 30-day patrol
-// interval covers tens of thousands of accounts without bursts. Owned by
-// Run's background WaitGroup so shutdown joins it before the DB closes.
+// runAccountRiskPatrol runs the bucketed verdict re-check loop. Each tick
+// re-checks a bounded batch of stale clean/error, unconfirmed denials, and
+// DeniedTTL-expired confirmed denials. Owned by Run's background WaitGroup
+// so shutdown joins it before the DB closes.
 func (a *Application) runAccountRiskPatrol(ctx context.Context) {
 	query := relational.NewRiskRepository(a.database)
 	timer := time.NewTimer(a.accountRisk.PatrolTickEvery())
@@ -602,8 +602,8 @@ func (a *Application) runAccountRiskPatrol(ctx context.Context) {
 			continue
 		}
 		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		patrolDue, errorRetryDue := a.accountRisk.PatrolCutoffs()
-		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, a.accountRisk.SnapshotConfig().DeniedConfirmations, a.accountRisk.PatrolBatchSize())
+		patrolDue, errorRetryDue, deniedTTLDue := a.accountRisk.PatrolCutoffs()
+		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, deniedTTLDue, a.accountRisk.SnapshotConfig().DeniedConfirmations, a.accountRisk.PatrolBatchSize())
 		if err != nil {
 			a.logger.Warn("account_risk_patrol_query_failed", "error", err.Error())
 			cancel()
@@ -680,8 +680,8 @@ func runDuePatrol(ctx context.Context, db *relational.Database, riskSvc *risk.Se
 		return 0, fmt.Errorf("account risk service not initialized")
 	}
 	query := relational.NewRiskRepository(db)
-	patrolDue, errorRetryDue := riskSvc.PatrolCutoffs()
-	due, err := query.ListPatrolDue(ctx, account.ProviderWeb, patrolDue, errorRetryDue, riskSvc.SnapshotConfig().DeniedConfirmations, riskSvc.PatrolBatchSize())
+	patrolDue, errorRetryDue, deniedTTLDue := riskSvc.PatrolCutoffs()
+	due, err := query.ListPatrolDue(ctx, account.ProviderWeb, patrolDue, errorRetryDue, deniedTTLDue, riskSvc.SnapshotConfig().DeniedConfirmations, riskSvc.PatrolBatchSize())
 	if err != nil {
 		return 0, err
 	}

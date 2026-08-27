@@ -106,3 +106,58 @@ func TestReconcileSkipsUnconfirmedLegacyDenied(t *testing.T) {
 		t.Fatal("unconfirmed legacy denied must not be re-flagged by reconcile")
 	}
 }
+
+// 2026-08-28 自愈闭环:已确认 denied 被 rsc_denied 排除调度后,OnDegraded
+// 永远不会再触发;DeniedTTL 过期必须由巡检重探,且 clean 必须真正清标
+// (含 SSO 连坐组成员),否则 TTL 只是 freshness 数字、误判永不恢复。
+func TestCleanPatrolUnflagsConfirmedDeniedIdentityGroup(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	accounts.linkedBack[90] = []uint64{7}
+	accounts.linkedConsole[90] = []uint64{8}
+	accounts.flagged[90] = true
+	accounts.flagged[7] = true
+	accounts.flagged[8] = true
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
+		90: {Verdict: VerdictDenied, DeniedStreak: 2, OriginAccountID: 90, Source: "sso_probe", CheckedAt: time.Now().UTC().Add(-25 * time.Hour)},
+	}}
+	cfg := baseTestConfig()
+	cfg.DeniedConfirmations = 2
+	cfg.DeniedTTL = 24 * time.Hour
+	cfg.OnDenied = "flag"
+	service := New(cfg, accounts, store, &fakeChecker{result: cleanResult()}, nil)
+
+	service.PatrolTick(context.Background(), []uint64{90})
+
+	verdict, err := store.GetRiskVerdict(context.Background(), 90)
+	if err != nil || verdict.Verdict != VerdictClean {
+		t.Fatalf("clean must overwrite confirmed denied, got %+v err=%v", verdict, err)
+	}
+	for _, id := range []uint64{90, 7, 8} {
+		if accounts.flagged[id] {
+			t.Fatalf("SSO-origin clean must unflag identity-group member %d", id)
+		}
+	}
+}
+
+// 请求路径通道隔离:Build 降智得到 clean 只解 Build,不得把 SSO 上的
+// 既有 rsc_denied 一并摘掉(那是另一条定罪,解组必须走 SSO-origin clean)。
+func TestChannelScopedCleanUnflagsOnlyDegradedAccount(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.flagged[7] = true
+	accounts.flagged[90] = true
+	cfg := baseTestConfig()
+	cfg.OnDenied = "flag"
+	service := New(cfg, accounts, &fakeStore{verdicts: map[uint64]StoredVerdict{}}, &fakeChecker{result: cleanResult()}, nil)
+
+	service.applyConsequences(context.Background(), 7, 90, StoredVerdict{
+		Verdict: VerdictClean, OriginAccountID: 7, CheckedAt: time.Now().UTC(),
+	}, 0)
+
+	if accounts.flagged[7] {
+		t.Fatal("channel-scoped clean must unflag the degraded account")
+	}
+	if !accounts.flagged[90] {
+		t.Fatal("channel-scoped clean must not cascade unflag onto SSO")
+	}
+}

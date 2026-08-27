@@ -214,7 +214,7 @@ type UpdateInput struct {
 	// BuildRouteMode 仅 grok_build 可设置；nil 表示不修改。
 	BuildRouteMode *accountdomain.BuildRouteMode
 	// RiskStatus 设置长期风险标记：仅允许 "" 与 "rsc_denied"。标记后账号
-	// 保持 enabled，但调度永久跳过，直到人工清空。
+	// 保持 enabled，但调度跳过，直到人工清空或 DeniedTTL 后巡检复测 clean。
 	RiskStatus *string
 }
 
@@ -2277,7 +2277,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 			return View{}, mapRepositoryError(err)
 		}
 		// 人工解除(此前被标记→现在清空)时级联删除身份组 verdict:
-		// denied/flagged 永久 fresh, 不删会被启动对账与后续降智自动回滚。
+		// denied/flagged 在 DeniedTTL 内 fresh, 不删会被启动对账与后续降智自动回滚。
 		if previousRiskStatus != "" && strings.TrimSpace(*input.RiskStatus) == "" {
 			s.clearIdentityVerdicts(ctx, updated)
 		}
@@ -4784,8 +4784,8 @@ func (s *Service) SetAccountEnabled(ctx context.Context, id uint64, enabled bool
 	return nil
 }
 
-// riskVerdictClearer 级联清除身份组的 RSC verdict(denied/flagged 永不过期,
-// 人工解除 risk_status 时必须一并删除, 否则会被对账与降智事件回滚)。
+// riskVerdictClearer 级联清除身份组的 RSC verdict(denied/flagged 在 TTL 内
+// 仍 fresh, 人工解除 risk_status 时必须一并删除, 否则会被对账与降智事件回滚)。
 // 由装配层注入 risk 服务; 未注入时人工清除仅作用于 risk_status 列。
 type riskVerdictClearer interface {
 	ClearIdentityVerdicts(ctx context.Context, credential accountdomain.Credential) error

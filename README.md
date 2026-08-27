@@ -403,24 +403,28 @@ identity. The check transport is selected by `method` (restart to apply):
 - **homepage (rollback only)**: the legacy grok.com RSC payload parse, dead since
   the payload change.
 
-- **denied/flagged**: the verdict is cached permanently. Request-path attribution is
-  **channel-scoped** — only the account that actually degraded gets `rsc_denied`
-  / disabled (flag by default; disable / markOnly available); a Build degrade does not
-  cascade onto SSO. **Exception: an SSO-identity denial** (periodic patrol, or a
-  Web-channel degrade whose probe returns denied) fans out to the whole identity
-  group (Web/Build/Console), because a flagged SSO identity can no longer run the
-  probe that later Build/Console degrades need, leaving those channels stuck in
-  cooldown. Flagged accounts stay enabled but are permanently
-  excluded from scheduling until an operator clears the flag in the admin UI. The probe
-  carries a channel-vocabulary breaker: a denied streak with zero clean witnesses is
-  suppressed and self-heals by re-probing the most recent clean identity, so a grok.com
-  protocol change cannot mass-flag the pool and a genuinely risk-controlled pool cannot
-  deadlock the breaker.
+- **denied/flagged**: a confirmed verdict stays trusted for `deniedTTL` (default 24h)
+  and requires `deniedConfirmations` consecutive denials (default 2) before flagging.
+  Request-path attribution is **channel-scoped** — only the account that actually
+  degraded gets `rsc_denied` / disabled (flag by default; disable / markOnly
+  available); a Build degrade does not cascade onto SSO. **Exception: an SSO-identity
+  denial** (periodic patrol, or a Web-channel degrade whose probe returns denied) fans
+  out to the whole identity group (Web/Build/Console), because a flagged SSO identity
+  can no longer run the probe that later Build/Console degrades need, leaving those
+  channels stuck in cooldown. Flagged accounts stay enabled but are excluded from
+  scheduling until an operator clears the flag, or until `deniedTTL` expires and
+  patrol re-probes clean (which clears the flag, including the SSO identity group).
+  The probe carries a channel-vocabulary breaker: a denied streak with zero clean
+  witnesses is suppressed and self-heals by re-probing the most recent clean identity,
+  so a grok.com protocol change cannot mass-flag the pool and a genuinely
+  risk-controlled pool cannot deadlock the breaker.
 - **clean**: the degrade was exit-IP scoped; quality cooldowns (missing-thinking,
-  empty-stream idle) are lifted so the account stays schedulable. Generic 5xx
-  failures are never cleared by a clean verdict.
-- A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`; risky
-  verdicts never recover automatically. Every field in this section is editable in the
+  empty-stream idle) are lifted so the account stays schedulable, and any
+  `rsc_denied` flag on that account is cleared. Generic 5xx failures are never
+  cleared by a clean verdict.
+- A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`,
+  unconfirmed denials after the error-retry window, and confirmed denials after
+  `deniedTTL`. Every field in this section is editable in the
   admin UI (Guard → Risk attribution) and applies immediately after save
   (detection method, denied action, concurrency, patrol toggles included); editing
   config.yaml directly still requires a restart, and once saved in the UI the runtime

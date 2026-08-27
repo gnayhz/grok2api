@@ -263,8 +263,9 @@ requestRetry:
   idleAccountCooldown: 15m
 
 # [按需启用] 账号级 RSC 风险归因：质量扣留触发异步 RSC 检查（经关联的
-# Web SSO）。clean 账号免于惩罚（出口 IP 嫌疑）；risk 结论永不恢复并
-# 永久缓存，规模安全。本段已进管理后台「守卫」页，保存后立即生效；
+# Web SSO）。clean 账号免于惩罚（出口 IP 嫌疑）；已确认 risk 结论在
+# deniedTTL 内缓存，过期后巡检重探，clean 复测清标自愈。本段已进管理
+# 后台「守卫」页，保存后立即生效；
 # 直接改文件仍需重启，且后台保存过设置后以运行时设置为准（可在后台
 # 「恢复文件默认」清除运行时覆盖）。
 accountRisk:
@@ -282,8 +283,9 @@ accountRisk:
     concurrency: 2        # RSC 检查全局并发上限（1-8）
     timeout: 30s          # 单次检查超时（5s-60s）
     # denied 处置（按通道隔离，只作用于实际降智的账号，不级联身份组）：
-    # flag = 打风控标记（账号保持启用、调度永久跳过、UI 徽章，可人工解除，
-    # 推荐）；disable = 直接停用该账号；markOnly = 仅记日志。
+    # flag = 打风控标记（账号保持启用、调度跳过、UI 徽章；可人工解除，
+    # 或 deniedTTL 过期后巡检复测 clean 自愈，推荐）；disable = 直接停用该账号；
+    # markOnly = 仅记日志。
     onDenied: flag
     # 探针出口代理（空 = 服务器直连）。2026-08-28 生产事故：机房裸 IP
     # 直连的首批巡检 7 连发被上游整批按降级模式服务，7 个健康 SSO 身份
@@ -294,8 +296,10 @@ accountRisk:
     # 不处置，ErrorRetry 后由下一轮巡检/归因重探；连续一致才打标/连坐。
     # 设 1 恢复旧的"单次即定罪"行为（不建议）。
     deniedConfirmations: 2
-    # 已确认 denied 结论的有效期（0=默认 24h，范围 1h-720h）。过期后允许
-    # 重探，clean 复测自动覆盖旧结论——误判可自愈。
+    # 已确认 denied 结论的有效期（0=默认 24h，范围 1h-720h）。过期后巡检
+    # 会重探该身份；clean 复测覆盖旧结论并清除 rsc_denied（含 SSO 连坐组）
+    # ——误判可自愈。flag 排除调度，因此必须由巡检触发重探，不能只靠
+    # 请求路径 OnDegraded。
     deniedTTL: 24h
     # Build 自主探测兜底（默认关闭）：未关联 Web SSO 的 Build 账号降智时，
     # 用其自身凭据发一次微型推理请求差分判定（有关联时始终优先 SSO 探针）。

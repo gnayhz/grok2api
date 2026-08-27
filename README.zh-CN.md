@@ -392,15 +392,18 @@ requestRetry:
   否则压制为 error 重试。无可用推理 Build 模型时功能自动停用（保持行为兜底）。
 - **homepage（回滚用）**：旧版首页 RSC 载荷解析，grok.com 改版后已失效。
 
-- **denied/flagged**：结论永久缓存。请求路径降智**按通道隔离处置**——只有实际降智被抓的那个账号被打
+- **denied/flagged**：已确认结论在 `deniedTTL`（默认 24h）内可信，且需连续
+  `deniedConfirmations` 次（默认 2）才打标。请求路径降智**按通道隔离处置**——只有实际降智被抓的那个账号被打
   `rsc_denied`/停用，不连坐身份组其他通道（例如 Build 降智只标 Build，SSO 仍可调度）。
   **例外：SSO 身份本身 denied**（主动巡检，或 Web 通道降智触发的探针）时连坐同一身份组的
   Web/Build/Console——SSO 已是注册风控后，其他渠道再降智无法调度 SSO 探针归因，会永远停在冷却。被标记账号保持启用
-  （flag 模式），但永久不参与调度，直到管理员在后台手动解除。探针内置通道词汇熔断：连续
+  （flag 模式），但不参与调度，直到管理员手动解除，或 `deniedTTL` 过期后巡检复测为 clean
+  （会自动清标，含 SSO 身份组）。探针内置通道词汇熔断：连续
   denied 且零 clean 见证时压制判定并自动用最近 clean 身份复验自愈，防止上游改版误杀整池。
 - **clean**：本次降智与账号无关（出口 IP 嫌疑）；missing-thinking 与空流冷却会被解除，
-  账号恢复可调度。泛型 5xx 故障永不因 clean 结论被清除。
-- 巡检循环按 `patrol.bucketDays` 周期复查 clean/error 结论；风险结论永不自动恢复。
+  该账号上的 `rsc_denied` 标记一并清除，账号恢复可调度。泛型 5xx 故障永不因 clean 结论被清除。
+- 巡检循环按 `patrol.bucketDays` 复查 clean/error，未确认 denied 按 error 重试窗口补确认，
+  已确认 denied 在 `deniedTTL` 过期后重探。
   本段全部参数已进管理后台「守卫 → 风险归因」，保存后立即生效（含检测方式、
   denied 处置、并发、巡检开关/周期/每批数量，以及立即巡检）；账号列表可看出是
   主动巡检还是请求降智打的标，也可对单个账号立即检测。直接改 config.yaml 仍需重启，且后台保存过设置后

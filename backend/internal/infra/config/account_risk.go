@@ -9,8 +9,9 @@ import (
 
 // AccountRiskConfig controls account-level RSC risk attribution: event-driven
 // checks on quality withhold, admission checks on import, and a bucketed
-// patrol for clean accounts. Risky verdicts never recover and are cached
-// forever, so the check load is bounded by real incidents, not pool size.
+// patrol for stale clean/error plus DeniedTTL-expired confirmed denials.
+// Confirmed risky verdicts stay cached for DeniedTTL (default 24h) then
+// become re-probeable so a false conviction can self-heal.
 type AccountRiskConfig struct {
 	RSCCheck AccountRiskRSCConfig `yaml:"rscCheck"`
 }

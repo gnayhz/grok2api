@@ -632,8 +632,9 @@ type egressOperationsConfigModel struct {
 func (egressOperationsConfigModel) TableName() string { return "egress_operations_config" }
 
 // accountRiskVerdictModel persists one RSC risk verdict for a Web SSO
-// identity. denied/flagged verdicts never expire (risk does not recover);
-// clean verdicts are re-checked on the patrol cadence.
+// identity. Confirmed denied/flagged stay fresh for DeniedTTL then become
+// patrol-due so a clean re-read can unflag; clean verdicts are re-checked
+// on the patrol cadence.
 type accountRiskVerdictModel struct {
 	AccountID  uint64    `gorm:"primaryKey"`
 	Verdict    string    `gorm:"size:16;not null;check:chk_account_risk_verdicts_verdict,verdict IN ('clean','denied','flagged','error')"`

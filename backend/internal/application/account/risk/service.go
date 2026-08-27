@@ -57,8 +57,9 @@ func (v StoredVerdict) Risky() bool { return v.Verdict == VerdictDenied || v.Ver
 // persistence-layer not-found error onto it at the wiring boundary.
 var ErrNotFound = errors.New("risk verdict not found")
 
-// Store persists verdicts. denied/flagged never expire; clean goes stale
-// after the patrol interval; error after the retry window.
+// Store persists verdicts. Confirmed denied/flagged stay fresh for DeniedTTL
+// then become re-probeable; clean goes stale after the patrol interval;
+// error (and unconfirmed denied) after the retry window.
 type Store interface {
 	GetRiskVerdict(ctx context.Context, accountID uint64) (relationalVerdict, error)
 	SaveRiskVerdict(ctx context.Context, accountID uint64, verdict StoredVerdict) error
@@ -959,8 +960,23 @@ func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint6
 			}
 		}
 	case verdict.Verdict == VerdictClean:
-		// The account is innocent: the degrade was exit-IP scoped. Lift the
-		// missing-thinking cooldown so the account stays schedulable.
+		// The account is innocent. Two closing actions:
+		// (1) drop rsc_denied so a DeniedTTL re-probe can actually
+		//     reschedule the identity (flag excludes the selector, so
+		//     OnDegraded never fires again — patrol is the only automatic
+		//     re-probe, and it is useless if clean leaves the flag in place);
+		// (2) lift missing-thinking cooldown so the account stays schedulable.
+		s.unflagAccount(ctx, degradedID, webID)
+		if degradedID == webID && webID != 0 && verdict.OriginAccountID == webID {
+			members := s.identityGroupIDs(ctx, webID)
+			s.logger.Info("account_risk_sso_clean_cascade", "web_account_id", webID, "members", members)
+			for _, id := range members {
+				if id == webID {
+					continue
+				}
+				s.unflagAccount(ctx, id, webID)
+			}
+		}
 		if err := s.accounts.ClearMissingThinkingCooldown(ctx, degradedID); err != nil {
 			s.logger.Warn("account_risk_clean_clear_failed", "account_id", degradedID, "error", err.Error())
 			return
@@ -1007,8 +1023,9 @@ func (s *Service) SetBuildProber(prober BuildProber) {
 
 // flagAccount 给"实际降智被抓的通道账号"打长期风控标记(risk_status =
 // rsc_denied),不级联身份组其余通道。账号保持启用:标志反映真实账号
-// 状态(可用但被风控路由),并永久排除调度直到人工解除。rsc_denied 已把
-// 账号排除出调度,残留的 missing-thinking 冷却只是 UI 噪音,顺手清掉。
+// 状态(可用但被风控路由),并排除调度直到人工解除或 DeniedTTL 后巡检
+// 复测为 clean。rsc_denied 已把账号排除出调度,残留的 missing-thinking
+// 冷却只是 UI 噪音,顺手清掉。
 func (s *Service) flagAccount(ctx context.Context, id, webID uint64, verdict StoredVerdict) {
 	origin := verdict.OriginAccountID
 	if origin == 0 {
@@ -1028,6 +1045,14 @@ func (s *Service) flagAccount(ctx context.Context, id, webID uint64, verdict Sto
 		return
 	}
 	s.logger.Warn("account_risk_flagged", "account_id", id, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+}
+
+// unflagAccount 收敛 risk_status 到 clean 结论:写空标记并清归因列。
+// 对从未打标的账号是幂等 UPDATE,让 DeniedTTL 自愈不必先读再写。
+func (s *Service) unflagAccount(ctx context.Context, id, webID uint64) {
+	if err := s.accounts.SetAccountRiskAttribution(ctx, id, false, "", 0, "", time.Time{}); err != nil {
+		s.logger.Error("account_risk_unflag_failed", "account_id", id, "web_account_id", webID, "error", err.Error())
+	}
 }
 
 // disableAccount 停用"实际降智被抓的通道账号"(通道隔离,不级联身份组)。
@@ -1057,11 +1082,12 @@ func (s *Service) clearCooldownQuietly(ctx context.Context, id uint64) {
 }
 
 // PatrolCutoffs returns the freshness bounds the wiring layer feeds into the
-// patrol query.
-func (s *Service) PatrolCutoffs() (patrolInterval, errorRetry time.Time) {
+// patrol query: clean older than PatrolInterval, error/unconfirmed-denied
+// older than ErrorRetry, confirmed denied/flagged older than DeniedTTL.
+func (s *Service) PatrolCutoffs() (patrolInterval, errorRetry, deniedTTL time.Time) {
 	cfg := s.config()
 	now := time.Now().UTC()
-	return now.Add(-cfg.PatrolInterval), now.Add(-cfg.ErrorRetry)
+	return now.Add(-cfg.PatrolInterval), now.Add(-cfg.ErrorRetry), now.Add(-cfg.DeniedTTL)
 }
 
 // ReconcileRiskyVerdicts converges risk_status flags with the verdict table at
