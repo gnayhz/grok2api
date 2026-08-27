@@ -871,6 +871,17 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		next.AccountRisk.RSCCheck.Method = strings.TrimSpace(input.AccountRisk.Method)
 		next.AccountRisk.RSCCheck.Concurrency = input.AccountRisk.Concurrency
 		next.AccountRisk.RSCCheck.OnDenied = strings.TrimSpace(input.AccountRisk.OnDenied)
+		next.AccountRisk.RSCCheck.ProbeProxyURL = strings.TrimSpace(input.AccountRisk.ProbeProxyURL)
+		next.AccountRisk.RSCCheck.DeniedConfirmations = input.AccountRisk.DeniedConfirmations
+		if ttl := strings.TrimSpace(input.AccountRisk.DeniedTTL); ttl != "" {
+			parsed, err := time.ParseDuration(ttl)
+			if err != nil {
+				return config.Config{}, errors.New("accountRisk.deniedTTL 必须是有效时长")
+			}
+			next.AccountRisk.RSCCheck.DeniedTTL = config.Duration(parsed)
+		} else {
+			next.AccountRisk.RSCCheck.DeniedTTL = 0
+		}
 		next.AccountRisk.RSCCheck.Patrol.Enabled = input.AccountRisk.PatrolEnabled
 		next.AccountRisk.RSCCheck.Patrol.BucketDays = input.AccountRisk.PatrolBucketDays
 		if input.AccountRisk.PatrolBatchSize != 0 {
@@ -1078,10 +1089,13 @@ func toEditable(cfg config.Config) EditableConfig {
 			Enabled: cfg.AccountRisk.RSCCheck.Enabled, Method: cfg.AccountRisk.RSCCheck.Method,
 			Concurrency: cfg.AccountRisk.RSCCheck.Concurrency, Timeout: cfg.AccountRisk.RSCCheck.Timeout.String(),
 			OnDenied: cfg.AccountRisk.RSCCheck.OnDenied, PatrolEnabled: cfg.AccountRisk.RSCCheck.Patrol.Enabled,
-			PatrolBucketDays:  cfg.AccountRisk.RSCCheck.Patrol.BucketDays,
-			PatrolInterval:    cfg.AccountRisk.RSCCheck.Patrol.Interval.String(),
-			PatrolBatchSize:   cfg.AccountRisk.RSCCheck.Patrol.BatchSize,
-			BuildProbeEnabled: boolPointer(cfg.AccountRisk.RSCCheck.BuildProbeEnabled()),
+			PatrolBucketDays:    cfg.AccountRisk.RSCCheck.Patrol.BucketDays,
+			PatrolInterval:      cfg.AccountRisk.RSCCheck.Patrol.Interval.String(),
+			PatrolBatchSize:     cfg.AccountRisk.RSCCheck.Patrol.BatchSize,
+			ProbeProxyURL:       cfg.AccountRisk.RSCCheck.ProbeProxyURL,
+			DeniedConfirmations: cfg.AccountRisk.RSCCheck.DeniedConfirmations,
+			DeniedTTL:           cfg.AccountRisk.RSCCheck.DeniedTTL.String(),
+			BuildProbeEnabled:   boolPointer(cfg.AccountRisk.RSCCheck.BuildProbeEnabled()),
 		},
 		AccountRiskProvided: true,
 		AccountsProvided:    true,
