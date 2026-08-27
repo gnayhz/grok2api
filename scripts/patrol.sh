@@ -78,7 +78,8 @@ print(",".join(bad))' 2>/dev/null)
   say "probe/tool key residue"
   [ -z "$residue" ] && ok || bad "$residue（工具密钥滞留，应删除）"
 else
-  say "risk surface"; echo "skipped (login failed)"
+  say "admin login"
+  bad "登录失败（凭据失效或认证面故障）——风险面检查被跳过不可接受"
 fi
 
 exit $FAIL
