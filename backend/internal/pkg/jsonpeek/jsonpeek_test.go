@@ -58,6 +58,38 @@ func TestRootStringFieldIgnoresNestedType(t *testing.T) {
 	}
 }
 
+func TestRootStringFieldScanOrderIndependent(t *testing.T) {
+	t.Parallel()
+	// 兼容层经 map[string]any 重排后的键序：response 在 type 之前。
+	sorted := []byte(`{"response":{"id":"resp_1","usage":{"output_tokens":7}},"sequence_number":9,"type":"response.completed"}`)
+	if got := RootStringFieldScan(sorted, "type"); got != "response.completed" {
+		t.Fatalf("sorted type = %q", got)
+	}
+	if got := RootStringFieldScan(sorted, "id"); got != "" {
+		t.Fatalf("root id must stay empty (nested only): %q", got)
+	}
+	huge := []byte(`{"response":{"output":[{"encrypted_content":"` + string(make([]byte, 1<<20)) + `"}]},"type":"response.failed"}`)
+	if got := RootStringFieldScan(huge, "type"); got != "response.failed" {
+		t.Fatalf("huge sorted type = %q", got)
+	}
+	// 截断缓冲：目标键在被截断的值之后必须返回空串。
+	truncated := sorted[:30]
+	if got := RootStringFieldScan(truncated, "type"); got != "" {
+		t.Fatalf("truncated type = %q", got)
+	}
+	// 嵌套 type 不得误命中（与 RootStringField 同口径）。
+	nested := []byte(`{"item":{"type":"message"},"type":"response.completed"}`)
+	if got := RootStringFieldScan(nested, "type"); got != "response.completed" {
+		t.Fatalf("nested-first type = %q", got)
+	}
+	if got := RootStringFieldScan([]byte(`[1,2]`), "type"); got != "" {
+		t.Fatalf("non-object = %q", got)
+	}
+	if got := RootStringFieldScan(nil, "type"); got != "" {
+		t.Fatalf("nil = %q", got)
+	}
+}
+
 func TestRawValueExtractsErrorFromTruncatedDocument(t *testing.T) {
 	t.Parallel()
 	prefix := []byte(`{"type":"response.failed","response":{"id":"resp_1","error":{"code":"server_error","message":"boom"},"output":[{"encrypted_content":"AAAA`)

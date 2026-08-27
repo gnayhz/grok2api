@@ -22,7 +22,14 @@ func responsesContainsGeneratedDelta(data []byte) bool {
 }
 
 func sseEventType(data []byte) string {
-	return jsonpeek.RootStringField(jsonpeek.Prefix(data, 4096), "type")
+	if typ := jsonpeek.RootStringField(jsonpeek.Prefix(data, 4096), "type"); typ != "" {
+		return typ
+	}
+	// 兼容层重写过的帧经 map[string]any 重排键序（字母序 "response" 在
+	// "type" 之前），根层 type 可被多 KB 的 response 对象推到 4KB 头窗之外。
+	// 头窗未命中时对完整帧做零分配的根层扫描（2026-08-27 线上 5/5
+	// upstream_stream_incomplete 回归根因）。
+	return jsonpeek.RootStringFieldScan(data, "type")
 }
 
 func (i *responseInspector) inspectDataPayload(value []byte) {
@@ -88,17 +95,21 @@ func (i *responseInspector) observeHugeSSEPayload(value []byte) {
 	i.applyPeekedFrameMetadata(value)
 }
 
-func peekRootOrResponseString(head []byte, key string) string {
+func peekRootOrResponseString(value, head []byte, key string) string {
 	if v := jsonpeek.RootStringField(head, key); v != "" {
 		return v
 	}
 	if raw := jsonpeek.RawValue(head, "response"); len(raw) > 0 {
-		return jsonpeek.RootStringField(raw, key)
+		if v := jsonpeek.RootStringField(raw, key); v != "" {
+			return v
+		}
 	}
-	switch jsonpeek.RootStringField(head, "type") {
+	switch sseEventType(value) {
 	case "response.created", "response.in_progress", "response.completed", "response.failed", "response.incomplete":
-		// Huge completed/failed frames truncate the nested response object in
-		// the 4KB head; id/model still sit before encrypted_content.
+		// Huge or key-sorted completed/failed frames truncate the nested
+		// response object in the 4KB head; id/model still sit before any
+		// encrypted_content payload. sseEventType must see the whole frame
+		// here: on re-marshaled frames the root type sits past the head.
 		return jsonpeek.StringField(head, key)
 	default:
 		return ""
@@ -108,10 +119,10 @@ func peekRootOrResponseString(head []byte, key string) string {
 func (i *responseInspector) applyPeekedFrameMetadata(value []byte) {
 	head := jsonpeek.Prefix(value, 4096)
 	// Root / nested response only — item.id must not win first-and-stick.
-	if id := peekRootOrResponseString(head, "id"); id != "" {
+	if id := peekRootOrResponseString(value, head, "id"); id != "" {
 		i.metadata.ResponseID = id
 	}
-	if model := peekRootOrResponseString(head, "model"); model != "" {
+	if model := peekRootOrResponseString(value, head, "model"); model != "" {
 		i.metadata.Model = model
 		i.metadata.Usage.ResponseModel = model
 	}

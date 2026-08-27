@@ -103,6 +103,84 @@ func RootStringField(data []byte, key string) string {
 	return ""
 }
 
+// RootStringFieldScan returns the root-level string value for key on a
+// COMPLETE JSON object of any size, walking past nested values of arbitrary
+// length without allocating. Unlike RootStringField it is key-order
+// independent on frames larger than any head window: callers that re-marshal
+// through map[string]any get alphabetically sorted keys, so a multi-KB
+// "response" object can precede "type" at the root. Returns "" when the
+// buffer truncates before the key's value completes.
+func RootStringFieldScan(data []byte, key string) string {
+	if len(data) == 0 || key == "" {
+		return ""
+	}
+	rest := skipJSONSpace(data)
+	if len(rest) == 0 || rest[0] != '{' {
+		return ""
+	}
+	rest = skipJSONSpace(rest[1:])
+	for len(rest) > 0 {
+		if rest[0] == '}' {
+			return ""
+		}
+		if rest[0] != '"' {
+			return ""
+		}
+		end := matchJSONString(rest)
+		if end <= 1 {
+			return ""
+		}
+		field := rest[1 : end-1]
+		rest = skipJSONSpace(rest[end:])
+		if len(rest) == 0 || rest[0] != ':' {
+			return ""
+		}
+		rest = skipJSONSpace(rest[1:])
+		valueEnd := scanJSONValue(rest)
+		if valueEnd <= 0 {
+			// Truncated value: the target key, when present, sits past the
+			// buffer end. Callers wanting head-only semantics pass a prefix.
+			return ""
+		}
+		if string(field) == key && rest[0] == '"' {
+			return string(rest[1 : valueEnd-1])
+		}
+		rest = skipJSONSpace(rest[valueEnd:])
+		if len(rest) > 0 && rest[0] == ',' {
+			rest = rest[1:]
+		}
+	}
+	return ""
+}
+
+// scanJSONValue returns the exclusive end offset of the JSON value at the
+// start of data, or -1 when data truncates inside it (unterminated string or
+// unbalanced brackets). Literal scalars end at the first value delimiter.
+func scanJSONValue(data []byte) int {
+	if len(data) == 0 {
+		return -1
+	}
+	switch data[0] {
+	case '"':
+		return matchJSONString(data)
+	case '{', '[':
+		return matchJSONBrackets(data)
+	default:
+		end := 0
+		for end < len(data) {
+			c := data[end]
+			if c == ',' || c == '}' || c == ']' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				break
+			}
+			end++
+		}
+		if end == 0 {
+			return -1
+		}
+		return end
+	}
+}
+
 func skipJSONSpace(data []byte) []byte {
 	for len(data) > 0 {
 		switch data[0] {
