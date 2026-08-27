@@ -580,6 +580,10 @@ const resources = {
         botRiskTooltip: "机器人风控",
         rscRisk: "注册风控",
         rscRiskTooltip: "注册风控（RSC 判定 denied）：账号保持启用但调度永久跳过，需人工解除",
+        rscRiskSourcePatrol: "主动巡检",
+        rscRiskSourceDegrade: "请求降智归因",
+        rscRiskSourceManual: "人工标记",
+        rscRiskTooltipDetail: "{{source}}判定注册风控：账号保持启用但调度永久跳过，需人工解除{{time}}{{detail}}",
         rscRiskFlag: {
           label: "注册风控标记",
           description: "开启后该账号（及未单独处理的关联账号）不参与调度但保持启用；关闭即解除标记、恢复调度。通常由 RSC 归因自动开启。",
@@ -1008,7 +1012,7 @@ const resources = {
         guard: { title: "质量防护", description: "路由守卫与 IP 轮换的运行参数，保存后立即生效。" },
         guardStats: { tabTitle: "命中统计", title: "特征命中统计", canaryTitle: "验证结论统计", signal: "特征", triggered: "触发次数", requests: "请求数", rescued: "救回", failed: "未救回", rescueRate: "救回率", count: "次数", canaryOutcome: "验证结论", sameAccountRetry: "同号补偿重试：发起 {{used}} 次，最终成功 {{rescued}} 次", exhausted: "重试耗尽：放行最后一次 {{deliverLast}} 次，拒绝 {{rejected}} 次", signals: { header_budget: "响应头预算早断", created_timeout: "首事件截止", evidence_timeout: "零证据截止", empty_stream: "空流", missing_thinking: "缺少思考证据" }, canary: { clean: "验证通过（IP 已恢复）", degraded: "验证降智", no_account: "无可用账号", unconfigured: "未配置验证模型", error: "验证出错" } },
         requestRetry: { title: "路由守卫", enabled: "启用实时路由守卫", enabledHelp: "对流式推理响应做质量扣留：缺少思考证据或超时的尝试被拦截并换账号重试，而不是把降智响应交付给客户端。", createdTimeout: "首事件截止", createdTimeoutHelp: "流式请求等待第一个 SSE data 事件的预算；超时中止该次尝试并重试。健康链路首事件通常在数秒内，降智排队可达分钟级。", evidenceTimeout: "零证据截止", evidenceTimeoutHelp: "静默期超过该时长仍无思考证据且无可见输出时，中止该次尝试。", holdTimeout: "扣留观察时长", holdTimeoutHelp: "为收集思考证据而扣留流的最长时间；到期后按已有证据判决。", earlyHeaderAbort: "响应头预算", earlyHeaderAbortHelp: "响应头超过该预算未返回即中止并重试（降智路径特征）。设为 0 表示关闭。", maxAttempts: "质量重试上限", maxAttemptsHelp: "单次请求内质量扣留重试（含换账号）的最大次数。", minOutputTokens: "扣留输出阈值", minOutputTokensHelp: "可见输出达到该 token 数即触发扣留判决（无思考证据而先出内容是降智特征）。", sameAccountRetry: "同号补偿重试", sameAccountRetryHelp: "扣留后先原账号重试一次再换号，用于区分瞬时出口 IP 污染与降智账号。", onExhausted: "重试耗尽策略", onExhaustedHelp: "质量重试全部耗尽时的行为。", failClosed: "快速失败", failOpen: "放行最后一次", accountCooldown: "降智账号冷却", accountCooldownHelp: "确认缺少思考证据的账号进入冷却的时长。", idleAccountCooldown: "空流账号冷却", idleAccountCooldownHelp: "空流/静默超时账号的冷却时长（常与出口 IP 相关）。设为 0 使用默认 15m。" },
-        accountRisk: { title: "风险归因", enabled: "启用 RSC 风险归因", enabledHelp: "质量扣留/空流时通过关联的 Web SSO 身份对 grok.com 发起一次检测：结论 clean 解除账号冷却（出口 IP 嫌疑），denied 按下方策略处置。每次检测消耗该账号 1 条消息额度，保存后立即生效。", method: "检测方式", methodHelp: "ssoProbe（推荐）＝用 SSO Cookie 发起一次临时 fast 会话，按是否出现思考流判定；homepage＝旧版首页载荷解析（grok.com 改版后已失效，仅作回滚）。", methodSSOProbe: "SSO 探针", methodHomepage: "首页载荷(回滚)", onDenied: "denied 处置", onDeniedHelp: "确认风控后的处置方式；结论永久缓存，仅可人工解除。", onDeniedFlag: "打风控标记", onDeniedDisable: "停用该账号", onDeniedMarkOnly: "仅记日志", timeout: "单次检测超时", timeoutHelp: "一次 RSC 检测从发起到判定的最长时间（5s-60s）。", concurrency: "检测并发", concurrencyHelp: "RSC 检测的全局并发上限（1-8）。", buildProbeEnabled: "启用 Build 自主探测兜底", buildProbeEnabledHelp: "未关联 Web SSO 的 Build 账号降智时，用其自身凭据发一次微型推理请求做差分判定（有关联时始终优先 SSO 探针）。降智会自动换出口二次验证；仅直连单路或无近期 clean 见证时不定罪。每次探测消耗少量额度。", patrolEnabled: "启用定期巡检", patrolEnabledHelp: "每 15 分钟复查一批结论过期的 Web 账号（clean 到期重查、error 到期重试；denied 永不重查）。Build 自主探测的结论不进巡检，到期后由下次降智事件复检。", patrolBucketDays: "clean 结论有效期", patrolBucketDaysHelp: "clean 结论在多少天内视为可信（7-90 天），到期后由巡检重新检测。" },
+        accountRisk: { title: "风险归因", enabled: "启用 RSC 风险归因", enabledHelp: "质量扣留/空流时通过关联的 Web SSO 身份对 grok.com 发起一次检测：结论 clean 解除账号冷却（出口 IP 嫌疑），denied 按下方策略处置。每次检测消耗该账号 1 条消息额度，保存后立即生效。", method: "检测方式", methodHelp: "ssoProbe（推荐）＝用 SSO Cookie 发起一次临时 fast 会话，按是否出现思考流判定；homepage＝旧版首页载荷解析（grok.com 改版后已失效，仅作回滚）。", methodSSOProbe: "SSO 探针", methodHomepage: "首页载荷(回滚)", onDenied: "denied 处置", onDeniedHelp: "确认风控后的处置方式；结论永久缓存，仅可人工解除。", onDeniedFlag: "打风控标记", onDeniedDisable: "停用该账号", onDeniedMarkOnly: "仅记日志", timeout: "单次检测超时", timeoutHelp: "一次 RSC 检测从发起到判定的最长时间（5s-60s）。", concurrency: "检测并发", concurrencyHelp: "RSC 检测的全局并发上限（1-8）。", buildProbeEnabled: "启用 Build 自主探测兜底", buildProbeEnabledHelp: "未关联 Web SSO 的 Build 账号降智时，用其自身凭据发一次微型推理请求做差分判定（有关联时始终优先 SSO 探针）。降智会自动换出口二次验证；仅直连单路或无近期 clean 见证时不定罪。每次探测消耗少量额度。", patrolEnabled: "启用定期巡检", patrolEnabledHelp: "每 15 分钟复查一批结论过期的 Web 账号（clean 到期重查、error 到期重试；denied 永不重查）。SSO 巡检判定 denied 时连坐同一身份组的 Web/Build/Console（SSO 已风控后无法再给其他渠道做探针归因）。请求路径降智仍按通道隔离：Build 降智只标 Build，不连坐 SSO。Build 自主探测的结论不进巡检，到期后由下次降智事件复检。", patrolBucketDays: "clean 结论有效期", patrolBucketDaysHelp: "clean 结论在多少天内视为可信（7-90 天），到期后由巡检重新检测。", patrolInterval: "巡检周期", patrolIntervalHelp: "后台主动巡检的运行间隔（1 分钟-6 小时）。", patrolBatchSize: "每批数量", patrolBatchSizeHelp: "每个周期最多复查多少个到期 Web 身份（1-200）。", patrolRunNow: "立即巡检", patrolRunNowHelp: "立刻复查当前到期的 clean/error 身份，不必等到下一个周期。", patrolRunQueued: "已开始巡检 {{count}} 个身份", riskCheckNow: "立即检测" },
         egressRotation: { title: "IP 轮换", enabled: "启用自动换 IP", enabledHelp: "出口 IP 被质量隔离后自动调用节点 webhook 换 IP，验证通过自动回池。", minNodeInterval: "同节点换 IP 最小间隔", minNodeIntervalHelp: "同一节点两次换 IP 之间的最小间隔，防止重启风暴。设为 0 使用默认 3m。", maxAttemptsPerQuarantine: "单周期换 IP 上限", maxAttemptsPerQuarantineHelp: "每次隔离周期内单节点最多尝试换 IP 的次数，耗尽后保持隔离等待人工介入。", maxGlobalPerHour: "全局每小时上限", maxGlobalPerHourHelp: "所有节点合计每小时最多换 IP 次数。", settleDelay: "重启静默期", settleDelayHelp: "调用 webhook 后等待隧道重建的时间。", probeTimeout: "探活超时", probeTimeoutHelp: "换 IP 后等待节点恢复健康的总时长。", probeInterval: "探活间隔", probeIntervalHelp: "等待节点恢复健康时的探测间隔。", webhookTimeout: "Webhook 超时", webhookTimeoutHelp: "调用换 IP webhook 的单次超时。", webhookRetries: "Webhook 重试", webhookRetriesHelp: "webhook 调用失败后的额外重试次数。", canaryModelPublicId: "验证模型（canary）", canaryModelPublicIdHelp: "换 IP 后做一次性真实推理验证的模型 publicId（须为支持推理的模型）。留空表示不做 canary 验证，换 IP 成功后短冷却暂定放行。", canaryCreatedTimeout: "验证首事件预算", canaryCreatedTimeoutHelp: "canary 验证请求等待首个流事件的时间预算，超时判验证失败。" },
         audit: {
           title: "请求审计与日志设置",
@@ -1862,6 +1866,10 @@ const resources = {
           "botRiskTooltip": "Bot risk control.",
           "rscRisk": "Registration risk",
           "rscRiskTooltip": "Registration risk (RSC verdict denied): the account stays enabled but is permanently excluded from scheduling until manually cleared.",
+          "rscRiskSourcePatrol": "SSO patrol",
+          "rscRiskSourceDegrade": "Request-path attribution",
+          "rscRiskSourceManual": "Manual flag",
+          "rscRiskTooltipDetail": "{{source}} marked registration risk: the account stays enabled but is excluded from scheduling until cleared{{time}}{{detail}}",
           "rscRiskFlag": {
             "label": "Registration risk flag",
             "description": "When on, this account stays enabled but is excluded from scheduling; turn off to clear the flag and restore scheduling. Usually set automatically by RSC attribution."
@@ -2497,9 +2505,17 @@ const resources = {
               "buildProbeEnabled": "Enable Build-native probe fallback",
               "buildProbeEnabledHelp": "For unlinked Build accounts, degrade attribution falls back to a tiny reasoning request through the account's own credential with differential exits (linked accounts always prefer the SSO probe). A degraded first attempt re-tries over a different exit; single-path (direct-only) or missing clean witnesses never convict. Each probe costs a small amount of quota.",
               "patrolEnabled": "Enable periodic patrol",
-              "patrolEnabledHelp": "Re-check a batch of Web accounts with stale verdicts every 15 minutes (clean re-checked when due, errors retried; denied never re-checked). Build-probe verdicts skip patrol and are re-verified by the next degrade event.",
+              "patrolEnabledHelp": "Re-check a batch of Web accounts with stale verdicts every 15 minutes (clean re-checked when due, errors retried; denied never re-checked). An SSO patrol denial flags the whole identity group (Web/Build/Console), because a flagged SSO identity can no longer attribute later Build/Console degrades. Request-path attribution stays channel-scoped: a Build degrade flags Build only and leaves SSO schedulable. Build-probe verdicts skip patrol and are re-verified by the next degrade event.",
               "patrolBucketDays": "Clean verdict validity",
-              "patrolBucketDaysHelp": "How many days a clean verdict stays trusted (7-90); the patrol re-checks it afterwards."
+              "patrolBucketDaysHelp": "How many days a clean verdict stays trusted (7-90); the patrol re-checks it afterwards.",
+              "patrolInterval": "Patrol interval",
+              "patrolIntervalHelp": "How often the background SSO patrol runs (1 minute-6 hours).",
+              "patrolBatchSize": "Batch size",
+              "patrolBatchSizeHelp": "How many due Web identities to re-check each cycle (1-200).",
+              "patrolRunNow": "Run patrol now",
+              "patrolRunNowHelp": "Re-check currently due clean/error identities immediately, without waiting for the next cycle.",
+              "patrolRunQueued": "Patrol started for {{count}} identities",
+              "riskCheckNow": "Check now"
             },
             "egressRotation": {
               "title": "IP rotation",

@@ -25,6 +25,8 @@ type AccountRiskVerdict struct {
 	CheckedAt  time.Time
 	// OriginAccountID 触发判定的账号(通道隔离重放目标);0=旧数据。
 	OriginAccountID uint64
+	// Trigger 判定入口：degrade / patrol / manual。空=升级前旧行。
+	Trigger string
 }
 
 // RiskRepository persists RSC verdicts for Web SSO identities.
@@ -57,12 +59,17 @@ func (r *RiskRepository) SaveRiskVerdict(ctx context.Context, verdict AccountRis
 
 // MostRecentCleanVerdict returns the account holding the newest clean verdict
 // for the given probe source (the channel-vocabulary breaker witness), or
-// found=false when none exists.
-func (r *RiskRepository) MostRecentCleanVerdict(ctx context.Context, source string) (uint64, bool, error) {
+// found=false when none exists. maxAge>0 bounds how old the verdict may be:
+// an ancient clean must not vouch for a channel vocabulary that may have
+// changed since (aligned with the build-probe witness gate).
+func (r *RiskRepository) MostRecentCleanVerdict(ctx context.Context, source string, maxAge time.Duration) (uint64, bool, error) {
 	var row accountRiskVerdictModel
-	err := r.db.db.WithContext(ctx).
-		Where("verdict = ? AND source = ?", "clean", source).
-		Order("checked_at DESC").First(&row).Error
+	query := r.db.db.WithContext(ctx).
+		Where("verdict = ? AND source = ?", "clean", source)
+	if maxAge > 0 {
+		query = query.Where("checked_at > ?", time.Now().UTC().Add(-maxAge))
+	}
+	err := query.Order("checked_at DESC").First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, false, nil
 	}
@@ -126,19 +133,24 @@ func (r *RiskRepository) listRiskyVerdictAccountIDs(ctx context.Context, afterID
 // ListPatrolDue returns enabled Web accounts whose stored verdict is due for
 // a patrol re-check: clean verdicts older than patrolInterval, or error
 // verdicts older than errorRetryAfter. Risky verdicts never re-check.
+// Accounts with no verdict row are not due — first detection is event-driven
+// (OnDegraded). Including them turned a method switch that purged stale
+// cleans into a full-pool scan that permanently flagged healthy identities.
 func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Provider, patrolInterval, errorRetryAfter time.Time, limit int) ([]uint64, error) {
 	if limit <= 0 {
 		limit = 500
 	}
 	var ids []uint64
 	err := r.db.db.WithContext(ctx).
-		Model(&accountModel{}).
-		Where("provider = ? AND enabled = ?", provider, true).
+		Table("account_risk_verdicts AS verdict").
+		Joins("JOIN provider_accounts AS account ON account.id = verdict.account_id").
+		Where("account.provider = ? AND account.enabled = ?", provider, true).
 		Where(
-			"id NOT IN (SELECT account_id FROM account_risk_verdicts WHERE verdict IN ('denied','flagged') OR (verdict = 'clean' AND checked_at > ?) OR (verdict = 'error' AND checked_at > ?))",
+			"(verdict.verdict = 'clean' AND verdict.checked_at <= ?) OR (verdict.verdict = 'error' AND verdict.checked_at <= ?)",
 			patrolInterval, errorRetryAfter,
 		).
+		Order("verdict.checked_at ASC").
 		Limit(limit).
-		Pluck("id", &ids).Error
+		Pluck("account.id", &ids).Error
 	return ids, mapError(err)
 }

@@ -54,6 +54,9 @@ func (f *fakeAccounts) SetAccountEnabled(_ context.Context, id uint64, enabled b
 	f.disabled[id] = reason
 	return nil
 }
+func (f *fakeAccounts) SetAccountRiskAttribution(_ context.Context, id uint64, flagged bool, trigger string, origin uint64, detail string, checkedAt time.Time) error {
+	return f.SetAccountRiskStatus(context.Background(), id, flagged)
+}
 func (f *fakeAccounts) SetAccountRiskStatus(_ context.Context, id uint64, flagged bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -127,13 +130,20 @@ func (f *fakeStore) DeleteCleanVerdictsExceptSources(_ context.Context, keepSour
 	return removed, nil
 }
 
-func (f *fakeStore) MostRecentCleanVerdict(_ context.Context, source string) (uint64, bool, error) {
+func (f *fakeStore) MostRecentCleanVerdict(_ context.Context, source string, maxAge time.Duration) (uint64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var bestID uint64
 	var bestAt time.Time
+	cutoff := time.Now().UTC().Add(-maxAge)
 	for id, v := range f.verdicts {
-		if v.Verdict == VerdictClean && v.Source == source && v.CheckedAt.After(bestAt) {
+		if v.Verdict != VerdictClean || v.Source != source {
+			continue
+		}
+		if maxAge > 0 && v.CheckedAt.Before(cutoff) {
+			continue
+		}
+		if v.CheckedAt.After(bestAt) {
 			bestID, bestAt = id, v.CheckedAt
 		}
 	}
@@ -232,10 +242,13 @@ func TestAttributionDeniedFlagsDegradedChannelOnly(t *testing.T) {
 	cfg.OnDenied = "flag"
 	service := New(cfg, accounts, store, checker, nil)
 
-	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
+	service.AttributeNow(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild})
 
 	if !accounts.flagged[7] {
 		t.Fatal("degraded build 7 must be risk-flagged")
+	}
+	if store.verdicts[90].Trigger != accountdomain.RiskTriggerDegrade {
+		t.Fatalf("degrade verdict trigger = %q, want degrade", store.verdicts[90].Trigger)
 	}
 	for _, id := range []uint64{90, 8} {
 		if accounts.flagged[id] {
@@ -248,11 +261,13 @@ func TestAttributionDeniedFlagsDegradedChannelOnly(t *testing.T) {
 }
 
 // TestPatrolTickAppliesConsequences：巡检发现的 clean→denied 迁移必须立即
-// 落地为账号动作，而不是只写 verdict 表等下一次请求路径扣留。
+// 落地为账号动作，而不是只写 verdict 表等下一次请求路径扣留。SSO 巡检
+// denied 连坐同一身份组的 Web/Build/Console。
 func TestPatrolTickAppliesConsequences(t *testing.T) {
 	accounts := newFakeAccounts()
 	accounts.token[90] = "sso-token"
 	accounts.linkedBack[90] = []uint64{7}
+	accounts.linkedConsole[90] = []uint64{55}
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	checker := &fakeChecker{result: deniedResult()}
 	cfg := baseTestConfig()
@@ -261,12 +276,101 @@ func TestPatrolTickAppliesConsequences(t *testing.T) {
 
 	service.PatrolTick(context.Background(), []uint64{90})
 
-	// 巡检以 Web 身份为处置对象(通道隔离):只标 Web 90,关联 Build 7 不级联。
-	if !accounts.flagged[90] {
-		t.Fatal("patrol denied must flag the web identity")
+	for _, id := range []uint64{90, 7, 55} {
+		if !accounts.flagged[id] {
+			t.Fatalf("patrol SSO denied must flag identity-group member %d, flagged=%v", id, accounts.flagged)
+		}
 	}
-	if accounts.flagged[7] {
-		t.Fatal("patrol must not cascade the flag onto linked builds (channel-scoped)")
+	if accounts.flagged[8] {
+		t.Fatal("unrelated account 8 must not be cascaded")
+	}
+	if store.verdicts[90].Trigger != accountdomain.RiskTriggerPatrol {
+		t.Fatalf("patrol verdict trigger = %q, want patrol", store.verdicts[90].Trigger)
+	}
+}
+
+// TestPatrolTickDeniedDisablesIdentityGroup：onDenied=disable 时 SSO 巡检
+// denied 同样连坐身份组，请求路径降智仍保持通道隔离（见 disable_console_test）。
+func TestPatrolTickDeniedDisablesIdentityGroup(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	accounts.linkedBack[90] = []uint64{7, 8}
+	accounts.linkedConsole[90] = []uint64{55}
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	service := New(baseTestConfig(), accounts, store, &fakeChecker{result: deniedResult()}, nil)
+
+	service.PatrolTick(context.Background(), []uint64{90})
+
+	for _, id := range []uint64{90, 7, 8, 55} {
+		if _, disabled := accounts.disabled[id]; !disabled {
+			t.Fatalf("patrol SSO denied must disable identity-group member %d, disabled=%v", id, accounts.disabled)
+		}
+	}
+}
+
+// TestPatrolTickCleanDoesNotTouchSiblings：巡检 clean 只说明 SSO 身份无辜，
+// 不得给关联通道打标/停用。
+func TestPatrolTickCleanDoesNotTouchSiblings(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	accounts.linkedBack[90] = []uint64{7}
+	accounts.linkedConsole[90] = []uint64{55}
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	cfg := baseTestConfig()
+	cfg.OnDenied = "flag"
+	service := New(cfg, accounts, store, &fakeChecker{result: cleanResult()}, nil)
+
+	service.PatrolTick(context.Background(), []uint64{90})
+
+	if len(accounts.flagged) != 0 {
+		t.Fatalf("clean patrol must flag nobody, flagged=%v", accounts.flagged)
+	}
+	if len(accounts.disabled) != 0 {
+		t.Fatalf("clean patrol must disable nobody, disabled=%v", accounts.disabled)
+	}
+}
+
+// TestWebDegradeDeniedCascadesIdentityGroup：SSO 通道自己降智且探针 denied
+// 与巡检同属身份级信号，必须连坐 Build/Console；否则 SSO 已标风控后
+// Build 无法再走探针归因。
+func TestWebDegradeDeniedCascadesIdentityGroup(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	accounts.linkedBack[90] = []uint64{7}
+	accounts.linkedConsole[90] = []uint64{55}
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	cfg := baseTestConfig()
+	cfg.OnDenied = "flag"
+	service := New(cfg, accounts, store, &fakeChecker{result: deniedResult()}, nil)
+
+	service.attribute(context.Background(), accountdomain.Credential{ID: 90, Provider: accountdomain.ProviderWeb}, 0)
+
+	for _, id := range []uint64{90, 7, 55} {
+		if !accounts.flagged[id] {
+			t.Fatalf("SSO-origin denied must flag identity-group member %d, flagged=%v", id, accounts.flagged)
+		}
+	}
+}
+
+// TestReconcileSSOOriginDeniedFansOut：启动对账重放 origin=webID 的 denied
+// 必须把身份组补齐（巡检当时连坐过、或进程重启后新关联的通道）。
+func TestReconcileSSOOriginDeniedFansOut(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.linkedBack[90] = []uint64{7}
+	accounts.linkedConsole[90] = []uint64{55}
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
+		90: {Verdict: VerdictDenied, OriginAccountID: 90, CheckedAt: time.Now().UTC()},
+	}}
+	cfg := baseTestConfig()
+	cfg.OnDenied = "flag"
+	service := New(cfg, accounts, store, &fakeChecker{result: cleanResult()}, nil)
+
+	service.ReconcileRiskyVerdicts(context.Background())
+
+	for _, id := range []uint64{90, 7, 55} {
+		if !accounts.flagged[id] {
+			t.Fatalf("reconcile of SSO-origin denied must flag %d, flagged=%v", id, accounts.flagged)
+		}
 	}
 }
 
@@ -418,7 +522,9 @@ func TestClearIdentityVerdictsRemovesRiskyVerdict(t *testing.T) {
 	accounts.token[90] = "sso-token"
 	accounts.linkedWeb[7] = 90
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		90: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
+		// 通道隔离语义:该 verdict 由 Build 7 的降智触发(origin=7),清 Build
+		// 标必须删除它;否则对账按 origin 重放会把刚清的标打回来。
+		90: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC(), OriginAccountID: 7},
 	}}
 	service := New(baseTestConfig(), accounts, store, &fakeChecker{}, nil)
 

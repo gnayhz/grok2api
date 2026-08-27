@@ -45,10 +45,22 @@ const (
 	accountEventWriteTimeout      = 30 * time.Second
 )
 
+type accountRiskChecker interface {
+	CheckAccount(ctx context.Context, id uint64) error
+}
+
 type Handler struct {
 	service *accountapp.Service
 	sync    accountSynchronizer
 	logger  *slog.Logger
+	risk    accountRiskChecker
+}
+
+func (h *Handler) SetRiskChecker(checker accountRiskChecker) {
+	if h == nil {
+		return
+	}
+	h.risk = checker
 }
 
 type accountSyncPipeline struct {
@@ -185,6 +197,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/:id/refresh-token", h.refreshToken)
 	router.POST("/accounts/:id/refresh-billing", h.refreshBilling)
 	router.POST("/accounts/:id/refresh-quota", h.refreshWebQuota)
+	router.POST("/accounts/:id/risk-check", h.riskCheck)
 }
 
 type updateRequest struct {
@@ -353,11 +366,15 @@ type accountResponse struct {
 	BuildBotFlagged             bool                    `json:"buildBotFlagged"`
 	BuildBotFlagSource          int                     `json:"buildBotFlagSource,omitempty"`
 	// RiskStatus 非空表示长期风控标记（当前 rsc_denied = RSC 注册风控）。
-	RiskStatus      string                `json:"riskStatus,omitempty"`
-	ModelSyncFailed bool                  `json:"modelSyncFailed,omitempty"`
-	Billing         *billingResponse      `json:"billing,omitempty"`
-	Quota           quotaResponse         `json:"quota"`
-	QuotaWindows    []quotaWindowResponse `json:"quotaWindows,omitempty"`
+	RiskStatus          string                `json:"riskStatus,omitempty"`
+	RiskTrigger         string                `json:"riskTrigger,omitempty"`
+	RiskOriginAccountID uint64                `json:"riskOriginAccountId,omitempty,string"`
+	RiskCheckedAt       *time.Time            `json:"riskCheckedAt,omitempty"`
+	RiskDetail          string                `json:"riskDetail,omitempty"`
+	ModelSyncFailed     bool                  `json:"modelSyncFailed,omitempty"`
+	Billing             *billingResponse      `json:"billing,omitempty"`
+	Quota               quotaResponse         `json:"quota"`
+	QuotaWindows        []quotaWindowResponse `json:"quotaWindows,omitempty"`
 }
 
 type linkedAccountResponse struct {
@@ -1439,6 +1456,27 @@ func (h *Handler) refreshToken(c *gin.Context) {
 	response.Success(c, http.StatusOK, newAccountResponse(value))
 }
 
+func (h *Handler) riskCheck(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	if h.risk == nil {
+		response.Error(c, http.StatusServiceUnavailable, "accountRiskUnavailable", "风险检测未初始化")
+		return
+	}
+	if err := h.risk.CheckAccount(c.Request.Context(), id); err != nil {
+		h.writeServiceError(c, "accountRiskCheckFailed", err, http.StatusBadGateway, "账号风险检测失败")
+		return
+	}
+	value, err := h.service.Get(c.Request.Context(), id)
+	if err != nil {
+		h.writeServiceError(c, "accountRiskCheckFailed", err, http.StatusInternalServerError, "读取账号失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newAccountResponse(value))
+}
+
 // clearCooldownUnconditional 是 clear-cooldown 的兼容别名路由：两者共享
 // Service.ClearCooldown（保留 missing-thinking 打击标记，只清瞬态冷却），
 // 失效事件同样携带保留后的标记，路由覆盖层与数据库终态一致。
@@ -1570,6 +1608,10 @@ func newAccountResponse(value accountapp.View) accountResponse {
 		BuildBotFlagged:            value.BuildBotFlagged && c.Provider == accountdomain.ProviderBuild,
 		BuildBotFlagSource:         buildBotFlagSourceResponse(c.Provider, value.BuildBotFlagged, value.BuildBotFlagSource),
 		RiskStatus:                 c.RiskStatus,
+		RiskTrigger:                c.RiskTrigger,
+		RiskOriginAccountID:        c.RiskOriginAccountID,
+		RiskCheckedAt:              c.RiskCheckedAt,
+		RiskDetail:                 c.RiskDetail,
 		Quota:                      newQuotaResponse(value.Quota), QuotaWindows: make([]quotaWindowResponse, 0, len(value.QuotaWindows)),
 	}
 	for _, linked := range c.LinkedAccounts {

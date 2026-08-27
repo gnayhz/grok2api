@@ -42,8 +42,10 @@ func (c AccountRiskRSCConfig) BuildProbeEnabled() bool {
 }
 
 type AccountRiskPatrolConfig struct {
-	Enabled    bool `yaml:"enabled"`
-	BucketDays int  `yaml:"bucketDays"`
+	Enabled    bool     `yaml:"enabled"`
+	BucketDays int      `yaml:"bucketDays"`
+	Interval   Duration `yaml:"interval"`
+	BatchSize  int      `yaml:"batchSize"`
 }
 
 func DefaultAccountRiskConfig() AccountRiskConfig {
@@ -54,7 +56,7 @@ func DefaultAccountRiskConfig() AccountRiskConfig {
 			Concurrency: 2,
 			Timeout:     Duration(30 * time.Second),
 			OnDenied:    "flag",
-			Patrol:      AccountRiskPatrolConfig{Enabled: false, BucketDays: 30},
+			Patrol:      AccountRiskPatrolConfig{Enabled: false, BucketDays: 30, Interval: Duration(15 * time.Minute), BatchSize: 50},
 			BuildProbe:  &AccountRiskBuildProbeConfig{Enabled: false},
 		},
 	}
@@ -80,6 +82,12 @@ func (c AccountRiskConfig) Validate() error {
 	}
 	if rsc.Patrol.BucketDays != 0 && (rsc.Patrol.BucketDays < 7 || rsc.Patrol.BucketDays > 90) {
 		return fmt.Errorf("accountRisk.rscCheck.patrol.bucketDays 必须在 7 到 90 之间")
+	}
+	if d := rsc.Patrol.Interval.Value(); d != 0 && (d < time.Minute || d > 6*time.Hour) {
+		return fmt.Errorf("accountRisk.rscCheck.patrol.interval 必须在 1m 到 6h 之间")
+	}
+	if rsc.Patrol.BatchSize != 0 && (rsc.Patrol.BatchSize < 1 || rsc.Patrol.BatchSize > 200) {
+		return fmt.Errorf("accountRisk.rscCheck.patrol.batchSize 必须在 1 到 200 之间")
 	}
 	return nil
 }

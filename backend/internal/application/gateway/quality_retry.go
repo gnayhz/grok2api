@@ -244,10 +244,11 @@ func ClassifyQualityHold(sig QualityStreamSignals, minOutput int64) QualityVerdi
 	if sig.HasThinking {
 		return QualityDeliver
 	}
-	if sig.OversizedLine {
-		// 无法可靠解析的流不猜测质量：与缓冲上限一致 fail-open。
-		return QualityDeliver
-	}
+	// OversizedLine 不再 fail-open。生产 grok-4.6 xhigh 降智流会在
+	// output_item.done 上推数 MiB encrypted_content（无可见思考），扫描器
+	// 在换行到达前就会积满 1MiB 未完成行；旧逻辑据此放行，把降智答案
+	// 原样交给客户端并污染会话。超长行在扫描器里按类型丢弃/分流，这里
+	// 只看思考证据与可见输出。
 	output := sig.OutputTokens
 	if output < sig.VisibleTokens {
 		output = sig.VisibleTokens
@@ -369,7 +370,9 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 	// 非流式与流式同样纳入 hold：peekQualityBody 对完整 body 判决，证据规则
 	// 一致（此前 !input.Streaming 豁免导致非流式降智响应直接交付，2026-08-20
 	// 实测复现；修复后 clean/risk 的 summary 区分 11/11）。
-	if !cfg.Enabled || ownership != nil || input.skipQualityHold {
+	// previous_response_id 钉账号（attempt 预算=1）不等于豁免质量守卫：
+	// 续聊降智一旦放行会写进 stored response，后续轮次全部被污染。
+	if !cfg.Enabled || input.skipQualityHold {
 		return false
 	}
 	switch operation {

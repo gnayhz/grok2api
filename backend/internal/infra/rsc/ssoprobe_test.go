@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,9 @@ type probeServerScript struct {
 	sessionStatus int
 	sessionBody   string
 	handshakeFail int // non-zero: /ws/mgw/ answers this status without upgrading
-	chunks        []map[string]any
+	// delay 非 0:发送 chunks 前静默该时长(驱动客户端读超时路径)。
+	delay  time.Duration
+	chunks []map[string]any
 }
 
 func probeServer(t *testing.T, script *probeServerScript) *fhttptest.Server {
@@ -79,19 +82,34 @@ func probeServer(t *testing.T, script *probeServerScript) *fhttptest.Server {
 			}
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "session.created", "client_event_id": createEvent["event_id"]}})
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "conversation.attached", "conversation": map[string]any{"id": "conv_1"}}})
-			var turn map[string]any
-			if err := connection.ReadJSON(&turn); err != nil {
-				t.Errorf("read response.create: %v", err)
+			var itemMsg map[string]any
+			if err := connection.ReadJSON(&itemMsg); err != nil {
+				t.Errorf("read conversation.item.create: %v", err)
 				return
 			}
-			turnEvent := turn["event"].(map[string]any)
-			if turnEvent["type"] != "response.create" {
-				t.Fatalf("second client event = %#v, want response.create", turnEvent)
+			itemEvent := itemMsg["event"].(map[string]any)
+			if itemEvent["type"] != "conversation.item.create" {
+				t.Fatalf("first turn event = %#v, want conversation.item.create", itemEvent)
 			}
-			item := turnEvent["item"].(map[string]any)
+			item := itemEvent["item"].(map[string]any)
 			chunks := item["x_grok"].(map[string]any)["input_chunks"].([]any)
 			if prompt, _ := chunks[0].(map[string]any)["text"].(map[string]any)["text"].(string); prompt != "OK" {
 				t.Errorf("probe prompt = %q, want OK", prompt)
+			}
+			var respMsg map[string]any
+			if err := connection.ReadJSON(&respMsg); err != nil {
+				t.Errorf("read response.create: %v", err)
+				return
+			}
+			respEvent := respMsg["event"].(map[string]any)
+			if respEvent["type"] != "response.create" {
+				t.Fatalf("second turn event = %#v, want response.create", respEvent)
+			}
+			if _, ok := respEvent["item"]; ok {
+				t.Fatalf("response.create must not inline the user item: %#v", respEvent)
+			}
+			if script.delay > 0 {
+				time.Sleep(script.delay)
 			}
 			for _, chunk := range script.chunks {
 				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": chunk})
@@ -140,6 +158,34 @@ func TestSSOProbeReasoningChunkIsClean(t *testing.T) {
 	}
 	if !strings.Contains(result.BotFlagDetails, "reasoning=1") {
 		t.Fatalf("details = %q", result.BotFlagDetails)
+	}
+}
+
+// The live Web gateway treats CHANNEL_ANALYSIS as thinking (see
+// appendGatewayDelta). The probe must too: otherwise a healthy UNIFIED
+// stream that puts reasoning on ANALYSIS is classified denied the moment
+// CHANNEL_ASSISTANT_RESPONSE arrives.
+func TestSSOProbeAnalysisChannelIsClean(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent("CHANNEL_ANALYSIS", "thought"),
+		chunkEvent(channelAssistantText, "OK."),
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictClean {
+		t.Fatalf("CHANNEL_ANALYSIS then answer = %#v, want clean", result)
+	}
+}
+
+// Channel names are matched case-insensitively like the live gateway.
+func TestSSOProbeNotetakerChannelIsCaseInsensitive(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent("channel_assistant_notetaker_header", "Thinking about your request"),
+	}})
+	defer server.Close()
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictClean {
+		t.Fatalf("lowercase notetaker = %#v, want clean", result)
 	}
 }
 
@@ -252,7 +298,8 @@ func TestNewSSOProbeCheckerDefaults(t *testing.T) {
 // The channel-vocabulary breaker: consecutive denials with zero clean
 // witnesses must stop trusting "answer without thinking" — that pattern is
 // exactly what a renamed thinking channel would produce, and a false denied
-// permanently flags whole identity groups.
+// permanently flags the degraded channel (request path) or the whole SSO
+// identity group (patrol).
 func TestSSOProbeBreakerSuppressesDeniedAfterAllDeniedWindow(t *testing.T) {
 	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
 		chunkEvent(channelAssistantText, "OK."),
@@ -333,5 +380,84 @@ func TestSSOProbeVerdictJSONRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), "\"Verdict\":\"denied\"") {
 		t.Fatalf("marshalled verdict missing denied: %s", encoded)
+	}
+}
+
+// The live Web gateway waits for session.created AND conversation.attached,
+// then split-sends conversation.item.create + an empty response.create.
+// Inlining the user turn into response.create on the first attached event
+// is a different mgw dialect and is what production used to miss thinking.
+func TestSSOProbeTurnMatchesGatewaySplitSend(t *testing.T) {
+	var mu sync.Mutex
+	var clientEvents []string
+	attachedFirst := make(chan struct{})
+	server := fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
+		switch request.URL.Path {
+		case "/api/auth/session":
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write([]byte(probeSessionBody))
+		case "/ws/mgw/":
+			connection, err := (&websocket.Upgrader{CheckOrigin: func(*fhttp.Request) bool { return true }}).Upgrade(writer, request, nil)
+			if err != nil {
+				t.Errorf("upgrade: %v", err)
+				return
+			}
+			defer connection.Close()
+			var create map[string]any
+			if err := connection.ReadJSON(&create); err != nil {
+				t.Errorf("read session.create: %v", err)
+				return
+			}
+			mu.Lock()
+			clientEvents = append(clientEvents, create["event"].(map[string]any)["type"].(string))
+			mu.Unlock()
+			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "conversation.attached", "conversation": map[string]any{"id": "conv_1"}}})
+			close(attachedFirst)
+			time.Sleep(150 * time.Millisecond)
+			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "session.created", "client_event_id": create["event"].(map[string]any)["event_id"]}})
+			for i := 0; i < 2; i++ {
+				var msg map[string]any
+				if err := connection.ReadJSON(&msg); err != nil {
+					t.Errorf("read turn %d: %v", i, err)
+					return
+				}
+				mu.Lock()
+				clientEvents = append(clientEvents, msg["event"].(map[string]any)["type"].(string))
+				mu.Unlock()
+			}
+			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": chunkEvent(channelNotetakerHeader, "Thinking")})
+		default:
+			fhttp.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	done := make(chan Result, 1)
+	go func() { done <- probeChecker(server).Check(context.Background(), "token-1") }()
+	select {
+	case <-attachedFirst:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never reached conversation.attached")
+	}
+	time.Sleep(80 * time.Millisecond)
+	mu.Lock()
+	early := append([]string(nil), clientEvents...)
+	mu.Unlock()
+	for _, eventType := range early {
+		if eventType == "response.create" || eventType == "conversation.item.create" {
+			t.Fatalf("sent %q before session.created; events=%v", eventType, early)
+		}
+	}
+	result := <-done
+	if result.Verdict != VerdictClean {
+		t.Fatalf("split-send probe = %#v, want clean", result)
+	}
+	mu.Lock()
+	got := append([]string(nil), clientEvents...)
+	mu.Unlock()
+	want := []string{"session.create", "conversation.item.create", "response.create"}
+	if len(got) < 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("client events = %v, want %v", got, want)
 	}
 }

@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -11,14 +12,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ service *settingsapp.Service }
+type riskPatrolRunner interface {
+	RunDuePatrol(ctx context.Context) (int, error)
+}
+
+type Handler struct {
+	service *settingsapp.Service
+	patrol  riskPatrolRunner
+}
 
 func NewHandler(service *settingsapp.Service) *Handler { return &Handler{service: service} }
+
+func (h *Handler) SetPatrolRunner(runner riskPatrolRunner) {
+	if h == nil {
+		return
+	}
+	h.patrol = runner
+}
 
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/settings", h.get)
 	router.PUT("/settings", h.update)
 	router.DELETE("/settings", h.reset)
+	router.POST("/settings/account-risk/patrol", h.runPatrol)
 }
 
 type settingsConfigDTO struct {
@@ -41,14 +57,17 @@ type settingsConfigDTO struct {
 }
 
 type accountRiskConfigDTO struct {
-	Enabled           bool   `json:"enabled"`
-	Method            string `json:"method"`
-	Concurrency       int    `json:"concurrency"`
-	Timeout           string `json:"timeout"`
-	OnDenied          string `json:"onDenied"`
-	PatrolEnabled     bool   `json:"patrolEnabled"`
-	PatrolBucketDays  int    `json:"patrolBucketDays"`
-	BuildProbeEnabled bool   `json:"buildProbeEnabled"`
+	Enabled          bool   `json:"enabled"`
+	Method           string `json:"method"`
+	Concurrency      int    `json:"concurrency"`
+	Timeout          string `json:"timeout"`
+	OnDenied         string `json:"onDenied"`
+	PatrolEnabled    bool   `json:"patrolEnabled"`
+	PatrolBucketDays int    `json:"patrolBucketDays"`
+	PatrolInterval   string `json:"patrolInterval,omitempty"`
+	PatrolBatchSize  int    `json:"patrolBatchSize,omitempty"`
+	// BuildProbeEnabled 指针语义:字段缺省(旧客户端)不覆盖当前值。
+	BuildProbeEnabled *bool `json:"buildProbeEnabled,omitempty"`
 }
 
 type requestRetryConfigDTO struct {
@@ -230,6 +249,19 @@ func (h *Handler) update(c *gin.Context) {
 // reset 删除持久化运行设置，恢复「以 config.yaml 为默认」的优先级
 // 语义（round 87 文档化陷阱的一键恢复路径，替代手删 runtime_settings
 // 行）。响应返回重置后的快照（即文件基线）。
+func (h *Handler) runPatrol(c *gin.Context) {
+	if h.patrol == nil {
+		response.Error(c, http.StatusServiceUnavailable, "accountRiskUnavailable", "风险巡检未初始化")
+		return
+	}
+	due, err := h.patrol.RunDuePatrol(c.Request.Context())
+	if err != nil {
+		response.Error(c, http.StatusBadGateway, "accountRiskPatrolFailed", "巡检执行失败: "+err.Error())
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"due": due})
+}
+
 func (h *Handler) reset(c *gin.Context) {
 	result, err := h.service.ResetToDefaults(c.Request.Context())
 	if err != nil {
@@ -336,6 +368,8 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			Concurrency: value.AccountRisk.Concurrency, Timeout: value.AccountRisk.Timeout,
 			OnDenied: value.AccountRisk.OnDenied, PatrolEnabled: value.AccountRisk.PatrolEnabled,
 			PatrolBucketDays:  value.AccountRisk.PatrolBucketDays,
+			PatrolInterval:    value.AccountRisk.PatrolInterval,
+			PatrolBatchSize:   value.AccountRisk.PatrolBatchSize,
 			BuildProbeEnabled: value.AccountRisk.BuildProbeEnabled,
 		}
 		result.AccountRiskProvided = true
@@ -435,6 +469,8 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				Concurrency: config.AccountRisk.Concurrency, Timeout: config.AccountRisk.Timeout,
 				OnDenied: config.AccountRisk.OnDenied, PatrolEnabled: config.AccountRisk.PatrolEnabled,
 				PatrolBucketDays:  config.AccountRisk.PatrolBucketDays,
+				PatrolInterval:    config.AccountRisk.PatrolInterval,
+				PatrolBatchSize:   config.AccountRisk.PatrolBatchSize,
 				BuildProbeEnabled: config.AccountRisk.BuildProbeEnabled,
 			},
 			EgressRotation: &egressRotationConfigDTO{

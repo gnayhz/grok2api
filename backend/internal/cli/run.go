@@ -16,6 +16,12 @@ import (
 
 // Run 解析启动参数并运行后端服务。
 func Run(args []string) error {
+	if len(args) > 0 && args[0] == "patrol-risk" {
+		return runPatrolRisk(args[1:])
+	}
+	if len(args) > 0 && args[0] == "attribute-risk" {
+		return runAttributeRisk(args[1:])
+	}
 	options, err := parseOptions(args)
 	if err != nil {
 		return err

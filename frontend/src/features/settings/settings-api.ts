@@ -49,7 +49,7 @@ export type SettingsConfigDTO = {
   // 旧后端不返回该节;withSettingsDefaults 提供本地默认。
   accountRisk?: {
     enabled: boolean; method: string; concurrency: number; timeout: string; onDenied: string;
-    patrolEnabled: boolean; patrolBucketDays: number; buildProbeEnabled: boolean;
+    patrolEnabled: boolean; patrolBucketDays: number; patrolInterval?: string; patrolBatchSize?: number; buildProbeEnabled: boolean;
   };
 };
 
@@ -173,6 +173,11 @@ const settingsConfigValidator = hasShape({
     accountCooldown: isString, earlyHeaderAbort: isString, sameAccountRetry: isBoolean,
     evidenceTimeout: isString, createdTimeout: isString, idleAccountCooldown: isString,
   })),
+  accountRisk: isOptional(hasShape({
+    enabled: isBoolean, method: isString, concurrency: isNumber, timeout: isString, onDenied: isString,
+    patrolEnabled: isBoolean, patrolBucketDays: isNumber, patrolInterval: isOptional(isString), patrolBatchSize: isOptional(isNumber),
+    buildProbeEnabled: isOptional(isBoolean),
+  })),
   egressRotation: isOptional(hasShape({
     enabled: isBoolean, maxAttemptsPerQuarantine: isNumber, minNodeInterval: isString, maxGlobalPerHour: isNumber,
     webhookTimeout: isString, webhookRetries: isNumber, settleDelay: isString, probeTimeout: isString, probeInterval: isString,
@@ -200,7 +205,7 @@ export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["eg
 });
 export const defaultAccountRiskConfig = (): NonNullable<SettingsConfigDTO["accountRisk"]> => ({
   enabled: false, method: "ssoProbe", concurrency: 2, timeout: "30s", onDenied: "flag",
-  patrolEnabled: false, patrolBucketDays: 30, buildProbeEnabled: false,
+  patrolEnabled: false, patrolBucketDays: 30, patrolInterval: "15m", patrolBatchSize: 50, buildProbeEnabled: false,
 });
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();
@@ -221,6 +226,8 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
         // 否则 zod 正数校验会卡死整个设置表单的保存。
         timeout: accountRisk.timeout && accountRisk.timeout !== "0s" ? accountRisk.timeout : "30s",
         patrolBucketDays: accountRisk.patrolBucketDays || 30,
+        patrolInterval: accountRisk.patrolInterval && accountRisk.patrolInterval !== "0s" ? accountRisk.patrolInterval : "15m",
+        patrolBatchSize: accountRisk.patrolBatchSize || 50,
         buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
       },
       providerWeb: {
@@ -432,6 +439,10 @@ export function updateSettings(revision: string, config: SettingsConfigDTO): Pro
 // 为默认（后台保存过的覆盖被移除），返回重置后的快照。
 export function resetSettings(): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", { method: "DELETE" }, decodeSettingsSnapshot);
+}
+
+export function runAccountRiskPatrol(): Promise<{ due: number }> {
+  return apiRequest("/api/admin/v1/settings/account-risk/patrol", { method: "POST" }, createObjectDecoder<{ due: number }>("patrol run", { due: isNumber }));
 }
 
 type ListEgressNodesInput = {

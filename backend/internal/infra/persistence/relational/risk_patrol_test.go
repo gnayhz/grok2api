@@ -12,7 +12,10 @@ import (
 // TestListPatrolDueSelection 锁定巡检到期语义：
 //   - denied/flagged 永不到期（不重查，与“风控永不恢复”一致）；
 //   - clean 超过 patrolInterval 到期；error 超过 errorRetryAfter 到期；
-//   - 新 clean（未到期）与禁用账号不入选。
+//   - 新 clean（未到期）、无 verdict、禁用账号不入选。
+//
+// 无 verdict 必须由降智事件 OnDegraded 做首次检测；巡检扫未检号会在
+// 方法切换清 clean 后把整池打成永久 rsc_denied。
 func TestListPatrolDueSelection(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "patrol.db"))
@@ -58,7 +61,7 @@ func TestListPatrolDueSelection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// 无 verdict 的启用账号应入选（首轮覆盖）；禁用账号不入选。
+	// 无 verdict 的启用账号不得入选（首次检测走 OnDegraded）；禁用账号不入选。
 	neverChecked, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
 		Provider: account.ProviderWeb, Name: "never", SourceKey: "never", EncryptedAccessToken: "enc",
 		Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 1, MaxConcurrent: 1,
@@ -95,8 +98,8 @@ func TestListPatrolDueSelection(t *testing.T) {
 			t.Fatalf("%s must not be patrol-due", item.name)
 		}
 	}
-	if !got[neverChecked.ID] {
-		t.Fatal("account without any verdict must be patrol-due on the first sweep")
+	if got[neverChecked.ID] {
+		t.Fatal("account without any verdict must not be patrol-due")
 	}
 	if got[disabled.ID] {
 		t.Fatal("disabled account must never be patrol-due")

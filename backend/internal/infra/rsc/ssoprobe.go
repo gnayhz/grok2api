@@ -70,11 +70,33 @@ const (
 	channelAssistantText   = "CHANNEL_ASSISTANT_RESPONSE"
 )
 
+// probeChannelName matches the live Web gateway's normalization
+// (appendGatewayDelta): trim + upper-case before classifying.
+func probeChannelName(channel string) string {
+	return strings.ToUpper(strings.TrimSpace(channel))
+}
+
+// probeThinkingChannel reports a reasoning/notetaker stream. The live
+// gateway treats any channel containing ANALYSIS or REASONING as thinking;
+// NOTETAKER is the SSO-probe health signal (header "Thinking about your
+// request") and is not an answer channel.
+func probeThinkingChannel(channel string) bool {
+	name := probeChannelName(channel)
+	return strings.Contains(name, "NOTETAKER") ||
+		strings.Contains(name, "ANALYSIS") ||
+		strings.Contains(name, "REASONING")
+}
+
+func probeAnswerChannel(channel string) bool {
+	return probeChannelName(channel) == channelAssistantText
+}
+
 // SSOProbeChecker detects registration risk by opening one real mgw
 // conversation with the SSO cookie and watching for the reasoning stream.
-// It is a Go port of the regc data/go-detect example, wired onto the same
-// Result/verdict vocabulary as the legacy homepage checker. Direct (no-proxy)
-// browser-TLS access is fine: the signal is account-level, not IP-level.
+// The turn protocol and thinking-channel vocabulary match the live Web
+// gateway (split item.create + response.create; ANALYSIS/REASONING/NOTETAKER).
+// Direct (no-proxy) browser-TLS access is fine: the signal is account-level,
+// not IP-level.
 type SSOProbeChecker struct {
 	// baseURL overrides https://grok.com for tests (empty means production).
 	baseURL string
@@ -246,8 +268,11 @@ func (p *SSOProbeChecker) attempt(ctx context.Context, ssoToken string) Result {
 		status := 0
 		if handshake != nil {
 			status = handshake.StatusCode
-			_, _ = io.Copy(io.Discard, io.LimitReader(handshake.Body, 4<<10))
-			_ = handshake.Body.Close()
+			// Body 在部分握手失败形态下可能为 nil,读/关之前必须判空。
+			if handshake.Body != nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(handshake.Body, 4<<10))
+				_ = handshake.Body.Close()
+			}
 		}
 		return Result{Verdict: VerdictError, HTTPStatus: status, Error: fmt.Sprintf("dial gateway: %v", dialErr), CheckedAt: now}
 	}
@@ -337,12 +362,14 @@ type probeOutcome struct {
 	streamError      string
 }
 
-// runConversation drives one temporary mgw session: session.create, the user
-// turn inlined in response.create after conversation.attached, then classify
-// on the first decidable response.chunk. A healthy account emits the notetaker
-// header (or reasoning) before any answer text; a degraded account emits the
-// answer directly. Stream errors stay inconclusive (error verdict) so rate
-// limits can never masquerade as risk.
+// runConversation drives one temporary mgw session using the same turn
+// protocol as the live Web gateway: session.create, wait for both
+// session.created and conversation.attached, then split-send
+// conversation.item.create + an empty response.create. Classify on the
+// first decidable response.chunk. A healthy account emits a thinking
+// channel (notetaker / analysis / reasoning) before any answer text; a
+// degraded account emits the answer directly. Stream errors stay
+// inconclusive (error verdict) so rate limits can never masquerade as risk.
 func (p *SSOProbeChecker) runConversation(connection *websocket.Conn) Result {
 	now := time.Now().UTC()
 	outcome := &probeOutcome{}
@@ -384,7 +411,8 @@ func (p *SSOProbeChecker) runConversation(connection *websocket.Conn) Result {
 		return Result{Verdict: VerdictError, Error: fmt.Sprintf("send session.create: %v", err), CheckedAt: now}
 	}
 
-	sent := false
+	created, attached, sent := false, false, false
+	sessionID := ""
 	for {
 		var envelope map[string]any
 		if err := connection.ReadJSON(&envelope); err != nil {
@@ -394,32 +422,19 @@ func (p *SSOProbeChecker) runConversation(connection *websocket.Conn) Result {
 		}
 		event, _ := envelope["event"].(map[string]any)
 		eventType, _ := event["type"].(string)
-		sessionID, _ := envelope["session_id"].(string)
+		if sid, _ := envelope["session_id"].(string); strings.TrimSpace(sid) != "" {
+			sessionID = sid
+		}
 
 		switch eventType {
+		case "session.created":
+			created = true
+
 		case "conversation.attached":
-			if !sent {
-				sent = true
-				// Browser split-send style: user message inlined in response.create.
-				millis := time.Now().UnixMilli()
-				turn := map[string]any{
-					"session_id": sessionID,
-					"event": map[string]any{
-						"type":     "response.create",
-						"event_id": fmt.Sprintf("evt_resp_%d", millis),
-						"item": map[string]any{
-							"type": "message", "role": "user",
-							"x_grok": map[string]any{
-								// 32-hex client message id; any stable unique id works.
-								"client_message_id": fmt.Sprintf("%032x", millis),
-								"input_chunks":      []any{map[string]any{"text": map[string]any{"text": prompt}}},
-							},
-						},
-					},
-				}
-				writeDeadline()
-				if err := connection.WriteJSON(turn); err != nil {
-					return Result{Verdict: VerdictError, Error: fmt.Sprintf("send response.create: %v", err), CheckedAt: now}
+			attached = true
+			if sessionID == "" {
+				if conversation, ok := event["conversation"].(map[string]any); ok {
+					sessionID, _ = conversation["id"].(string)
 				}
 			}
 
@@ -439,18 +454,23 @@ func (p *SSOProbeChecker) runConversation(connection *websocket.Conn) Result {
 				continue
 			}
 			channel, _ := text["channel"].(string)
-			switch channel {
-			case channelNotetakerHeader:
-				outcome.notetakerHeaders++
+			switch {
+			case probeThinkingChannel(channel):
+				if strings.Contains(probeChannelName(channel), "NOTETAKER") {
+					outcome.notetakerHeaders++
+				} else {
+					outcome.reasoningChunks++
+				}
 				return outcome.finish(now) // decidable: healthy
-			case channelReasoning:
-				outcome.reasoningChunks++
-				return outcome.finish(now) // decidable: healthy
-			case channelAssistantText:
+			case probeAnswerChannel(channel):
 				if value, ok := text["text"].(string); ok {
 					outcome.answerText.WriteString(value)
 				}
-				return outcome.finish(now) // decidable: answered with no thinking
+				// 只有非空白答案文本才是 denied 证据:上游可能先推一个
+				// 空/空白 RESPONSE 再推 thinking,空白首包不能定罪。继续等。
+				if strings.TrimSpace(outcome.answerText.String()) != "" {
+					return outcome.finish(now) // decidable: answered with no thinking
+				}
 			}
 
 		case "response.grok.output":
@@ -477,7 +497,52 @@ func (p *SSOProbeChecker) runConversation(connection *websocket.Conn) Result {
 			outcome.streamError = "stream ended (" + eventType + ") before a decidable chunk"
 			return outcome.finish(now)
 		}
+		if created && attached && !sent {
+			sent = true
+			if strings.TrimSpace(sessionID) == "" {
+				return Result{Verdict: VerdictError, Error: "gateway session id missing after attach", CheckedAt: now}
+			}
+			writeDeadline()
+			if err := sendProbeTurn(connection, sessionID, prompt); err != nil {
+				return Result{Verdict: VerdictError, Error: err.Error(), CheckedAt: now}
+			}
+		}
 	}
+}
+
+// sendProbeTurn matches the live Web gateway: conversation.item.create
+// carrying the user message, then an empty response.create. Inlining the
+// item into response.create is a different dialect and omits thinking.
+func sendProbeTurn(connection *websocket.Conn, sessionID, prompt string) error {
+	millis := time.Now().UnixMilli()
+	item := map[string]any{
+		"session_id": sessionID,
+		"event": map[string]any{
+			"type":     "conversation.item.create",
+			"event_id": fmt.Sprintf("evt_msg_%d", millis),
+			"item": map[string]any{
+				"type": "message", "role": "user",
+				"x_grok": map[string]any{
+					"client_message_id": fmt.Sprintf("%032x", millis),
+					"input_chunks":      []any{map[string]any{"text": map[string]any{"text": prompt}}},
+				},
+			},
+		},
+	}
+	if err := connection.WriteJSON(item); err != nil {
+		return fmt.Errorf("send conversation.item.create: %v", err)
+	}
+	response := map[string]any{
+		"session_id": sessionID,
+		"event": map[string]any{
+			"type":     "response.create",
+			"event_id": fmt.Sprintf("evt_resp_%d", millis),
+		},
+	}
+	if err := connection.WriteJSON(response); err != nil {
+		return fmt.Errorf("send response.create: %v", err)
+	}
+	return nil
 }
 
 // finish classifies the accumulated outcome onto the shared Result shape.
@@ -492,7 +557,8 @@ func (o *probeOutcome) finish(checkedAt time.Time) Result {
 	case o.notetakerHeaders > 0 || o.reasoningChunks > 0:
 		result.Verdict = VerdictClean
 		result.BotFlagDetails = "sso probe thinking_ok: " + detail
-	case o.answerText.Len() > 0:
+	case strings.TrimSpace(o.answerText.String()) != "":
+		// 空白文本(纯空格/换行)不是作答证据:按 inconclusive 处理。
 		result.Verdict = VerdictDenied
 		answer := []rune(o.answerText.String())
 		if len(answer) > probeAnswerSnippets {

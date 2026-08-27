@@ -132,7 +132,21 @@ export function AccountNameCell({ account }: { account: AccountDTO }) {
                   <ShieldAlert className="size-3.5" />
                 </span>
               </TooltipTrigger>
-              <TooltipContent>{t("accounts.rscRiskTooltip")}</TooltipContent>
+              <TooltipContent>
+                {account.riskTrigger
+                  ? t("accounts.rscRiskTooltipDetail", {
+                      source: t(
+                        account.riskTrigger === "patrol"
+                          ? "accounts.rscRiskSourcePatrol"
+                          : account.riskTrigger === "manual"
+                            ? "accounts.rscRiskSourceManual"
+                            : "accounts.rscRiskSourceDegrade",
+                      ),
+                      time: account.riskCheckedAt ? ` · ${formatDateTime(account.riskCheckedAt, i18n.language)}` : "",
+                      detail: account.riskDetail ? ` · ${account.riskDetail}` : "",
+                    })
+                  : t("accounts.rscRiskTooltip")}
+              </TooltipContent>
             </Tooltip>
           </>
         ) : null}

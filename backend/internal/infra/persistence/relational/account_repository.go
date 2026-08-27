@@ -891,7 +891,7 @@ func (r *AccountRepository) LinkedBuildAccountIDs(ctx context.Context, webAccoun
 }
 
 // LinkedConsoleAccountIDs returns every Console account sharing a Web identity.
-// RSC denial flags the whole identity group; Console accounts are part of it.
+// SSO patrol denials fan out to this group; request-path attribution does not.
 func (r *AccountRepository) LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
 	if webAccountID == 0 {
 		return nil, nil
@@ -1392,6 +1392,10 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 		// risk_status 是长期风控标记：重新导入/令牌同步等 upsert 路径不得
 		// 用传入的新实体（无标记）清空它（外部复核发现）。
 		row.RiskStatus = existing.RiskStatus
+		row.RiskTrigger = existing.RiskTrigger
+		row.RiskOriginAccountID = existing.RiskOriginAccountID
+		row.RiskCheckedAt = existing.RiskCheckedAt
+		row.RiskDetail = existing.RiskDetail
 		row.Priority = existing.Priority
 		row.MaxConcurrent = existing.MaxConcurrent
 		row.MinimumRemaining = existing.MinimumRemaining
@@ -2293,10 +2297,31 @@ func (r *AccountRepository) UpdateQualityIdleCooldown(ctx context.Context, id ui
 // UpdateRiskStatus 只写 risk_status 列：归因路径由请求事件自动触发，必须
 // 避免 Get→全量 Save（会静默回滚并发的健康写/令牌刷新/启停写）。
 func (r *AccountRepository) UpdateRiskStatus(ctx context.Context, id uint64, status string) error {
+	attr := repository.RiskAttribution{Status: status}
+	if status != "" {
+		attr.Trigger = account.RiskTriggerManual
+	}
+	return r.UpdateRiskAttribution(ctx, id, attr)
+}
+
+func (r *AccountRepository) UpdateRiskAttribution(ctx context.Context, id uint64, attr repository.RiskAttribution) error {
 	if id == 0 {
 		return repository.ErrNotFound
 	}
-	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Update("risk_status", status)
+	fields := map[string]any{
+		"risk_status":            attr.Status,
+		"risk_trigger":           attr.Trigger,
+		"risk_origin_account_id": attr.OriginAccountID,
+		"risk_checked_at":        attr.CheckedAt,
+		"risk_detail":            attr.Detail,
+	}
+	if attr.Status == "" {
+		fields["risk_trigger"] = ""
+		fields["risk_origin_account_id"] = 0
+		fields["risk_checked_at"] = nil
+		fields["risk_detail"] = ""
+	}
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Updates(fields)
 	if result.Error != nil {
 		return mapError(result.Error)
 	}

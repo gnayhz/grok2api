@@ -74,12 +74,11 @@ func TestOversizedLineFailsOpen(t *testing.T) {
 	huge := "data: " + strings.Repeat("x", 1<<21) + "\n\n"
 	replay, verdict, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(huge)), qualityProtocolChat,
 		QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
+	if replay != nil {
+		defer replay.Close()
 	}
-	defer replay.Close()
-	if verdict != QualityDeliver {
-		t.Fatalf("verdict = %s, want deliver (fail-open on unparseable oversized line)", verdict)
+	if verdict == QualityDeliver && err == nil {
+		t.Fatalf("verdict = %s, oversized garbage must not fail-open", verdict)
 	}
 }
 

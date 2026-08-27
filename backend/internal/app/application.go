@@ -454,7 +454,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService, AccountRisk: riskHTTPAdapter{risk: riskService, accounts: accountService, db: database, logger: logger}})
 	logSecureCookiesHint(logger, cfg)
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
@@ -537,6 +537,8 @@ func accountRiskRuntime(cfg config.Config) risk.Config {
 		OnDenied:          rscCfg.OnDenied,
 		PatrolEnabled:     rscCfg.Patrol.Enabled,
 		PatrolInterval:    time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
+		PatrolTickEvery:   rscCfg.Patrol.Interval.Value(),
+		PatrolBatchSize:   rscCfg.Patrol.BatchSize,
 		ErrorRetry:        time.Hour,
 		BuildProbeEnabled: rscCfg.BuildProbeEnabled(),
 	}
@@ -578,26 +580,27 @@ func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig) string {
 // interval covers tens of thousands of accounts without bursts. Owned by
 // Run's background WaitGroup so shutdown joins it before the DB closes.
 func (a *Application) runAccountRiskPatrol(ctx context.Context) {
-	interval := 15 * time.Minute
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	query := relational.NewRiskRepository(a.database)
+	timer := time.NewTimer(a.accountRisk.PatrolTickEvery())
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 		// patrol.enabled 是运行时设置：关闭时本 tick 空转（任务常驻，切换免重启）。
 		if !a.accountRisk.PatrolEnabled() {
+			timer.Reset(a.accountRisk.PatrolTickEvery())
 			continue
 		}
 		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		patrolDue, errorRetryDue := a.accountRisk.PatrolCutoffs()
-		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, 50)
+		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, a.accountRisk.PatrolBatchSize())
 		if err != nil {
 			a.logger.Warn("account_risk_patrol_query_failed", "error", err.Error())
 			cancel()
+			timer.Reset(a.accountRisk.PatrolTickEvery())
 			continue
 		}
 		if len(due) > 0 {
@@ -605,7 +608,111 @@ func (a *Application) runAccountRiskPatrol(ctx context.Context) {
 			a.accountRisk.PatrolTick(patrolCtx, due)
 		}
 		cancel()
+		timer.Reset(a.accountRisk.PatrolTickEvery())
 	}
+}
+
+// PatrolRiskAccounts runs one PatrolTick over the given Web account IDs
+// using the live SSO probe. It force-enables attribution for the duration
+// of the call so a disabled runtime setting cannot no-op a one-shot.
+func (a *Application) PatrolRiskAccounts(ctx context.Context, ids []uint64) error {
+	if a == nil || a.accountRisk == nil {
+		return fmt.Errorf("account risk service not initialized")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	cfg := a.accountRisk.SnapshotConfig()
+	a.logger.Info("account_risk_patrol_oneshot", "ids", len(ids), "onDenied", cfg.OnDenied, "concurrency", cfg.Concurrency)
+	a.accountRisk.PatrolTickForced(ctx, ids)
+	return nil
+}
+
+// RunDuePatrol lists currently due Web identities and re-checks them with the
+// live SSO probe. Intended for the admin "run patrol now" action; it does not
+// require patrolEnabled (operator intent).
+func (a *Application) RunDuePatrol(ctx context.Context) (int, error) {
+	if a == nil {
+		return 0, fmt.Errorf("account risk service not initialized")
+	}
+	return runDuePatrol(ctx, a.database, a.accountRisk, a.logger)
+}
+
+func (a *Application) CheckAccount(ctx context.Context, id uint64) error {
+	if a == nil {
+		return fmt.Errorf("account risk service not initialized")
+	}
+	return a.AttributeRiskAccounts(ctx, []uint64{id})
+}
+
+type riskHTTPAdapter struct {
+	risk     *risk.Service
+	accounts *accountapp.Service
+	db       *relational.Database
+	logger   *slog.Logger
+}
+
+func (h riskHTTPAdapter) CheckAccount(ctx context.Context, id uint64) error {
+	if h.risk == nil || h.accounts == nil {
+		return fmt.Errorf("account risk service not initialized")
+	}
+	view, err := h.accounts.Get(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load account %d: %w", id, err)
+	}
+	h.risk.AttributeNowWithTrigger(ctx, view.Credential, account.RiskTriggerManual)
+	return nil
+}
+
+func (h riskHTTPAdapter) RunDuePatrol(ctx context.Context) (int, error) {
+	return runDuePatrol(ctx, h.db, h.risk, h.logger)
+}
+
+func runDuePatrol(ctx context.Context, db *relational.Database, riskSvc *risk.Service, logger *slog.Logger) (int, error) {
+	if riskSvc == nil {
+		return 0, fmt.Errorf("account risk service not initialized")
+	}
+	query := relational.NewRiskRepository(db)
+	patrolDue, errorRetryDue := riskSvc.PatrolCutoffs()
+	due, err := query.ListPatrolDue(ctx, account.ProviderWeb, patrolDue, errorRetryDue, riskSvc.PatrolBatchSize())
+	if err != nil {
+		return 0, err
+	}
+	if len(due) == 0 {
+		return 0, nil
+	}
+	cfg := riskSvc.SnapshotConfig()
+	if logger != nil {
+		logger.Info("account_risk_patrol_manual", "due", len(due), "onDenied", cfg.OnDenied, "concurrency", cfg.Concurrency)
+	}
+	riskSvc.PatrolTickForced(ctx, due)
+	return len(due), nil
+}
+
+// AttributeRiskAccounts runs one request-path attribution per account ID
+// (each account's own provider/channel). Build/Console stays channel-scoped;
+// a Web ID is an SSO-origin denial and fans out.
+func (a *Application) AttributeRiskAccounts(ctx context.Context, ids []uint64) error {
+	if a == nil || a.accountRisk == nil || a.accounts == nil {
+		return fmt.Errorf("account risk service not initialized")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	cfg := a.accountRisk.SnapshotConfig()
+	a.logger.Info("account_risk_attribute_oneshot", "ids", len(ids), "onDenied", cfg.OnDenied, "concurrency", cfg.Concurrency)
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		view, err := a.accounts.Get(ctx, id)
+		if err != nil {
+			return fmt.Errorf("load account %d: %w", id, err)
+		}
+		a.logger.Info("account_risk_attribute_oneshot_item", "account_id", id, "provider", string(view.Credential.Provider))
+		a.accountRisk.AttributeNowWithTrigger(ctx, view.Credential, account.RiskTriggerManual)
+	}
+	return nil
 }
 
 func maxBatchConcurrency(value config.BatchConfig) int {

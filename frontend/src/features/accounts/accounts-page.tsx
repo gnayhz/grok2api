@@ -58,6 +58,7 @@ import {
   resetAllAccountQuota,
   refreshAccountsTokens,
   refreshAccountToken,
+  checkAccountRisk,
   refreshAccountQuota,
   refreshAllAccountBilling,
   refreshAllAccountTokens,
@@ -438,6 +439,15 @@ export function AccountsPage() {
     onSuccess: () => {
       invalidateAccountData();
       toast.success(t("accounts.cooldownCleared"));
+    },
+    onError: showError,
+  });
+
+  const riskCheckMutation = useMutation({
+    mutationFn: checkAccountRisk,
+    onSuccess: (account) => {
+      invalidateAccountData();
+      toast.success(account.riskStatus === "rsc_denied" ? t("accounts.rscRisk") : t("accounts.statusActive"));
     },
     onError: showError,
   });
@@ -1662,8 +1672,20 @@ export function AccountsPage() {
               <div className="space-y-1">
                 <Label htmlFor="account-risk-flagged">{t("accounts.rscRiskFlag.label")}</Label>
                 <p className="text-xs text-muted-foreground">{t("accounts.rscRiskFlag.description")}</p>
+                {editing?.riskTrigger ? (
+                  <p className="text-xs text-rose-700 dark:text-rose-300">
+                    {t(`accounts.rscRiskSource${editing.riskTrigger === "patrol" ? "Patrol" : editing.riskTrigger === "manual" ? "Manual" : "Degrade"}`)}
+                    {editing.riskCheckedAt ? ` · ${formatDateTime(editing.riskCheckedAt, i18n.language)}` : ""}
+                    {editing.riskDetail ? ` · ${editing.riskDetail}` : ""}
+                  </p>
+                ) : null}
               </div>
-              <Switch id="account-risk-flagged" checked={riskFlagged} onCheckedChange={(checked) => form.setValue("riskFlagged", checked, { shouldDirty: true })} />
+              <div className="flex shrink-0 items-center gap-2">
+                <Button type="button" variant="outline" size="sm" disabled={!editing || riskCheckMutation.isPending} onClick={() => editing && riskCheckMutation.mutate(editing.id)}>
+                  {riskCheckMutation.isPending ? <Spinner /> : null}{t("settings.accountRisk.riskCheckNow")}
+                </Button>
+                <Switch id="account-risk-flagged" checked={riskFlagged} onCheckedChange={(checked) => form.setValue("riskFlagged", checked, { shouldDirty: true })} />
+              </div>
             </div>
             {editing?.provider === "grok_build" ? (
               <div className="space-y-4">

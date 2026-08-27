@@ -13,7 +13,7 @@ func TestDecryptFailureVerdictStampsOrigin(t *testing.T) {
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	service := New(baseTestConfig(), accounts, store, &fakeChecker{}, nil)
 
-	verdict := service.checkNow(context.Background(), 90, 91)
+	verdict := service.checkNow(context.Background(), 90, 91, "")
 
 	if verdict.Verdict != VerdictError {
 		t.Fatalf("verdict = %s, want error", verdict.Verdict)

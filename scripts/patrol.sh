@@ -70,7 +70,9 @@ if [ -n "${TOKEN:-}" ]; then
   say "disabled accounts (info)"
   echo "${disabled:-?}（对照换血基线 30，激增需溯源）"
   # --- 6) 工具密钥残留（r34 教训：删除操作必须验证，探针密钥不许滞留）
-  residue=$(curl -sf -m 5 -H "Authorization: Bearer $TOKEN" "$BASE/api/admin/v1/client-keys?page=1&pageSize=50" 2>/dev/null \
+  # pageSize=200 与 delete-probe-keys 的枚举上限对齐:残留检查只扫第一页,
+  # 密钥多于 50 条时探针密钥会静默漏检。
+  residue=$(curl -sf -m 5 -H "Authorization: Bearer $TOKEN" "$BASE/api/admin/v1/client-keys?page=1&pageSize=200" 2>/dev/null \
     | PATROL_TOOL_PATTERNS='probe,drill,load-test,smoke-script' python3 -c 'import sys,json,os
 patterns = os.environ.get("PATROL_TOOL_PATTERNS", "").split(",")
 names = [k.get("name", "") for k in json.load(sys.stdin)["data"]["items"]]

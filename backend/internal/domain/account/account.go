@@ -134,6 +134,13 @@ func NormalizeHealthMarker(value string) string {
 // RiskStatusRSCDenied 标记 RSC 判定注册风控的账号：保持启用但调度永久跳过。
 const RiskStatusRSCDenied = "rsc_denied"
 
+// 风控触发来源：请求路径降智归因 / SSO 主动巡检 / 管理员手动标记。
+const (
+	RiskTriggerDegrade = "degrade"
+	RiskTriggerPatrol  = "patrol"
+	RiskTriggerManual  = "manual"
+)
+
 // EgressAssignmentMode 表示账号出口节点的维护方式。手工绑定绝不会被
 // 自动均衡任务迁移，自动绑定才允许在健康或容量变化时重新分配。
 // (上游账号-出口绑定体系;本分支的池路由之外,仓储层仍保留该绑定面。)
@@ -186,12 +193,18 @@ type Credential struct {
 	LastError        string
 	// RiskStatus 为空表示无长期风险标记；rsc_denied 表示 RSC 判定注册风控，
 	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态）。
-	RiskStatus      string
-	LastUsedAt      *time.Time
-	ObservedModel   string
-	ObservedModelAt *time.Time
-	WebTier         WebTier
-	WebTierSyncedAt *time.Time
+	RiskStatus string
+	// RiskTrigger 记录打标来源：degrade（请求降智）/ patrol（主动巡检）/ manual。
+	RiskTrigger string
+	// RiskOriginAccountID 触发判定的账号（SSO 巡检时为 Web 身份，Build 降智时为该 Build）。
+	RiskOriginAccountID uint64
+	RiskCheckedAt       *time.Time
+	RiskDetail          string
+	LastUsedAt          *time.Time
+	ObservedModel       string
+	ObservedModelAt     *time.Time
+	WebTier             WebTier
+	WebTierSyncedAt     *time.Time
 	// EgressIdentity 是不含凭据和个人信息的稳定出口身份。
 	// 关联到同一 Web 账号的 Build/Console 只共享该值，不共享任何运行状态。
 	EgressIdentity string

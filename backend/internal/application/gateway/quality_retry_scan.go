@@ -44,9 +44,11 @@ type qualityScanState struct {
 	usage           Usage
 	responseID      string
 	terminal        bool
-	// oversizedLine 标记出现过 >1MiB 的单行：内容无法可靠解析，按与缓冲
-	// 上限一致的 fail-open 处理。
+	// oversizedLine 保留给决策表/旧测试：扫描器不再用它 fail-open。
 	oversizedLine bool
+	// skipUntilNewline 丢弃当前超长 SSE 行的剩余分片（换行到达前的
+	// encrypted_content 等），避免 1MiB 未完成行把降智流 fail-open。
+	skipUntilNewline bool
 	// sawDataEvent 标记已解析到至少一个 SSE data 事件（任意类型）。供首事件
 	// 截止使用：keepalive 注释不算——降智排队期间上游只发注释或零字节。
 	sawDataEvent bool
@@ -308,13 +310,23 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 	}
 	state.pending = append(state.pending, chunk...)
 	for {
+		if state.skipUntilNewline {
+			index := bytes.IndexByte(state.pending, '\n')
+			if index < 0 {
+				state.pending = nil
+				return
+			}
+			state.pending = state.pending[index+1:]
+			state.skipUntilNewline = false
+			continue
+		}
 		index := bytes.IndexByte(state.pending, '\n')
 		if index < 0 {
 			if len(state.pending) > 1<<20 {
-				// 超长单行无法可靠解析：标记 fail-open（与 4MiB 缓冲上限同
-				// 语义），而不是丢弃缓冲——丢弃会丢掉这条行内可能存在的推理
-				// 证据，把健康流误判为降智。
-				state.oversizedLine = true
+				// 换行前已超过 1MiB：生产 grok-4.6 xhigh 降智是
+				// encrypted_content 单行。丢弃本行剩余分片并继续扫后续事件。
+				classifyOversizedQualityLine(state, state.pending)
+				state.skipUntilNewline = true
 				state.pending = nil
 			}
 			return
@@ -337,6 +349,29 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 			continue
 		}
 		observeQualityPayload(state, payload)
+	}
+}
+
+// classifyOversizedQualityLine 处理换行前已超过 1MiB 的 SSE 前缀。
+// 生产 2026-08-27：grok-4.6 xhigh 降智在 output_item.done 上推数 MiB
+// encrypted_content、零可见思考；旧 fail-open 把后续答案原样交给客户端。
+// 思考增量不会到 1MiB，超长行按类型分流后丢掉本行。
+func classifyOversizedQualityLine(state *qualityScanState, line []byte) {
+	if state == nil || len(line) == 0 {
+		return
+	}
+	if bytes.Contains(line, []byte("encrypted_content")) {
+		return
+	}
+	if bytes.Contains(line, []byte("reasoning_text.delta")) ||
+		bytes.Contains(line, []byte("reasoning_summary_text.delta")) ||
+		bytes.Contains(line, []byte("thinking_delta")) ||
+		bytes.Contains(line, []byte("reasoning_content")) {
+		state.hasThinking = true
+		return
+	}
+	if bytes.Contains(line, []byte("output_text.delta")) {
+		state.visibleRunes += 32
 	}
 }
 
@@ -572,7 +607,12 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 			if len(result.data) > 0 {
 				if held.Len()+len(result.data) > qualityHoldMaxBufferBytes {
 					_, _ = held.Write(result.data)
-					return newPrefixReplay(&held, pump), QualityDeliver, state.usage, state.responseID, nil
+					ObserveQualityChunk(&state, result.data)
+					if state.hasThinking {
+						return newPrefixReplay(&held, pump), QualityDeliver, state.usage, state.responseID, nil
+					}
+					// 无思考证据的超大前缀几乎一定是降智密文堆，扣留而不是放行。
+					return newPrefixReplay(&held, pump), QualityWithhold, state.usage, state.responseID, nil
 				}
 				_, _ = held.Write(result.data)
 				ObserveQualityChunk(&state, result.data)

@@ -228,6 +228,11 @@ export const settingsSchema = z.object({
     onDenied: z.enum(["flag", "disable", "markOnly"]),
     patrolEnabled: z.boolean(),
     patrolBucketDays: z.number().int().min(7).max(90),
+    patrolInterval: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 60 && seconds <= 6 * 3600;
+    }),
+    patrolBatchSize: z.number().int().min(1).max(200),
     buildProbeEnabled: z.boolean(),
   }),
   // 出口换 IP 轮换调度。边界与后端 EgressRotationConfig 校验对齐。
@@ -350,6 +355,8 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       onDenied: accountRisk.onDenied === "disable" || accountRisk.onDenied === "markOnly" ? accountRisk.onDenied : "flag",
       patrolEnabled: accountRisk.patrolEnabled,
       patrolBucketDays: accountRisk.patrolBucketDays,
+      patrolInterval: parseDuration(accountRisk.patrolInterval || "15m"),
+      patrolBatchSize: accountRisk.patrolBatchSize || 50,
       buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
     },
   };
@@ -435,6 +442,8 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       onDenied: config.accountRisk.onDenied,
       patrolEnabled: config.accountRisk.patrolEnabled,
       patrolBucketDays: config.accountRisk.patrolBucketDays,
+      patrolInterval: formatDuration(config.accountRisk.patrolInterval),
+      patrolBatchSize: config.accountRisk.patrolBatchSize,
       buildProbeEnabled: config.accountRisk.buildProbeEnabled,
     },
   };

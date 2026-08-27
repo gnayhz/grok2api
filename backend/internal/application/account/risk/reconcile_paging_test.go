@@ -25,7 +25,7 @@ func (p *pagedStore) DeleteCleanVerdictsExceptSources(_ context.Context, _ ...st
 	return 0, nil
 }
 
-func (p *pagedStore) MostRecentCleanVerdict(_ context.Context, _ string) (uint64, bool, error) {
+func (p *pagedStore) MostRecentCleanVerdict(_ context.Context, _ string, _ time.Duration) (uint64, bool, error) {
 	return 0, false, nil
 }
 
@@ -100,6 +100,9 @@ func (c *countingAccounts) LinkedConsoleAccountIDs(_ context.Context, webID uint
 }
 func (c *countingAccounts) SetAccountEnabled(_ context.Context, id uint64, enabled bool, reason string) error {
 	return nil
+}
+func (c *countingAccounts) SetAccountRiskAttribution(ctx context.Context, id uint64, flagged bool, trigger string, origin uint64, detail string, checkedAt time.Time) error {
+	return c.SetAccountRiskStatus(ctx, id, flagged)
 }
 func (c *countingAccounts) SetAccountRiskStatus(_ context.Context, id uint64, flagged bool) error {
 	c.mu.Lock()

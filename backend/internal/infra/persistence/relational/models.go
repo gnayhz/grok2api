@@ -46,10 +46,14 @@ type accountModel struct {
 	LastError        string `gorm:"size:512;check:chk_accounts_last_error,length(last_error) <= 512"`
 	// RiskStatus 标记注册风控等长期风险态（当前仅 rsc_denied）。与 enabled
 	// 解耦：账号本身可用，但调度必须跳过，直到人工解除。
-	RiskStatus      string `gorm:"size:32;not null;default:''"`
-	LastUsedAt      *time.Time
-	ObservedModel   string `gorm:"size:255;check:chk_accounts_observed_model,length(observed_model) <= 255"`
-	ObservedModelAt *time.Time
+	RiskStatus          string `gorm:"size:32;not null;default:''"`
+	RiskTrigger         string `gorm:"size:16;not null;default:''"`
+	RiskOriginAccountID uint64 `gorm:"not null;default:0"`
+	RiskCheckedAt       *time.Time
+	RiskDetail          string `gorm:"size:512;not null;default:''"`
+	LastUsedAt          *time.Time
+	ObservedModel       string `gorm:"size:255;check:chk_accounts_observed_model,length(observed_model) <= 255"`
+	ObservedModelAt     *time.Time
 	// BuildAPIFallback 仅对 grok_build 有意义：XAI 推理回退标记；其他 Provider 保持 false。
 	BuildAPIFallback bool `gorm:"not null;default:false"`
 	// BuildRouteMode 仅控制 grok_build 推理地址；其它 Provider 固定 auto。
@@ -644,6 +648,8 @@ type accountRiskVerdictModel struct {
 	// 降智产生的 verdict 重放后果时只打到该 Build,不连坐 Web 身份本身。
 	// 0 = 旧数据,重放退回 webID。
 	OriginAccountID uint64 `gorm:"not null;default:0"`
+	// Trigger 记录判定入口：degrade / patrol / manual。空=升级前旧行。
+	Trigger string `gorm:"size:16;not null;default:''"`
 }
 
 func (accountRiskVerdictModel) TableName() string { return "account_risk_verdicts" }

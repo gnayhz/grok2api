@@ -64,7 +64,7 @@ func TestCheckNowStampsOriginAccount(t *testing.T) {
 	checker := &fakeChecker{result: deniedResult()}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
 
-	verdict := service.checkNow(context.Background(), 90, 91)
+	verdict := service.checkNow(context.Background(), 90, 91, "")
 
 	if verdict.OriginAccountID != 91 {
 		t.Fatalf("verdict.OriginAccountID = %d, want 91", verdict.OriginAccountID)

@@ -48,6 +48,8 @@ type AccountRiskConfig struct {
 	OnDenied         string
 	PatrolEnabled    bool
 	PatrolBucketDays int
+	PatrolInterval   time.Duration
+	PatrolBatchSize  int
 	// BuildProbeEnabled gates the Build-native differential fallback for
 	// unlinked Build accounts. Pointer semantics: nil (legacy payloads)
 	// inherits the file baseline.

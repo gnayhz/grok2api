@@ -66,6 +66,13 @@ type Dependencies struct {
 	Settings     *settingsapp.Service
 	Egress       *egressapp.Service
 	Updates      *updatecheckapp.Service
+	AccountRisk  AccountRiskActions
+}
+
+// AccountRiskActions is the admin risk-check / patrol-run surface.
+type AccountRiskActions interface {
+	CheckAccount(ctx context.Context, id uint64) error
+	RunDuePatrol(ctx context.Context) (int, error)
 }
 
 type ReadinessComponent struct {
@@ -153,14 +160,18 @@ func New(deps Dependencies) *gin.Engine {
 	adminProtected := adminRoot.Group("")
 	adminProtected.Use(middleware.AdminAuth(deps.AdminAuth))
 	authHandler.RegisterAuthenticated(adminProtected)
-	accounthttp.NewHandler(deps.Accounts, deps.AccountSync, deps.Logger).Register(adminProtected)
+	accountHandler := accounthttp.NewHandler(deps.Accounts, deps.AccountSync, deps.Logger)
+	accountHandler.SetRiskChecker(deps.AccountRisk)
+	accountHandler.Register(adminProtected)
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
 	auditHandler := audithttp.NewHandler(deps.Audits)
 	auditHandler.Register(adminProtected)
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
 	mediaHandler.RegisterAdmin(adminProtected)
-	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
+	settingsHandler := settingshttp.NewHandler(deps.Settings)
+	settingsHandler.SetPatrolRunner(deps.AccountRisk)
+	settingsHandler.Register(adminProtected)
 	egressHandler := egresshttp.NewHandler(deps.Egress, deps.Logger)
 	egressHandler.Register(adminProtected)
 	guardstatshttp.NewHandler().Register(adminProtected)

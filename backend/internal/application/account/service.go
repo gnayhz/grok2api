@@ -4750,7 +4750,7 @@ func (s *Service) LinkedBuildAccountIDs(ctx context.Context, webAccountID uint64
 }
 
 // LinkedConsoleAccountIDs lists Console accounts sharing one Web identity.
-// RSC attribution flags the whole identity group, Console included.
+// SSO patrol denials fan out to this group; request-path attribution does not.
 func (s *Service) LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
 	linked, ok := s.accounts.(interface {
 		LinkedConsoleAccountIDs(context.Context, uint64) ([]uint64, error)
@@ -4820,6 +4820,34 @@ func (s *Service) SetAccountRiskStatus(ctx context.Context, id uint64, flagged b
 		status = accountdomain.RiskStatusRSCDenied
 	}
 	if err := s.accounts.UpdateRiskStatus(ctx, id, status); err != nil {
+		return mapRepositoryError(err)
+	}
+	return nil
+}
+
+func (s *Service) SetAccountRiskAttribution(ctx context.Context, id uint64, flagged bool, trigger string, originAccountID uint64, detail string, checkedAt time.Time) error {
+	status := ""
+	var at *time.Time
+	if flagged {
+		status = accountdomain.RiskStatusRSCDenied
+		if trigger == "" {
+			trigger = accountdomain.RiskTriggerDegrade
+		}
+		if !checkedAt.IsZero() {
+			t := checkedAt.UTC()
+			at = &t
+		}
+	} else {
+		trigger = ""
+		originAccountID = 0
+		detail = ""
+	}
+	if len(detail) > 512 {
+		detail = detail[:512]
+	}
+	if err := s.accounts.UpdateRiskAttribution(ctx, id, repository.RiskAttribution{
+		Status: status, Trigger: trigger, OriginAccountID: originAccountID, CheckedAt: at, Detail: detail,
+	}); err != nil {
 		return mapRepositoryError(err)
 	}
 	return nil

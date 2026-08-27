@@ -25,11 +25,22 @@ type BuildThinkingProbeResult struct {
 	Details string
 }
 
+// Build 探针 outcome 词汇(导出供装配层映射):clean / degraded / error /
+// unconfigured。degraded 是网关侧词汇(两路差分都降智),风险侧定罪词是
+// denied——装配层必须显式翻译,曾有默认分支把它当未知词改写成 error,
+// 导致差分定罪链路整体失效。
 const (
-	buildProbeClean        = "clean"
-	buildProbeDegraded     = "degraded"
-	buildProbeError        = "error"
-	buildProbeUnconfigured = "unconfigured"
+	BuildProbeOutcomeClean        = "clean"
+	BuildProbeOutcomeDegraded     = "degraded"
+	BuildProbeOutcomeError        = "error"
+	BuildProbeOutcomeUnconfigured = "unconfigured"
+)
+
+const (
+	buildProbeClean        = BuildProbeOutcomeClean
+	buildProbeDegraded     = BuildProbeOutcomeDegraded
+	buildProbeError        = BuildProbeOutcomeError
+	buildProbeUnconfigured = BuildProbeOutcomeUnconfigured
 )
 
 const buildProbePrompt = "Reply with the single digit 1 and nothing else."
@@ -166,8 +177,13 @@ func (s *Service) buildProbeAttempt(ctx context.Context, adapter provider.Respon
 		return buildProbeError, peekErr.Error()
 	case verdict == QualityWithhold:
 		return buildProbeDegraded, "withheld: no thinking evidence"
-	default:
+	case verdict == QualityDeliver:
+		// 只有真实思考证据(或与其同判的 oversized-line fail-open)算 clean。
 		return buildProbeClean, ""
+	default:
+		// QualityWait 等不可判定形态:绝不能当 clean 落库(会洗掉降智嫌疑),
+		// 也不能当 degraded(无证据不定罪)——按探针纪律记 error。
+		return buildProbeError, "inconclusive quality verdict: " + string(verdict)
 	}
 }
 

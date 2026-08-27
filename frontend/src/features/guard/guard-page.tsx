@@ -1,5 +1,7 @@
+import { useMutation } from "@tanstack/react-query";
 import { BarChart3, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 import { Controller } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
@@ -11,6 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { GuardStatsPanel } from "@/features/guard/guard-stats-panel";
+import { runAccountRiskPatrol } from "@/features/settings/settings-api";
 import { DurationInput, SettingsField, SettingsPane, SettingsSection } from "@/features/settings/settings-ui";
 import { useSettings } from "@/features/settings/use-settings";
 import { ErrorState } from "@/shared/components/data-state";
@@ -24,6 +27,15 @@ export function GuardPage() {
   const { t } = useTranslation();
   const { form, settingsQuery, updateMutation, resetDefaultsMutation, reset } = useSettings();
   const [resetDefaultsConfirm, setResetDefaultsConfirm] = useState(false);
+  const patrolMutation = useMutation({
+    mutationFn: runAccountRiskPatrol,
+    onSuccess: (result) => {
+      toast.success(t("settings.accountRisk.patrolRunQueued", { count: result.due }));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message);
+    },
+  });
 
   if (settingsQuery.isError) {
     return <ErrorState message={settingsQuery.error.message} onRetry={() => void settingsQuery.refetch()} />;
@@ -135,7 +147,12 @@ export function GuardPage() {
           </SettingsPane>
 
           <SettingsPane value="accountRisk">
-          <SettingsSection title={t("settings.accountRisk.title")}>
+          <SettingsSection title={t("settings.accountRisk.title")} action={
+            <Button type="button" variant="outline" size="sm" disabled={loading || patrolMutation.isPending} onClick={() => patrolMutation.mutate()}>
+              {patrolMutation.isPending ? <Spinner /> : <RefreshCw />}
+              {t("settings.accountRisk.patrolRunNow")}
+            </Button>
+          }>
             <div className="space-y-0">
               <SettingsField controlId="account-risk-enabled" className="sm:col-span-2" label={t("settings.accountRisk.enabled")} description={t("settings.accountRisk.enabledHelp")}><Controller control={form.control} name="accountRisk.enabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="account-risk-enabled" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
               <SettingsField controlId="account-risk-method" label={t("settings.accountRisk.method")} description={t("settings.accountRisk.methodHelp")} error={form.formState.errors.accountRisk?.method?.message}>
@@ -164,6 +181,8 @@ export function GuardPage() {
               <SettingsField controlId="account-risk-build-probe" className="sm:col-span-2" label={t("settings.accountRisk.buildProbeEnabled")} description={t("settings.accountRisk.buildProbeEnabledHelp")}><Controller control={form.control} name="accountRisk.buildProbeEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="account-risk-build-probe" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
               <SettingsField controlId="account-risk-patrol-enabled" className="sm:col-span-2" label={t("settings.accountRisk.patrolEnabled")} description={t("settings.accountRisk.patrolEnabledHelp")}><Controller control={form.control} name="accountRisk.patrolEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="account-risk-patrol-enabled" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
               <SettingsField controlId="account-risk-patrol-days" label={t("settings.accountRisk.patrolBucketDays")} description={t("settings.accountRisk.patrolBucketDaysHelp")} error={form.formState.errors.accountRisk?.patrolBucketDays?.message}><Input id="account-risk-patrol-days" type="number" min={7} max={90} {...form.register("accountRisk.patrolBucketDays", { valueAsNumber: true })} /></SettingsField>
+              <SettingsField controlId="account-risk-patrol-interval" label={t("settings.accountRisk.patrolInterval")} description={t("settings.accountRisk.patrolIntervalHelp")} error={form.formState.errors.accountRisk?.patrolInterval?.message}><Controller control={form.control} name="accountRisk.patrolInterval" render={({ field }) => <DurationInput id="account-risk-patrol-interval" value={field.value} onChange={field.onChange} />} /></SettingsField>
+              <SettingsField controlId="account-risk-patrol-batch" label={t("settings.accountRisk.patrolBatchSize")} description={t("settings.accountRisk.patrolBatchSizeHelp")} error={form.formState.errors.accountRisk?.patrolBatchSize?.message}><Input id="account-risk-patrol-batch" type="number" min={1} max={200} {...form.register("accountRisk.patrolBatchSize", { valueAsNumber: true })} /></SettingsField>
             </div>
           </SettingsSection>
           </SettingsPane>

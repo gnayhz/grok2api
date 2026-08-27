@@ -403,10 +403,14 @@ identity. The check transport is selected by `method` (restart to apply):
 - **homepage (rollback only)**: the legacy grok.com RSC payload parse, dead since
   the payload change.
 
-- **denied/flagged**: the verdict is cached permanently and consequences are
-  **channel-scoped** - only the account that actually degraded gets `rsc_denied`
-  / disabled (flag by default; disable / markOnly available); other channels of the
-  identity group are never cascaded. Flagged accounts stay enabled but are permanently
+- **denied/flagged**: the verdict is cached permanently. Request-path attribution is
+  **channel-scoped** — only the account that actually degraded gets `rsc_denied`
+  / disabled (flag by default; disable / markOnly available); a Build degrade does not
+  cascade onto SSO. **Exception: an SSO-identity denial** (periodic patrol, or a
+  Web-channel degrade whose probe returns denied) fans out to the whole identity
+  group (Web/Build/Console), because a flagged SSO identity can no longer run the
+  probe that later Build/Console degrades need, leaving those channels stuck in
+  cooldown. Flagged accounts stay enabled but are permanently
   excluded from scheduling until an operator clears the flag in the admin UI. The probe
   carries a channel-vocabulary breaker: a denied streak with zero clean witnesses is
   suppressed and self-heals by re-probing the most recent clean identity, so a grok.com

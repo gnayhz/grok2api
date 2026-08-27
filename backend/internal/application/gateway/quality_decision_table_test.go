@@ -13,14 +13,14 @@ func TestClassifyQualityHoldOversizedFailOpen(t *testing.T) {
 		want QualityVerdict
 	}{
 		{
-			name: "oversized alone delivers (fail-open)",
+			name: "oversized alone waits",
 			sig:  QualityStreamSignals{OversizedLine: true},
-			want: QualityDeliver,
+			want: QualityWait,
 		},
 		{
-			name: "oversized with large visible still delivers (no guessing)",
+			name: "oversized with large visible withholds",
 			sig:  QualityStreamSignals{OversizedLine: true, VisibleTokens: 500, Terminal: true},
-			want: QualityDeliver,
+			want: QualityWithhold,
 		},
 		{
 			name: "oversized does not outrank real thinking",
@@ -28,9 +28,9 @@ func TestClassifyQualityHoldOversizedFailOpen(t *testing.T) {
 			want: QualityDeliver,
 		},
 		{
-			name: "zero-output oversized also delivers",
+			name: "zero-output oversized waits",
 			sig:  QualityStreamSignals{OversizedLine: true, VisibleTokens: 0},
-			want: QualityDeliver,
+			want: QualityWait,
 		},
 	}
 	for _, tc := range cases {

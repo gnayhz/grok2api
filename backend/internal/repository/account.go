@@ -20,6 +20,16 @@ type AccountUpsertResult struct {
 	Created bool
 }
 
+// RiskAttribution is the column-targeted write for long-term risk flags plus
+// provenance (trigger/origin/detail). Empty Status clears the flag and meta.
+type RiskAttribution struct {
+	Status          string
+	Trigger         string
+	OriginAccountID uint64
+	CheckedAt       *time.Time
+	Detail          string
+}
+
 // BuildBotFlagCredential is the minimal encrypted credential projection used to
 // rebuild persisted Build bot-risk metadata outside the request path.
 type BuildBotFlagCredential struct {
@@ -150,8 +160,10 @@ type AccountRepository interface {
 	UpdateObservedModel(ctx context.Context, id uint64, model string, observedAt time.Time) error
 	UpdateHealth(ctx context.Context, id uint64, provider account.Provider, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error
 	// UpdateRiskStatus 定向写入长期风控标记列（不走全量 Save，避免覆盖并发
-	// 健康写/令牌刷新/启停写）。
+	// 健康写/令牌刷新/启停写）。清标时同时清空 trigger/origin/detail。
 	UpdateRiskStatus(ctx context.Context, id uint64, status string) error
+	// UpdateRiskAttribution 写入风控标记及来源元数据（巡检/降智/人工）。
+	UpdateRiskAttribution(ctx context.Context, id uint64, attr RiskAttribution) error
 	// UpdateQualityIdleCooldown 仅写 idle 冷却两列（marker+until），不动
 	// failure_count——避免快照回写覆盖并发计数。
 	UpdateQualityIdleCooldown(ctx context.Context, id uint64, provider account.Provider, until time.Time) error

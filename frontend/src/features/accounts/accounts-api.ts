@@ -86,6 +86,11 @@ export type AccountDTO = {
   buildBotFlagged: boolean;
   /** Long-term risk flag on the account itself (e.g. rsc_denied = RSC registration risk). */
   riskStatus?: string;
+  /** degrade = request-path attribution, patrol = SSO patrol, manual = operator. */
+  riskTrigger?: "degrade" | "patrol" | "manual" | string;
+  riskOriginAccountId?: string;
+  riskCheckedAt?: string;
+  riskDetail?: string;
   /** Numeric bot_flag_source/bfs claim when risk-flagged: 1 or 2. */
   buildBotFlagSource?: number;
   modelSyncFailed?: boolean;
@@ -195,7 +200,7 @@ const accountValidator = hasShape({
   id: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), authType: isOneOf("oauth", "sso"), webTier: isOptional(isOneOf("auto", "basic", "super", "heavy")),
   webTierSyncedAt: isOptional(isString), nsfwEnabledAt: isOptional(isString), termsAcceptedAt: isOptional(isString), name: isString, email: isOptional(isString), userId: isOptional(isString), teamId: isOptional(isString),
   enabled: isBoolean, authStatus: isOneOf("active", "reauthRequired"), expiresAt: isOptional(isString), refreshable: isBoolean, cloudflareCookieConfigured: isBoolean,
-  buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
+  buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), riskTrigger: isOptional(isString), riskOriginAccountId: isOptional(isString), riskCheckedAt: isOptional(isString), riskDetail: isOptional(isString), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
   lastRefreshErrorStatus: isOptional(isNumber), lastRefreshErrorCode: isOptional(isString), lastRefreshErrorMessage: isOptional(isString), lastRefreshErrorResponse: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
   failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), enabledDoesNotClearCooldown: isOptional(isBoolean), lastUsedAt: isOptional(isString),
   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")), linkedAccounts: isOptional(isArrayOf(linkedAccountValidator)),
@@ -310,6 +315,10 @@ export function refreshAccountBilling(id: string): Promise<BillingDTO> {
 
 export function refreshAccountToken(id: string): Promise<AccountDTO> {
   return apiRequest(`/api/admin/v1/accounts/${id}/refresh-token`, { method: "POST" }, decodeAccount);
+}
+
+export function checkAccountRisk(id: string): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/risk-check`, { method: "POST" }, decodeAccount);
 }
 
 /** Manual operator escape hatch: unconditionally lift the request-path cooldown

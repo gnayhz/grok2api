@@ -283,8 +283,10 @@ accountRisk:
     buildProbe:
       enabled: false
     patrol:
-      enabled: false      # clean 账号低频巡检（每 15 分钟一批 50 个）
+      enabled: false      # clean 账号低频巡检
       bucketDays: 30      # clean 结论的有效期（7-90 天）
+      interval: 15m       # 巡检循环间隔（1m-6h，管理后台可改）
+      batchSize: 50       # 每个周期最多复查的到期身份数（1-200）
 
 # 新建客户端 Key 的默认限流值（管理端创建界面仍可逐 Key 覆盖）。
 clientKeyDefaults:

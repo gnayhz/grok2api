@@ -43,17 +43,31 @@ var _ risk.BuildProber = buildProberAdapter{}
 
 func (a buildProberAdapter) ProbeBuildThinking(ctx context.Context, accountID, degradedNodeID uint64) risk.BuildProbeResult {
 	result := a.Gateway.ProbeBuildThinking(ctx, accountID, degradedNodeID)
-	verdict := result.Outcome
-	switch result.Outcome {
-	case "clean", "denied", "error", "unconfigured":
-	default:
-		verdict = "error"
-	}
 	return risk.BuildProbeResult{
-		Verdict:   verdict,
+		Verdict:   buildProbeOutcomeVerdict(result.Outcome),
 		Error:     result.Reason,
 		Details:   result.Details,
 		CheckedAt: time.Now().UTC(),
+	}
+}
+
+// buildProbeOutcomeVerdict 翻译网关 Build 探针 outcome 到风险侧定罪词汇。
+// 关键映射:网关 degraded(双路差分都降智)= 风险 denied(定罪)。此前这里
+// 只白名单四个词而 degraded 不在其中,落入 default 被改写成 error,差分
+// 定罪链路整体失效(risk 层单测用 fake 注入 denied,测不到该装配缺口)。
+// 未知词仍 fail-safe 到 error:探针只允许产生结论或不结论,绝不猜。
+func buildProbeOutcomeVerdict(outcome string) string {
+	switch outcome {
+	case gateway.BuildProbeOutcomeClean:
+		return risk.BuildProbeClean
+	case gateway.BuildProbeOutcomeDegraded:
+		return risk.BuildProbeDenied
+	case gateway.BuildProbeOutcomeError:
+		return risk.BuildProbeError
+	case gateway.BuildProbeOutcomeUnconfigured:
+		return risk.BuildProbeUnconfigured
+	default:
+		return risk.BuildProbeError
 	}
 }
 
@@ -78,7 +92,7 @@ func (s riskRelationalStore) GetRiskVerdict(ctx context.Context, accountID uint6
 	return risk.StoredVerdict{
 		Verdict: verdict.Verdict, BotFlagSrc: verdict.BotFlagSrc, BotFlagDtl: verdict.BotFlagDtl,
 		RiskScore: verdict.RiskScore, HTTPStatus: verdict.HTTPStatus, Error: verdict.Error,
-		Source: verdict.Source, CheckedAt: verdict.CheckedAt, OriginAccountID: verdict.OriginAccountID,
+		Source: verdict.Source, CheckedAt: verdict.CheckedAt, OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
 	}, nil
 }
 
@@ -87,7 +101,7 @@ func (s riskRelationalStore) SaveRiskVerdict(ctx context.Context, accountID uint
 		AccountID: accountID, Verdict: verdict.Verdict, BotFlagSrc: verdict.BotFlagSrc,
 		BotFlagDtl: verdict.BotFlagDtl, RiskScore: verdict.RiskScore, HTTPStatus: verdict.HTTPStatus,
 		Error: verdict.Error, Source: verdict.Source, CheckedAt: verdict.CheckedAt,
-		OriginAccountID: verdict.OriginAccountID,
+		OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
 	})
 }
 
@@ -107,6 +121,6 @@ func (s riskRelationalStore) DeleteCleanVerdictsExceptSources(ctx context.Contex
 	return s.Repo.DeleteCleanVerdictsExceptSources(ctx, keepSources...)
 }
 
-func (s riskRelationalStore) MostRecentCleanVerdict(ctx context.Context, source string) (uint64, bool, error) {
-	return s.Repo.MostRecentCleanVerdict(ctx, source)
+func (s riskRelationalStore) MostRecentCleanVerdict(ctx context.Context, source string, maxAge time.Duration) (uint64, bool, error) {
+	return s.Repo.MostRecentCleanVerdict(ctx, source, maxAge)
 }

@@ -177,8 +177,13 @@ type AccountRiskEditable struct {
 	OnDenied         string
 	PatrolEnabled    bool
 	PatrolBucketDays int
-	// BuildProbeEnabled 开关 Build 原生差分兜底(未关联 Build)。
-	BuildProbeEnabled bool
+	PatrolInterval   string
+	PatrolBatchSize  int
+	// BuildProbeEnabled 开关 Build 原生差分兜底(未关联 Build)。指针语义:
+	// nil = 请求未携带该字段(旧客户端),保留当前值;非 nil = 显式设置。
+	// 它默认关闭、打开会消耗账号额度,对象整体提交而漏掉这个布尔时,
+	// 零值 false 不该把已打开的探针悄悄关掉。
+	BuildProbeEnabled *bool
 }
 
 // EgressRotationEditable 是管理接口使用的出口轮换输入（时长为字符串）。
@@ -599,15 +604,23 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		}
 	}
 	if value.AccountRisk != nil {
-		base.AccountRisk.RSCCheck = config.AccountRiskRSCConfig{
+		rsc := config.AccountRiskRSCConfig{
 			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
 			Concurrency: value.AccountRisk.Concurrency, Timeout: config.Duration(value.AccountRisk.Timeout),
 			OnDenied: value.AccountRisk.OnDenied,
-			Patrol:   config.AccountRiskPatrolConfig{Enabled: value.AccountRisk.PatrolEnabled, BucketDays: value.AccountRisk.PatrolBucketDays},
+			Patrol: config.AccountRiskPatrolConfig{
+				Enabled: value.AccountRisk.PatrolEnabled, BucketDays: value.AccountRisk.PatrolBucketDays,
+				Interval: config.Duration(value.AccountRisk.PatrolInterval), BatchSize: value.AccountRisk.PatrolBatchSize,
+			},
 		}
+		// BuildProbe 字段比节点内其余字段更晚加入:旧持久化载荷带 AccountRisk
+		// 却没有 BuildProbeEnabled 时,先继承文件基线再让显式值覆盖——
+		// 直接整节赋值会把 yaml 里的 buildProbe.enabled: true 静默清掉。
+		rsc.BuildProbe = base.AccountRisk.RSCCheck.BuildProbe
 		if value.AccountRisk.BuildProbeEnabled != nil {
-			base.AccountRisk.RSCCheck.BuildProbe = &config.AccountRiskBuildProbeConfig{Enabled: *value.AccountRisk.BuildProbeEnabled}
+			rsc.BuildProbe = &config.AccountRiskBuildProbeConfig{Enabled: *value.AccountRisk.BuildProbeEnabled}
 		}
+		base.AccountRisk.RSCCheck = rsc
 	}
 	if value.EgressRotation != nil {
 		base.Egress.Rotation = config.EgressRotationConfig{
@@ -710,6 +723,8 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			OnDenied:          value.AccountRisk.RSCCheck.OnDenied,
 			PatrolEnabled:     value.AccountRisk.RSCCheck.Patrol.Enabled,
 			PatrolBucketDays:  value.AccountRisk.RSCCheck.Patrol.BucketDays,
+			PatrolInterval:    value.AccountRisk.RSCCheck.Patrol.Interval.Value(),
+			PatrolBatchSize:   value.AccountRisk.RSCCheck.Patrol.BatchSize,
 			BuildProbeEnabled: boolPointer(value.AccountRisk.RSCCheck.BuildProbeEnabled()),
 		},
 		EgressRotation: &settingsdomain.EgressRotationConfig{
@@ -847,12 +862,23 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		next.AccountRisk.RSCCheck.OnDenied = strings.TrimSpace(input.AccountRisk.OnDenied)
 		next.AccountRisk.RSCCheck.Patrol.Enabled = input.AccountRisk.PatrolEnabled
 		next.AccountRisk.RSCCheck.Patrol.BucketDays = input.AccountRisk.PatrolBucketDays
-		buildProbe := next.AccountRisk.RSCCheck.BuildProbe
-		if buildProbe == nil {
-			buildProbe = &config.AccountRiskBuildProbeConfig{}
+		if input.AccountRisk.PatrolBatchSize != 0 {
+			next.AccountRisk.RSCCheck.Patrol.BatchSize = input.AccountRisk.PatrolBatchSize
 		}
-		buildProbe.Enabled = input.AccountRisk.BuildProbeEnabled
-		next.AccountRisk.RSCCheck.BuildProbe = buildProbe
+		// BuildProbe 是堆指针,与热配置共享:必须克隆后修改。曾直接原地改,
+		// 校验失败(如非法 timeout)的保存也会把内存里的开关翻掉,下一次
+		// 无关保存把它一并持久化。nil 输入(旧客户端漏字段)保持当前值。
+		if input.AccountRisk.BuildProbeEnabled != nil {
+			buildProbe := next.AccountRisk.RSCCheck.BuildProbe
+			if buildProbe == nil {
+				buildProbe = &config.AccountRiskBuildProbeConfig{}
+			} else {
+				cloned := *buildProbe
+				buildProbe = &cloned
+			}
+			buildProbe.Enabled = *input.AccountRisk.BuildProbeEnabled
+			next.AccountRisk.RSCCheck.BuildProbe = buildProbe
+		}
 	}
 
 	type durationInput struct {
@@ -914,6 +940,9 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		durations = append(durations,
 			durationInput{"accountRisk.rscCheck.timeout", input.AccountRisk.Timeout, func(value config.Duration) { next.AccountRisk.RSCCheck.Timeout = value }},
 		)
+		if strings.TrimSpace(input.AccountRisk.PatrolInterval) != "" {
+			durations = append(durations, durationInput{"accountRisk.rscCheck.patrol.interval", input.AccountRisk.PatrolInterval, func(value config.Duration) { next.AccountRisk.RSCCheck.Patrol.Interval = value }})
+		}
 	}
 	if input.EgressRotationProvided {
 		durations = append(durations,
@@ -1039,7 +1068,9 @@ func toEditable(cfg config.Config) EditableConfig {
 			Concurrency: cfg.AccountRisk.RSCCheck.Concurrency, Timeout: cfg.AccountRisk.RSCCheck.Timeout.String(),
 			OnDenied: cfg.AccountRisk.RSCCheck.OnDenied, PatrolEnabled: cfg.AccountRisk.RSCCheck.Patrol.Enabled,
 			PatrolBucketDays:  cfg.AccountRisk.RSCCheck.Patrol.BucketDays,
-			BuildProbeEnabled: cfg.AccountRisk.RSCCheck.BuildProbeEnabled(),
+			PatrolInterval:    cfg.AccountRisk.RSCCheck.Patrol.Interval.String(),
+			PatrolBatchSize:   cfg.AccountRisk.RSCCheck.Patrol.BatchSize,
+			BuildProbeEnabled: boolPointer(cfg.AccountRisk.RSCCheck.BuildProbeEnabled()),
 		},
 		AccountRiskProvided: true,
 		AccountsProvided:    true,
