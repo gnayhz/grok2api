@@ -25,6 +25,29 @@ func TestCleanVersionRejectsOversizeAndControlChars(t *testing.T) {
 	}
 }
 
+// TestCurrentCommitFallbackChain 锁定构建提交回退链:ldflags 注入 >
+// GROK2API_COMMIT 环境变量 > vcs 元数据/unknown。背景:2026-08-27 事故中
+// 仓库已合并修复而线上容器未滚动,管理端却无字段区分运行的提交。
+func TestCurrentCommitFallbackChain(t *testing.T) {
+	t.Setenv("GROK2API_COMMIT", "abc123def456")
+	if got := CurrentCommit(); got != "abc123def456" {
+		t.Fatalf("env commit = %q", got)
+	}
+	t.Setenv("GROK2API_COMMIT", "")
+	if got := CurrentCommit(); got == "" {
+		t.Fatal("commit must never be empty (vcs or unknown fallback)")
+	}
+	if cleanCommit(strings.Repeat("c", 65)) != "" {
+		t.Fatal("oversize commit accepted")
+	}
+	if cleanCommit("abcdef") != "" {
+		t.Fatal("control-chars commit accepted")
+	}
+	if cleanCommit("  abc123  ") != "abc123" {
+		t.Fatal("commit trim broken")
+	}
+}
+
 func TestCurrentVersionFallsBackThroughChain(t *testing.T) {
 	dir := t.TempDir()
 	origWD, err := os.Getwd()

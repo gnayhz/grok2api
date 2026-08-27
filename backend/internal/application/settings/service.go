@@ -155,17 +155,18 @@ type AccountsConfig struct {
 
 // RequestRetryEditable 是管理接口使用的实时路由守卫输入（时长为字符串）。
 type RequestRetryEditable struct {
-	Enabled             bool
-	MaxAttempts         int
-	HoldTimeout         string
-	MinOutputTokens     int
-	OnExhausted         string
-	AccountCooldown     string
-	EarlyHeaderAbort    string
-	SameAccountRetry    bool
-	EvidenceTimeout     string
-	CreatedTimeout      string
-	IdleAccountCooldown string
+	Enabled                bool
+	MaxAttempts            int
+	HoldTimeout            string
+	MinOutputTokens        int
+	OnExhausted            string
+	AccountCooldown        string
+	EarlyHeaderAbort       string
+	SameAccountRetry       bool
+	EvidenceTimeout        string
+	CreatedTimeout         string
+	IdleAccountCooldown    string
+	TerminalBurstThreshold int
 }
 
 // AccountRiskEditable 是管理接口使用的账号风险归因输入（时长为字符串）。
@@ -600,7 +601,8 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: config.Duration(value.RequestRetry.AccountCooldown),
 			EarlyHeaderAbort: config.Duration(value.RequestRetry.EarlyHeaderAbort), SameAccountRetry: value.RequestRetry.SameAccountRetry,
 			EvidenceTimeout: config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
-			IdleAccountCooldown: config.Duration(value.RequestRetry.IdleAccountCooldown),
+			IdleAccountCooldown:    config.Duration(value.RequestRetry.IdleAccountCooldown),
+			TerminalBurstThreshold: value.RequestRetry.TerminalBurstThreshold,
 		}
 	}
 	if value.AccountRisk != nil {

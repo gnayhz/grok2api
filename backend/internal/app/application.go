@@ -757,17 +757,18 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 
 func qualityRetryRuntime(value config.RequestRetryConfig) gateway.QualityRetryRuntime {
 	return gateway.QualityRetryRuntime{
-		Enabled:             value.Enabled,
-		MaxAttempts:         value.MaxAttempts,
-		HoldTimeout:         value.HoldTimeout.Value(),
-		MinOutputTokens:     int64(value.MinOutputTokens),
-		OnExhausted:         value.OnExhausted,
-		AccountCooldown:     value.AccountCooldown.Value(),
-		SameAccountRetry:    value.SameAccountRetry,
-		EarlyHeaderAbort:    value.EarlyHeaderAbort.Value(),
-		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
-		EvidenceTimeout:     value.EvidenceTimeout.Value(),
-		CreatedTimeout:      value.CreatedTimeout.Value(),
+		Enabled:                value.Enabled,
+		MaxAttempts:            value.MaxAttempts,
+		HoldTimeout:            value.HoldTimeout.Value(),
+		MinOutputTokens:        int64(value.MinOutputTokens),
+		OnExhausted:            value.OnExhausted,
+		AccountCooldown:        value.AccountCooldown.Value(),
+		SameAccountRetry:       value.SameAccountRetry,
+		EarlyHeaderAbort:       value.EarlyHeaderAbort.Value(),
+		IdleAccountCooldown:    value.IdleAccountCooldown.Value(),
+		EvidenceTimeout:        value.EvidenceTimeout.Value(),
+		CreatedTimeout:         value.CreatedTimeout.Value(),
+		TerminalBurstThreshold: value.TerminalBurstThreshold,
 	}
 }
 
@@ -813,7 +814,7 @@ func (a *Application) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	servedAt := time.Now()
 	go func() {
-		a.logger.Info("server_started", "listen", a.server.Addr)
+		a.logger.Info("server_started", "listen", a.server.Addr, "version", buildinfo.CurrentVersion(), "commit", buildinfo.CurrentCommit())
 		errCh <- a.server.ListenAndServe()
 	}()
 	a.reconcileStartup(runCtx)

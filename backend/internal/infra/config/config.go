@@ -287,6 +287,11 @@ type RequestRetryConfig struct {
 	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 15m），独立于
 	// missing-thinking 的 AccountCooldown；上下限与 AccountCooldown 相同。
 	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
+	// TerminalBurstThreshold 是交付后"整包末尾爆发+零思考"签名的账号连击
+	// 熔断阈值（0=默认 3，范围 0-10）：达到即按 missing-thinking 语义冷却
+	// 账号并触发 RSC 归因。流级质量守卫之外的纵深防御——2026-08-27 线上
+	// previous_response_id 续聊链 7 连发降智零惩罚的直接对策。
+	TerminalBurstThreshold int `yaml:"terminalBurstThreshold"`
 }
 
 type ClientKeyDefaultsConfig struct {
@@ -817,6 +822,9 @@ func validateRequestRetry(value RequestRetryConfig) error {
 	if d := value.CreatedTimeout.Value(); d != 0 && (d < time.Second || d > 2*time.Minute) {
 		return errors.New("requestRetry.createdTimeout 必须在 1s 到 2m 之间（0 表示默认 5s）")
 	}
+	if value.TerminalBurstThreshold < 0 || value.TerminalBurstThreshold > 10 {
+		return errors.New("requestRetry.terminalBurstThreshold 必须在 0 到 10 之间（0 表示默认 3）")
+	}
 	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
 		return errors.New("qualityGuard.requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间")
 	}
@@ -932,7 +940,7 @@ func defaultConfig() Config {
 		AccountRisk: DefaultAccountRiskConfig(),
 		RequestRetry: RequestRetryConfig{
 			MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed", SameAccountRetry: true,
-			AccountCooldown: Duration(24 * time.Hour)},
+			AccountCooldown: Duration(24 * time.Hour), TerminalBurstThreshold: 3},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{
 			MarkBuildForbiddenReauth:             false,

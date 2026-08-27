@@ -29,6 +29,9 @@ FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS backend-builder
 
 ARG TARGETOS
 ARG TARGETARCH
+# 构建时可注入 git 提交（docker build --build-arg GIT_COMMIT=$(git rev-parse
+# --short=12 HEAD)）；缺省时回退到 GROK2API_COMMIT 环境变量/vcs 元数据。
+ARG GIT_COMMIT=""
 
 WORKDIR /src/backend
 RUN apk add --no-cache ca-certificates git
@@ -43,7 +46,9 @@ COPY backend/docs/docs.go ./docs/docs.go
 RUN --mount=type=cache,id=grok2api-go-mod,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,id=grok2api-go-build,target=/root/.cache/go-build,sharing=locked \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/grok2api ./cmd/grok2api
+    go build -buildvcs=false -trimpath \
+    -ldflags="-s -w -X github.com/chenyme/grok2api/backend/internal/buildinfo.Commit=${GIT_COMMIT}" \
+    -o /out/grok2api ./cmd/grok2api
 
 
 FROM alpine:${ALPINE_VERSION}

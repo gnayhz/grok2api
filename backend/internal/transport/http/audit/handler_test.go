@@ -105,6 +105,25 @@ func TestAuditResponseDerivesOutputThroughput(t *testing.T) {
 	if burst.OutputTokensPerSecond != nil {
 		t.Fatalf("sub-second burst window must not render a rate = %#v", burst)
 	}
+
+	// 降智档位:健康速率行无档位;亚秒爆发窗口按速率归 hard_tps;
+	// terminal_burst(first==dur、零思考、输出达口径)必须可见——速度列
+	// 为空恰是它的形态(2026-08-27 续聊链 7 连发的审计签名)。
+	if response.DegradeClass != "" {
+		t.Fatalf("healthy row must not classify: %q", response.DegradeClass)
+	}
+	if burst.DegradeClass != auditdomain.DegradeClassHard {
+		t.Fatalf("sub-second burst class = %q", burst.DegradeClass)
+	}
+	terminalFirst := int64(20362)
+	terminal := newAuditResponse(auditdomain.Record{StatusCode: http.StatusOK, Streaming: true, FirstTokenMS: &terminalFirst, DurationMS: 20362, OutputTokens: 339, ReasoningTokens: 0})
+	if terminal.OutputTokensPerSecond != nil || terminal.DegradeClass != auditdomain.DegradeClassTerminalBurst {
+		t.Fatalf("terminal burst row = %#v", terminal)
+	}
+	failed := newAuditResponse(auditdomain.Record{StatusCode: http.StatusBadGateway, Streaming: true, FirstTokenMS: &terminalFirst, DurationMS: 20362, OutputTokens: 339})
+	if failed.DegradeClass != "" {
+		t.Fatalf("failed row must not classify: %q", failed.DegradeClass)
+	}
 }
 
 func TestAuditResponseExplainsBillingWithoutChangingStoredTotal(t *testing.T) {

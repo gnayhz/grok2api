@@ -64,6 +64,8 @@ export type AuditDTO = {
   contextOutputTokens: number;
   firstTokenMs?: number;
   outputTokensPerSecond?: number;
+  /** 降智档位（terminal_burst=整包末尾爆发+零思考，速度列恰为空的形态）。 */
+  degradeClass?: string;
   /** 转发到客户端的 SSE data 事件数（非流式恒 1）；0=未统计或未到达。 */
   deliveredEvents: number;
   /** 转发到客户端的累计字节；0=未统计或未到达。 */
@@ -160,7 +162,7 @@ const auditValidator = hasShape({
   cachedInputTokens: isNumber, outputTokens: isNumber, reasoningTokens: isNumber, totalTokens: isNumber,
   costInUsdTicks: isNumber, estimatedCostInUsdTicks: isNumber, pricingModel: isOptional(isString), pricingVersion: isOptional(isString), billing: isOptional(auditBillingValidator),
   numSourcesUsed: isNumber, numServerSideToolsUsed: isNumber, contextInputTokens: isNumber, contextOutputTokens: isNumber,
-  firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber),
+  firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber), degradeClass: isOptional(isString),
   deliveredEvents: isNumber, deliveredBytes: isNumber,
   durationMs: isNumber, errorCode: isOptional(isString), requestMethod: isOptional(isString), requestPath: isOptional(isString),
   requestHeaders: isOptional(isRecordOf(isArrayOf(isString))), attemptCount: isNumber, createdAt: isString,

@@ -5,9 +5,18 @@ import (
 	"strings"
 
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
+	"github.com/chenyme/grok2api/backend/internal/buildinfo"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
+
+// versionResponse 在更新检查快照之上附带构建提交：仓库合并了修复不等于
+// 线上在跑修复——2026-08-27 事故的直接教训。嵌入结构体使原有字段平铺
+// 不变，仅新增 buildCommit 一个键。
+type versionResponse struct {
+	updatecheckapp.Snapshot
+	BuildCommit string `json:"buildCommit"`
+}
 
 type Handler struct {
 	publicAPIBaseURL func() string
@@ -31,7 +40,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 func (h *Handler) version(c *gin.Context) {
-	response.Success(c, http.StatusOK, h.updates.Snapshot())
+	response.Success(c, http.StatusOK, versionResponse{Snapshot: h.updates.Snapshot(), BuildCommit: buildinfo.CurrentCommit()})
 }
 
 func (h *Handler) checkUpdate(c *gin.Context) {

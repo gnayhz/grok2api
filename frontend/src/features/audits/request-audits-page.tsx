@@ -363,6 +363,10 @@ function ResponsePerformance({ audit, locale }: { audit: AuditDTO; locale: strin
   const duration = splitDuration(formatDuration(audit.durationMs));
   const firstToken = audit.firstTokenMs === undefined ? { value: "—", unit: "" } : splitDuration(formatDuration(audit.firstTokenMs));
   const throughput = audit.outputTokensPerSecond === undefined ? "—" : formatNumber(audit.outputTokensPerSecond, locale, 1);
+  // 速度列为空且命中 terminal_burst（整包末尾爆发+零思考）时展示降智档位
+  // 而不是"—"：这类行生成窗口≈0，此前在速度列与一切速率汇总里完全隐形，
+  // 却恰是 2026-08-27 续聊链事故的最强降智签名。
+  const throughputValue = throughput === "—" && audit.degradeClass === "terminal_burst" ? t("audits.degradeClassTerminalBurst") : throughput;
   return (
     <div className="grid w-fit max-w-full grid-cols-[auto_auto] gap-x-2.5 gap-y-0.5 whitespace-nowrap text-[11px] leading-4 tabular-nums">
       <span className="text-muted-foreground">{t("audits.durationMetric")}</span>
@@ -370,7 +374,7 @@ function ResponsePerformance({ audit, locale }: { audit: AuditDTO; locale: strin
       <span className="text-muted-foreground">{t("audits.firstTokenMetric")}</span>
       <PerformanceValue value={firstToken.value} unit={firstToken.unit} />
       <span className="text-muted-foreground">{t("audits.throughputMetric")}</span>
-      <PerformanceValue value={throughput} unit={t("audits.tokensPerSecondUnit")} />
+      <PerformanceValue value={throughputValue} unit={throughputValue === throughput ? t("audits.tokensPerSecondUnit") : ""} />
       <span className="text-muted-foreground">{t("audits.deliveredMetric")}</span>
       <PerformanceValue value={audit.deliveredEvents > 0 || audit.deliveredBytes > 0 ? `${formatNumber(audit.deliveredEvents, locale)} ${t('audits.deliveredChunkUnit')} · ${formatNumber(Math.round(audit.deliveredBytes / 1024), locale)} ${t("audits.deliveredBytesUnit")}` : "—"} unit="" />
     </div>

@@ -244,6 +244,13 @@ requestRetry:
   # 重试仍扣留才进入换号重试与账号惩罚。注意探测（probe）通道来源的
   # 账号永不参与同号重试（见 selector 会话 probeCandidates 语义）。
   sameAccountRetry: true
+  # 交付后降智签名的账号连击熔断（0=默认 3，范围 0-10）：同一账号连续 N
+  # 条流式交付满足"首字节时间>=总时长（整包末尾一次到达）且零思考 token
+  # 且输出>=32"时，按 missing-thinking 语义冷却账号并触发 RSC 归因与出口
+  # 隔离。这是流级守卫之外的纵深防御，捕获豁免路径/超大 body fail-open/
+  # deliver_last 的残余放行——2026-08-27 线上 previous_response_id 续聊链
+  # 7 连发降智零惩罚的直接对策。带思考证据的健康交付会清零连击。
+  terminalBurstThreshold: 3
   # First missing-thinking hit cools the account; a later hit after the
   # cooldown expires disables it. 0 disables account cooldown; nonzero
   # must be 1m-168h.

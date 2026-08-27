@@ -23,10 +23,13 @@ const (
 	// 生成可晚于任何短预算），短 hold 会把健康流扣成"超时+可见输出"路径。
 	// 配合截止放行语义（超时+流开放+有输出=不确定→放行不惩罚），30s 是
 	// "等密文窗口"而非误扣源；降智路径已由 EarlyHeaderAbort 在头阶段拦截。
-	defaultQualityHoldTimeout        = 3 * time.Second
-	defaultQualityEvidenceTimeout    = 15 * time.Second
-	defaultQualityCreatedTimeout     = 5 * time.Second
-	defaultQualityMinOutput          = int64(8)
+	defaultQualityHoldTimeout     = 3 * time.Second
+	defaultQualityEvidenceTimeout = 15 * time.Second
+	defaultQualityCreatedTimeout  = 5 * time.Second
+	defaultQualityMinOutput       = int64(8)
+	// defaultTerminalBurstThreshold：交付后"整包末尾爆发+零思考"签名的账号
+	// 连击熔断阈值（0/缺省=3）。见 terminalBurstTracker。
+	defaultTerminalBurstThreshold    = 3
 	defaultMissingThinkingCooldown   = 12 * time.Hour
 	lastErrorMissingThinking         = accountdomain.LastErrorMissingThinking
 	lastErrorMissingThinkingDisabled = accountdomain.LastErrorMissingThinkingDisabled
@@ -91,6 +94,12 @@ type QualityRetryRuntime struct {
 	// 证实该延迟在上游时钟内：clean 0.8-2.2s（与复杂度无关），降智
 	// 68-125s（排队期间仅有 keepalive 注释或零字节）。
 	CreatedTimeout time.Duration
+	// TerminalBurstThreshold 是交付后降智签名的账号熔断阈值（0=默认 3）：
+	// 连续 N 条流式交付满足"首字节时间>=总时长且零思考 token 且输出达到
+	// 降智最小口径"时，按 missing-thinking 语义处罚账号并触发 RSC 归因。
+	// 这是流级守卫之外的纵深防御，捕获豁免路径/超大 body fail-open/
+	// deliver_last 的残余放行（2026-08-27 线上续聊链 7 连发零惩罚的对策）。
+	TerminalBurstThreshold int
 }
 
 // QualityStreamSignals is the hold classifier input. Tests drive this
@@ -147,6 +156,9 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
 	}
 	if cfg.CreatedTimeout <= 0 {
 		cfg.CreatedTimeout = defaultQualityCreatedTimeout
+	}
+	if cfg.TerminalBurstThreshold <= 0 {
+		cfg.TerminalBurstThreshold = defaultTerminalBurstThreshold
 	}
 	cfg.OnExhausted = normalizeQualityExhaustionPolicy(cfg.OnExhausted)
 	return cfg
@@ -364,28 +376,48 @@ func CommitQualityHold(verdict QualityVerdict, qualityAttempt, maxAttempts int, 
 	}
 }
 
-func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) bool {
+// 质量守卫豁免原因令牌：guard-stats 按 token 计数（exempts 列表）。此前
+// 豁免完全无痕——2026-08-27 线上 previous_response_id 续聊链 7 连发降智全部
+// 裸奔（旧构建 ownership 豁免），事后只能靠 token 链反推是哪条路径放行。
+const (
+	QualityExemptDisabled         = "disabled"              // requestRetry.enabled=false
+	QualityExemptSkipInput        = "skip_input"            // 受信网关侧分类器显式跳过
+	QualityExemptOperation        = "operation"             // 非推理操作（image/media/embedding...）
+	QualityExemptCompaction       = "compaction"            // TUI compaction 请求
+	QualityExemptProvider         = "provider"              // 非 Build/Console 供应商
+	QualityExemptReasoningOff     = "reasoning_disabled"    // 请求体显式关闭推理（effort=none 等）
+	QualityExemptMessagesNoThink  = "messages_thinking_off" // Messages 协议未请求 thinking
+	QualityExemptModelNoReasoning = "model_no_reasoning"    // 目标模型不支持推理
+)
+
+// qualityHoldExemptReason 返回守卫不介入该请求的原因；空串表示应介入。
+// 判定顺序与 shouldHoldQualityStream 完全一致（后者是它的布尔投影），
+// 新增豁免路径必须两处同步演进。
+func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) string {
 	// 非流式与流式同样纳入 hold：peekQualityBody 对完整 body 判决，证据规则
 	// 一致（此前 !input.Streaming 豁免导致非流式降智响应直接交付，2026-08-20
 	// 实测复现；修复后 clean/risk 的 summary 区分 11/11）。
 	// previous_response_id 钉账号（attempt 预算=1）不等于豁免质量守卫：
 	// 续聊降智一旦放行会写进 stored response，后续轮次全部被污染。
-	if !cfg.Enabled || input.skipQualityHold {
-		return false
+	if !cfg.Enabled {
+		return QualityExemptDisabled
+	}
+	if input.skipQualityHold {
+		return QualityExemptSkipInput
 	}
 	switch operation {
 	case audit.OperationChat, audit.OperationResponses, audit.OperationMessages, "":
 	default:
-		return false
+		return QualityExemptOperation
 	}
 	// TUI compaction is a normal /v1/responses body (no compaction_trigger).
 	// Keep this defensive body check in addition to skipQualityHold so a caller
 	// that bypasses CreateResponse cannot withhold a 100s+ summary as missing-thinking.
 	if isResponsesCompactionRequest(input.Body) {
-		return false
+		return QualityExemptCompaction
 	}
 	if route.Provider != accountdomain.ProviderBuild && route.Provider != accountdomain.ProviderConsole {
-		return false
+		return QualityExemptProvider
 	}
 	// 判定只看流特征,不看请求体里的工具标记(2026-08-25 线上实证:同一 agent
 	// 会话 52 轮只有第 1 轮有守卫,后 51 轮全部裸奔,唯一一条降智原样交付)。
@@ -396,19 +428,26 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 	// body instead of only the reasoning-capable base model. In particular,
 	// grok-4.3-none becomes grok-4.3 plus an explicit disabled setting.
 	if qualityRequestDisablesReasoning(input.Body) {
-		return false
+		return QualityExemptReasoningOff
 	}
 	// Anthropic Messages 协议只有在客户端显式请求 thinking 时才会把上游思考
 	// 转换为可见的 thinking_delta；未请求 thinking 的请求没有思考证据通道，
 	// 守卫无从区分健康与降智（2026-08-20 实测：clean 账号的合法 messages 请求
 	// 被误判缺少推理，二连扣留后 503）。此类请求豁免 hold。
 	if operation == audit.OperationMessages && !qualityMessagesThinkingEnabled(input.Body) {
-		return false
+		return QualityExemptMessagesNoThink
 	}
 	if modeldomain.SupportsReasoningForProvider(route.Provider, input.PublicModel) {
-		return true
+		return ""
 	}
-	return modeldomain.SupportsReasoningForProvider(route.Provider, route.UpstreamModel)
+	if modeldomain.SupportsReasoningForProvider(route.Provider, route.UpstreamModel) {
+		return ""
+	}
+	return QualityExemptModelNoReasoning
+}
+
+func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) bool {
+	return qualityHoldExemptReason(input, ownership, route, operation, cfg) == ""
 }
 
 func qualityRequestDisablesReasoning(body []byte) bool {

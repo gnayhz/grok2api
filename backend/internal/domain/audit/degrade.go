@@ -1,11 +1,12 @@
 package audit
 
 const (
-	DegradeClassBurst    = "buffered_burst"
-	DegradeClassSoft     = "soft_tps"
-	DegradeClassHard     = "hard_tps"
-	DegradeClassThinking = "missing_thinking"
-	ErrorQualityDegraded = "quality_degraded"
+	DegradeClassBurst         = "buffered_burst"
+	DegradeClassSoft          = "soft_tps"
+	DegradeClassHard          = "hard_tps"
+	DegradeClassThinking      = "missing_thinking"
+	DegradeClassTerminalBurst = "terminal_burst"
+	ErrorQualityDegraded      = "quality_degraded"
 )
 
 const (
@@ -21,7 +22,17 @@ const (
 // and soft thresholds apply in that order.
 func ClassifyOutputSpeed(outputTokens, reasoningTokens, firstTokenMS, durationMS int64, softTPS, hardTPS float64, minGenMS int64, failClosed bool) (class string, tps float64, genMS int64) {
 	genMS = GenerationWindowMS(firstTokenMS, durationMS, reasoningTokens)
-	if genMS <= 0 || outputTokens <= 0 {
+	if outputTokens <= 0 {
+		return "", 0, genMS
+	}
+	// genMS<=0 且输出已达最小口径：整包在流末尾一次到达（首字节时间>=
+	// 总时长）。Token/s 是除以 ~0ms 的数学假象，此前这类行在速度列显示
+	// "—"、按速率分级也分不进任何档——2026-08-27 线上续聊链 7 连发降智
+	// 恰是这个形态，最强签名在所有汇总里反而隐形。单独归 terminal_burst。
+	if genMS <= 0 {
+		if durationMS > 0 && outputTokens >= DefaultDegradeMinOutput {
+			return DegradeClassTerminalBurst, 0, 0
+		}
 		return "", 0, genMS
 	}
 	tps = OutputTokensPerSecond(outputTokens, reasoningTokens, firstTokenMS, durationMS)

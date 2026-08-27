@@ -246,6 +246,9 @@ type Service struct {
 	// first-event budget); zero ModelPublicID disables verification.
 	egressCanary atomic.Value // EgressCanaryRuntime
 	accountRisk  atomic.Value // risk.Attributor
+	// terminalBurst 是交付后降智签名（整包末尾爆发+零思考）的账号连击
+	// 熔断器，见 quality_burst_breaker.go。
+	terminalBurst *terminalBurstTracker
 }
 
 type teamModelRateLimit struct {
@@ -284,7 +287,7 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 		models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers,
 		selector: selector, responses: responses, logger: slog.Default(),
 		rateLimits: make(map[string]teamModelRateLimit), rateLimitTeams: make(map[uint64]teamRateLimitObservation),
-		modelSyncing: make(map[uint64]struct{}),
+		modelSyncing: make(map[uint64]struct{}), terminalBurst: newTerminalBurstTracker(),
 	}
 	service.UpdateMaxAttempts(maxAttempts)
 	return service
@@ -1124,6 +1127,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// log amplification proportional to traffic.
 	if qualityHoldEnabled {
 		s.logger.Info("quality_hold_gate", "request_id", input.RequestID, "cfg_enabled", holdCfg.Enabled, "provider", route.Provider, "public_model", input.PublicModel, "upstream_model", route.UpstreamModel, "operation", operation)
+	} else {
+		// 豁免留痕：每条路径放行多少请求进 guard-stats（exempts 计数），
+		// 不再重演 2026-08-27"7 连发裸奔却无任何痕迹可查"。
+		guardStats.recordExempt(qualityHoldExemptReason(input, ownership, route, operation, holdCfg))
 	}
 	// Count accounts that actually reached the upstream. Credential-only skips
 	// do not consume the quality retry budget; refreshes stay on the same account.
@@ -1312,6 +1319,30 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				}
 				record.DurationMS = time.Since(startedAt).Milliseconds()
 				record.ErrorCode = errorCode
+				// 交付后降智签名检测（纵深防御）：整包末尾爆发+零思考是
+				// 2026-08-27 续聊链事故的确切签名。守卫正常时应在此前已
+				// 扣留；这里捕获一切残余放行（豁免路径/超大 body
+				// fail-open/deliver_last），连击达阈值即按 missing-thinking
+				// 语义处罚账号并触发 RSC 归因与出口隔离。
+				if s.terminalBurst != nil && successful && input.Streaming {
+					if terminalBurstSignature(record.FirstTokenMS, record.DurationMS, usage.ReasoningTokens, usage.OutputTokens) {
+						if count := s.terminalBurst.observeBurst(accountID); count >= holdCfg.TerminalBurstThreshold {
+							s.terminalBurst.reset(accountID)
+							guardStats.recordSignal(GuardSignalTerminalBurst)
+							nodeID := degradedEgressNodeID(egressTrace, route.Provider)
+							s.logger.Warn("terminal_burst_breaker_tripped",
+								"request_id", input.RequestID, "account_id", accountID, "account_name", credential.Name,
+								"consecutive_bursts", count, "output_tokens", usage.OutputTokens, "egress_node_id", nodeID)
+							s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
+							reportEgressDegradation(credential)
+							if attributor := s.accountRiskAttributor(); attributor != nil {
+								attributor.OnDegraded(ctx, credential, nodeID)
+							}
+						}
+					} else if usage.ReasoningTokens > 0 {
+						s.terminalBurst.observeHealthy(accountID)
+					}
+				}
 				attempts := failureAttempts.snapshot()
 				if !successful || len(attempts) > 0 {
 					record.Attempts = attempts

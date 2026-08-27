@@ -75,6 +75,9 @@ type RequestRetryConfig struct {
 	EvidenceTimeout     time.Duration
 	CreatedTimeout      time.Duration
 	IdleAccountCooldown time.Duration
+	// TerminalBurstThreshold：交付后"整包末尾爆发+零思考"连击熔断阈值
+	// (0=默认 3,范围 0-10)。见 gateway.terminalBurstTracker。
+	TerminalBurstThreshold int
 }
 
 // EgressRotationConfig 定义出口换 IP 轮换调度的可热更新参数。

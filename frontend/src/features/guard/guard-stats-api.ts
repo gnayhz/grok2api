@@ -11,8 +11,17 @@ export type GuardSignalStat = {
   lastSeen?: string;
 };
 
+// 守卫豁免统计:按原因记录守卫未介入的请求(协议无证据通道/模型不
+// 支持推理等)。"为什么这批降智请求没被拦"的第一反应应该是看这里。
+export type GuardExemptStat = {
+  reason: string;
+  count: number;
+  lastSeen?: string;
+};
+
 export type GuardStats = {
   signals: GuardSignalStat[];
+  exempts?: GuardExemptStat[];
   retrial: {
     sameAccountRetryUsed: number;
     sameAccountRetryRescued: number;
@@ -32,6 +41,11 @@ const statsValidator = hasShape({
     failed: isNumber,
     lastSeen: isOptional(isString),
   })),
+  exempts: isOptional(isArrayOf(hasShape({
+    reason: isString,
+    count: isNumber,
+    lastSeen: isOptional(isString),
+  }))),
   retrial: hasShape({
     sameAccountRetryUsed: isNumber,
     sameAccountRetryRescued: isNumber,

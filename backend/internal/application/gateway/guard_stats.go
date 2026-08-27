@@ -20,6 +20,10 @@ const (
 	GuardSignalHeaderBudget GuardSignal = "header_budget"
 	// GuardSignalWithhold: 有输出但缺少思考证据被判扣留。
 	GuardSignalWithhold GuardSignal = "missing_thinking"
+	// GuardSignalTerminalBurst: 交付后"整包末尾爆发+零思考"签名连击熔断
+	// (2026-08-27 续聊链事故对策)。它是交付后的纵深防御信号,按拦截
+	// 时机排在所有实时信号之后。
+	GuardSignalTerminalBurst GuardSignal = "terminal_burst"
 )
 
 // guardSignalOrder 定义 UI 展示顺序(按拦截时机从早到晚)。
@@ -29,6 +33,21 @@ var guardSignalOrder = []GuardSignal{
 	GuardSignalEvidenceTimeout,
 	GuardSignalEmptyStream,
 	GuardSignalWithhold,
+	GuardSignalTerminalBurst,
+}
+
+// guardExemptOrder 定义守卫豁免原因的展示顺序,与 quality_retry.go 中的
+// QualityExempt* 常量一一对应。未知 token 按信号同约定丢弃——重命名不会
+// 静默清零计数,缺失会立刻在快照里可见。
+var guardExemptOrder = []string{
+	QualityExemptDisabled,
+	QualityExemptSkipInput,
+	QualityExemptOperation,
+	QualityExemptCompaction,
+	QualityExemptProvider,
+	QualityExemptReasoningOff,
+	QualityExemptMessagesNoThink,
+	QualityExemptModelNoReasoning,
 }
 
 // GuardSignalStat 是一个特征自进程启动以来的累计观测。
@@ -42,6 +61,15 @@ type GuardSignalStat struct {
 	Rescued int64 `json:"rescued"`
 	// Failed 这些请求最终失败(4xx/5xx/503)的数量。
 	Failed   int64      `json:"failed"`
+	LastSeen *time.Time `json:"lastSeen,omitempty"`
+}
+
+// GuardExemptStat 是质量守卫某条豁免路径自进程启动以来放行的请求数。
+// 豁免本身是设计内行为(协议无证据通道/模型不支持推理等),但必须可观测:
+// "为什么这批降智请求没被拦"的第一反应应该是看这里。
+type GuardExemptStat struct {
+	Reason   string     `json:"reason"`
+	Count    int64      `json:"count"`
 	LastSeen *time.Time `json:"lastSeen,omitempty"`
 }
 
@@ -61,6 +89,8 @@ type GuardRetrialStat struct {
 // (与 routingStats 同生命周期语义)。
 type GuardStatsSnapshot struct {
 	Signals []GuardSignalStat `json:"signals"`
+	// Exempts 按原因统计守卫未介入的请求(与 Signals 同生命周期语义)。
+	Exempts []GuardExemptStat `json:"exempts"`
 	Retrial GuardRetrialStat  `json:"retrial"`
 	// Canary 按结论统计换 IP 后 canary 一次性验证的执行结果。
 	Canary map[string]int64 `json:"canary"`
@@ -74,6 +104,7 @@ type GuardStatsSnapshot struct {
 type guardStatsCollector struct {
 	mu      sync.Mutex
 	signals map[GuardSignal]*GuardSignalStat
+	exempts map[string]*GuardExemptStat
 	retrial GuardRetrialStat
 	canary  map[string]int64
 	since   time.Time
@@ -86,7 +117,11 @@ func newGuardStatsCollector() *guardStatsCollector {
 	for _, signal := range guardSignalOrder {
 		signals[signal] = &GuardSignalStat{Signal: string(signal)}
 	}
-	return &guardStatsCollector{signals: signals, canary: make(map[string]int64)}
+	exempts := make(map[string]*GuardExemptStat, len(guardExemptOrder))
+	for _, reason := range guardExemptOrder {
+		exempts[reason] = &GuardExemptStat{Reason: reason}
+	}
+	return &guardStatsCollector{signals: signals, exempts: exempts, canary: make(map[string]int64)}
 }
 
 func (c *guardStatsCollector) touch() {
@@ -105,6 +140,21 @@ func (c *guardStatsCollector) recordSignal(signal GuardSignal) {
 	}
 	c.touch()
 	stat.Triggered++
+	now := time.Now().UTC()
+	stat.LastSeen = &now
+}
+
+// recordExempt 记录一次守卫豁免(按原因 token)。未知 token 丢弃——
+// 与信号同约定:常量重命名会让计数停在新键上,而不是静默归零旧键。
+func (c *guardStatsCollector) recordExempt(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stat, ok := c.exempts[reason]
+	if !ok {
+		return
+	}
+	c.touch()
+	stat.Count++
 	now := time.Now().UTC()
 	stat.LastSeen = &now
 }
@@ -186,11 +236,22 @@ func (c *guardStatsCollector) Snapshot() GuardStatsSnapshot {
 		}
 	}
 	// signals 已按 guardSignalOrder 顺序构造,无需再排序。
+	exempts := make([]GuardExemptStat, 0, len(guardExemptOrder))
+	for _, reason := range guardExemptOrder {
+		if stat, ok := c.exempts[reason]; ok {
+			copied := *stat
+			if stat.LastSeen != nil {
+				seen := *stat.LastSeen
+				copied.LastSeen = &seen
+			}
+			exempts = append(exempts, copied)
+		}
+	}
 	canary := make(map[string]int64, len(c.canary))
 	for outcome, count := range c.canary {
 		canary[outcome] = count
 	}
-	snapshot := GuardStatsSnapshot{Signals: signals, Retrial: c.retrial, Canary: canary}
+	snapshot := GuardStatsSnapshot{Signals: signals, Exempts: exempts, Retrial: c.retrial, Canary: canary}
 	if !c.since.IsZero() {
 		since := c.since
 		snapshot.Since = &since

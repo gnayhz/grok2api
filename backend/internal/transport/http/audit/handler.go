@@ -67,16 +67,21 @@ type auditResponse struct {
 	ContextOutputTokens     int64                     `json:"contextOutputTokens"`
 	FirstTokenMS            *int64                    `json:"firstTokenMs,omitempty"`
 	OutputTokensPerSecond   *float64                  `json:"outputTokensPerSecond,omitempty"`
-	DeliveredEvents         int64                     `json:"deliveredEvents"`
-	DeliveredBytes          int64                     `json:"deliveredBytes"`
-	DurationMS              int64                     `json:"durationMs"`
-	ErrorCode               string                    `json:"errorCode,omitempty"`
-	QualityFailOpen         bool                      `json:"qualityFailOpen,omitempty"`
-	RequestMethod           string                    `json:"requestMethod,omitempty"`
-	RequestPath             string                    `json:"requestPath,omitempty"`
-	RequestHeaders          map[string][]string       `json:"requestHeaders,omitempty"`
-	AttemptCount            int                       `json:"attemptCount"`
-	CreatedAt               time.Time                 `json:"createdAt"`
+	// DegradeClass 是按面板公式对 2xx 流式成功行做的降智分级；特别地
+	// terminal_burst 表示"整包末尾爆发+零思考"——这类行 Token/s 是除以
+	// ~0ms 的数学假象、速度列显示为空，此前在一切降智汇总里都隐形
+	// （2026-08-27 续聊链 7 连发事故的直接表象）。
+	DegradeClass    string              `json:"degradeClass,omitempty"`
+	DeliveredEvents int64               `json:"deliveredEvents"`
+	DeliveredBytes  int64               `json:"deliveredBytes"`
+	DurationMS      int64               `json:"durationMs"`
+	ErrorCode       string              `json:"errorCode,omitempty"`
+	QualityFailOpen bool                `json:"qualityFailOpen,omitempty"`
+	RequestMethod   string              `json:"requestMethod,omitempty"`
+	RequestPath     string              `json:"requestPath,omitempty"`
+	RequestHeaders  map[string][]string `json:"requestHeaders,omitempty"`
+	AttemptCount    int                 `json:"attemptCount"`
+	CreatedAt       time.Time           `json:"createdAt"`
 }
 
 type billingBreakdownResponse struct {
@@ -318,7 +323,7 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		Billing:        newBillingBreakdown(value),
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens,
-		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DeliveredEvents: value.DeliveredEvents, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
+		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DegradeClass: auditDegradeClass(value), DeliveredEvents: value.DeliveredEvents, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
 		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: value.RequestHeaders,
 		AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
 	}
@@ -365,6 +370,17 @@ func newBillingBreakdown(value auditdomain.Record) *billingBreakdownResponse {
 		})
 	}
 	return breakdown
+}
+
+// auditDegradeClass 对可分级的行（2xx 流式成功且有测量）返回降智档位；
+// terminal_burst 是"整包末尾爆发+零思考"的专用档，速度列为空恰恰是它的
+// 形态而不是"无数据"。不可分级的行返回空串。
+func auditDegradeClass(value auditdomain.Record) string {
+	if !value.Streaming || value.StatusCode < 200 || value.StatusCode >= 300 || value.ErrorCode != "" || value.FirstTokenMS == nil || value.OutputTokens <= 0 {
+		return ""
+	}
+	class, _, _ := auditdomain.ClassifyOutputSpeed(value.OutputTokens, value.ReasoningTokens, *value.FirstTokenMS, value.DurationMS, auditdomain.DefaultDegradeSoftTPS, auditdomain.DefaultDegradeHardTPS, auditdomain.DefaultDegradeMinGenMS, false)
+	return class
 }
 
 func auditOutputTokensPerSecond(value auditdomain.Record) *float64 {
