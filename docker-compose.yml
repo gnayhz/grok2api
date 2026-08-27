@@ -10,6 +10,10 @@ services:
       TZ: "${TZ:-Asia/Shanghai}"
       # 非空时覆盖 config.yaml 的 PostgreSQL DSN，并自动启用 postgres。
       GROK2API_DATABASE_URL: "${GROK2API_DATABASE_URL:-}"
+      # Optional. entrypoint sets GOMEMLIMIT to 90% of the cgroup memory.max
+      # when this is empty. Pair with a container memory limit, e.g.:
+      #   mem_limit: 2g
+      # Do not set GOGC=50 by default; it raises TTFB p99 during reasoning.
     volumes:
       - "${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro"
       - grok2api-data:/app/data

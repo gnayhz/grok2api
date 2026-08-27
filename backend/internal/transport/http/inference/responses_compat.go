@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 )
 
 // responsesCompatState fills fields Grok CLI serde treats as required.
@@ -33,6 +35,9 @@ func rewriteResponsesStreamChunk(chunk []byte, state *responsesCompatState) []by
 		out = append(out, chunk[:index+1]...)
 		chunk = chunk[index+1:]
 		state.passingLongLine = false
+	}
+	if cap(state.pending) == 0 && len(chunk) > 0 {
+		state.pending = make([]byte, 0, responseCopyBufferBytes)
 	}
 	state.pending = append(state.pending, chunk...)
 	for {
@@ -116,6 +121,14 @@ func rewriteResponsesDataLine(line []byte, state *responsesCompatState) []byte {
 	}
 	payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return line
+	}
+	// 只跳过带 encrypted_content 的超大行。长文本 output_item.done/completed
+	// 仍要走 sanitize（补 annotations），否则 Grok CLI 会缺字段反序列化失败。
+	if len(payload) > maxParsedSSEJSONBytes && ssePayloadHasEncryptedContent(payload) {
+		return line
+	}
+	if responsesDeltaAlreadyAddressed(payload) {
 		return line
 	}
 	var event map[string]any
@@ -312,6 +325,17 @@ func (s *responsesCompatState) itemID(outputIndex int64) string {
 		return ""
 	}
 	return s.itemIDs[outputIndex]
+}
+
+// responsesDeltaAlreadyAddressed 报告常见增量帧是否已带 item_id。
+// 这类帧 sanitizeResponsesEvent 不会改任何字段，跳过 map 解码可避免
+// 推理阶段每个 token 都分配 map[string]any。
+func responsesDeltaAlreadyAddressed(payload []byte) bool {
+	typ := jsonpeek.StringField(payload, "type")
+	if !responsesEventNeedsItemID(typ) {
+		return false
+	}
+	return jsonpeek.StringField(payload, "item_id") != ""
 }
 
 func responsesEventNeedsItemID(eventType string) bool {

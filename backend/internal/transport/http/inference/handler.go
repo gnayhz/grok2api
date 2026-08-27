@@ -39,9 +39,14 @@ type Handler struct {
 }
 
 const (
-	responseCopyBufferBytes         = 32 << 10
-	maxJSONMetadataInspectionBytes  = 8 << 20
-	maxStreamEventInspectionBytes   = 8 << 20
+	responseCopyBufferBytes        = 32 << 10
+	maxJSONMetadataInspectionBytes = 8 << 20
+	maxStreamEventInspectionBytes  = 8 << 20
+	// maxParsedSSEJSONBytes 是热路径上完整 json.Unmarshal 的上限。
+	// grok-4.6 xhigh 推理结束会推数 MiB encrypted_content；把整行解成
+	// map/结构体会在推理阶段把 CPU 和内存打满，而兼容补字段/用量抽取
+	// 都不需要密文。未完成行仍按 maxStreamEventInspectionBytes 透传。
+	maxParsedSSEJSONBytes           = 64 << 10
 	maxStreamFailureDiagnosticBytes = 64 << 10
 	maxCredentialErrorInspectBytes  = 64 << 10
 	maxJSONResponseTransferBytes    = 128 << 20
@@ -1680,6 +1685,9 @@ var internalSSEMarkers = [][]byte{
 }
 
 func (i *responseInspector) Inspect(chunk []byte) {
+	if cap(i.pending) == 0 && len(chunk) > 0 {
+		i.pending = make([]byte, 0, responseCopyBufferBytes)
+	}
 	i.pending = append(i.pending, chunk...)
 	for {
 		index := bytes.IndexByte(i.pending, '\n')
@@ -1706,49 +1714,13 @@ func (i *responseInspector) Inspect(chunk []byte) {
 		if bytes.HasPrefix(line, []byte("data:")) {
 			i.metadata.DeliveredEvents++
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-			if containsGeneratedDelta(value, i.protocol) {
-				i.metadata.Usage.OutputObserved = true
-			}
-			i.observeFirstToken(value)
-			i.observeTerminal(value)
-			if !bytes.Equal(value, []byte("[DONE]")) {
-				metadata := extractMetadata(value)
-				if hasUsageMetadata(metadata.Usage) {
-					if metadata.Usage.ResponseModel == "" {
-						metadata.Usage.ResponseModel = i.metadata.Model
-					}
-					i.metadata.Usage = mergeGatewayUsage(i.metadata.Usage, metadata.Usage)
-				}
-				if metadata.ResponseID != "" {
-					i.metadata.ResponseID = metadata.ResponseID
-				}
-				if metadata.SequenceNumber > i.metadata.SequenceNumber {
-					i.metadata.SequenceNumber = metadata.SequenceNumber
-				}
-				if metadata.Model != "" {
-					i.metadata.Model = metadata.Model
-					i.metadata.Usage.ResponseModel = metadata.Model
-				}
-				if metadata.cacheCreationInputTokens > 0 {
-					i.metadata.cacheCreationInputTokens = metadata.cacheCreationInputTokens
-				}
-			}
+			i.inspectDataPayload(value)
 		}
 	}
 }
 
 func (i *responseInspector) observeReasoningStart() {
 	if i.firstTokenSeen || i.firstTokenReady || i.onFirstToken == nil {
-		return
-	}
-	i.firstTokenReady = true
-}
-
-func (i *responseInspector) observeFirstToken(data []byte) {
-	if i.firstTokenSeen || i.firstTokenReady || i.onFirstToken == nil || len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-		return
-	}
-	if !containsGeneratedDelta(data, i.protocol) {
 		return
 	}
 	i.firstTokenReady = true
@@ -1767,27 +1739,7 @@ func (i *responseInspector) markFirstTokenForwarded() {
 func containsGeneratedDelta(data []byte, protocol streamProtocol) bool {
 	switch protocol {
 	case streamProtocolResponses:
-		var event struct {
-			Type  string `json:"type"`
-			Delta string `json:"delta"`
-			Item  struct {
-				ID   string `json:"id"`
-				Type string `json:"type"`
-			} `json:"item"`
-		}
-		if json.Unmarshal(data, &event) != nil {
-			return false
-		}
-		switch event.Type {
-		case "response.output_text.delta", "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.refusal.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
-			return event.Delta != ""
-		case "response.output_item.added":
-			// Native Responses can stream an identified reasoning item with no
-			// text delta when only encrypted_content is requested. That item is
-			// still generation start; waiting for output_text kicks thinking
-			// time out of the TPS denominator.
-			return event.Item.Type == "reasoning" && event.Item.ID != ""
-		}
+		return responsesContainsGeneratedDelta(data)
 	case streamProtocolChat:
 		var event struct {
 			Choices []struct {
@@ -1898,33 +1850,28 @@ func (i *responseInspector) observeTerminal(data []byte) {
 		}
 		return
 	}
-	var payload struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(data, &payload) != nil {
-		return
-	}
+	typ := sseEventType(data)
 	switch i.protocol {
 	case streamProtocolResponses:
-		switch payload.Type {
+		switch typ {
 		case "response.completed":
 			i.terminalSuccess = true
 		case "response.failed", "response.incomplete", "response.error", "error":
 			i.markTerminalFailure(data)
 		}
 	case streamProtocolChat:
-		if payload.Type == "error" {
+		if typ == "error" {
 			i.markTerminalFailure(data)
 		}
 	case streamProtocolAnthropic:
-		switch payload.Type {
+		switch typ {
 		case "message_stop":
 			i.terminalSuccess = true
 		case "error":
 			i.markTerminalFailure(data)
 		}
 	case streamProtocolImage:
-		switch payload.Type {
+		switch typ {
 		case "image_generation.completed":
 			i.terminalSuccess = true
 		case "image_generation.failed", "error":

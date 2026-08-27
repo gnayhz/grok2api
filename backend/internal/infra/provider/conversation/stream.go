@@ -6,16 +6,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 const (
 	maxDeferredSearchTextBytes       = 8 << 20
 	maxDeferredReasoningSummaryBytes = 8 << 20
+	maxSSEEventBytes                 = 8 << 20
+	// maxParsedSSEJSONBytes 与 inference 热路径同口径：超过则不再把整段
+	// JSON（通常是 encrypted_content）Unmarshal 进 map/结构体。
+	maxParsedSSEJSONBytes = 64 << 10
 
 	// contentDoomLoopThreshold 连续重复同一可见内容增量时终止流。真正的
 	// 内容循环会消耗配额和客户端上下文，因此远低于推理上限；但仍需容纳
@@ -87,6 +93,7 @@ type streamConverter struct {
 	stopSequence      string
 	refused           bool
 	repeatTracker     streamRepeatTracker
+	outBuf            bytes.Buffer
 }
 
 // streamRepeatTracker 在协议转换、缓冲和 stop filter 之前跟踪上游增量，
@@ -280,6 +287,18 @@ func (c *streamConverter) handle(event string, data []byte) error {
 	}
 	if c.stopSequence != "" && typeName != "response.completed" && typeName != "response.incomplete" && typeName != "response.failed" && typeName != "error" {
 		return nil
+	}
+	if root == nil {
+		switch typeName {
+		case "response.output_item.done":
+			return c.handleHugeOutputItemDone(data)
+		case "response.completed", "response.incomplete":
+			return c.handleHugeCompleted(data, typeName)
+		case "response.failed":
+			return c.streamError(jsonpeek.Prefix(data, 8192))
+		default:
+			return nil
+		}
 	}
 	switch typeName {
 	case "response.created", "response.in_progress":
@@ -664,6 +683,12 @@ func (c *streamConverter) finish() error {
 }
 
 func streamErrorValue(data []byte) any {
+	if raw := jsonpeek.RawValue(data, "error"); len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var value any
+		if json.Unmarshal(raw, &value) == nil && value != nil {
+			return value
+		}
+	}
 	var root map[string]any
 	if json.Unmarshal(data, &root) != nil {
 		return strings.TrimSpace(string(data))
@@ -687,7 +712,26 @@ func (c *streamConverter) writeData(value any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(c.writer, "data: %s\n\n", data)
+	c.outBuf.Reset()
+	c.outBuf.Grow(len(data) + 8)
+	c.outBuf.WriteString("data: ")
+	c.outBuf.Write(data)
+	c.outBuf.WriteByte(10)
+	c.outBuf.WriteByte(10)
+	_, err = c.writer.Write(c.outBuf.Bytes())
+	return err
+}
+
+func (c *streamConverter) writeSignatureDelta(signatureJSON []byte) error {
+	index := strconv.Itoa(c.thinkingIndex)
+	c.outBuf.Reset()
+	c.outBuf.Grow(len(signatureJSON) + 96 + len(index))
+	c.outBuf.WriteString("event: content_block_delta\ndata: {\"delta\":{\"signature\":")
+	c.outBuf.Write(signatureJSON)
+	c.outBuf.WriteString(",\"type\":\"signature_delta\"},\"index\":")
+	c.outBuf.WriteString(index)
+	c.outBuf.WriteString(",\"type\":\"content_block_delta\"}\n\n")
+	_, err := c.writer.Write(c.outBuf.Bytes())
 	return err
 }
 
@@ -696,41 +740,67 @@ func (c *streamConverter) writeEvent(event string, value any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(c.writer, "event: %s\ndata: %s\n\n", event, data)
+	c.outBuf.Reset()
+	c.outBuf.Grow(len(event) + len(data) + 16)
+	c.outBuf.WriteString("event: ")
+	c.outBuf.WriteString(event)
+	c.outBuf.WriteByte(10)
+	c.outBuf.WriteString("data: ")
+	c.outBuf.Write(data)
+	c.outBuf.WriteByte(10)
+	c.outBuf.WriteByte(10)
+	_, err = c.writer.Write(c.outBuf.Bytes())
 	return err
 }
 
 func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
 	reader := bufio.NewReaderSize(source, 64<<10)
 	var event string
-	var data strings.Builder
+	var data bytes.Buffer
+	var long []byte
 	firstLine := true
 	for {
-		line, err := reader.ReadString('\n')
-		if line != "" {
-			line = strings.TrimRight(line, "\r\n")
+		frag, err := reader.ReadSlice('\n')
+		if len(frag) > 0 {
+			var line []byte
+			if err == bufio.ErrBufferFull {
+				if cap(long) == 0 {
+					long = make([]byte, 0, 64<<10)
+				}
+				long = append(long, frag...)
+				if len(long) > maxSSEEventBytes {
+					return fmt.Errorf("SSE 单事件超过 8 MiB")
+				}
+				continue
+			}
+			if len(long) > 0 {
+				long = append(long, frag...)
+				line = long
+				long = nil
+			} else {
+				line = frag
+			}
+			for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
+				line = line[:len(line)-1]
+			}
 			if firstLine {
-				// 与 semantic streamidle 检测器同口径:剥离开场 UTF-8 BOM,
-				// 否则首个事件的 data 行解析失败、首事件被静默丢弃。
-				line = strings.TrimPrefix(line, "\ufeff")
+				line = bytes.TrimPrefix(line, []byte("\xef\xbb\xbf"))
 				firstLine = false
 			}
-			// 事件缓冲上限, 与 cli 侧 maxCompatibleSSEEventBytes(8MiB)同口径:
-			// 无上限时上游单行超长会使内存无界增长。
-			if data.Len() > 8<<20 {
+			if data.Len() > maxSSEEventBytes {
 				return fmt.Errorf("SSE 单事件超过 8 MiB")
 			}
 			switch {
-			case strings.HasPrefix(line, "event:"):
-				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			case strings.HasPrefix(line, "data:"):
+			case bytes.HasPrefix(line, []byte("event:")):
+				event = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))))
+			case bytes.HasPrefix(line, []byte("data:")):
 				if data.Len() > 0 {
 					data.WriteByte('\n')
 				}
-				data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-			case line == "":
+				data.Write(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))))
+			case len(line) == 0:
 				if data.Len() > 0 {
-					if handleErr := handle(event, []byte(data.String())); handleErr != nil {
+					if handleErr := handle(event, data.Bytes()); handleErr != nil {
 						return handleErr
 					}
 				}
@@ -739,9 +809,12 @@ func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
 			}
 		}
 		if err != nil {
+			if err == bufio.ErrBufferFull {
+				continue
+			}
 			if err == io.EOF {
 				if data.Len() > 0 {
-					return handle(event, []byte(data.String()))
+					return handle(event, data.Bytes())
 				}
 				return nil
 			}
@@ -753,6 +826,21 @@ func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
 func parseSSEEvent(event string, data []byte) (string, map[string]json.RawMessage, bool) {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		return "", nil, false
+	}
+	if len(data) > maxParsedSSEJSONBytes {
+		typeName := event
+		if typeName == "" {
+			head := data
+			if len(head) > 4096 {
+				head = data[:4096]
+			}
+			typeName = jsonpeek.StringField(head, "type")
+		}
+		switch typeName {
+		case "response.output_item.added", "response.output_item.done",
+			"response.completed", "response.incomplete", "response.failed":
+			return typeName, nil, true
+		}
 	}
 	var root map[string]json.RawMessage
 	if json.Unmarshal(data, &root) != nil {
@@ -766,6 +854,9 @@ func parseSSEEvent(event string, data []byte) (string, map[string]json.RawMessag
 }
 
 func (t *streamRepeatTracker) trackEvent(typeName string, root map[string]json.RawMessage) error {
+	if root == nil {
+		return nil
+	}
 	var delta string
 	switch typeName {
 	case "response.output_text.delta":

@@ -1290,6 +1290,35 @@ func TestResponseInspectorTreatsOversizedDataLineAsObservedOutput(t *testing.T) 
 	}
 }
 
+func TestRewriteResponsesPassesHugeCiphertextThrough(t *testing.T) {
+	cipher := strings.Repeat("A", maxParsedSSEJSONBytes+8)
+	line := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"" + cipher + "\"}}\n")
+	got := rewriteResponsesDataLine(line, &responsesCompatState{})
+	if !bytes.Equal(got, line) {
+		t.Fatalf("huge ciphertext line was rewritten: in=%d out=%d", len(line), len(got))
+	}
+}
+
+func TestRewriteResponsesSkipsDeltasThatAlreadyHaveItemID(t *testing.T) {
+	line := []byte("data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"hmm\"}\n")
+	got := rewriteResponsesDataLine(line, &responsesCompatState{})
+	if !bytes.Equal(got, line) {
+		t.Fatalf("addressed delta was rewritten: %s", got)
+	}
+}
+
+func TestResponseInspectorTreatsCompleteHugeDataLineAsObservedOutput(t *testing.T) {
+	inspector := &responseInspector{protocol: streamProtocolResponses}
+	payload := strings.Repeat("A", maxParsedSSEJSONBytes+32)
+	inspector.Inspect([]byte("data: {\"type\":\"response.output_item.done\",\"encrypted_content\":\"" + payload + "\"}\n"))
+	if !inspector.Metadata().Usage.OutputObserved {
+		t.Fatal("complete huge SSE data line was still classified as empty")
+	}
+	if inspector.Metadata().DeliveredEvents != 1 {
+		t.Fatalf("delivered events = %d, want 1", inspector.Metadata().DeliveredEvents)
+	}
+}
+
 func TestCopyStreamMarksFirstTokenAfterFlush(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

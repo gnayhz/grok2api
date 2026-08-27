@@ -231,3 +231,26 @@ func TestMemoryTTLExpire(t *testing.T) {
 		t.Fatalf("expected expired miss ok=%v err=%v", ok, err)
 	}
 }
+
+func TestCaptureBodyStreamingDropsDeltasButKeepsItemDone(t *testing.T) {
+	store := memory.NewReasoningReplayStore(100)
+	replay := New(store, Config{Enabled: true, TTL: time.Hour}, slog.Default())
+	enc := validEncrypted(21)
+	var body strings.Builder
+	for i := 0; i < 200; i++ {
+		body.WriteString("data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"hmm\"}\n\n")
+	}
+	body.WriteString("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"" + enc + "\"}}\n\n")
+	body.WriteString("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n")
+	wrapped := replay.CaptureBody(io.NopCloser(strings.NewReader(body.String())), "grok-4.5", "session-deltas", true, false)
+	if _, err := io.Copy(io.Discard, wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	updated := replay.Apply(context.Background(), "grok-4.5", "session-deltas", []byte("{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"next\"}]}"))
+	if !strings.Contains(string(updated), enc) {
+		t.Fatalf("delta-heavy SSE did not store reasoning: %s", updated)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 )
 
 const (
@@ -18,6 +19,10 @@ const (
 	qualityProtocolResponses  = "responses"
 	qualityProtocolAnthropic  = "anthropic"
 	qualityHoldMaxBufferBytes = 4 << 20
+	qualityOversizedLineBytes = 1 << 20
+	qualitySkipHeadBytes      = 4096
+	qualitySkipTailBytes      = 8192
+	qualityReadChunkBytes     = 32 << 10
 	// qualityBodyPeekLimit 是非流式判决的内存上限:流式路径扣留缓冲有 4MiB 界,
 	// 非流式此前无界。取 32MiB——足够容纳任何合法的完整 JSON 响应, 超过即视为
 	// 异常形态, 放弃判决直接透传。
@@ -46,9 +51,13 @@ type qualityScanState struct {
 	terminal        bool
 	// oversizedLine 保留给决策表/旧测试：扫描器不再用它 fail-open。
 	oversizedLine bool
-	// skipUntilNewline 丢弃当前超长 SSE 行的剩余分片（换行到达前的
+	// skipUntilNewline 丢弃当前超长 SSE 行的中间分片（换行到达前的
 	// encrypted_content 等），避免 1MiB 未完成行把降智流 fail-open。
+	// skipHead/skipTail 保留行首与滚动行尾，这样 2MiB completed 仍能
+	// 读到 type 与 usage。
 	skipUntilNewline bool
+	skipHead         []byte
+	skipTail         []byte
 	// sawDataEvent 标记已解析到至少一个 SSE data 事件（任意类型）。供首事件
 	// 截止使用：keepalive 注释不算——降智排队期间上游只发注释或零字节。
 	sawDataEvent bool
@@ -87,15 +96,22 @@ func newQualityReadPump(source io.ReadCloser) *qualityReadPump {
 
 func (p *qualityReadPump) run() {
 	defer close(p.results)
-	buf := make([]byte, 4096)
+	// Double-buffer so the consumer can keep result.data without a copy:
+	// send is synchronous, and the next Read uses the other backing array.
+	bufs := [2][]byte{
+		make([]byte, qualityReadChunkBytes),
+		make([]byte, qualityReadChunkBytes),
+	}
+	which := 0
 	for {
+		buf := bufs[which]
 		n, err := p.source.Read(buf)
 		if n == 0 && err == nil {
 			continue
 		}
 		result := qualityReadResult{err: err}
 		if n > 0 {
-			result.data = append([]byte(nil), buf[:n]...)
+			result.data = buf[:n]
 		}
 		select {
 		case p.results <- result:
@@ -105,6 +121,7 @@ func (p *qualityReadPump) run() {
 		if err != nil {
 			return
 		}
+		which ^= 1
 	}
 }
 
@@ -275,6 +292,7 @@ type qualityResponsesEvent struct {
 			OutputTokens        int64 `json:"output_tokens"`
 			InputTokens         int64 `json:"input_tokens"`
 			TotalTokens         int64 `json:"total_tokens"`
+			CostInUSDTicks      int64 `json:"cost_in_usd_ticks"`
 			OutputTokensDetails struct {
 				ReasoningTokens int64 `json:"reasoning_tokens"`
 			} `json:"output_tokens_details"`
@@ -308,26 +326,34 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 	if state == nil || len(chunk) == 0 {
 		return
 	}
+	if cap(state.pending) == 0 {
+		state.pending = make([]byte, 0, qualityReadChunkBytes)
+	}
 	state.pending = append(state.pending, chunk...)
 	for {
 		if state.skipUntilNewline {
 			index := bytes.IndexByte(state.pending, '\n')
 			if index < 0 {
-				state.pending = nil
+				state.skipTail = keepQualityTail(state.skipTail, state.pending, qualitySkipTailBytes)
+				state.pending = state.pending[:0]
 				return
 			}
+			state.skipTail = keepQualityTail(state.skipTail, state.pending[:index], qualitySkipTailBytes)
 			state.pending = state.pending[index+1:]
 			state.skipUntilNewline = false
+			observeSkippedQualityLine(state)
 			continue
 		}
 		index := bytes.IndexByte(state.pending, '\n')
 		if index < 0 {
-			if len(state.pending) > 1<<20 {
+			if len(state.pending) > qualityOversizedLineBytes {
 				// 换行前已超过 1MiB：生产 grok-4.6 xhigh 降智是
-				// encrypted_content 单行。丢弃本行剩余分片并继续扫后续事件。
+				// encrypted_content 单行。丢掉中间密文，但保留行首/行尾。
 				classifyOversizedQualityLine(state, state.pending)
+				state.skipHead = append(state.skipHead[:0], state.pending[:min(len(state.pending), qualitySkipHeadBytes)]...)
+				state.skipTail = keepQualityTail(state.skipTail[:0], state.pending, qualitySkipTailBytes)
 				state.skipUntilNewline = true
-				state.pending = nil
+				state.pending = state.pending[:0]
 			}
 			return
 		}
@@ -375,7 +401,105 @@ func classifyOversizedQualityLine(state *qualityScanState, line []byte) {
 	}
 }
 
+func keepQualityTail(dst, src []byte, n int) []byte {
+	if n <= 0 {
+		return dst[:0]
+	}
+	dst = append(dst, src...)
+	if len(dst) <= n {
+		return dst
+	}
+	copy(dst, dst[len(dst)-n:])
+	return dst[:n]
+}
+
+func observeSkippedQualityLine(state *qualityScanState) {
+	if state == nil {
+		return
+	}
+	head := append([]byte(nil), state.skipHead...)
+	tail := append([]byte(nil), state.skipTail...)
+	state.skipHead = state.skipHead[:0]
+	state.skipTail = state.skipTail[:0]
+	if len(head) == 0 && len(tail) == 0 {
+		return
+	}
+	if bytes.Contains(head, []byte("data:")) {
+		state.sawDataEvent = true
+	}
+	payload := bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(head), []byte("data:")))
+	payload = append(payload, tail...)
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return
+	}
+	observeHugeQualityPayload(state, payload)
+}
+
+func observeHugeQualityPayload(state *qualityScanState, payload []byte) {
+	if state == nil {
+		return
+	}
+	classifyOversizedQualityLine(state, payload)
+	head := jsonpeek.Prefix(payload, 4096)
+	tail := jsonpeek.Suffix(payload, 8192)
+	typ := jsonpeek.StringField(head, "type")
+	switch typ {
+	case "response.completed", "response.incomplete", "response.failed", "message_stop":
+		state.terminal = true
+	}
+	if jsonpeek.HasKey(head, "finish_reason") || jsonpeek.HasKey(tail, "finish_reason") {
+		state.terminal = true
+	}
+	if id := jsonpeek.StringField(head, "id"); id != "" && state.responseID == "" {
+		state.responseID = id
+	}
+	usage := jsonpeek.TokenUsageFrom(tail)
+	if usage.Found {
+		state.usage.Reported = true
+		if usage.Input > 0 {
+			state.usage.InputTokens = usage.Input
+		}
+		if usage.Output > 0 {
+			state.usage.OutputTokens = usage.Output
+			state.outputTokens = usage.Output
+		}
+		if usage.Total > 0 {
+			state.usage.TotalTokens = usage.Total
+		}
+		if usage.Reasoning > 0 {
+			state.usage.ReasoningTokens = usage.Reasoning
+			state.reasoningTokens = usage.Reasoning
+		}
+		if usage.CostTicks > 0 {
+			state.usage.CostInUSDTicks = usage.CostTicks
+		}
+		if usage.Sources > 0 {
+			state.usage.NumSourcesUsed = usage.Sources
+		}
+		if usage.ServerTools > 0 {
+			state.usage.NumServerSideToolsUsed = usage.ServerTools
+		}
+		if usage.ContextInput > 0 {
+			state.usage.ContextInputTokens = usage.ContextInput
+		}
+		if usage.ContextOutput > 0 {
+			state.usage.ContextOutputTokens = usage.ContextOutput
+		}
+	}
+	if jsonpeek.HasKey(tail, "output_text") {
+		if text := jsonpeek.StringField(tail, "text"); text != "" {
+			state.aggregateRunes = max(state.aggregateRunes, utf8.RuneCountInString(text))
+		} else {
+			state.aggregateRunes = max(state.aggregateRunes, 32)
+		}
+	}
+}
+
 func observeQualityPayload(state *qualityScanState, payload []byte) {
+	if len(payload) > 64<<10 {
+		observeHugeQualityPayload(state, payload)
+		return
+	}
 	switch state.protocol {
 	case qualityProtocolChat:
 		observeQualityChat(state, payload)
@@ -473,6 +597,7 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 			state.usage.OutputTokens = event.Response.Usage.OutputTokens
 			state.usage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
 			state.usage.TotalTokens = event.Response.Usage.TotalTokens
+			state.usage.CostInUSDTicks = event.Response.Usage.CostInUSDTicks
 			state.usage.ResponseModel = event.Response.Model
 			state.outputTokens = event.Response.Usage.OutputTokens
 			state.reasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
@@ -632,9 +757,9 @@ func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *quality
 	if state == nil {
 		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, "", errQualityEmptyStream
 	}
-	if len(state.pending) > 0 {
+	if len(state.pending) > 0 || state.skipUntilNewline {
 		// Process a final valid SSE data line even when the upstream omitted its
-		// trailing newline.
+		// trailing newline. Also flush a skipped huge line that never saw '\n'.
 		ObserveQualityChunk(state, []byte{'\n'})
 	}
 	state.terminal = true

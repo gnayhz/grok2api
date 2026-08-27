@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 )
 
 func (r *ReasoningReplay) CaptureBody(body io.ReadCloser, model, sessionKey string, streaming, compact bool) io.ReadCloser {
@@ -32,6 +34,7 @@ type replayCaptureBody struct {
 	streaming bool
 	compact   bool
 	buf       bytes.Buffer
+	pending   []byte
 	truncated bool
 	sawEOF    bool
 	readErr   error
@@ -40,16 +43,22 @@ type replayCaptureBody struct {
 
 func (b *replayCaptureBody) Read(p []byte) (int, error) {
 	n, err := b.inner.Read(p)
-	if n > 0 && !b.truncated {
-		if b.buf.Len()+n > maxReplayCaptureBytes {
+	if n > 0 && !b.truncated && !b.compact {
+		if b.streaming {
+			b.observeSSE(p[:n])
+		} else if b.buf.Len()+n > maxReplayCaptureBytes {
 			b.truncated = true
 			b.buf.Reset()
+			b.pending = nil
 		} else {
 			_, _ = b.buf.Write(p[:n])
 		}
 	}
 	if err == io.EOF {
 		b.sawEOF = true
+		if b.streaming && !b.truncated && !b.compact && len(b.pending) > 0 {
+			b.observeSSE([]byte{10})
+		}
 	} else if err != nil {
 		b.readErr = err
 	}
@@ -62,10 +71,6 @@ func (b *replayCaptureBody) Close() error {
 	}
 	b.done = true
 	closeErr := b.inner.Close()
-	if b.truncated || b.buf.Len() == 0 {
-		return closeErr
-	}
-	payload := b.buf.Bytes()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if b.compact {
@@ -74,6 +79,10 @@ func (b *replayCaptureBody) Close() error {
 		}
 		return closeErr
 	}
+	if b.truncated || b.buf.Len() == 0 {
+		return closeErr
+	}
+	payload := b.buf.Bytes()
 	if b.streaming {
 		if completed, ok := extractCompletedPayloadFromSSE(payload); ok {
 			b.replay.StoreFromCompleted(ctx, b.model, b.session, completed)
@@ -85,6 +94,62 @@ func (b *replayCaptureBody) Close() error {
 	}
 	b.replay.StoreFromCompleted(ctx, b.model, b.session, payload)
 	return closeErr
+}
+
+func (b *replayCaptureBody) observeSSE(chunk []byte) {
+	if b.truncated {
+		return
+	}
+	if cap(b.pending) == 0 && len(chunk) > 0 {
+		b.pending = make([]byte, 0, 32<<10)
+	}
+	b.pending = append(b.pending, chunk...)
+	for {
+		index := bytes.IndexByte(b.pending, 10)
+		if index < 0 {
+			if len(b.pending) > maxReplayCaptureBytes {
+				b.truncated = true
+				b.buf.Reset()
+				b.pending = nil
+			}
+			return
+		}
+		line := b.pending[:index+1]
+		b.pending = b.pending[index+1:]
+		if !keepReplaySSELine(line) {
+			continue
+		}
+		if b.buf.Len()+len(line) > maxReplayCaptureBytes {
+			b.truncated = true
+			b.buf.Reset()
+			b.pending = nil
+			return
+		}
+		_, _ = b.buf.Write(line)
+	}
+}
+
+func keepReplaySSELine(line []byte) bool {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return false
+	}
+	payload := bytes.TrimSpace(trimmed[5:])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return false
+	}
+	head := payload
+	if len(head) > 4096 {
+		head = payload[:4096]
+	}
+	switch jsonpeek.StringField(head, "type") {
+	case "response.output_item.done", "response.completed", "response.done":
+		return true
+	case "":
+		return bytes.Contains(head, []byte(`"output"`))
+	default:
+		return false
+	}
 }
 
 func extractCompletedPayloadFromSSE(data []byte) ([]byte, bool) {

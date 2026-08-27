@@ -2,14 +2,14 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
+
+const maxIdleInspectBytes = 64 << 10
 
 var buildGeneratedDeltaEvents = map[string]struct{}{
 	"response.output_text.delta":             {},
@@ -182,8 +182,16 @@ func (d *buildSSEActivityDetector) observeLine(line []byte) {
 	case "event":
 		d.eventName = string(value)
 	case "data":
+		if len(d.data) >= maxIdleInspectBytes {
+			return
+		}
 		if len(d.data) > 0 {
-			d.data = append(d.data, '\n')
+			d.data = append(d.data, 10)
+		}
+		remain := maxIdleInspectBytes - len(d.data)
+		if len(value) > remain {
+			d.data = append(d.data, value[:remain]...)
+			return
 		}
 		d.data = append(d.data, value...)
 	}
@@ -192,30 +200,7 @@ func (d *buildSSEActivityDetector) observeLine(line []byte) {
 func (d *buildSSEActivityDetector) finishEvent() bool {
 	active := false
 	if !d.overLimit && len(d.data) > 0 {
-		var payload struct {
-			Type  string `json:"type"`
-			Delta string `json:"delta"`
-			Item  struct {
-				ID     string `json:"id"`
-				Type   string `json:"type"`
-				CallID string `json:"call_id"`
-				Name   string `json:"name"`
-			} `json:"item"`
-		}
-		if json.Unmarshal(d.data, &payload) == nil {
-			kind := strings.TrimSpace(payload.Type)
-			if kind == "" {
-				kind = strings.TrimSpace(d.eventName)
-			}
-			if _, generatedDelta := buildGeneratedDeltaEvents[kind]; generatedDelta {
-				active = payload.Delta != ""
-			} else if kind == "response.output_item.added" || kind == "response.output_item.done" {
-				itemType := strings.TrimSpace(payload.Item.Type)
-				_, generatedItem := buildGeneratedOutputItemTypes[itemType]
-				active = generatedItem && (strings.TrimSpace(payload.Item.ID) != "" ||
-					strings.TrimSpace(payload.Item.CallID) != "" || strings.TrimSpace(payload.Item.Name) != "")
-			}
-		}
+		active = d.classifyActivity()
 	}
 	d.eventName = ""
 	d.data = nil
