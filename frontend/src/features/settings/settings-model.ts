@@ -234,6 +234,21 @@ export const settingsSchema = z.object({
     }),
     patrolBatchSize: z.number().int().min(1).max(200),
     buildProbeEnabled: z.boolean(),
+    probeProxyURL: z.string().max(256).refine((value) => {
+      const trimmed = value.trim();
+      if (!trimmed) return true; // 空 = 直连
+      try {
+        const parsed = new URL(trimmed);
+        return ["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol) && !!parsed.host;
+      } catch {
+        return false;
+      }
+    }, "仅支持 http/https/socks5 代理 URL,留空表示直连"),
+    deniedConfirmations: z.number().int().min(0).max(5),
+    deniedTTL: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds === 0 || (seconds >= 3600 && seconds <= 720 * 3600);
+    }),
   }),
   // 出口换 IP 轮换调度。边界与后端 EgressRotationConfig 校验对齐。
   egressRotation: z.object({
@@ -358,6 +373,9 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       patrolInterval: parseDuration(accountRisk.patrolInterval || "15m"),
       patrolBatchSize: accountRisk.patrolBatchSize || 50,
       buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
+      probeProxyURL: accountRisk.probeProxyURL ?? "",
+      deniedConfirmations: accountRisk.deniedConfirmations ?? 2,
+      deniedTTL: parseDuration(accountRisk.deniedTTL || "24h"),
     },
   };
 }
@@ -445,6 +463,9 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       patrolInterval: formatDuration(config.accountRisk.patrolInterval),
       patrolBatchSize: config.accountRisk.patrolBatchSize,
       buildProbeEnabled: config.accountRisk.buildProbeEnabled,
+      probeProxyURL: config.accountRisk.probeProxyURL,
+      deniedConfirmations: config.accountRisk.deniedConfirmations,
+      deniedTTL: formatDuration(config.accountRisk.deniedTTL),
     },
   };
 }

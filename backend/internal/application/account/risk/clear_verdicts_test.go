@@ -19,7 +19,7 @@ func TestClearLinkedBuildKeepsWebOwnedVerdict(t *testing.T) {
 	accounts.linkedWeb[91] = 90
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	// web 90 自己的 SSO 结论(origin==webID),以及 build 91 的原生结论。
-	mustSave(t, store, 90, StoredVerdict{Verdict: VerdictDenied, Source: "sso_probe", OriginAccountID: 90, CheckedAt: time.Now().UTC()})
+	mustSave(t, store, 90, StoredVerdict{Verdict: VerdictDenied, DeniedStreak: 2, Source: "sso_probe", OriginAccountID: 90, CheckedAt: time.Now().UTC()})
 	mustSave(t, store, 91, StoredVerdict{Verdict: VerdictDenied, Source: buildProbeSourceTag, OriginAccountID: 91, CheckedAt: time.Now().UTC()})
 	service := New(baseBuildTestConfig(), accounts, store, &fakeChecker{}, nil)
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,9 @@ type StoredVerdict struct {
 	OriginAccountID uint64
 	// Trigger 判定入口：degrade（请求降智）/ patrol（主动巡检）/ manual。
 	Trigger string
+	// DeniedStreak 记录连续 denied 次数（0=旧数据/单次）：达到
+	// DeniedConfirmations 才处置与连坐；clean/error 覆盖时自然归零。
+	DeniedStreak int
 }
 
 // Risky reports a verdict that marks the identity as registration risk.
@@ -94,6 +98,12 @@ type Config struct {
 	// PatrolBatchSize caps how many due identities one tick re-checks (default 50).
 	PatrolBatchSize int
 	ErrorRetry      time.Duration
+	// DeniedConfirmations 是 denied 定罪所需的连续确认次数（0=默认 2）：
+	// 未达次数的 denied 只记录不处置，待 ErrorRetry 后的重探确认。
+	DeniedConfirmations int
+	// DeniedTTL 是已确认 denied verdict 的新鲜期（0=默认 24h）：过期后
+	// 允许重探，误判可自愈（clean 会覆盖旧 denied）。
+	DeniedTTL time.Duration
 	// BuildProbeEnabled gates the Build-native differential fallback for
 	// unlinked Build accounts (config-switchable, default off).
 	BuildProbeEnabled bool
@@ -225,6 +235,11 @@ type checkCall struct {
 	result  CheckResult
 	origin  uint64
 	trigger string
+	// stored 是 leader 落库的最终 verdict(含 DeniedStreak 连击数)。
+	// 等待方从 result(CheckResult)重组 verdict 时拿不到连击数——
+	// 连击在 leader 侧基于历史 verdict 计算,不在探针结果里。nil 表示
+	// leader 未走到落库(如取消),等待方沿用旧组装路径。
+	stored *StoredVerdict
 }
 
 // CheckResult is the application-layer projection of one RSC probe outcome.
@@ -342,6 +357,15 @@ func normalizeConfig(cfg Config) Config {
 	}
 	if cfg.ErrorRetry <= 0 {
 		cfg.ErrorRetry = time.Hour
+	}
+	if cfg.DeniedConfirmations <= 0 {
+		cfg.DeniedConfirmations = 2
+	}
+	if cfg.DeniedConfirmations > 5 {
+		cfg.DeniedConfirmations = 5
+	}
+	if cfg.DeniedTTL <= 0 {
+		cfg.DeniedTTL = 24 * time.Hour
 	}
 	if cfg.PatrolTickEvery <= 0 {
 		cfg.PatrolTickEvery = 15 * time.Minute
@@ -709,7 +733,13 @@ func (s *Service) freshVerdictFor(ctx context.Context, id uint64, expectedTag st
 	cfg := s.config()
 	switch verdict.Verdict {
 	case VerdictDenied, VerdictFlagged:
-		return verdict, true
+		// 未达确认次数:ErrorRetry 内视作新鲜(防抖),过后重探补确认;
+		// 已确认:DeniedTTL 内新鲜,过期允许重探让误判自愈(clean 可覆盖)。
+		// 此前 denied 永久新鲜是"单次采样永久定罪"的一半根源。
+		if !verdictConfirmed(cfg, verdict) {
+			return verdict, now.Sub(verdict.CheckedAt) < cfg.ErrorRetry
+		}
+		return verdict, now.Sub(verdict.CheckedAt) < cfg.DeniedTTL
 	case VerdictClean:
 		// Homepage-era cleans were produced after grok.com stopped delivering
 		// botFlag fields — every account read as healthy — and must never
@@ -739,6 +769,11 @@ func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64, t
 		select {
 		case <-leader.done:
 			shared := storedFromCheck(leader.result)
+			if leader.stored != nil {
+				// 继承 leader 的最终 verdict(含 DeniedStreak):连击数按
+				// 落库历史计算,等待方无法从探针结果自行推导。
+				shared = *leader.stored
+			}
 			shared.OriginAccountID = leader.origin
 			shared.Trigger = leader.trigger
 			return shared
@@ -793,7 +828,11 @@ func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64, t
 	// 时由 patrolTick 连坐身份组。
 	verdict.OriginAccountID = originAccountID
 	verdict.Trigger = trigger
+	if verdict.Verdict == VerdictDenied {
+		verdict.DeniedStreak = s.nextDeniedStreak(ctx, webID)
+	}
 	s.saveVerdictGuarded(ctx, webID, verdict)
+	call.stored = &verdict
 	perfmetrics.Default.Inc("account_rsc_check_total", perfmetrics.Labels{
 		Subsystem: "account", Operation: "rsc_check", Outcome: verdict.Verdict,
 	})
@@ -828,6 +867,38 @@ func storedFromCheck(result CheckResult) StoredVerdict {
 	}
 }
 
+// nextDeniedStreak 统计一个身份的连续 denied 次数:已有 denied/flagged
+// verdict(saveVerdictGuarded 使其对 error 具有粘性)则 +1,否则从 1 起。
+// 连续次数达到 DeniedConfirmations 才进入处置——单次瞬时误读(2026-08-28
+// 生产首批 7 连发被整批降级服务)不可能再直接定罪。
+func (s *Service) nextDeniedStreak(ctx context.Context, webID uint64) int {
+	if existing, err := s.store.GetRiskVerdict(ctx, webID); err == nil && existing.Risky() {
+		return existing.DeniedStreak + 1
+	}
+	return 1
+}
+
+// verdictConfirmed 报告一条 risky verdict 是否已达到处置所需的连续确认
+// 次数。flagged 视为旧数据已确认;denied 需要 DeniedConfirmations 次连续。
+func verdictConfirmed(cfg Config, verdict StoredVerdict) bool {
+	if !verdict.Risky() {
+		return false
+	}
+	if verdict.Verdict == VerdictFlagged {
+		return true
+	}
+	// Build 差分探针的 denied 自带确认:它本来就要求两个不同出口都降智
+	// 才出 denied,单次采样问题不适用于该路径。
+	if verdict.Source == buildProbeSourceTag {
+		return true
+	}
+	confirmations := cfg.DeniedConfirmations
+	if confirmations <= 0 {
+		confirmations = 2
+	}
+	return verdict.DeniedStreak >= confirmations
+}
+
 // saveVerdictGuarded persists a verdict unless it would clobber a strictly
 // better one: a transient error must never overwrite a denied/flagged verdict
 // ("denied 永久缓存" invariant — external review found the unconditional
@@ -846,7 +917,15 @@ func (s *Service) saveVerdictGuarded(ctx context.Context, webID uint64, verdict 
 
 // applyConsequences acts on a verdict for the degraded account.
 func (s *Service) applyConsequences(ctx context.Context, degradedID, webID uint64, verdict StoredVerdict, egressNodeID uint64) {
+	cfg := s.config()
 	switch {
+	case verdict.Risky() && !verdictConfirmed(cfg, verdict):
+		// 单次 denied 未达确认次数:只记录,不处置、不连坐。ErrorRetry 后
+		// 巡检/归因会重探,连续一致才进入处置分支。
+		s.logger.Warn("account_risk_denied_pending_confirmation",
+			"web_account_id", webID, "degraded_account_id", degradedID,
+			"streak", verdict.DeniedStreak, "confirmations", cfg.DeniedConfirmations,
+			"trigger", verdict.Trigger)
 	case verdict.Risky():
 		// 账号有罪 → 出口节点无辜。三层撤销:
 		// (1) 清未决软冷却(L2);
@@ -1058,7 +1137,7 @@ func (s *Service) patrolTick(ctx context.Context, dueIDs []uint64, force bool) {
 	if !force && !s.Enabled() {
 		return
 	}
-	for _, webID := range dueIDs {
+	for index, webID := range dueIDs {
 		select {
 		case <-ctx.Done():
 			return
@@ -1069,6 +1148,17 @@ func (s *Service) patrolTick(ctx context.Context, dueIDs []uint64, force bool) {
 		// 已标风控后 Build 再降智时无法再调度 SSO 探针,Build 会永远停在冷却。
 		verdict := s.checkNow(ctx, webID, webID, accountdomain.RiskTriggerPatrol)
 		s.applyConsequences(ctx, webID, webID, verdict, 0)
+		// 探针间隔抖动:2026-08-28 首批 7 连发(9 秒)触发上游对整批连接的
+		// 降级服务,7 个健康身份被一次性误判。0.5-1.2s 随机间隔打散批次
+		// 节奏,期间保持可取消。
+		if index < len(dueIDs)-1 {
+			gap := time.Duration(500+rand.IntN(700)) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(gap):
+			}
+		}
 	}
 }
 

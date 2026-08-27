@@ -531,16 +531,19 @@ func newAccountRiskService(cfg config.Config, database *relational.Database, acc
 func accountRiskRuntime(cfg config.Config) risk.Config {
 	rscCfg := cfg.AccountRisk.RSCCheck
 	return risk.Config{
-		Enabled:           rscCfg.Enabled,
-		Concurrency:       rscCfg.Concurrency,
-		Timeout:           rscCfg.Timeout.Value(),
-		OnDenied:          rscCfg.OnDenied,
-		PatrolEnabled:     rscCfg.Patrol.Enabled,
-		PatrolInterval:    time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
-		PatrolTickEvery:   rscCfg.Patrol.Interval.Value(),
-		PatrolBatchSize:   rscCfg.Patrol.BatchSize,
-		ErrorRetry:        time.Hour,
-		BuildProbeEnabled: rscCfg.BuildProbeEnabled(),
+		Enabled:         rscCfg.Enabled,
+		Concurrency:     rscCfg.Concurrency,
+		Timeout:         rscCfg.Timeout.Value(),
+		OnDenied:        rscCfg.OnDenied,
+		PatrolEnabled:   rscCfg.Patrol.Enabled,
+		PatrolInterval:  time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
+		PatrolTickEvery: rscCfg.Patrol.Interval.Value(),
+		PatrolBatchSize: rscCfg.Patrol.BatchSize,
+		ErrorRetry:      time.Hour,
+		// denied 定罪需连续确认(默认 2)且 verdict 有 TTL,单次误读不再永久定罪。
+		DeniedConfirmations: rscCfg.DeniedConfirmations,
+		DeniedTTL:           rscCfg.DeniedTTL.Value(),
+		BuildProbeEnabled:   rscCfg.BuildProbeEnabled(),
 	}
 }
 
@@ -551,7 +554,11 @@ func buildRSCChecker(rscCfg config.AccountRiskRSCConfig) rsc.Probe {
 	if strings.EqualFold(strings.TrimSpace(rscCfg.Method), "homepage") {
 		return rsc.NewChecker(rscCfg.Timeout.Value())
 	}
-	return rsc.NewSSOProbeChecker(rscCfg.Timeout.Value())
+	probe := rsc.NewSSOProbeChecker(rscCfg.Timeout.Value())
+	// 探针出口可配置:空=直连。2026-08-28 生产首批巡检从机房裸 IP 直连,
+	// 整批被降级服务误判;部署机出口不干净时应指向干净代理。
+	probe.ProxyURL = rscCfg.ProbeProxyURL
+	return probe
 }
 
 // rscCheckerSourceTag names the probe method for verdict provenance:
@@ -572,7 +579,7 @@ func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig) string {
 	if method == "" {
 		method = "ssoprobe"
 	}
-	return method + "|" + rscCfg.Timeout.String()
+	return method + "|" + rscCfg.Timeout.String() + "|" + strings.TrimSpace(rscCfg.ProbeProxyURL)
 }
 
 // runAccountRiskPatrol runs the bucketed clean-verdict re-check loop. Each
@@ -596,7 +603,7 @@ func (a *Application) runAccountRiskPatrol(ctx context.Context) {
 		}
 		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		patrolDue, errorRetryDue := a.accountRisk.PatrolCutoffs()
-		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, a.accountRisk.PatrolBatchSize())
+		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, a.accountRisk.SnapshotConfig().DeniedConfirmations, a.accountRisk.PatrolBatchSize())
 		if err != nil {
 			a.logger.Warn("account_risk_patrol_query_failed", "error", err.Error())
 			cancel()
@@ -674,7 +681,7 @@ func runDuePatrol(ctx context.Context, db *relational.Database, riskSvc *risk.Se
 	}
 	query := relational.NewRiskRepository(db)
 	patrolDue, errorRetryDue := riskSvc.PatrolCutoffs()
-	due, err := query.ListPatrolDue(ctx, account.ProviderWeb, patrolDue, errorRetryDue, riskSvc.PatrolBatchSize())
+	due, err := query.ListPatrolDue(ctx, account.ProviderWeb, patrolDue, errorRetryDue, riskSvc.SnapshotConfig().DeniedConfirmations, riskSvc.PatrolBatchSize())
 	if err != nil {
 		return 0, err
 	}

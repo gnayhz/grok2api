@@ -15,7 +15,7 @@ func TestReconcileRespectsVerdictOrigin(t *testing.T) {
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	// Build 91 降智产生的 verdict,键在 web 90。
 	if err := store.SaveRiskVerdict(context.Background(), 90, StoredVerdict{
-		Verdict: VerdictDenied, Source: "sso_probe", OriginAccountID: 91,
+		Verdict: VerdictDenied, DeniedStreak: 1, Source: "sso_probe", OriginAccountID: 91,
 		CheckedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
@@ -39,7 +39,9 @@ func TestReconcileLegacyVerdictFallsBackToWebID(t *testing.T) {
 	accounts := newFakeAccounts()
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	if err := store.SaveRiskVerdict(context.Background(), 90, StoredVerdict{
-		Verdict: VerdictDenied, Source: "sso_probe",
+		// DeniedStreak>=DeniedConfirmations:本用例锁定 origin 回退语义,
+		// 不是定罪策略——确认语义由 dedicated 测试覆盖。
+		Verdict: VerdictDenied, Source: "sso_probe", DeniedStreak: 2,
 		CheckedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)

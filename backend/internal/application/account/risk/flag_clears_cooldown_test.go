@@ -13,14 +13,14 @@ func TestFlagClearsMissingThinkingCooldownScoped(t *testing.T) {
 	accounts := newFakeAccounts()
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
 	checker := &fakeChecker{result: CheckResult{Verdict: VerdictDenied, Source: "sso_probe"}}
-	service := New(Config{Enabled: true, Concurrency: 2, Timeout: time.Second, OnDenied: "flag", PatrolInterval: 30 * 24 * time.Hour, ErrorRetry: time.Hour}, accounts, store, checker, nil)
+	service := New(Config{Enabled: true, Concurrency: 2, Timeout: time.Second, OnDenied: "flag", PatrolInterval: 30 * 24 * time.Hour, ErrorRetry: time.Hour, DeniedConfirmations: 1}, accounts, store, checker, nil)
 	// web 90 + build 91 + console 92 同一身份组;三者都带着 missing-thinking 冷却。
 	accounts.linkedBack[90] = []uint64{91}
 	accounts.linkedConsole[90] = []uint64{92}
 	for _, id := range []uint64{90, 91, 92} {
 		accounts.cooldown[id] = true
 	}
-	verdict := StoredVerdict{Verdict: VerdictDenied, Source: "sso_probe", CheckedAt: time.Now().UTC()}
+	verdict := StoredVerdict{Verdict: VerdictDenied, DeniedStreak: 1, Source: "sso_probe", CheckedAt: time.Now().UTC()}
 	service.applyConsequences(context.Background(), 91, 90, verdict, 0)
 	if !accounts.flagged[91] || accounts.cooldown[91] {
 		t.Fatalf("degraded build 91: flagged=%v cooldown=%v, want flagged and cleared", accounts.flagged[91], accounts.cooldown[91])

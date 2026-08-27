@@ -50,6 +50,7 @@ export type SettingsConfigDTO = {
   accountRisk?: {
     enabled: boolean; method: string; concurrency: number; timeout: string; onDenied: string;
     patrolEnabled: boolean; patrolBucketDays: number; patrolInterval?: string; patrolBatchSize?: number; buildProbeEnabled: boolean;
+    probeProxyURL?: string; deniedConfirmations?: number; deniedTTL?: string;
   };
 };
 
@@ -177,6 +178,7 @@ const settingsConfigValidator = hasShape({
     enabled: isBoolean, method: isString, concurrency: isNumber, timeout: isString, onDenied: isString,
     patrolEnabled: isBoolean, patrolBucketDays: isNumber, patrolInterval: isOptional(isString), patrolBatchSize: isOptional(isNumber),
     buildProbeEnabled: isOptional(isBoolean),
+    probeProxyURL: isOptional(isString), deniedConfirmations: isOptional(isNumber), deniedTTL: isOptional(isString),
   })),
   egressRotation: isOptional(hasShape({
     enabled: isBoolean, maxAttemptsPerQuarantine: isNumber, minNodeInterval: isString, maxGlobalPerHour: isNumber,
@@ -206,6 +208,7 @@ export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["eg
 export const defaultAccountRiskConfig = (): NonNullable<SettingsConfigDTO["accountRisk"]> => ({
   enabled: false, method: "ssoProbe", concurrency: 2, timeout: "30s", onDenied: "flag",
   patrolEnabled: false, patrolBucketDays: 30, patrolInterval: "15m", patrolBatchSize: 50, buildProbeEnabled: false,
+  probeProxyURL: "", deniedConfirmations: 2, deniedTTL: "24h",
 });
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();

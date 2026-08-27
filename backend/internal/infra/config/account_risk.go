@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -30,6 +31,17 @@ type AccountRiskRSCConfig struct {
 	// Build accounts (SSO probe stays the priority whenever a Web identity is
 	// linked). Defaults to off.
 	BuildProbe *AccountRiskBuildProbeConfig `yaml:"buildProbe"`
+	// ProbeProxyURL 让 SSO 探针经代理出站（socks5/http(s)；空 = 直连）。
+	// 2026-08-28 生产事故：探针从机房裸 IP 直连，首批巡检 7 连发全部被
+	// 上游按降级模式服务（答案直接给、无思考头），7 个健康身份被误标
+	// 风控并连坐。部署机出口不干净时应把探针指向干净代理。
+	ProbeProxyURL string `yaml:"probeProxyURL"`
+	// DeniedConfirmations 是 denied 定罪所需的连续确认次数（0=默认 2，
+	// 范围 0-5）：未达次数的 denied 只记录不处置，待下一轮重探确认。
+	DeniedConfirmations int `yaml:"deniedConfirmations"`
+	// DeniedTTL 是已确认 denied verdict 的新鲜期（0=默认 24h，范围
+	// 1h-720h）：过期后允许重探，误判可自愈（clean 会覆盖旧 denied）。
+	DeniedTTL Duration `yaml:"deniedTTL"`
 }
 
 type AccountRiskBuildProbeConfig struct {
@@ -88,6 +100,23 @@ func (c AccountRiskConfig) Validate() error {
 	}
 	if rsc.Patrol.BatchSize != 0 && (rsc.Patrol.BatchSize < 1 || rsc.Patrol.BatchSize > 200) {
 		return fmt.Errorf("accountRisk.rscCheck.patrol.batchSize 必须在 1 到 200 之间")
+	}
+	if proxyURL := strings.TrimSpace(rsc.ProbeProxyURL); proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil || parsed.Host == "" {
+			return fmt.Errorf("accountRisk.rscCheck.probeProxyURL 必须是合法的代理 URL（http/https/socks5）")
+		}
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("accountRisk.rscCheck.probeProxyURL 仅支持 http/https/socks5 代理")
+		}
+	}
+	if rsc.DeniedConfirmations != 0 && (rsc.DeniedConfirmations < 1 || rsc.DeniedConfirmations > 5) {
+		return fmt.Errorf("accountRisk.rscCheck.deniedConfirmations 必须在 1 到 5 之间（0 表示默认 2）")
+	}
+	if d := rsc.DeniedTTL.Value(); d != 0 && (d < time.Hour || d > 720*time.Hour) {
+		return fmt.Errorf("accountRisk.rscCheck.deniedTTL 必须在 1h 到 720h 之间（0 表示默认 24h）")
 	}
 	return nil
 }

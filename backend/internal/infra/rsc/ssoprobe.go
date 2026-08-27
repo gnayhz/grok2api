@@ -14,6 +14,7 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/bogdanfinn/websocket"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 )
 
 // Probe is the transport contract behind every RSC check method. The legacy
@@ -95,8 +96,13 @@ func probeAnswerChannel(channel string) bool {
 // conversation with the SSO cookie and watching for the reasoning stream.
 // The turn protocol and thinking-channel vocabulary match the live Web
 // gateway (split item.create + response.create; ANALYSIS/REASONING/NOTETAKER).
-// Direct (no-proxy) browser-TLS access is fine: the signal is account-level,
-// not IP-level.
+//
+// ProxyURL is configurable (empty = direct): the 2026-08-28 production
+// incident falsified the old "the signal is account-level, not IP-level,
+// direct is fine" assumption — the first patrol burst dialed direct from
+// the datacenter IP and grok.com served every healthy identity without a
+// thinking channel, permanently flagging 7 identities. Deployments whose
+// own egress is unclean must point the probe at a clean proxy.
 type SSOProbeChecker struct {
 	// baseURL overrides https://grok.com for tests (empty means production).
 	baseURL string
@@ -105,6 +111,10 @@ type SSOProbeChecker struct {
 	Model string
 	// Prompt is the probe message body (default "OK").
 	Prompt string
+	// ProxyURL routes both the session fetch and the mgw WebSocket through
+	// the given proxy (socks5/http(s); empty = direct). Socks-family schemes
+	// go through a tunnel dialer so the uTLS Chrome fingerprint survives.
+	ProxyURL string
 	// vitality tracks the recent clean/denied mix; see the breaker comment
 	// above. One checker instance lives for the process, so the window
 	// survives across checks and restarts simply reset it.
@@ -221,12 +231,31 @@ func transientHTTPStatus(status int) bool {
 	return false
 }
 
+// newClient mirrors the egress browser client's proxy handling: tunnel
+// dialer for socks-family schemes (keeps the uTLS fingerprint on the WS),
+// WithProxyUrl for plain http(s) proxies, direct when ProxyURL is empty.
 func (p *SSOProbeChecker) newClient() (tlsclient.HttpClient, error) {
-	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
+	options := []tlsclient.HttpClientOption{
 		tlsclient.WithTimeoutSeconds(int(p.Timeout.Seconds())+1),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithNotFollowRedirects(),
-	)
+	}
+	if proxyURL := strings.TrimSpace(p.ProxyURL); proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("解析探针代理: %w", err)
+		}
+		if tunnelproxy.IsSupportedScheme(parsed.Scheme) {
+			dialer, err := tunnelproxy.NewDialer(proxyURL)
+			if err != nil {
+				return nil, fmt.Errorf("创建探针隧道代理: %w", err)
+			}
+			options = append(options, tlsclient.WithDialContext(dialer.DialContext))
+		} else {
+			options = append(options, tlsclient.WithProxyUrl(proxyURL))
+		}
+	}
+	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), options...)
 }
 
 func (p *SSOProbeChecker) attempt(ctx context.Context, ssoToken string) Result {

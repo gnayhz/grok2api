@@ -35,15 +35,22 @@ func TestListPatrolDueSelection(t *testing.T) {
 	seed := []struct {
 		name    string
 		verdict string
+		streak  int
 		checked time.Time
 		wantDue bool
 	}{
-		{"denied-old", "denied", stale, false},
-		{"flagged-old", "flagged", stale, false},
-		{"clean-stale", "clean", stale, true},
-		{"clean-fresh", "clean", fresh, false},
-		{"error-stale", "error", stale, true},
-		{"error-fresh", "error", fresh, false},
+		// 已确认 denied(连击≥确认数 2)不进巡检 due——它只在 DeniedTTL
+		// 过期后经 freshVerdict 失效重探。
+		{"denied-confirmed-old", "denied", 2, stale, false},
+		{"flagged-old", "flagged", 0, stale, false},
+		// 未确认 denied(连击 1 < 2)在 ErrorRetry 过期后 due,供下一轮
+		// 巡检补确认或被 clean 覆盖自愈(2026-08-28 误判回归的新语义)。
+		{"denied-unconfirmed-old", "denied", 1, stale, true},
+		{"denied-unconfirmed-fresh", "denied", 1, fresh, false},
+		{"clean-stale", "clean", 0, stale, true},
+		{"clean-fresh", "clean", 0, fresh, false},
+		{"error-stale", "error", 0, stale, true},
+		{"error-fresh", "error", 0, fresh, false},
 	}
 	accountIDs := make(map[string]uint64)
 	for _, item := range seed {
@@ -56,7 +63,7 @@ func TestListPatrolDueSelection(t *testing.T) {
 		}
 		accountIDs[item.name] = result.ID
 		if err := repo.SaveRiskVerdict(ctx, AccountRiskVerdict{
-			AccountID: result.ID, Verdict: item.verdict, Source: "rsc", CheckedAt: item.checked,
+			AccountID: result.ID, Verdict: item.verdict, DeniedStreak: item.streak, Source: "rsc", CheckedAt: item.checked,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +89,7 @@ func TestListPatrolDueSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	due, err := repo.ListPatrolDue(ctx, account.ProviderWeb, now.Add(-24*time.Hour), now.Add(-2*time.Hour), 100)
+	due, err := repo.ListPatrolDue(ctx, account.ProviderWeb, now.Add(-24*time.Hour), now.Add(-2*time.Hour), 2, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

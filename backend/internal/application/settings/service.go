@@ -171,15 +171,18 @@ type RequestRetryEditable struct {
 
 // AccountRiskEditable 是管理接口使用的账号风险归因输入（时长为字符串）。
 type AccountRiskEditable struct {
-	Enabled          bool
-	Method           string
-	Concurrency      int
-	Timeout          string
-	OnDenied         string
-	PatrolEnabled    bool
-	PatrolBucketDays int
-	PatrolInterval   string
-	PatrolBatchSize  int
+	Enabled             bool
+	Method              string
+	Concurrency         int
+	Timeout             string
+	OnDenied            string
+	PatrolEnabled       bool
+	PatrolBucketDays    int
+	PatrolInterval      string
+	PatrolBatchSize     int
+	ProbeProxyURL       string
+	DeniedConfirmations int
+	DeniedTTL           string
 	// BuildProbeEnabled 开关 Build 原生差分兜底(未关联 Build)。指针语义:
 	// nil = 请求未携带该字段(旧客户端),保留当前值;非 nil = 显式设置。
 	// 它默认关闭、打开会消耗账号额度,对象整体提交而漏掉这个布尔时,
@@ -609,7 +612,10 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		rsc := config.AccountRiskRSCConfig{
 			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
 			Concurrency: value.AccountRisk.Concurrency, Timeout: config.Duration(value.AccountRisk.Timeout),
-			OnDenied: value.AccountRisk.OnDenied,
+			OnDenied:            value.AccountRisk.OnDenied,
+			ProbeProxyURL:       value.AccountRisk.ProbeProxyURL,
+			DeniedConfirmations: value.AccountRisk.DeniedConfirmations,
+			DeniedTTL:           config.Duration(value.AccountRisk.DeniedTTL),
 			Patrol: config.AccountRiskPatrolConfig{
 				Enabled: value.AccountRisk.PatrolEnabled, BucketDays: value.AccountRisk.PatrolBucketDays,
 				Interval: config.Duration(value.AccountRisk.PatrolInterval), BatchSize: value.AccountRisk.PatrolBatchSize,
@@ -718,16 +724,19 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown.Value(),
 		},
 		AccountRisk: &settingsdomain.AccountRiskConfig{
-			Enabled:           value.AccountRisk.RSCCheck.Enabled,
-			Method:            value.AccountRisk.RSCCheck.Method,
-			Concurrency:       value.AccountRisk.RSCCheck.Concurrency,
-			Timeout:           value.AccountRisk.RSCCheck.Timeout.Value(),
-			OnDenied:          value.AccountRisk.RSCCheck.OnDenied,
-			PatrolEnabled:     value.AccountRisk.RSCCheck.Patrol.Enabled,
-			PatrolBucketDays:  value.AccountRisk.RSCCheck.Patrol.BucketDays,
-			PatrolInterval:    value.AccountRisk.RSCCheck.Patrol.Interval.Value(),
-			PatrolBatchSize:   value.AccountRisk.RSCCheck.Patrol.BatchSize,
-			BuildProbeEnabled: boolPointer(value.AccountRisk.RSCCheck.BuildProbeEnabled()),
+			Enabled:             value.AccountRisk.RSCCheck.Enabled,
+			Method:              value.AccountRisk.RSCCheck.Method,
+			Concurrency:         value.AccountRisk.RSCCheck.Concurrency,
+			Timeout:             value.AccountRisk.RSCCheck.Timeout.Value(),
+			OnDenied:            value.AccountRisk.RSCCheck.OnDenied,
+			PatrolEnabled:       value.AccountRisk.RSCCheck.Patrol.Enabled,
+			PatrolBucketDays:    value.AccountRisk.RSCCheck.Patrol.BucketDays,
+			PatrolInterval:      value.AccountRisk.RSCCheck.Patrol.Interval.Value(),
+			PatrolBatchSize:     value.AccountRisk.RSCCheck.Patrol.BatchSize,
+			ProbeProxyURL:       value.AccountRisk.RSCCheck.ProbeProxyURL,
+			DeniedConfirmations: value.AccountRisk.RSCCheck.DeniedConfirmations,
+			DeniedTTL:           value.AccountRisk.RSCCheck.DeniedTTL.Value(),
+			BuildProbeEnabled:   boolPointer(value.AccountRisk.RSCCheck.BuildProbeEnabled()),
 		},
 		EgressRotation: &settingsdomain.EgressRotationConfig{
 			Enabled:                  value.Egress.Rotation.Enabled,

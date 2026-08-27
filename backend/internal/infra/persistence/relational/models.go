@@ -650,6 +650,11 @@ type accountRiskVerdictModel struct {
 	OriginAccountID uint64 `gorm:"not null;default:0"`
 	// Trigger 记录判定入口：degrade / patrol / manual。空=升级前旧行。
 	Trigger string `gorm:"size:16;not null;default:''"`
+	// DeniedStreak 连续 denied 次数（0=旧数据/单次）：达到运行时设置的
+	// DeniedConfirmations 才处置。AutoMigrate 对既有表补列，旧行默认 0
+	// = 未确认，重启对账不会重放它们的处置（2026-08-28 误判批次因此
+	// 不会被 reconcile 重新打标）。
+	DeniedStreak int `gorm:"not null;default:0"`
 }
 
 func (accountRiskVerdictModel) TableName() string { return "account_risk_verdicts" }

@@ -50,6 +50,13 @@ type AccountRiskConfig struct {
 	PatrolBucketDays int
 	PatrolInterval   time.Duration
 	PatrolBatchSize  int
+	// ProbeProxyURL 让 SSO 探针经代理出站(socks5/http(s);空=直连)。
+	// 2026-08-28 事故:机房裸 IP 直连的首批巡检整批被降级服务误判。
+	ProbeProxyURL string
+	// DeniedConfirmations: denied 定罪所需连续确认次数(0=默认 2)。
+	DeniedConfirmations int
+	// DeniedTTL: 已确认 denied verdict 的新鲜期(0=默认 24h),过期可重探。
+	DeniedTTL time.Duration
 	// BuildProbeEnabled gates the Build-native differential fallback for
 	// unlinked Build accounts. Pointer semantics: nil (legacy payloads)
 	// inherits the file baseline.

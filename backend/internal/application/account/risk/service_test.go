@@ -190,14 +190,21 @@ func deniedResult() CheckResult {
 	return CheckResult{
 		Verdict: VerdictDenied, BotFlagSource: 1,
 		BotFlagDetails: "policy=deny,risk=0.86,event=" + string(rune(36)) + "registration",
-		RiskScore:      0.86, HTTPStatus: 200,
+		RiskScore: 0.86, HTTPStatus: 200,
+		// 真实探针恒填 CheckedAt;缺失会让 DeniedTTL/ErrorRetry 的新鲜期
+		// 判定把零值时间当作远古结论(测试夹具必须与线上一致)。
+		CheckedAt: time.Now().UTC(),
 	}
 }
 
-func cleanResult() CheckResult { return CheckResult{Verdict: VerdictClean, HTTPStatus: 200} }
+func cleanResult() CheckResult {
+	return CheckResult{Verdict: VerdictClean, HTTPStatus: 200, CheckedAt: time.Now().UTC()}
+}
 
 func baseTestConfig() Config {
-	return Config{Enabled: true, Concurrency: 2, Timeout: time.Second, OnDenied: "disable", PatrolInterval: 30 * 24 * time.Hour, ErrorRetry: time.Hour}
+	// DeniedConfirmations:1 保持存量用例的"单次即定罪"语义;确认计数
+	// 的新语义由 denied_confirmation_test.go 单独覆盖(默认 2)。
+	return Config{Enabled: true, Concurrency: 2, Timeout: time.Second, OnDenied: "disable", PatrolInterval: 30 * 24 * time.Hour, ErrorRetry: time.Hour, DeniedConfirmations: 1}
 }
 
 func TestAttributionDeniedDisablesIdentity(t *testing.T) {
@@ -359,7 +366,7 @@ func TestReconcileSSOOriginDeniedFansOut(t *testing.T) {
 	accounts.linkedBack[90] = []uint64{7}
 	accounts.linkedConsole[90] = []uint64{55}
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		90: {Verdict: VerdictDenied, OriginAccountID: 90, CheckedAt: time.Now().UTC()},
+		90: {Verdict: VerdictDenied, DeniedStreak: 1, OriginAccountID: 90, CheckedAt: time.Now().UTC()},
 	}}
 	cfg := baseTestConfig()
 	cfg.OnDenied = "flag"
@@ -382,8 +389,8 @@ func TestReconcileRiskyVerdictsFlagsDrifted(t *testing.T) {
 	accounts.linkedBack[90] = []uint64{7}
 	accounts.linkedBack[91] = []uint64{8}
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		90: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
-		91: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
+		90: {Verdict: VerdictDenied, DeniedStreak: 1, CheckedAt: time.Now().UTC()},
+		91: {Verdict: VerdictDenied, DeniedStreak: 1, CheckedAt: time.Now().UTC()},
 	}}
 	cfg := baseTestConfig()
 	cfg.OnDenied = "flag"
@@ -410,7 +417,7 @@ func TestReconcileRiskyVerdictsFlagsDrifted(t *testing.T) {
 	accounts2.linkedBack[95] = []uint64{11}
 	accounts2.linkedConsole[95] = []uint64{12}
 	store2 := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		95: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
+		95: {Verdict: VerdictDenied, DeniedStreak: 1, CheckedAt: time.Now().UTC()},
 	}}
 	service2 := New(cfg, accounts2, store2, &fakeChecker{result: cleanResult()}, nil)
 	service2.attribute(context.Background(), accountdomain.Credential{ID: 11, Provider: accountdomain.ProviderBuild}, 0)
@@ -464,7 +471,7 @@ func TestCachedRiskySkipsCheck(t *testing.T) {
 	accounts.linkedWeb[7] = 90
 	accounts.linkedBack[90] = []uint64{7}
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		90: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
+		90: {Verdict: VerdictDenied, DeniedStreak: 1, CheckedAt: time.Now().UTC()},
 	}}
 	checker := &fakeChecker{result: cleanResult()}
 	service := New(baseTestConfig(), accounts, store, checker, nil)
@@ -486,7 +493,10 @@ func TestCachedRiskySkipsCheck(t *testing.T) {
 func TestFreshVerdictExpiryMatrix(t *testing.T) {
 	now := time.Now().UTC()
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		1: {Verdict: VerdictDenied, CheckedAt: now.Add(-1000 * time.Hour)},
+		1: {Verdict: VerdictDenied, DeniedStreak: 2, CheckedAt: now.Add(-time.Hour)},
+		6: {Verdict: VerdictDenied, DeniedStreak: 2, CheckedAt: now.Add(-1000 * time.Hour)},
+		7: {Verdict: VerdictDenied, DeniedStreak: 0, CheckedAt: now.Add(-time.Minute)},
+		8: {Verdict: VerdictDenied, DeniedStreak: 0, CheckedAt: now.Add(-2 * time.Hour)},
 		2: {Verdict: VerdictClean, CheckedAt: now.Add(-time.Hour)},
 		3: {Verdict: VerdictClean, CheckedAt: now.Add(-1000 * time.Hour)},
 		4: {Verdict: VerdictError, CheckedAt: now.Add(-time.Minute)},
@@ -496,7 +506,7 @@ func TestFreshVerdictExpiryMatrix(t *testing.T) {
 	cases := []struct {
 		id   uint64
 		want bool
-	}{{1, true}, {2, true}, {3, false}, {4, true}, {5, false}}
+	}{{1, true}, {2, true}, {3, false}, {4, true}, {5, false}, {6, false}, {7, true}, {8, false}}
 	for _, testCase := range cases {
 		if _, fresh := service.freshVerdict(context.Background(), testCase.id); fresh != testCase.want {
 			t.Fatalf("id=%d fresh=%v want=%v", testCase.id, fresh, testCase.want)

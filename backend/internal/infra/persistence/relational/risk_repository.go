@@ -27,6 +27,9 @@ type AccountRiskVerdict struct {
 	OriginAccountID uint64
 	// Trigger 判定入口：degrade / patrol / manual。空=升级前旧行。
 	Trigger string
+	// DeniedStreak 连续 denied 次数（与 risk.StoredVerdict 逐字段镜像，
+	// 二者靠直接结构转换互通）：达到 DeniedConfirmations 才处置。
+	DeniedStreak int
 }
 
 // RiskRepository persists RSC verdicts for Web SSO identities.
@@ -136,9 +139,17 @@ func (r *RiskRepository) listRiskyVerdictAccountIDs(ctx context.Context, afterID
 // Accounts with no verdict row are not due — first detection is event-driven
 // (OnDegraded). Including them turned a method switch that purged stale
 // cleans into a full-pool scan that permanently flagged healthy identities.
-func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Provider, patrolInterval, errorRetryAfter time.Time, limit int) ([]uint64, error) {
+//
+// Unconfirmed denials (denied_streak < deniedConfirmations) become due after
+// errorRetryAfter so the next patrol re-probes and either confirms (streak
+// grows → consequences) or clears (clean overwrites). Confirmed denials are
+// NOT due here: they re-probe only after DeniedTTL via freshVerdict expiry.
+func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Provider, patrolInterval, errorRetryAfter time.Time, deniedConfirmations int, limit int) ([]uint64, error) {
 	if limit <= 0 {
 		limit = 500
+	}
+	if deniedConfirmations <= 0 {
+		deniedConfirmations = 2
 	}
 	var ids []uint64
 	err := r.db.db.WithContext(ctx).
@@ -146,8 +157,8 @@ func (r *RiskRepository) ListPatrolDue(ctx context.Context, provider account.Pro
 		Joins("JOIN provider_accounts AS account ON account.id = verdict.account_id").
 		Where("account.provider = ? AND account.enabled = ?", provider, true).
 		Where(
-			"(verdict.verdict = 'clean' AND verdict.checked_at <= ?) OR (verdict.verdict = 'error' AND verdict.checked_at <= ?)",
-			patrolInterval, errorRetryAfter,
+			"(verdict.verdict = 'clean' AND verdict.checked_at <= ?) OR (verdict.verdict = 'error' AND verdict.checked_at <= ?) OR (verdict.verdict = 'denied' AND verdict.denied_streak < ? AND verdict.checked_at <= ?)",
+			patrolInterval, errorRetryAfter, deniedConfirmations, errorRetryAfter,
 		).
 		Order("verdict.checked_at ASC").
 		Limit(limit).

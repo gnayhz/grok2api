@@ -127,7 +127,7 @@ func TestReconcilePagesAcrossBoundary(t *testing.T) {
 	total := riskyVerdictPageLimit + extra
 	store := &pagedStore{verdicts: map[uint64]StoredVerdict{}, pageLimit: riskyVerdictPageLimit}
 	for id := uint64(1); id <= uint64(total); id++ {
-		store.verdicts[id] = StoredVerdict{Verdict: VerdictDenied, CheckedAt: time.Now().UTC()}
+		store.verdicts[id] = StoredVerdict{Verdict: VerdictDenied, DeniedStreak: 1, CheckedAt: time.Now().UTC()}
 	}
 	accounts := &countingAccounts{flagged: map[uint64]int{}, tokens: map[uint64]string{}, linkedW: map[uint64]uint64{}}
 	cfg := baseTestConfig()
@@ -165,7 +165,7 @@ func TestReconcilePagesAcrossBoundary(t *testing.T) {
 func TestReconcileStopsOnListErrorWithoutCursorAdvance(t *testing.T) {
 	store := &pagedStore{verdicts: map[uint64]StoredVerdict{}, pageLimit: 10, listErrAfter: 1}
 	for id := uint64(1); id <= 3; id++ {
-		store.verdicts[id] = StoredVerdict{Verdict: VerdictDenied, CheckedAt: time.Now().UTC()}
+		store.verdicts[id] = StoredVerdict{Verdict: VerdictDenied, DeniedStreak: 1, CheckedAt: time.Now().UTC()}
 	}
 	accounts := &countingAccounts{flagged: map[uint64]int{}, tokens: map[uint64]string{}, linkedW: map[uint64]uint64{}}
 	cfg := baseTestConfig()

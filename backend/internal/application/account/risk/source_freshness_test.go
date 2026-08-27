@@ -58,7 +58,9 @@ func TestFreshVerdictKeepsDeniedAcrossMethods(t *testing.T) {
 	checker := &fakeChecker{result: CheckResult{Verdict: VerdictClean, Source: "sso_probe"}}
 	service := New(Config{Enabled: true, Concurrency: 2, Timeout: time.Second, OnDenied: "flag", PatrolInterval: 30 * 24 * time.Hour, ErrorRetry: time.Hour}, accounts, store, checker, nil)
 	service.UpdateChecker(checker, "sso_probe")
-	if err := store.SaveRiskVerdict(context.Background(), 90, StoredVerdict{Verdict: VerdictDenied, Source: "rsc", CheckedAt: time.Now().Add(-90 * 24 * time.Hour).UTC()}); err != nil {
+	// 已确认 denied(DeniedStreak>=2)在 DeniedTTL 内保持权威:方法切换
+	// 不得使其失效。(-90d 永久权威语义已由 DeniedTTL 取代,过期可重探。)
+	if err := store.SaveRiskVerdict(context.Background(), 90, StoredVerdict{Verdict: VerdictDenied, DeniedStreak: 2, Source: "rsc", CheckedAt: time.Now().Add(-time.Hour).UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	accounts.linkedWeb[91] = 90
