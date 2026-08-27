@@ -110,6 +110,11 @@ func peekRootOrResponseString(value, head []byte, key string) string {
 		// response object in the 4KB head; id/model still sit before any
 		// encrypted_content payload. sseEventType must see the whole frame
 		// here: on re-marshaled frames the root type sits past the head.
+		// 先做根层整帧扫描（限定根层，item.id 不会误中），再退回头窗内
+		// 的嵌套 response 早段字段（字母序 id/model 在 output 之前）。
+		if v := jsonpeek.RootStringFieldScan(value, key); v != "" {
+			return v
+		}
 		return jsonpeek.StringField(head, key)
 	default:
 		return ""
@@ -126,7 +131,13 @@ func (i *responseInspector) applyPeekedFrameMetadata(value []byte) {
 		i.metadata.Model = model
 		i.metadata.Usage.ResponseModel = model
 	}
-	if seq, ok := jsonpeek.IntField(head, "sequence_number"); ok && seq > i.metadata.SequenceNumber {
+	if seq, ok := jsonpeek.IntField(head, "sequence_number"); ok {
+		if seq > i.metadata.SequenceNumber {
+			i.metadata.SequenceNumber = seq
+		}
+	} else if seq, ok := jsonpeek.RootIntFieldScan(value, "sequence_number"); ok && seq > i.metadata.SequenceNumber {
+		// 重排键序的大帧上 sequence_number 按字母序位于 response 对象
+		// 之后，头窗取不到；整帧根层扫描兜底（合成终止事件的序号依赖它）。
 		i.metadata.SequenceNumber = seq
 	}
 	src := value

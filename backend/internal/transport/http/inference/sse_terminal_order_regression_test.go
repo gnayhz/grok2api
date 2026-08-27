@@ -2,9 +2,35 @@ package inference
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
+
+// 终审补充：失败/未完成终止事件在重排键序大帧下同样不得丢失——
+// 误判会把 upstream_stream_error 换成 upstream_stream_incomplete，
+// 污染错误分类与告警面。
+func TestRewrittenFailedAndIncompleteFramesClassified(t *testing.T) {
+	text := strings.Repeat("段", 2600) // 与 completed 用例同体量,推过 4096
+	tpl := `{"type":"__TYPE__","sequence_number":41,"response":{"id":"resp_live_2","status":"failed","error":{"code":"server_error","message":"boom"},"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"__TEXT__"}],"content":[]},{"type":"message","content":[{"type":"output_text","text":"answer"}]}],"usage":{"input_tokens":420,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":10},"total_tokens":470}}}`
+	for _, eventType := range []string{"response.failed", "response.incomplete"} {
+		line := "data: " + strings.ReplaceAll(strings.ReplaceAll(tpl, "__TYPE__", eventType), "__TEXT__", text) + "\n"
+		state := &responsesCompatState{}
+		rewritten := rewriteResponsesDataLine([]byte(line), state)
+		if len(rewritten) <= 4096 {
+			t.Fatalf("%s: rewritten frame should exceed 4096 bytes, got %d", eventType, len(rewritten))
+		}
+		if offset := bytes.Index(rewritten, []byte(`"type":"`+eventType+`"`)); offset <= 4096 {
+			t.Fatalf("%s: type at offset %d should sit past the head window", eventType, offset)
+		}
+		inspector := &responseInspector{protocol: streamProtocolResponses}
+		inspector.Inspect(rewritten)
+		inspector.Finish()
+		if err := inspector.TerminalError(); !errors.Is(err, errUpstreamStreamFailed) {
+			t.Fatalf("%s: terminal error = %v want errUpstreamStreamFailed", eventType, err)
+		}
+	}
+}
 
 // 复现线上 upstream_stream_incomplete 回归（2026-08-27 线上 5/5 失败）:
 // copyStream 对 streamProtocolResponses 先 rewriteResponsesStreamChunk 再 Inspect。

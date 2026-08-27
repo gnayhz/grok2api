@@ -10,6 +10,10 @@
 #   3. audit_retention_days_purged 日志 —— 出现即 retentionDays 被重新打开
 #   4. readyz 组件态 —— 非 ready/disabled 的组件需人工关注
 #   5. 账号池风险面 —— disabled 计数（信息性，对照换血基线 30）
+#   6. 工具密钥残留 —— probe/tool 命名的 client key 不许滞留
+#   7. upstream_stream_incomplete 审计行 —— 超基线即"部署边界回归"告警
+#      （ce63696b 回归类：键序盲扫丢 terminal。历史行未老化前可用
+#        PATROL_INCOMPLETE_BASELINE 压噪，如生产当前设 6）
 #
 # 退出码: 0=全部正常  1=存在异常项。只读巡检，不产生任何数据变更。
 set -uo pipefail
@@ -80,6 +84,19 @@ bad = [n for n in names if any(x in n for x in patterns)]
 print(",".join(bad))' 2>/dev/null)
   say "probe/tool key residue"
   [ -z "$residue" ] && ok || bad "$residue（工具密钥滞留，应删除）"
+  # --- 7) upstream_stream_incomplete 误判哨兵（ce63696b 回归类教训）
+  # 取最近一页该 errorCode 审计行数;超基线即告警。基线用于压历史行噪声
+  # （行按天老化后应回落到 0,勿长期保留非零基线）。
+  inc=$(curl -sf -m 5 -H "Authorization: Bearer $TOKEN" \
+    "$BASE/api/admin/v1/request-audits?pagination=cursor&pageSize=50&errorCode=upstream_stream_incomplete" 2>/dev/null \
+    | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["data"]["items"]))' 2>/dev/null)
+  inc_baseline="${PATROL_INCOMPLETE_BASELINE:-0}"
+  say "upstream_stream_incomplete rows"
+  if [ "${inc:-$((inc_baseline + 1))}" -le "$inc_baseline" ]; then
+    echo "${inc}（≤基线 ${inc_baseline}）"
+  else
+    bad "${inc:-?} 条 > 基线 ${inc_baseline}（部署边界回归？键序盲扫丢 terminal）"
+  fi
 else
   say "admin login"
   bad "登录失败（凭据失效或认证面故障）——风险面检查被跳过不可接受"

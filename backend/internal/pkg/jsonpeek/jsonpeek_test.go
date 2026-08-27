@@ -90,6 +90,34 @@ func TestRootStringFieldScanOrderIndependent(t *testing.T) {
 	}
 }
 
+func TestRootIntFieldScanOrderIndependent(t *testing.T) {
+	t.Parallel()
+	// 重排键序大帧：sequence_number 位于多 KB response 对象之后。
+	sorted := []byte("{\"response\":{\"output\":[{\"text\":\"" + string(make([]byte, 8192)) + "\"}]},\"sequence_number\":41,\"type\":\"response.completed\"}")
+	if got, ok := RootIntFieldScan(sorted, "sequence_number"); !ok || got != 41 {
+		t.Fatalf("sorted sequence_number = %d ok=%v", got, ok)
+	}
+	plain := []byte("{\"sequence_number\":7,\"type\":\"x\"}")
+	if got, ok := RootIntFieldScan(plain, "sequence_number"); !ok || got != 7 {
+		t.Fatalf("plain sequence_number = %d ok=%v", got, ok)
+	}
+	if got, ok := RootIntFieldScan([]byte("{\"n\":-3}"), "n"); !ok || got != -3 {
+		t.Fatalf("negative = %d ok=%v", got, ok)
+	}
+	if _, ok := RootIntFieldScan([]byte("{\"n\":\"7\"}"), "n"); ok {
+		t.Fatal("string value must not parse as int")
+	}
+	if _, ok := RootIntFieldScan([]byte("{\"n\":true}"), "n"); ok {
+		t.Fatal("bool value must not parse as int")
+	}
+	if _, ok := RootIntFieldScan([]byte("{\"item\":{\"sequence_number\":9}}"), "sequence_number"); ok {
+		t.Fatal("nested value must not match")
+	}
+	if _, ok := RootIntFieldScan(sorted[:60], "sequence_number"); ok {
+		t.Fatal("truncated buffer must not match")
+	}
+}
+
 func TestRawValueExtractsErrorFromTruncatedDocument(t *testing.T) {
 	t.Parallel()
 	prefix := []byte(`{"type":"response.failed","response":{"id":"resp_1","error":{"code":"server_error","message":"boom"},"output":[{"encrypted_content":"AAAA`)

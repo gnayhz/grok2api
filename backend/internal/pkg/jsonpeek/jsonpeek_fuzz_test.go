@@ -167,3 +167,99 @@ func FuzzTokenUsageFrom(f *testing.F) {
 		}
 	})
 }
+
+// FuzzRootStringFieldScan 以 encoding/json 为 oracle 校验整帧根层扫描：
+// 键序无关、仅根层、非字符串值不得命中。转义键名等奇异拼写字节比较与
+// 解码语义不同，用「键明文恰好出现一次」守住可比性（与 FuzzStringField
+// 同口径的 guard）。
+func FuzzRootStringFieldScan(f *testing.F) {
+	f.Add([]byte(`{"response":{"id":"r"},"type":"response.completed"}`), "type")
+	f.Add([]byte(`{"a":{"b":"nested"},"b":"root"}`), "b")
+	f.Add([]byte(`{"type":"x","n":7}`), "n")
+	f.Fuzz(func(t *testing.T, data []byte, key string) {
+		got := RootStringFieldScan(data, key)
+		if key == "" || !json.Valid(data) {
+			return
+		}
+		// Scan 按字节比较键名，encoding/json 会把非法 UTF-8 字节归一化为
+		// U+FFFD——两者只在合法 UTF-8 输入上可比（真实 SSE 键恒为 ASCII）。
+		if !utf8.Valid(data) || !utf8.ValidString(key) {
+			return
+		}
+		needle := make([]byte, 0, len(key)+2)
+		needle = append(needle, '"')
+		needle = append(needle, key...)
+		needle = append(needle, '"')
+		if bytes.Count(data, needle) != 1 {
+			return
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(data, &obj) != nil {
+			return
+		}
+		raw, ok := obj[key]
+		if !ok {
+			if got != "" {
+				t.Fatalf("RootStringFieldScan(%q) = %q want empty (absent key) in %s", key, got, data)
+			}
+			return
+		}
+		var want string
+		if json.Unmarshal(raw, &want) != nil {
+			if got != "" {
+				t.Fatalf("RootStringFieldScan(%q) = %q want empty (non-string value) in %s", key, got, data)
+			}
+			return
+		}
+		if bytes.IndexByte(raw, '\\') >= 0 || !utf8.Valid(raw) {
+			return
+		}
+		if got != want {
+			t.Fatalf("RootStringFieldScan(%q) = %q want %q in %s", key, got, want, data)
+		}
+	})
+}
+
+// FuzzRootIntFieldScan 同上，校验根层整数扫描。
+func FuzzRootIntFieldScan(f *testing.F) {
+	f.Add([]byte(`{"response":{"x":1},"sequence_number":41}`), "sequence_number")
+	f.Add([]byte(`{"n":-3}`), "n")
+	f.Add([]byte(`{"n":"7"}`), "n")
+	f.Fuzz(func(t *testing.T, data []byte, key string) {
+		got, ok := RootIntFieldScan(data, key)
+		if key == "" || !json.Valid(data) {
+			return
+		}
+		if !utf8.Valid(data) || !utf8.ValidString(key) {
+			return
+		}
+		needle := make([]byte, 0, len(key)+2)
+		needle = append(needle, '"')
+		needle = append(needle, key...)
+		needle = append(needle, '"')
+		if bytes.Count(data, needle) != 1 {
+			return
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(data, &obj) != nil {
+			return
+		}
+		raw, exists := obj[key]
+		if !exists {
+			if ok {
+				t.Fatalf("RootIntFieldScan(%q) = %d ok=true want absent in %s", key, got, data)
+			}
+			return
+		}
+		var want int64
+		if json.Unmarshal(raw, &want) != nil {
+			if ok {
+				t.Fatalf("RootIntFieldScan(%q) = %d ok=true want non-int in %s", key, got, data)
+			}
+			return
+		}
+		if !ok || got != want {
+			t.Fatalf("RootIntFieldScan(%q) = %d ok=%v want %d in %s", key, got, ok, want, data)
+		}
+	})
+}

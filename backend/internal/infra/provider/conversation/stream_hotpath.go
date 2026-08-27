@@ -48,6 +48,12 @@ func (c *streamConverter) handleHugeCompleted(data []byte, typeName string) erro
 	response.ID = jsonpeek.StringField(head, "id")
 	response.Model = jsonpeek.StringField(head, "model")
 	response.Status = jsonpeek.StringField(head, "status")
+	if response.Status == "" {
+		// 字母序下 status 位于 output 之后：帧形态把大对象前置时 status
+		// 会掉出 8KB 头窗，而从尾部窗口兜底（status 全帧只出现一次，
+		// 且与 usage 同侧，误中面为零）。
+		response.Status = jsonpeek.StringField(tail, "status")
+	}
 	usage := jsonpeek.TokenUsageFrom(tail)
 	if usage.Found {
 		response.Usage.InputTokens = usage.Input

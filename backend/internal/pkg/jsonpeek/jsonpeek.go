@@ -153,6 +153,57 @@ func RootStringFieldScan(data []byte, key string) string {
 	return ""
 }
 
+// RootIntFieldScan returns the root-level integer value for key on a
+// COMPLETE JSON object of any size, with the same key-order independence
+// as RootStringFieldScan. Returns false when the key is absent, its value
+// is not an integer literal, or the buffer truncates before it completes.
+// 用于重排键序大帧上位于嵌套大对象之后的根层数值（如 sequence_number）。
+func RootIntFieldScan(data []byte, key string) (int64, bool) {
+	if len(data) == 0 || key == "" {
+		return 0, false
+	}
+	rest := skipJSONSpace(data)
+	if len(rest) == 0 || rest[0] != '{' {
+		return 0, false
+	}
+	rest = skipJSONSpace(rest[1:])
+	for len(rest) > 0 {
+		if rest[0] == '}' {
+			return 0, false
+		}
+		if rest[0] != '"' {
+			return 0, false
+		}
+		end := matchJSONString(rest)
+		if end <= 1 {
+			return 0, false
+		}
+		field := rest[1 : end-1]
+		rest = skipJSONSpace(rest[end:])
+		if len(rest) == 0 || rest[0] != ':' {
+			return 0, false
+		}
+		rest = skipJSONSpace(rest[1:])
+		valueEnd := scanJSONValue(rest)
+		if valueEnd <= 0 {
+			return 0, false
+		}
+		if string(field) == key && rest[0] != '"' && rest[0] != '{' && rest[0] != '[' {
+			value, err := strconv.ParseInt(string(rest[:valueEnd]), 10, 64)
+			if err != nil {
+				// 布尔/null/浮点字面量：该键不是整数，与缺失同口径。
+				return 0, false
+			}
+			return value, true
+		}
+		rest = skipJSONSpace(rest[valueEnd:])
+		if len(rest) > 0 && rest[0] == ',' {
+			rest = rest[1:]
+		}
+	}
+	return 0, false
+}
+
 // scanJSONValue returns the exclusive end offset of the JSON value at the
 // start of data, or -1 when data truncates inside it (unterminated string or
 // unbalanced brackets). Literal scalars end at the first value delimiter.

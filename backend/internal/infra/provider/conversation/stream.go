@@ -835,6 +835,12 @@ func parseSSEEvent(event string, data []byte) (string, map[string]json.RawMessag
 				head = data[:4096]
 			}
 			typeName = jsonpeek.StringField(head, "type")
+			if typeName == "" {
+				// 上游原生帧当前 type 在前，但这是未声明的键序契约；头窗
+				// 未命中时对完整帧做键序无关的根层扫描兜底（与 inference
+				// 侧 sseEventType 同口径，防同类 terminal 丢失回归）。
+				typeName = jsonpeek.RootStringFieldScan(data, "type")
+			}
 		}
 		switch typeName {
 		case "response.output_item.added", "response.output_item.done",
