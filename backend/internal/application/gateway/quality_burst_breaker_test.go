@@ -60,3 +60,22 @@ func TestTerminalBurstTrackerCountsWindowAndReset(t *testing.T) {
 	nilTracker.observeHealthy(1)
 	nilTracker.reset(1)
 }
+
+func TestTerminalBurstTrackerDropsExpiredAccounts(t *testing.T) {
+	tracker := newTerminalBurstTracker()
+	if tracker.observeBurst(1) != 1 || tracker.observeBurst(2) != 1 {
+		t.Fatal("seed bursts")
+	}
+	tracker.mu.Lock()
+	tracker.entries[1].lastSeen = time.Now().Add(-terminalBurstWindow - time.Minute)
+	tracker.mu.Unlock()
+	if got := tracker.observeBurst(2); got != 2 {
+		t.Fatalf("fresh account streak = %d", got)
+	}
+	tracker.mu.Lock()
+	_, stale := tracker.entries[1]
+	tracker.mu.Unlock()
+	if stale {
+		t.Fatal("expired account must be dropped from the tracker")
+	}
+}

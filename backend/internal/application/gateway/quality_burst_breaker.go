@@ -32,6 +32,14 @@ func newTerminalBurstTracker() *terminalBurstTracker {
 }
 
 // observeBurst 记录一次爆发签名交付，返回该账号当前的连续计数。
+func (t *terminalBurstTracker) pruneExpiredLocked(now time.Time) {
+	for id, entry := range t.entries {
+		if now.Sub(entry.lastSeen) > terminalBurstWindow {
+			delete(t.entries, id)
+		}
+	}
+}
+
 func (t *terminalBurstTracker) observeBurst(accountID uint64) int {
 	if t == nil || accountID == 0 {
 		return 0
@@ -39,8 +47,10 @@ func (t *terminalBurstTracker) observeBurst(accountID uint64) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
+	// 窗口外条目只在下次 observe 时被覆盖；已删除/不再调度的账号会永远占着 map。
+	t.pruneExpiredLocked(now)
 	entry, ok := t.entries[accountID]
-	if !ok || now.Sub(entry.lastSeen) > terminalBurstWindow {
+	if !ok {
 		entry = &terminalBurstEntry{}
 		t.entries[accountID] = entry
 	}
