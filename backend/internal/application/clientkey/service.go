@@ -222,7 +222,12 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 		BillingLimitUSDTicks: input.BillingLimitUSDTicks, AllowModelAliases: input.AllowModelAliases, AllowedModels: input.AllowedModels,
 		ProviderScope: providerScope, TierScope: tierScope,
 	})
-	return Created{Key: value, Secret: raw}, mapRepositoryError(err)
+	if err != nil {
+		return Created{}, mapRepositoryError(err)
+	}
+	// 注释承诺 Create 会失效负缓存：否则同前缀在 2s 窗口内仍 401。
+	s.authCache.deletePrefix(prefix)
+	return Created{Key: value, Secret: raw}, nil
 }
 
 // RevealSecret 解密指定客户端 Key，并校验密文、前缀和鉴权哈希仍然一致。

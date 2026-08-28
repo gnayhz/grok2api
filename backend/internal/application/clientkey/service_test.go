@@ -399,5 +399,53 @@ func TestAuthenticateCachesUnknownPrefixNegatively(t *testing.T) {
 	}
 }
 
+func TestAuthenticateNegativeCacheClearedOnBatchInvalidation(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "negative-cache-clear.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	counting := &countingClientKeyRepository{ClientKeyRepository: relational.NewClientKeyRepository(database)}
+	service := NewService(counting, nil, nil, 60, 5, testCipher(t))
+	unknown := "g2a_deadbeefcafe_" + strings.Repeat("ab", 24)
+	if _, _, err := service.Authenticate(ctx, unknown); err != ErrInvalidKey {
+		t.Fatalf("err = %v, want ErrInvalidKey", err)
+	}
+	service.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationClientKeyChanged})
+	if _, _, err := service.Authenticate(ctx, unknown); err != ErrInvalidKey {
+		t.Fatalf("err = %v, want ErrInvalidKey", err)
+	}
+	if counting.lookups != 2 {
+		t.Fatalf("GetByPrefix lookups = %d, want 2 (batch invalidation must drop negative cache)", counting.lookups)
+	}
+}
+
+func TestAuthKeyCacheClearAndPutDropNegatives(t *testing.T) {
+	cache := newAuthKeyCache()
+	now := time.Now().UTC()
+	cache.putNegative("deadbeefcafe", now)
+	if !cache.getNegative("deadbeefcafe", now) {
+		t.Fatal("negative entry missing")
+	}
+	cache.clear()
+	if cache.getNegative("deadbeefcafe", now) {
+		t.Fatal("clear must drop negative entries")
+	}
+	cache.putNegative("deadbeefcafe", now)
+	cache.deletePrefix("deadbeefcafe")
+	if cache.getNegative("deadbeefcafe", now) {
+		t.Fatal("deletePrefix must drop negative entries")
+	}
+	cache.putNegative("aabbccddeeff", now)
+	cache.put("aabbccddeeff", clientkeydomain.Key{ID: 1, Prefix: "aabbccddeeff"}, now)
+	if cache.getNegative("aabbccddeeff", now) {
+		t.Fatal("put of a real key must drop the negative entry")
+	}
+}
+
 var _ repository.RateLimiter = failingRateLimiter{}
 var _ repository.ConcurrencyLimiter = failingConcurrencyLimiter{}

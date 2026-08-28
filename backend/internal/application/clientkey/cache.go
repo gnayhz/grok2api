@@ -59,6 +59,7 @@ func (c *authKeyCache) put(prefix string, value clientkeydomain.Key, now time.Ti
 	value.AllowedModels = append([]uint64(nil), value.AllowedModels...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	delete(c.negatives, prefix)
 	c.byPrefix[prefix] = cachedAuthKey{value: value, expiresAt: now.Add(keyAuthCacheTTL)}
 	if len(c.byPrefix) <= keyAuthCacheMaxEntries {
 		return
@@ -129,9 +130,20 @@ func (c *authKeyCache) deleteIDs(ids []uint64) {
 	}
 }
 
+func (c *authKeyCache) deletePrefix(prefix string) {
+	if prefix == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byPrefix, prefix)
+	delete(c.negatives, prefix)
+}
+
 func (c *authKeyCache) clear() {
 	c.mu.Lock()
 	clear(c.byPrefix)
+	clear(c.negatives)
 	c.mu.Unlock()
 }
 
