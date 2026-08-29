@@ -4545,6 +4545,9 @@ func TestIsUpstreamStreamFailureIncludesIdleTimeout(t *testing.T) {
 	if !isUpstreamStreamFailure("upstream_stream_interrupted") || !isUpstreamStreamFailure("upstream_stream_incomplete") {
 		t.Fatal("existing stream-failure codes must stay classified")
 	}
+	if !isUpstreamStreamFailure("upstream_output_loop") {
+		t.Fatal("output-loop abort must stay classified as an upstream stream failure")
+	}
 	if isUpstreamStreamFailure("") || isUpstreamStreamFailure("quality_degraded") {
 		t.Fatal("non-stream codes must not look like mid-stream failures")
 	}
