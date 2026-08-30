@@ -405,16 +405,17 @@ the grok.com redesign; rollback-to-no-attribution is the `enabled` switch):
   surviving account-level signal (independent of exit-IP quality). Each check
   consumes one message of the account's rolling quota; rate limits, challenges,
   and stream errors always classify as error (retried later), never as risk.
-- **buildProbe (fallback, unlinked Build accounts only)**: accounts linked to a
-  Web identity always use ssoProbe; an unlinked Build that degrades gets one tiny
-  reasoning request through its own credential (classified by the production
-  guard signals). IP pollution is the built-in confound of that signal, so a
-  degraded first attempt triggers a **differential second attempt** (pool node =
-  re-roll for a new exit IP, fixed node = excluded and rerouted, direct-only =
-  inconclusive error, never a denial). A double-degraded verdict additionally
-  requires a recent build-probe clean witness, otherwise it is suppressed to
-  error and retried. Without any reasoning Build model the fallback stays
-  disabled (behavioral penalties only).
+- **buildProbe (Build-channel degrade, linked or not)**: a Build grok-4.5/4.6
+  withhold is classified by a tiny same-channel reasoning request through that
+  account's own credential — not by the grok.com `fast` SSO probe, which is a
+  different product surface and the large-pool misjudgment path. IP pollution is
+  the built-in confound, so a degraded first attempt triggers a **differential
+  second attempt** (pool node = re-roll for a new exit IP, fixed node = excluded
+  and rerouted, direct-only = inconclusive error, never a denial). A
+  double-degraded verdict additionally requires a recent build-probe clean
+  witness, otherwise it is suppressed to error and retried. Without any
+  reasoning Build model the probe stays disabled (behavioral penalties only).
+  SSO remains for Web/Console degrade and patrol.
 
 - **denied/flagged**: a confirmed verdict stays trusted for `deniedTTL` (default 24h)
   and requires `deniedConfirmations` consecutive denials (default 2) before flagging.

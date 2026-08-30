@@ -57,8 +57,8 @@ type AccountRiskConfig struct {
 	DeniedConfirmations int
 	// DeniedTTL: 已确认 denied verdict 的新鲜期(0=默认 24h),过期可重探。
 	DeniedTTL time.Duration
-	// BuildProbeEnabled gates the Build-native differential fallback for
-	// unlinked Build accounts. Pointer semantics: nil (legacy payloads)
+	// BuildProbeEnabled gates the Build-native differential probe for
+	// Build-channel degrade events. Pointer semantics: nil (legacy payloads)
 	// inherits the file baseline.
 	BuildProbeEnabled *bool
 }

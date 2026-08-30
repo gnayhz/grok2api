@@ -105,8 +105,8 @@ type Config struct {
 	// DeniedTTL 是已确认 denied verdict 的新鲜期（0=默认 24h）：过期后
 	// 允许重探，误判可自愈（clean 会覆盖旧 denied）。
 	DeniedTTL time.Duration
-	// BuildProbeEnabled gates the Build-native differential fallback for
-	// unlinked Build accounts (config-switchable, default off).
+	// BuildProbeEnabled gates the Build-native differential probe for
+	// Build-channel degrade events (linked or not; config-switchable, default off).
 	BuildProbeEnabled bool
 }
 
@@ -145,8 +145,8 @@ type Service struct {
 	// egressQuarantiner receives exit-IP quarantine duty when attribution
 	// exonerates the account (RSC clean); nil keeps the degrade account-scoped.
 	egressQuarantiner EgressQuarantiner
-	// buildProber is the Build-native fallback for unlinked Build accounts;
-	// nil keeps the behavioral-only path (no RSC signal without a Web SSO).
+	// buildProber is the Build-native differential probe for Build-channel
+	// degrade events; nil keeps the behavioral-only path when the switch is off.
 	buildProber BuildProber
 
 	sem chan struct{}
@@ -270,7 +270,7 @@ type Checker interface {
 }
 
 // buildProbeSourceTag marks verdicts produced by the Build-native probe
-// (unlinked Build accounts only; the SSO probe stays the primary method).
+// (Build-channel degrade; SSO remains the method for Web/Console and patrol).
 const buildProbeSourceTag = "build_probe"
 
 // Build-native probe verdicts (gateway differential probe outcome mapped).
@@ -292,7 +292,7 @@ type BuildProbeResult struct {
 	CheckedAt time.Time
 }
 
-// BuildProber runs the Build-native risk probe for one unlinked Build
+// BuildProber runs the Build-native differential probe for one Build-channel
 // account. Implemented by the gateway (tiny reasoning request through the
 // real Build channel with egress differential); wired in the composition
 // root so the risk package stays gateway-free.
@@ -440,7 +440,7 @@ func (s *Service) InvalidateStaleCleanVerdicts(ctx context.Context) {
 	if tag == "" {
 		return
 	}
-	// build_probe 的 clean 缓存属于另一套探测体系（未关联 Build），不随
+	// build_probe 的 clean 缓存属于另一套探测体系（Build 通道差分），不随
 	// SSO 方法切换失效。
 	removed, err := s.store.DeleteCleanVerdictsExceptSources(ctx, tag, buildProbeSourceTag)
 	if err != nil {
@@ -537,18 +537,20 @@ func (s *Service) attributeWithTrigger(ctx context.Context, credential accountdo
 	if trigger == "" {
 		trigger = accountdomain.RiskTriggerDegrade
 	}
+	// Build 通道降智必须用同通道差分探针，才能拆开「脏 IP」与「账号风控」。
+	// 即便已关联 Web SSO，也不得改走 grok.com fast 探针：那是另一套产品面，
+	// 大账号池误判的主因（探针出口脏、fast 跳思考、Web≠Build 风控）。
+	// SSO 仍用于 Web/Console 降智与巡检（注册风控连坐）。
+	if credential.Provider == accountdomain.ProviderBuild && s.buildProber != nil && s.config().BuildProbeEnabled {
+		s.attributeBuildNative(ctx, credential, egressNodeID)
+		return
+	}
 	webID, linked, err := s.resolveWebIdentity(ctx, credential)
 	if err != nil {
 		s.logger.Warn("account_risk_resolve_failed", "account_id", credential.ID, "error", err.Error())
 		return
 	}
 	if !linked {
-		// 未关联 SSO 的 Build 走 Build 原生差分探针兜底（有关联时 SSO 探针
-		// 始终优先：它的信号是账号级的，不受出口 IP 质量影响）。
-		if credential.Provider == accountdomain.ProviderBuild && s.buildProber != nil && s.config().BuildProbeEnabled {
-			s.attributeBuildNative(ctx, credential, egressNodeID)
-			return
-		}
 		s.logger.Info("account_risk_unlinked_behavior_attribution", "account_id", credential.ID)
 		return
 	}
@@ -560,10 +562,10 @@ func (s *Service) attributeWithTrigger(ctx context.Context, credential accountdo
 	s.applyConsequences(ctx, credential.ID, webID, result, egressNodeID)
 }
 
-// attributeBuildNative runs the Build-native fallback for an unlinked Build
-// account: cached verdict reuse first, then one differential probe. The
-// verdict is keyed by the Build account itself and consequences stay
-// channel-scoped to it.
+// attributeBuildNative runs the Build-native differential probe for a
+// Build-channel degrade: cached verdict reuse first, then one same-account
+// two-path probe. The verdict is keyed by the Build account itself and
+// consequences stay channel-scoped to it.
 func (s *Service) attributeBuildNative(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64) {
 	if verdict, fresh := s.freshVerdictFor(ctx, credential.ID, buildProbeSourceTag); fresh {
 		s.applyConsequences(ctx, credential.ID, credential.ID, verdict, egressNodeID)
@@ -1010,8 +1012,8 @@ func (s *Service) SetEgressQuarantiner(quarantiner EgressQuarantiner) {
 	s.egressQuarantiner = quarantiner
 }
 
-// SetBuildProber installs the Build-native probe fallback (unlinked Build
-// accounts); nil keeps the behavioral-only path.
+// SetBuildProber installs the Build-native differential probe; nil keeps
+// the behavioral-only path when the switch is off.
 func (s *Service) SetBuildProber(prober BuildProber) {
 	if s == nil || prober == nil {
 		return

@@ -179,7 +179,7 @@ type AccountRiskEditable struct {
 	ProbeProxyURL       string
 	DeniedConfirmations int
 	DeniedTTL           string
-	// BuildProbeEnabled 开关 Build 原生差分兜底(未关联 Build)。指针语义:
+	// BuildProbeEnabled 开关 Build 通道差分探针(有无 SSO 关联都走)。指针语义:
 	// nil = 请求未携带该字段(旧客户端),保留当前值;非 nil = 显式设置。
 	// 它默认关闭、打开会消耗账号额度,对象整体提交而漏掉这个布尔时,
 	// 零值 false 不该把已打开的探针悄悄关掉。

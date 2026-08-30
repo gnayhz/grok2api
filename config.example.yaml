@@ -290,8 +290,9 @@ accountRisk:
     # ——误判可自愈。flag 排除调度，因此必须由巡检触发重探，不能只靠
     # 请求路径 OnDegraded。
     deniedTTL: 24h
-    # Build 自主探测兜底（默认关闭）：未关联 Web SSO 的 Build 账号降智时，
-    # 用其自身凭据发一次微型推理请求差分判定（有关联时始终优先 SSO 探针）。
+    # Build 通道差分探针（默认关闭）：Build 降智时用该账号自身凭据发一次
+    # 微型推理请求判定（有无 Web 关联都走同通道；不再用 grok.com fast 探针
+    # 给主力推理模型定罪）。SSO 仍用于 Web/Console 降智与巡检。
     buildProbe:
       enabled: false
     patrol:

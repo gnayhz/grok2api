@@ -28,9 +28,9 @@ type AccountRiskRSCConfig struct {
 	Timeout     Duration                `yaml:"timeout"`
 	OnDenied    string                  `yaml:"onDenied"`
 	Patrol      AccountRiskPatrolConfig `yaml:"patrol"`
-	// BuildProbe enables the Build-native differential fallback for unlinked
-	// Build accounts (SSO probe stays the priority whenever a Web identity is
-	// linked). Defaults to off.
+	// BuildProbe enables the Build-native differential probe for Build-channel
+	// degrade events (linked or not). SSO remains for Web/Console degrade and
+	// patrol. Defaults to off.
 	BuildProbe *AccountRiskBuildProbeConfig `yaml:"buildProbe"`
 	// ProbeProxyURL 让 SSO 探针经代理出站（socks5/http(s)；空 = 直连）。
 	// 历史生产事故：探针从部署机直连，首批巡检密集探测全部被
