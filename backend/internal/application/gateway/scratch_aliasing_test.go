@@ -17,15 +17,15 @@ func TestScannerScratchNoStringAliasing(t *testing.T) {
 	payload2 := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"second-frame-text-overwrites-buffer\"}}]}\n\n")
 	state := &qualityScanState{protocol: qualityProtocolChat}
 	buf := append([]byte(nil), payload1...)
-	ObserveQualityChunk(state, buf)
+	observeQualityChunk(state, buf)
 	visibleAfterFirst := state.visibleRunes
 	buf = append(buf[:0], payload2...)
-	ObserveQualityChunk(state, buf)
+	observeQualityChunk(state, buf)
 	if state.visibleRunes <= visibleAfterFirst {
 		t.Fatalf("second frame must add visible runes: before=%d after=%d", visibleAfterFirst, state.visibleRunes)
 	}
 	fresh := &qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(fresh, append([]byte(nil), payload2...))
+	observeQualityChunk(fresh, append([]byte(nil), payload2...))
 	deltaReused := state.visibleRunes - visibleAfterFirst
 	deltaFresh := fresh.visibleRunes
 	if deltaReused != deltaFresh {

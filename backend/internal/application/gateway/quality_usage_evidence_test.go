@@ -5,7 +5,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Degraded (risk-routed) streams reason server-side — usage reports large
@@ -38,8 +37,8 @@ data: [DONE]
 
 func TestMarkerAloneStillWithholds(t *testing.T) {
 	t.Parallel()
-	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 3, MinOutputTokens: 32, HoldTimeout: 500 * time.Millisecond, OnExhausted: qualityRetryFailClosed}
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(bFormWithMarkerChat())), qualityProtocolChat, cfg)
+	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailClosed}
+	replay, verdict, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(bFormWithMarkerChat())), qualityProtocolChat, cfg)
 	if err != nil {
 		t.Fatalf("peek error: %v", err)
 	}
@@ -66,7 +65,7 @@ func bFormBurstChat() string {
 func TestDegradedUsageClaimNeverDeliversChat(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(&state, []byte(bFormBurstChat()))
+	observeQualityChunk(&state, []byte(bFormBurstChat()))
 	sig := state.signals()
 	if sig.HasThinking {
 		t.Fatalf("usage reasoning claim must not count as thinking evidence: %#v", sig)
@@ -74,7 +73,7 @@ func TestDegradedUsageClaimNeverDeliversChat(t *testing.T) {
 	if sig.ReasoningTokens != 928 {
 		t.Fatalf("audit field lost: %#v", sig)
 	}
-	if verdict := ClassifyQualityHold(sig, 32); verdict != QualityWithhold {
+	if verdict := classifyQualityHold(sig); verdict != QualityWithhold {
 		t.Fatalf("degraded burst must withhold, got %s (%#v)", verdict, sig)
 	}
 }
@@ -82,7 +81,7 @@ func TestDegradedUsageClaimNeverDeliversChat(t *testing.T) {
 func TestDegradedUsageClaimNeverDeliversResponses(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolResponses}
-	ObserveQualityChunk(&state, []byte(strings.Join([]string{
+	observeQualityChunk(&state, []byte(strings.Join([]string{
 		"event: response.output_text.delta",
 		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"To solve this, multiply and add the partial products carefully.\"}",
 		"",
@@ -94,7 +93,7 @@ func TestDegradedUsageClaimNeverDeliversResponses(t *testing.T) {
 	if sig.HasThinking {
 		t.Fatalf("responses usage claim must not count as thinking: %#v", sig)
 	}
-	if verdict := ClassifyQualityHold(sig, 32); verdict != QualityWithhold {
+	if verdict := classifyQualityHold(sig); verdict != QualityWithhold {
 		t.Fatalf("degraded responses burst must withhold, got %s", verdict)
 	}
 }
@@ -103,8 +102,8 @@ func TestDegradedUsageClaimNeverDeliversResponses(t *testing.T) {
 // withhold, not deliver, even though usage arrives in the same read.
 func TestPeekQualityStreamWithholdsDegradedBurst(t *testing.T) {
 	t.Parallel()
-	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 3, MinOutputTokens: 32, HoldTimeout: 500 * time.Millisecond, OnExhausted: qualityRetryFailClosed}
-	replay, verdict, usage, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(bFormBurstChat())), qualityProtocolChat, cfg)
+	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailClosed}
+	replay, verdict, usage, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(bFormBurstChat())), qualityProtocolChat, cfg)
 	if err != nil {
 		t.Fatalf("peek error: %v", err)
 	}
@@ -122,7 +121,7 @@ func TestPeekQualityStreamWithholdsDegradedBurst(t *testing.T) {
 func TestThinkingMarkerStillDeliversWhenCoalesced(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(&state, []byte(strings.Join([]string{
+	observeQualityChunk(&state, []byte(strings.Join([]string{
 		": grok2api-reasoning-start",
 		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan the answer\"}}]}",
 		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer is 391\"}}]}",
@@ -134,7 +133,7 @@ func TestThinkingMarkerStillDeliversWhenCoalesced(t *testing.T) {
 	if !sig.HasThinking {
 		t.Fatalf("reasoning events must still deliver: %#v", sig)
 	}
-	if ClassifyQualityHold(sig, 32) != QualityDeliver {
+	if classifyQualityHold(sig) != QualityDeliver {
 		t.Fatalf("thinking fixture withheld")
 	}
 }

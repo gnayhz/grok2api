@@ -249,6 +249,9 @@ const summaryQuery = useQuery({
     // record share the same error_code; see recordQualityDegraded).
     { id: "errorCode", label: t("audits.errorCodeFilter"), value: errorCodeFilter, onChange: setErrorCodeFilter, options: [
      { value: "quality_degraded", label: t("audits.errorCodeQualityDegraded") },
+     { value: "quality_evidence_timeout", label: t("audits.errorCodeQualityEvidenceTimeout") },
+     { value: "quality_created_timeout", label: t("audits.errorCodeQualityCreatedTimeout") },
+     { value: "upstream_stream_empty", label: t("audits.errorCodeUpstreamStreamEmpty") },
     ] },
                 {
                   id: "key", label: t("audits.key"), value: keyFilter,
@@ -365,7 +368,7 @@ function ResponsePerformance({ audit, locale }: { audit: AuditDTO; locale: strin
   const throughput = audit.outputTokensPerSecond === undefined ? "—" : formatNumber(audit.outputTokensPerSecond, locale, 1);
   // 速度列为空且命中 terminal_burst（整包末尾爆发+零思考）时展示降智档位
   // 而不是"—"：这类行生成窗口≈0，此前在速度列与一切速率汇总里完全隐形，
-  // 却恰是 2026-08-27 续聊链事故的最强降智签名。
+  // 却恰是 续聊链事故的最强降智签名。
   const throughputValue = throughput === "—" && audit.degradeClass === "terminal_burst" ? t("audits.degradeClassTerminalBurst") : throughput;
   return (
     <div className="grid w-fit max-w-full grid-cols-[auto_auto] gap-x-2.5 gap-y-0.5 whitespace-nowrap text-[11px] leading-4 tabular-nums">

@@ -48,7 +48,7 @@ func TestListPatrolDueSelection(t *testing.T) {
 		{"flagged-old", "flagged", 0, stale, true},
 		{"flagged-fresh", "flagged", 0, fresh, false},
 		// 未确认 denied(连击 1 < 2)在 ErrorRetry 过期后 due,供下一轮
-		// 巡检补确认或被 clean 覆盖自愈(2026-08-28 误判回归的新语义)。
+		// 巡检补确认或被 clean 覆盖自愈(误判回归的新语义)。
 		{"denied-unconfirmed-old", "denied", 1, stale, true},
 		{"denied-unconfirmed-fresh", "denied", 1, fresh, false},
 		{"clean-stale", "clean", 0, stale, true},

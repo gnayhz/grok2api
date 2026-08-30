@@ -28,8 +28,8 @@ func TestRequestScopesAndTrafficClasses(t *testing.T) {
 		t.Fatalf("RequestScopes() = %v, want 5 entries", scopes)
 	}
 	classes := TrafficClasses()
-	if len(classes) != 5 {
-		t.Fatalf("TrafficClasses() = %v, want 5 entries", classes)
+	if len(classes) != 6 {
+		t.Fatalf("TrafficClasses() = %v, want 6 entries", classes)
 	}
 	for _, class := range classes {
 		if !class.IsValid() {

@@ -39,20 +39,16 @@ func TestExampleConfigQualityRetryWiring(t *testing.T) {
 	wants := struct {
 		enabled          bool
 		maxAttempts      int
-		holdTimeout      time.Duration
-		minOutputTokens  int64
 		onExhausted      string
-		earlyHeaderAbort time.Duration
 		sameAccountRetry bool
 		accountCooldown  time.Duration
 		idleCooldown     time.Duration
 		evidenceTimeout  time.Duration
 		createdTimeout   time.Duration
 	}{
-		enabled: true, maxAttempts: 6, holdTimeout: 3 * time.Second,
-		minOutputTokens: 8, onExhausted: "fail_closed", earlyHeaderAbort: 0,
+		enabled: true, maxAttempts: 2, onExhausted: "fail_closed",
 		sameAccountRetry: true, accountCooldown: 12 * time.Hour,
-		idleCooldown: 15 * time.Minute, evidenceTimeout: 15 * time.Second,
+		idleCooldown: 15 * time.Minute, evidenceTimeout: 3500 * time.Millisecond,
 		createdTimeout: 5 * time.Second,
 	}
 	if runtime.Enabled != wants.enabled {
@@ -61,17 +57,8 @@ func TestExampleConfigQualityRetryWiring(t *testing.T) {
 	if runtime.MaxAttempts != wants.maxAttempts {
 		t.Errorf("MaxAttempts = %d", runtime.MaxAttempts)
 	}
-	if runtime.HoldTimeout != wants.holdTimeout {
-		t.Errorf("HoldTimeout = %s", runtime.HoldTimeout)
-	}
-	if runtime.MinOutputTokens != wants.minOutputTokens {
-		t.Errorf("MinOutputTokens = %d", runtime.MinOutputTokens)
-	}
 	if runtime.OnExhausted != wants.onExhausted {
 		t.Errorf("OnExhausted = %q", runtime.OnExhausted)
-	}
-	if runtime.EarlyHeaderAbort != wants.earlyHeaderAbort {
-		t.Errorf("EarlyHeaderAbort = %s (example documents 0s = off)", runtime.EarlyHeaderAbort)
 	}
 	if runtime.SameAccountRetry != wants.sameAccountRetry {
 		t.Errorf("SameAccountRetry = %v", runtime.SameAccountRetry)

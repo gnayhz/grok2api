@@ -11,38 +11,40 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestValidateRequestRetryEarlyHeaderAbort 边界表（D 审查缺口）。
-func TestValidateRequestRetryEarlyHeaderAbort(t *testing.T) {
-	base := func(d time.Duration) RequestRetryConfig {
-		return RequestRetryConfig{Enabled: true, EarlyHeaderAbort: Duration(d)}
+// TestDefaultRequestRetryBudgetDefaults 锁定全局请求预算默认值（蓝图 §3.2）：
+// MaxAttempts=2（1 次初始 + 1 次换号重试）与 EvidenceTimeout=3.5s（防死锁
+// 兜底，降智流已被零延迟拦截截胡）。
+func TestDefaultRequestRetryBudgetDefaults(t *testing.T) {
+	cfg := defaultConfig()
+	if got := cfg.RequestRetry.MaxAttempts; got != 2 {
+		t.Fatalf("MaxAttempts default = %d, want 2", got)
 	}
-	cases := []struct {
-		name    string
-		value   time.Duration
-		wantErr bool
-	}{
-		{"zero off", 0, false},
-		{"min 3s", 3 * time.Second, false},
-		{"max 60s", 60 * time.Second, false},
-		{"below min", 2999 * time.Millisecond, true},
-		{"above max", 61 * time.Second, true},
+	if got := cfg.RequestRetry.EvidenceTimeout.Value(); got != 3500*time.Millisecond {
+		t.Fatalf("EvidenceTimeout default = %v, want 3.5s", got)
 	}
-	for _, tc := range cases {
-		err := validateRequestRetry(base(tc.value))
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("%s: err=%v wantErr=%v", tc.name, err, tc.wantErr)
-		}
+	if !cfg.RequestRetry.SameAccountRetry {
+		t.Fatal("SameAccountRetry default must stay true (comment + example document it)")
 	}
-	if err := validateRequestRetry(RequestRetryConfig{Enabled: false, EarlyHeaderAbort: Duration(time.Second)}); err != nil {
-		t.Fatalf("disabled config must skip validation: %v", err)
+	if cfg.RequestRetry.OnExhausted != "fail_closed" {
+		t.Fatalf("OnExhausted default = %q, want fail_closed", cfg.RequestRetry.OnExhausted)
 	}
 }
 
-// TestDefaultRequestRetrySameAccountRetryTrue 默认值与注释/示例一致（true）。
-func TestDefaultRequestRetrySameAccountRetryTrue(t *testing.T) {
-	cfg := defaultConfig()
-	if !cfg.RequestRetry.SameAccountRetry {
-		t.Fatal("SameAccountRetry default must stay true (comment + example document it)")
+// TestRequestRetryBudgetCap 锁定预算上限（蓝图 §3.2 安全属性）：上限 3
+// = 默认 2 + 一档旋转池同号重试余量；历史上限 6 会重建零延迟拦截前的
+// 90-120s 串行换号黑洞性时延。
+func TestRequestRetryBudgetCap(t *testing.T) {
+	base := defaultConfig()
+	base.Secrets.JWTSecret = strings.Repeat("k", 32)
+	base.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	base.RequestRetry.Enabled = true
+	base.RequestRetry.MaxAttempts = 3
+	if err := base.Validate(); err != nil {
+		t.Fatalf("maxAttempts=3 must validate: %v", err)
+	}
+	base.RequestRetry.MaxAttempts = 4
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "1 到 3") {
+		t.Fatalf("maxAttempts=4 must be rejected with the budget-cap error, got %v", err)
 	}
 }
 
@@ -50,15 +52,18 @@ func TestDefaultRequestRetrySameAccountRetryTrue(t *testing.T) {
 func TestUnmarshalRequestRetryFields(t *testing.T) {
 	var section RequestRetryConfig
 	nl := string(rune(10))
-	yamlText := "enabled: true" + nl + "sameAccountRetry: false" + nl + "earlyHeaderAbort: 10s" + nl + "maxAttempts: 4" + nl + "holdTimeout: 2s" + nl + "onExhausted: fail_closed" + nl + "accountCooldown: 12h" + nl
+	yamlText := "enabled: true" + nl + "sameAccountRetry: false" + nl + "evidenceTimeout: 4s" + nl + "maxAttempts: 2" + nl + "createdTimeout: 8s" + nl + "onExhausted: fail_closed" + nl + "accountCooldown: 12h" + nl
 	if err := yaml.NewDecoder(bytes.NewReader([]byte(yamlText))).Decode(&section); err != nil {
 		t.Fatal(err)
 	}
 	if section.SameAccountRetry {
 		t.Fatal("explicit sameAccountRetry:false must load as false")
 	}
-	if section.EarlyHeaderAbort.Value() != 10*time.Second {
-		t.Fatalf("earlyHeaderAbort = %s, want 10s", section.EarlyHeaderAbort.Value())
+	if section.EvidenceTimeout.Value() != 4*time.Second {
+		t.Fatalf("evidenceTimeout = %s, want 4s", section.EvidenceTimeout.Value())
+	}
+	if section.CreatedTimeout.Value() != 8*time.Second {
+		t.Fatalf("createdTimeout = %s, want 8s", section.CreatedTimeout.Value())
 	}
 }
 
@@ -74,6 +79,24 @@ func TestLegacyQualityGuardKeyRejected(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "qualityGuard") {
 		t.Fatalf("legacy qualityGuard key must be rejected with a clear error, got: %v", err)
+	}
+}
+
+// TestRemovedRequestRetryKeysRejected 逐一锁定已删除的历史键被加载器按名
+// 拒绝（KnownFields 严格解码在 Load 路径）——既防止残留配置复活死机制，
+// 也是未来删除任何键时的回归模板（把新键名加进列表即可）。
+func TestRemovedRequestRetryKeysRejected(t *testing.T) {
+	t.Parallel()
+	nl := string(rune(10))
+	for _, key := range []string{"holdTimeout", "minOutputTokens", "earlyHeaderAbort", "terminalBurstThreshold"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := "requestRetry:" + nl + "  enabled: true" + nl + "  " + key + ": 1s" + nl
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("removed key %q must be rejected by name, got: %v", key, err)
+		}
 	}
 }
 

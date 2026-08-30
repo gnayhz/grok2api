@@ -19,19 +19,21 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 )
 
-// 截止语义（回滚后）：可见输出+截止触发 → 扣留。降智流不因超时放行。
+// 判决语义：可见输出+零思考 → 扣留（正文抢跑，与长度/截止无关）。
+// 纯 stub 流（零输出零思考）不判 missing-thinking——静默挂起由证据截止
+// 的空闲路径收口。
 func TestDeadlineSemanticsWithholdsOutputStream(t *testing.T) {
 	t.Parallel()
-	sig := QualityStreamSignals{VisibleTokens: 64, HoldExpired: true}
-	if v := ClassifyQualityHold(sig, 32); v != QualityWithhold {
-		t.Fatalf("超时+可见输出 = %s，应扣留（空流不因超时放行，输出流不因超时放行）", v)
+	sig := qualityStreamSignals{VisibleTokens: 64}
+	if v := classifyQualityHold(sig); v != QualityWithhold {
+		t.Fatalf("可见输出+零思考 = %s，应扣留（降智流不因任何原因放行）", v)
 	}
-	stubOnly := QualityStreamSignals{HoldExpired: true}
-	if v := ClassifyQualityHold(stubOnly, 32); v != QualityWait {
-		t.Fatalf("stub-only 超时 = %s，应继续等待（空流走 idle 路径）", v)
+	stubOnly := qualityStreamSignals{}
+	if v := classifyQualityHold(stubOnly); v != QualityWait {
+		t.Fatalf("stub-only = %s，应继续等待（空流走 idle 路径）", v)
 	}
-	terminal := QualityStreamSignals{VisibleTokens: 64, Terminal: true}
-	if v := ClassifyQualityHold(terminal, 32); v != QualityWithhold {
+	terminal := qualityStreamSignals{VisibleTokens: 64, Terminal: true}
+	if v := classifyQualityHold(terminal); v != QualityWithhold {
 		t.Fatalf("终态无证据 = %s，应扣留", v)
 	}
 }
@@ -39,7 +41,7 @@ func TestDeadlineSemanticsWithholdsOutputStream(t *testing.T) {
 // 迟到密文不是证据：流中段可见输出达到阈值即扣留，不等待流末密文。
 func TestPeekWithholdsStreamBeforeLateCiphertext(t *testing.T) {
 	t.Parallel()
-	cfg := QualityRetryRuntime{Enabled: true, HoldTimeout: 60 * time.Millisecond, MinOutputTokens: 32}
+	cfg := QualityRetryRuntime{Enabled: true}
 	content := strings.Repeat("word ", 40)
 	stream := strings.Join([]string{
 		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
@@ -52,7 +54,7 @@ func TestPeekWithholdsStreamBeforeLateCiphertext(t *testing.T) {
 		_, _ = writer.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"gAAAA-late"}}` + "\n\n"))
 		_ = writer.Close()
 	}()
-	_, verdict, _, _, peekErr := peekQualityStream(context.Background(), reader, qualityProtocolResponses, cfg)
+	_, verdict, _, peekErr := peekQualityStream(context.Background(), reader, qualityProtocolResponses, cfg)
 	_ = reader.Close()
 	if peekErr != nil {
 		t.Fatalf("peek err = %v", peekErr)
@@ -62,7 +64,7 @@ func TestPeekWithholdsStreamBeforeLateCiphertext(t *testing.T) {
 	}
 }
 
-// 工具声明不影响 hold 门控(2026-08-25 回归锁定):质量判决只看流特征。
+// 工具声明不影响 hold 门控(回归锁定):质量判决只看流特征。
 // 上游按"hosted 工具/在途工具结果"豁免整轮的规则已移除——扣留的响应从不
 // 发给客户端,客户端无从重放;纯语义输出(工具调用形态)按流特征 Deliver。
 func TestToolDeclarationsStillHeld(t *testing.T) {
@@ -98,21 +100,21 @@ func TestConvertedEncryptedThinkingNotEvidence(t *testing.T) {
 	t.Parallel()
 	content := strings.Repeat("word ", 40)
 	chat := qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(&chat, []byte(sse(
+	observeQualityChunk(&chat, []byte(sse(
 		": grok2api-reasoning-start",
 		`data: {"choices":[{"delta":{"reasoning_content":"先想一步"}}]}`,
 	)))
-	if v := ClassifyQualityHold(chat.signals(), 32); v != QualityDeliver {
+	if v := classifyQualityHold(chat.signals()); v != QualityDeliver {
 		t.Fatalf("chat 可见 reasoning_content 增量应放行: %s (%#v)", v, chat.signals())
 	}
 	messages := qualityScanState{protocol: qualityProtocolAnthropic}
-	ObserveQualityChunk(&messages, []byte(sse(
+	observeQualityChunk(&messages, []byte(sse(
 		`data: {"type":"content_block_start","content_block":{"type":"thinking"}}`,
 		`data: {"type":"content_block_delta","delta":{"type":"signature_delta","signature":"EqoBCkgIYj"}}`,
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"`+content+`"}}`,
 		`data: {"type":"message_stop"}`,
 	)))
-	if v := ClassifyQualityHold(messages.signals(), 32); v != QualityWithhold {
+	if v := classifyQualityHold(messages.signals()); v != QualityWithhold {
 		t.Fatalf("signature_delta（Messages 加密思考）不是证据，应扣留: %s (%#v)", v, messages.signals())
 	}
 }
@@ -121,7 +123,7 @@ func TestConvertedEncryptedThinkingNotEvidence(t *testing.T) {
 func TestSemanticAndAggregatedOutputNotEmptyStream(t *testing.T) {
 	t.Parallel()
 	tools := qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(&tools, []byte(sse(
+	observeQualityChunk(&tools, []byte(sse(
 		`data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}`,
 		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 		"data: [DONE]",
@@ -133,7 +135,7 @@ func TestSemanticAndAggregatedOutputNotEmptyStream(t *testing.T) {
 		t.Fatalf("纯 tool_calls 流应判定为仅语义输出: %#v", tools.signals())
 	}
 	agg := qualityScanState{protocol: qualityProtocolResponses}
-	ObserveQualityChunk(&agg, []byte(sse(
+	observeQualityChunk(&agg, []byte(sse(
 		`data: {"type":"response.completed","response":{"id":"r1","output":[{"type":"message","content":[{"type":"output_text","text":"`+strings.Repeat("word ", 40)+`"}]}],"usage":{"output_tokens":50}}}`,
 	)))
 	sig := agg.signals()

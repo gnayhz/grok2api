@@ -37,10 +37,9 @@ export type SettingsConfigDTO = {
   };
   // 旧后端不返回这两节;withSettingsDefaults 提供本地默认。
   requestRetry?: {
-    enabled: boolean; maxAttempts: number; holdTimeout: string; minOutputTokens: number; onExhausted: string;
-    accountCooldown: string; earlyHeaderAbort: string; sameAccountRetry: boolean;
+    enabled: boolean; maxAttempts: number; onExhausted: string;
+    accountCooldown: string; sameAccountRetry: boolean;
     evidenceTimeout: string; createdTimeout: string; idleAccountCooldown: string;
-    terminalBurstThreshold?: number;
   };
   egressRotation?: {
     enabled: boolean; maxAttemptsPerQuarantine: number; minNodeInterval: string; maxGlobalPerHour: number;
@@ -81,7 +80,7 @@ export type EgressPoolStrategy = "affinity" | "random" | "sticky" | "rotation";
 export type EgressPoolFallbackMode = "none" | "pool" | "direct";
 
 export type EgressRoutingScope = "grok_build" | "grok_web" | "grok_console";
-export type EgressTrafficClass = "inference" | "credential" | "billing" | "model_sync" | "video";
+export type EgressTrafficClass = "inference" | "credential" | "billing" | "model_sync" | "video" | "probe";
 export type EgressRoutingTargetMode = "auto" | "direct" | "node" | "pool";
 export type EgressRoutingTarget = { mode: EgressRoutingTargetMode; nodeId?: string; poolId?: string };
 
@@ -171,10 +170,9 @@ const settingsConfigValidator = hasShape({
     autoCleanIncludeDisabled: isBoolean,
   })),
   requestRetry: isOptional(hasShape({
-    enabled: isBoolean, maxAttempts: isNumber, holdTimeout: isString, minOutputTokens: isNumber, onExhausted: isString,
-    accountCooldown: isString, earlyHeaderAbort: isString, sameAccountRetry: isBoolean,
+    enabled: isBoolean, maxAttempts: isNumber, onExhausted: isString,
+    accountCooldown: isString, sameAccountRetry: isBoolean,
     evidenceTimeout: isString, createdTimeout: isString, idleAccountCooldown: isString,
-    terminalBurstThreshold: isOptional(isNumber),
   })),
   accountRisk: isOptional(hasShape({
     enabled: isBoolean, method: isString, concurrency: isNumber, timeout: isString, onDenied: isString,
@@ -198,10 +196,9 @@ const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
   autoCleanIncludeDisabled: false,
 });
 export const defaultRequestRetryConfig = (): NonNullable<SettingsConfigDTO["requestRetry"]> => ({
-  enabled: true, maxAttempts: 6, holdTimeout: "3s", minOutputTokens: 32, onExhausted: "fail_closed",
-  accountCooldown: "24h", earlyHeaderAbort: "0s", sameAccountRetry: true,
-  evidenceTimeout: "15s", createdTimeout: "5s", idleAccountCooldown: "15m",
-  terminalBurstThreshold: 3,
+  enabled: true, maxAttempts: 2, onExhausted: "fail_closed",
+  accountCooldown: "24h", sameAccountRetry: true,
+  evidenceTimeout: "3.5s", createdTimeout: "5s", idleAccountCooldown: "15m",
 });
 export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["egressRotation"]> => ({
   enabled: true, maxAttemptsPerQuarantine: 3, minNodeInterval: "3m", maxGlobalPerHour: 6,
@@ -219,7 +216,6 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
   const requestRetry = {
     ...defaultRequestRetryConfig(),
     ...requestRetryRaw,
-    terminalBurstThreshold: requestRetryRaw.terminalBurstThreshold ?? 3,
   };
   const egressRotation = snapshot.config.egressRotation ?? defaultEgressRotationConfig();
   const accountRisk = snapshot.config.accountRisk ?? defaultAccountRiskConfig();

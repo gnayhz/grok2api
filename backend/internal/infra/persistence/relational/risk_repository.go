@@ -16,9 +16,7 @@ import (
 type AccountRiskVerdict struct {
 	AccountID  uint64
 	Verdict    string // clean | denied | flagged | error
-	BotFlagSrc int
 	BotFlagDtl string
-	RiskScore  float64
 	HTTPStatus int
 	Error      string
 	Source     string

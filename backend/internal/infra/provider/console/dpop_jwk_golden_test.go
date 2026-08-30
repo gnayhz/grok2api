@@ -8,7 +8,7 @@ import (
 )
 
 // TestPublicDPoPJWKGoldenVector 用固定标量锁定 JWK 坐标编码的字节形态
-// （2026-08-21 golden 基准，值由旧实现 key.X/key.Y FillBytes(32) 生成）：
+// （golden 基准，值由旧实现 key.X/key.Y FillBytes(32) 生成）：
 // 迁移到 PublicKey.Bytes()（未压缩 SEC1 点 0x04||X||Y）后输出必须逐字节一致，
 // 否则 JWK thumbprint（jkt）会变，已分发的 DPoP 会话校验将全部失效。
 func TestPublicDPoPJWKGoldenVector(t *testing.T) {

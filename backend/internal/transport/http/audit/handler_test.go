@@ -101,19 +101,20 @@ func TestAuditResponseDerivesOutputThroughput(t *testing.T) {
 	burstFirst := int64(10000)
 	burst := newAuditResponse(auditdomain.Record{StatusCode: http.StatusOK, Streaming: true, FirstTokenMS: &burstFirst, DurationMS: 10100, OutputTokens: 2000})
 	// 亚秒窗口的"速率"是末尾整包爆发除以毫秒的假象,不再作为吞吐展示;
-	// 爆发本身由降智汇总面板(buffered_burst)负责告警。
+	// 这类行的降智签名只在 first==dur 的 terminal_burst 形态归档。
 	if burst.OutputTokensPerSecond != nil {
 		t.Fatalf("sub-second burst window must not render a rate = %#v", burst)
 	}
 
-	// 降智档位:健康速率行无档位;亚秒爆发窗口按速率归 hard_tps;
-	// terminal_burst(first==dur、零思考、输出达口径)必须可见——速度列
-	// 为空恰是它的形态(2026-08-27 续聊链 7 连发的审计签名)。
+	// 降智档位:健康速率行无档位;亚秒窗口但仍有生成时间的行无档位
+	// (速度列展示为空已足够);terminal_burst(first==dur、零思考、输出达
+	// 口径)必须可见——速度列为空恰是它的形态(续聊链连续降智
+	// 的审计签名)。
 	if response.DegradeClass != "" {
 		t.Fatalf("healthy row must not classify: %q", response.DegradeClass)
 	}
-	if burst.DegradeClass != auditdomain.DegradeClassHard {
-		t.Fatalf("sub-second burst class = %q", burst.DegradeClass)
+	if burst.DegradeClass != "" {
+		t.Fatalf("sub-second burst with real generation window must not classify: %q", burst.DegradeClass)
 	}
 	terminalFirst := int64(20362)
 	terminal := newAuditResponse(auditdomain.Record{StatusCode: http.StatusOK, Streaming: true, FirstTokenMS: &terminalFirst, DurationMS: 20362, OutputTokens: 339, ReasoningTokens: 0})
@@ -152,7 +153,7 @@ func TestAuditResponseExplainsBillingWithoutChangingStoredTotal(t *testing.T) {
 
 	historical := newAuditResponse(auditdomain.Record{
 		InputTokens: 100, CachedInputTokens: 20, OutputTokens: 50,
-		EstimatedCostInUSDTicks: 1_840_000, PricingModel: "grok-build-0.1", PricingVersion: "2026-07-11",
+		EstimatedCostInUSDTicks: 1_840_000, PricingModel: "grok-build-0.1", PricingVersion: "",
 	})
 	if historical.Billing == nil || historical.Billing.Method != "stored_estimate" || len(historical.Billing.Components) != 0 || historical.Billing.TotalInUSDTicks != 1_840_000 {
 		t.Fatalf("historical billing = %#v", historical.Billing)

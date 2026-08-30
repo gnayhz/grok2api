@@ -128,8 +128,8 @@ func (s *Service) SetQualityGuardConfig(value QualityGuardConfig) {
 
 // SetQualityLogger installs a dedicated logger for the quality guard.
 // MarkDegradeEvidence applies the pending soft cooldown on the serving node
-// after one degrade verdict (withhold / idle / header budget). Implements the
-// gateway observer surface; never blocks the request path.
+// after one degrade verdict (withhold / idle abort). Implements the gateway
+// observer surface; never blocks the request path.
 func (s *Service) MarkDegradeEvidence(nodeID uint64) {
 	if s == nil || nodeID == 0 {
 		return

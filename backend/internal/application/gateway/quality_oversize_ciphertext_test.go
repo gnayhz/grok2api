@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestOversizedEncryptedContentWithholds(t *testing.T) {
@@ -19,8 +18,8 @@ func TestOversizedEncryptedContentWithholds(t *testing.T) {
 			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":80,\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n"+
 			"data: [DONE]\n",
 		cipher)
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolResponses,
-		QualityRetryRuntime{MinOutputTokens: 8, HoldTimeout: time.Second})
+	replay, verdict, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolResponses,
+		QualityRetryRuntime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,8 +37,8 @@ func TestOversizedReasoningDeltaStillDelivers(t *testing.T) {
 			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n"+
 			"data: [DONE]\n",
 		delta)
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolResponses,
-		QualityRetryRuntime{MinOutputTokens: 8, HoldTimeout: time.Second})
+	replay, verdict, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolResponses,
+		QualityRetryRuntime{})
 	if err != nil {
 		t.Fatal(err)
 	}

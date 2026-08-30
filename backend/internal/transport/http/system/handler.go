@@ -11,7 +11,7 @@ import (
 )
 
 // versionResponse 在更新检查快照之上附带构建提交：仓库合并了修复不等于
-// 线上在跑修复——2026-08-27 事故的直接教训。嵌入结构体使原有字段平铺
+// 线上在跑修复——事故的直接教训。嵌入结构体使原有字段平铺
 // 不变，仅新增 buildCommit 一个键。
 type versionResponse struct {
 	updatecheckapp.Snapshot

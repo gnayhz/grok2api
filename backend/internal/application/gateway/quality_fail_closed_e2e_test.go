@@ -93,8 +93,8 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: accounts, MinOutputTokens: 32,
-		OnExhausted: qualityRetryFailClosed, HoldTimeout: time.Second,
+		Enabled: true, MaxAttempts: accounts,
+		OnExhausted: qualityRetryFailClosed,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{

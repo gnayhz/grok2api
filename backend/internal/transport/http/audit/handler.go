@@ -67,10 +67,10 @@ type auditResponse struct {
 	ContextOutputTokens     int64                     `json:"contextOutputTokens"`
 	FirstTokenMS            *int64                    `json:"firstTokenMs,omitempty"`
 	OutputTokensPerSecond   *float64                  `json:"outputTokensPerSecond,omitempty"`
-	// DegradeClass 是按面板公式对 2xx 流式成功行做的降智分级；特别地
+	// DegradeClass 是对 2xx 流式成功行的降智观测档位；唯一档位
 	// terminal_burst 表示"整包末尾爆发+零思考"——这类行 Token/s 是除以
 	// ~0ms 的数学假象、速度列显示为空，此前在一切降智汇总里都隐形
-	// （2026-08-27 续聊链 7 连发事故的直接表象）。
+	// （续聊链连续降智事故的直接表象）。纯 KPI，不参与执行。
 	DegradeClass    string              `json:"degradeClass,omitempty"`
 	DeliveredEvents int64               `json:"deliveredEvents"`
 	DeliveredBytes  int64               `json:"deliveredBytes"`
@@ -372,15 +372,18 @@ func newBillingBreakdown(value auditdomain.Record) *billingBreakdownResponse {
 	return breakdown
 }
 
-// auditDegradeClass 对可分级的行（2xx 流式成功且有测量）返回降智档位；
-// terminal_burst 是"整包末尾爆发+零思考"的专用档，速度列为空恰恰是它的
-// 形态而不是"无数据"。不可分级的行返回空串。
+// auditDegradeClass 对可分级的行（2xx 流式成功且有测量）返回降智档位。
+// 唯一档位 terminal_burst 是"整包末尾爆发+零思考"的专用档，速度列为空
+// 恰恰是它的形态而不是"无数据"（TPS 时代的 soft/hard/buffered 档位已随
+// 零延迟拦截重构删除）。不可分级的行返回空串。
 func auditDegradeClass(value auditdomain.Record) string {
 	if !value.Streaming || value.StatusCode < 200 || value.StatusCode >= 300 || value.ErrorCode != "" || value.FirstTokenMS == nil || value.OutputTokens <= 0 {
 		return ""
 	}
-	class, _, _ := auditdomain.ClassifyOutputSpeed(value.OutputTokens, value.ReasoningTokens, *value.FirstTokenMS, value.DurationMS, auditdomain.DefaultDegradeSoftTPS, auditdomain.DefaultDegradeHardTPS, auditdomain.DefaultDegradeMinGenMS, false)
-	return class
+	if auditdomain.ClassifyTerminalBurst(value.OutputTokens, value.ReasoningTokens, *value.FirstTokenMS, value.DurationMS) {
+		return auditdomain.DegradeClassTerminalBurst
+	}
+	return ""
 }
 
 func auditOutputTokensPerSecond(value auditdomain.Record) *float64 {
@@ -389,7 +392,7 @@ func auditOutputTokensPerSecond(value auditdomain.Record) *float64 {
 	}
 	// 生成窗口不足最小窗口(默认 1s)时,"速率"是把整包末尾爆发除以几毫秒的
 	// 数学假象(实测 70 token / 2ms = 35000 tok/s),不是物理吞吐。展示为空;
-	// 降智汇总面板按原始列独立计算 buffered_burst,不受此影响。
+	// 这些行的降智签名由 terminal_burst 档位在明细里保持可见。
 	if auditdomain.GenerationWindowMS(*value.FirstTokenMS, value.DurationMS, value.ReasoningTokens) < auditdomain.DefaultDegradeMinGenMS {
 		return nil
 	}

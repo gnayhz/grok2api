@@ -246,9 +246,6 @@ type Service struct {
 	// first-event budget); zero ModelPublicID disables verification.
 	egressCanary atomic.Value // EgressCanaryRuntime
 	accountRisk  atomic.Value // risk.Attributor
-	// terminalBurst 是交付后降智签名（整包末尾爆发+零思考）的账号连击
-	// 熔断器，见 quality_burst_breaker.go。
-	terminalBurst *terminalBurstTracker
 }
 
 type teamModelRateLimit struct {
@@ -287,7 +284,7 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 		models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers,
 		selector: selector, responses: responses, logger: slog.Default(),
 		rateLimits: make(map[string]teamModelRateLimit), rateLimitTeams: make(map[uint64]teamRateLimitObservation),
-		modelSyncing: make(map[uint64]struct{}), terminalBurst: newTerminalBurstTracker(),
+		modelSyncing: make(map[uint64]struct{}),
 	}
 	service.UpdateMaxAttempts(maxAttempts)
 	return service
@@ -570,7 +567,7 @@ func (s *Service) CompactResponse(ctx context.Context, input Input) (*Result, er
 // 当前无可用账号」（ErrNoAvailableAccount → 503 upstream_unavailable，
 // 可重试）。availableRoutePredicate 要求路由绑有启用账号，无账号
 // Provider 的路由在候选查询里整体消失——没有这一步，无账号 Provider 上
-// 的模型会被误报成不存在（2026-08-21 实测：grok-4.20-0309-reasoning 无
+// 的模型会被误报成不存在（实测：grok-4.20-0309-reasoning 无
 // console 账号时返回 404；同日对抗审查发现 effort 别名出口
 // grok-4.3-low 同样漏判）。所有候选为空的失败出口都必须经过这里。
 func (s *Service) distinguishMissingOrNoAccount(ctx context.Context, publicModel string, err error) error {
@@ -1126,10 +1123,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// is engaged: a per-request INFO line while the feature is off would be pure
 	// log amplification proportional to traffic.
 	if qualityHoldEnabled {
-		s.logger.Info("quality_hold_gate", "request_id", input.RequestID, "cfg_enabled", holdCfg.Enabled, "provider", route.Provider, "public_model", input.PublicModel, "upstream_model", route.UpstreamModel, "operation", operation)
+		s.logger.Info("quality_hold_gate", "request_id", input.RequestID, "provider", route.Provider, "public_model", input.PublicModel, "upstream_model", route.UpstreamModel, "operation", operation)
 	} else {
 		// 豁免留痕：每条路径放行多少请求进 guard-stats（exempts 计数），
-		// 不再重演 2026-08-27"7 连发裸奔却无任何痕迹可查"。
+		// 不再重演"连续多发裸奔却无任何痕迹可查"。
 		guardStats.recordExempt(qualityHoldExemptReason(input, ownership, route, operation, holdCfg))
 	}
 	// Count accounts that actually reached the upstream. Credential-only skips
@@ -1160,13 +1157,6 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			guardStats.recordSameAccountRescued()
 		}
 	}
-	// headerBudgetArmed 保留单发机制的装填位（helper 参数），但预算现已
-	// 对每次流式尝试持续生效（见下方 fired 分支）：实测健康流式的响应头
-	// 恒定秒级返回（0.7-2.2s 含代理），而降智复杂生成的头要等整个生成
-	// 完成（75-300s，2026-08-21 魔法球实测：单发解除后第二次慢头尝试
-	// 悬挂满 5 分钟 ResponseHeaderTimeout）。持续装填把每次头等待都压进
-	// 预算内。非流式不受预算约束（其头=生成完成，见 qualityHeaderBudget）。
-	headerBudgetArmed := true
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	quotaProbeAttempted := false
 	selection := preselectedSession
@@ -1180,60 +1170,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		responseStartedAt = started
 		lease.markSelectorUpstreamStarted()
 		request := provider.ResponseResourceRequest{Credential: credential, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata}
-		var response *provider.Response
-		var err error
-		if budget := qualityHeaderBudget(holdCfg, qualityHoldEnabled, input.Streaming, headerBudgetArmed); budget > 0 {
-			// 响应头预算早断：健康推理路径的头恒定秒级返回，降智路径要等
-			// 整个生成完成。预算内头未到即中止换路径，把降智判定从首字节
-			// 提前到头阶段（复杂问题可省数十秒）。
-			callCtx, cancel := context.WithCancel(physicalCallCtx)
-			fired := &atomic.Bool{}
-			timerDone := make(chan struct{})
-			timer := time.AfterFunc(budget, func() {
-				// defer close 保证 channel 关闭时 fired 已置位且 cancel 已
-				// 执行——主线程读到的是最终态。
-				defer close(timerDone)
-				fired.Store(true)
-				cancel()
-			})
-			response, err = adapter.ForwardResponse(callCtx, request)
-			if !timer.Stop() {
-				// Stop()=false 仅表示回调已触发，不代表已完成：回调可能停在
-				// fired.Store 之前。等回调结束再判定，消除“成功交付一个随后
-				// 才被取消的 body”窗口。回调无阻塞操作，等待必返回。
-				<-timerDone
-			}
-			if err != nil {
-				// Go 惯例 err!=nil 时 response 仍可能非 nil：未关闭会泄漏连接。
-				if response != nil && response.Body != nil {
-					_ = response.Body.Close()
-				}
-				cancel()
-				if fired.Load() {
-					s.logger.Warn("quality_degraded_header_budget_abort", "request_id", input.RequestID, "account_id", credential.ID, "budget", budget.String(), "elapsed", time.Since(started).String())
-					// 哨兵错误刻意不链底层 context.Canceled：父请求仍在进行。
-					err = errQualityHeaderBudget
-				}
-			} else if fired.Load() {
-				// 成功与超时竞态：头恰在预算边缘返回，但 timer 已 cancel 了
-				// callCtx，body 读取必然立即失败且不会重试。统一按预算中止
-				// 处理——关闭竞态体，转哨兵错误走换路径重试。
-				cancel()
-				if response != nil && response.Body != nil {
-					_ = response.Body.Close()
-				}
-				response = nil
-				s.logger.Warn("quality_degraded_header_budget_abort", "request_id", input.RequestID, "account_id", credential.ID, "budget", budget.String(), "elapsed", time.Since(started).String(), "race", true)
-				err = errQualityHeaderBudget
-			} else {
-				// 头在预算内正常返回且未触发：body 生命周期必须长于 callCtx
-				// （peek/客户端读取发生在 forwardResponse 返回之后）。这里不
-				// cancel，泄漏的 context 由父 physicalCallCtx 释放兜底——
-				// WithCancel 子 ctx 会随父 ctx 取消而释放，无真实泄漏。
-			}
-		} else {
-			response, err = adapter.ForwardResponse(physicalCallCtx, request)
-		}
+		response, err := adapter.ForwardResponse(physicalCallCtx, request)
 		auditBase.ReasoningEffort = normalizedMetadata.ReasoningEffort
 		err = failureAttempts.captureResponse(credential, started, response, err)
 		timing.markUpstream(time.Since(started))
@@ -1319,30 +1256,6 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				}
 				record.DurationMS = time.Since(startedAt).Milliseconds()
 				record.ErrorCode = errorCode
-				// 交付后降智签名检测（纵深防御）：整包末尾爆发+零思考是
-				// 2026-08-27 续聊链事故的确切签名。守卫正常时应在此前已
-				// 扣留；这里捕获一切残余放行（豁免路径/超大 body
-				// fail-open/deliver_last），连击达阈值即按 missing-thinking
-				// 语义处罚账号并触发 RSC 归因与出口隔离。
-				if s.terminalBurst != nil && successful && input.Streaming {
-					if terminalBurstSignature(record.FirstTokenMS, record.DurationMS, usage.ReasoningTokens, usage.OutputTokens) {
-						if count := s.terminalBurst.observeBurst(accountID); count >= holdCfg.TerminalBurstThreshold {
-							s.terminalBurst.reset(accountID)
-							guardStats.recordSignal(GuardSignalTerminalBurst)
-							nodeID := degradedEgressNodeID(egressTrace, route.Provider)
-							s.logger.Warn("terminal_burst_breaker_tripped",
-								"request_id", input.RequestID, "account_id", accountID, "account_name", credential.Name,
-								"consecutive_bursts", count, "output_tokens", usage.OutputTokens, "egress_node_id", nodeID)
-							s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
-							reportEgressDegradation(credential)
-							if attributor := s.accountRiskAttributor(); attributor != nil {
-								attributor.OnDegraded(ctx, credential, nodeID)
-							}
-						}
-					} else if usage.ReasoningTokens > 0 {
-						s.terminalBurst.observeHealthy(accountID)
-					}
-				}
 				attempts := failureAttempts.snapshot()
 				if !successful || len(attempts) > 0 {
 					record.Attempts = attempts
@@ -1510,15 +1423,6 @@ attemptLoop:
 				continue
 			}
 			lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
-			if errors.Is(err, errQualityHeaderBudget) {
-				noteGuardSignal(GuardSignalHeaderBudget)
-				// 头预算早断是降智路径特征:请求内排除该出口节点,并上报出口降级
-				// 观测(RSC 归因 clean → 出口 IP 嫌疑;关闭 RSC 时走跨账号确认)。
-				reportEgressDegradation(credential)
-				if attributor := s.accountRiskAttributor(); attributor != nil {
-					attributor.OnDegraded(ctx, credential, degradedEgressNodeID(egressTrace, route.Provider))
-				}
-			}
 			if !isRetryableTransportFailure(credential.Provider, err) {
 				break
 			}
@@ -1789,7 +1693,7 @@ attemptLoop:
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
-			// 注：曾在此处记录上游响应头全量用于降智早期信号研究；2026-08-21
+			// 注：曾在此处记录上游响应头全量用于降智早期信号研究；
 			// 直连矩阵证实 clean/降智头部完全一致（零判别力），已移除该噪声日志。
 			if qualityHoldEnabled {
 				proto := qualityProtocolForOperation(operation)
@@ -1797,14 +1701,24 @@ attemptLoop:
 				var verdict QualityVerdict
 				var peekUsage Usage
 				var peekErr error
+				// 活跃度预算制度表（qualityLivenessSchedule）：按请求类（搜索工具/
+				// 重推理/默认）给 created/evidence 预算——证据与依据见该函数注释。
+				// 流式/非流式共用：预算只对流式生效；完整 body 判决与流式共用
+				// 同一套证据规则。
+				peekCfg := qualityLivenessSchedule(input.Body, string(operation), holdCfg)
 				if input.Streaming {
-					replay, verdict, peekUsage, _, peekErr = peekQualityStream(ctx, response.Body, proto, holdCfg)
+					replay, verdict, peekUsage, peekErr = peekQualityStream(ctx, response.Body, proto, peekCfg)
 				} else {
 					// 非流式：完整 body 判决（零扣留延迟），证据规则与流式一致。
-					replay, verdict, peekUsage, _, peekErr = peekQualityBody(response.Body, holdCfg)
+					replay, verdict, peekUsage, peekErr = peekQualityBody(response.Body, peekCfg)
 				}
 				response.Body = replay
+				// 池出口判定（空闲节点标记/降智节点标记/同号重试三处共用；固定或直连
+				// 出口下节点级标记均不成立——审计交叉验证：同节点干净/降智交错）。
+				poolEgress := egressSelectionPooled(egressTrace, route.Provider)
 				// Real-time guard observability: per-attempt withhold decision.
+				// 日志中的 usage 是判决时刻快照而非终值（规则 1 早交付先于 usage
+				// 帧到达）。
 				s.logger.Info("quality_hold_verdict", "request_id", input.RequestID, "account_id", credential.ID, "protocol", proto, "streaming", input.Streaming, "verdict", string(verdict), "usage_output", peekUsage.OutputTokens, "usage_reasoning", peekUsage.ReasoningTokens, "peek_err", peekErr)
 				if peekErr != nil {
 					if replay != nil {
@@ -1827,6 +1741,8 @@ attemptLoop:
 					case errors.Is(peekErr, errQualityEmptyStream):
 						noteGuardSignal(GuardSignalEmptyStream)
 					}
+
+					poolEgress := egressSelectionPooled(egressTrace, route.Provider)
 					if neterrorpkg.IsUpstreamStreamIdleTimeout(peekErr) || neterrorpkg.IsUpstreamStreamIdleTimeout(context.Cause(ctx)) || errors.Is(peekErr, errQualityEmptyStream) || errors.Is(peekErr, errQualityEvidenceTimeout) || errors.Is(peekErr, errQualityCreatedTimeout) {
 						// 守卫空闲路径的尝试进审计明细（round 41：此前多账号轮换
 						// 轨迹在 attempts 里不可见；对照 quality_hold 路径有明细）。
@@ -1845,7 +1761,13 @@ attemptLoop:
 						// 空流/空闲超时通常与出口 IP 相关而非账号本身。走与扣留路径相同的 RSC 归因：clean
 						// 结论自动解除上面的冷却（IP 嫌疑），denied 结论打风控标记。没有这一步，无辜账号
 						// 只能干等 24h，且同号重试恰好转为空流时会丢失归因。
-						idleNodeID := markDegradedEgress()
+						// 空闲路径的节点标记同样仅池出口生效：固定/直连出口上空闲
+						// 与干净请求交错（66/9 交叉验证），单次空闲标记节点会饿死严格
+						// 绑定的重试（t3 批次实证：idle → 节点排除 → 重试 502）。
+						var idleNodeID uint64
+						if poolEgress {
+							idleNodeID = markDegradedEgress()
+						}
 						if observer := s.egressDegradationObserver(); observer != nil && idleNodeID != 0 {
 							observer.OnEgressDegraded(ctx, idleNodeID, credential.ID)
 						}
@@ -1870,12 +1792,16 @@ attemptLoop:
 				// 同号重试仅对流式有意义：流式重试在数秒内重新拿到证据/输出判决。
 				// 非流式的重试要重跑整个生成（复杂提示词降智实测 75-146s/次），
 				// 对账号级/出口级降智的期望收益为负——直接惩罚换号。
-				sameAccountEligible := input.Streaming && verdict == QualityWithhold && attemptPolicy.hasNext(attempt) && commitableSameAccountRetry(holdCfg, sameAccountRetried, probeOrigin, selection)
+				// 且仅当本次尝试经由旋转代理池出口（每请求换新 IP）时才有意义：
+				// 直连/固定出口下同号重试会再次进入同一个脏 IP，恢复概率≈0，
+				// 白白烧掉请求预算（蓝图 #9：固定/直连出口强制禁用）。
+				// poolEgress 已在空闲处理块前计算（两处共用同一判定）。
+				sameAccountEligible := input.Streaming && verdict == QualityWithhold && attemptPolicy.hasNext(attempt) && commitableSameAccountRetry(holdCfg, sameAccountRetried, probeOrigin, selection, poolEgress)
 				if sameAccountEligible {
 					// The un-excluded account itself becomes the next candidate.
 					hasNextAccount = true
 				}
-				commit := CommitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
+				commit := commitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
 				if verdict == QualityWithhold {
 					noteGuardSignal(GuardSignalWithhold)
 					// 记录该账号首次扣留时的出口节点:同号重试会排除该节点,
@@ -1892,7 +1818,13 @@ attemptLoop:
 						s.logger.Info("quality_degraded_same_account_retry", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
 					} else {
 						s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
-						reportEgressDegradation(credential)
+						// 节点级降智证据仅在旋转池出口下成立（每请求换 IP，降智可
+						// 能由脏 IP 触发）。固定/直连出口的降智是账号级：审计
+						// 交叉验证——同节点 52 上降智请求间穿插 66 条干净 200，多账号
+						// 共节点时标记节点 = 惩罚全部干净账号并饿死严格绑定的重试。
+						if poolEgress {
+							reportEgressDegradation(credential)
+						}
 						if attributor := s.accountRiskAttributor(); attributor != nil {
 							attributor.OnDegraded(ctx, credential, firstDegradeNode[credential.ID])
 						}
@@ -1919,7 +1851,7 @@ attemptLoop:
 					lastErr = errQualityDegraded
 					lastFailure = &UpstreamFailure{
 						HTTPStatus: http.StatusServiceUnavailable, Code: ErrorQualityDegraded,
-						PublicMessage: "上游响应缺少推理", AccountID: credential.ID, AccountName: credential.Name,
+						PublicMessage: "上游模型暂不可用或缺少推理能力，请稍后重试", AccountID: credential.ID, AccountName: credential.Name,
 						Cause: errQualityDegraded,
 					}
 					s.logger.Info("quality_degraded_retry", "request_id", input.RequestID, "account_id", credential.ID, "quality_attempt", qualityAccountAttempts, "output_tokens", peekUsage.OutputTokens)
@@ -1931,7 +1863,7 @@ attemptLoop:
 					lastErr = errQualityDegraded
 					lastFailure = &UpstreamFailure{
 						HTTPStatus: http.StatusServiceUnavailable, Code: ErrorQualityDegraded,
-						PublicMessage: "上游响应缺少推理", AccountID: credential.ID, AccountName: credential.Name,
+						PublicMessage: "上游模型暂不可用或缺少推理能力，请稍后重试", AccountID: credential.ID, AccountName: credential.Name,
 						Cause: errQualityDegraded,
 					}
 					s.logger.Info("quality_degraded_rejected", "request_id", input.RequestID, "account_id", credential.ID)
@@ -2272,7 +2204,7 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	} else if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
 		// 上游已删除该 stored response：本地 ownership 失效同步删除，且不得把
 		// 上游原文 Header+Body 透传给客户端（same leak class as the ≥400 branch
-		// below——2026-08-21 补漏：此前该分支直接把原文流回客户端）。读空并
+		// below——补漏：此前该分支直接把原文流回客户端）。读空并
 		// 关闭 body 供分类审计，客户端统一收到受控的 response_not_found 信封。
 		_, _ = readRetryableBody(response.Body)
 		_ = response.Body.Close()

@@ -5,7 +5,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestUsageClaimWithOutputTokensIsEmptyStream：A 审查指出的回归形态——
@@ -18,8 +17,8 @@ func TestUsageClaimWithOutputTokensIsEmptyStream(t *testing.T) {
 		"data: [DONE]",
 		"",
 	}, "\n")
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolChat,
-		QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second})
+	replay, verdict, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolChat,
+		QualityRetryRuntime{})
 	if err == nil || verdict != QualityWait {
 		t.Fatalf("usage-only stream with completion claim must be empty-stream, verdict=%s err=%v", verdict, err)
 	}

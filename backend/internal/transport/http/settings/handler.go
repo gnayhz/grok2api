@@ -78,17 +78,12 @@ type accountRiskConfigDTO struct {
 type requestRetryConfigDTO struct {
 	Enabled             bool   `json:"enabled"`
 	MaxAttempts         int    `json:"maxAttempts"`
-	HoldTimeout         string `json:"holdTimeout"`
-	MinOutputTokens     int    `json:"minOutputTokens"`
 	OnExhausted         string `json:"onExhausted"`
 	AccountCooldown     string `json:"accountCooldown"`
-	EarlyHeaderAbort    string `json:"earlyHeaderAbort"`
 	SameAccountRetry    bool   `json:"sameAccountRetry"`
 	EvidenceTimeout     string `json:"evidenceTimeout"`
 	CreatedTimeout      string `json:"createdTimeout"`
 	IdleAccountCooldown string `json:"idleAccountCooldown"`
-	// TerminalBurstThreshold 与该节其余标量一样整节替换;0=默认 3。
-	TerminalBurstThreshold int `json:"terminalBurstThreshold"`
 }
 
 type egressRotationConfigDTO struct {
@@ -361,12 +356,10 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 	if value.RequestRetry != nil {
 		result.RequestRetry = settingsapp.RequestRetryEditable{
 			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
-			HoldTimeout: value.RequestRetry.HoldTimeout, MinOutputTokens: value.RequestRetry.MinOutputTokens,
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: value.RequestRetry.AccountCooldown,
-			EarlyHeaderAbort: value.RequestRetry.EarlyHeaderAbort, SameAccountRetry: value.RequestRetry.SameAccountRetry,
-			EvidenceTimeout: value.RequestRetry.EvidenceTimeout, CreatedTimeout: value.RequestRetry.CreatedTimeout,
-			IdleAccountCooldown:    value.RequestRetry.IdleAccountCooldown,
-			TerminalBurstThreshold: value.RequestRetry.TerminalBurstThreshold,
+			SameAccountRetry: value.RequestRetry.SameAccountRetry,
+			EvidenceTimeout:  value.RequestRetry.EvidenceTimeout, CreatedTimeout: value.RequestRetry.CreatedTimeout,
+			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown,
 		}
 		result.RequestRetryProvided = true
 	}
@@ -470,12 +463,10 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			},
 			RequestRetry: &requestRetryConfigDTO{
 				Enabled: config.RequestRetry.Enabled, MaxAttempts: config.RequestRetry.MaxAttempts,
-				HoldTimeout: config.RequestRetry.HoldTimeout, MinOutputTokens: config.RequestRetry.MinOutputTokens,
 				OnExhausted: config.RequestRetry.OnExhausted, AccountCooldown: config.RequestRetry.AccountCooldown,
-				EarlyHeaderAbort: config.RequestRetry.EarlyHeaderAbort, SameAccountRetry: config.RequestRetry.SameAccountRetry,
-				EvidenceTimeout: config.RequestRetry.EvidenceTimeout, CreatedTimeout: config.RequestRetry.CreatedTimeout,
-				IdleAccountCooldown:    config.RequestRetry.IdleAccountCooldown,
-				TerminalBurstThreshold: config.RequestRetry.TerminalBurstThreshold,
+				SameAccountRetry: config.RequestRetry.SameAccountRetry,
+				EvidenceTimeout:  config.RequestRetry.EvidenceTimeout, CreatedTimeout: config.RequestRetry.CreatedTimeout,
+				IdleAccountCooldown: config.RequestRetry.IdleAccountCooldown,
 			},
 			AccountRisk: &accountRiskConfigDTO{
 				Enabled: config.AccountRisk.Enabled, Method: config.AccountRisk.Method,

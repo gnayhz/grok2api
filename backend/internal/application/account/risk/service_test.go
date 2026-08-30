@@ -188,9 +188,9 @@ func (f *fakeChecker) Check(context.Context, string) CheckResult {
 
 func deniedResult() CheckResult {
 	return CheckResult{
-		Verdict: VerdictDenied, BotFlagSource: 1,
+		Verdict:        VerdictDenied,
 		BotFlagDetails: "policy=deny,risk=0.86,event=" + string(rune(36)) + "registration",
-		RiskScore: 0.86, HTTPStatus: 200,
+		HTTPStatus:     200,
 		// 真实探针恒填 CheckedAt;缺失会让 DeniedTTL/ErrorRetry 的新鲜期
 		// 判定把零值时间当作远古结论(测试夹具必须与线上一致)。
 		CheckedAt: time.Now().UTC(),

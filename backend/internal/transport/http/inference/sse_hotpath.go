@@ -27,7 +27,7 @@ func sseEventType(data []byte) string {
 	}
 	// 兼容层重写过的帧经 map[string]any 重排键序（字母序 "response" 在
 	// "type" 之前），根层 type 可被多 KB 的 response 对象推到 4KB 头窗之外。
-	// 头窗未命中时对完整帧做零分配的根层扫描（2026-08-27 线上 5/5
+	// 头窗未命中时对完整帧做零分配的根层扫描（线上全部
 	// upstream_stream_incomplete 回归根因）。
 	return jsonpeek.RootStringFieldScan(data, "type")
 }
@@ -41,9 +41,10 @@ func (i *responseInspector) inspectDataPayload(value []byte) {
 		i.observeHugeSSEPayload(value)
 		return
 	}
-	if containsGeneratedDelta(value, i.protocol) {
+	if !i.deltaScanDone && containsGeneratedDelta(value, i.protocol) {
 		i.metadata.Usage.OutputObserved = true
 		i.markFirstTokenReady()
+		i.deltaScanDone = true
 	}
 	i.observeTerminal(value)
 	i.applyPeekedFrameMetadata(value)
@@ -63,6 +64,7 @@ func (i *responseInspector) observeHugeSSEPayload(value []byte) {
 	i.metadata.Usage.OutputObserved = true
 	if i.protocol == streamProtocolResponses && responsesContainsGeneratedDelta(value) {
 		i.markFirstTokenReady()
+		i.deltaScanDone = true
 	}
 	typ := sseEventType(value)
 	switch i.protocol {
@@ -123,13 +125,19 @@ func peekRootOrResponseString(value, head []byte, key string) string {
 
 func (i *responseInspector) applyPeekedFrameMetadata(value []byte) {
 	head := jsonpeek.Prefix(value, 4096)
-	// Root / nested response only — item.id must not win first-and-stick.
-	if id := peekRootOrResponseString(value, head, "id"); id != "" {
-		i.metadata.ResponseID = id
+	// id/model 首次命中后即停止逐帧探测：RootStringField 的命中返回
+	// （jsonpeek.go:101 的 string 转换）是流基准 ~97% 的分配来源，而
+	// 这两个字段是 first-and-stick 语义——后续帧不会再改写它们。
+	if i.metadata.ResponseID == "" {
+		if id := peekRootOrResponseString(value, head, "id"); id != "" {
+			i.metadata.ResponseID = id
+		}
 	}
-	if model := peekRootOrResponseString(value, head, "model"); model != "" {
-		i.metadata.Model = model
-		i.metadata.Usage.ResponseModel = model
+	if i.metadata.Model == "" {
+		if model := peekRootOrResponseString(value, head, "model"); model != "" {
+			i.metadata.Model = model
+			i.metadata.Usage.ResponseModel = model
+		}
 	}
 	if seq, ok := jsonpeek.IntField(head, "sequence_number"); ok {
 		if seq > i.metadata.SequenceNumber {

@@ -28,28 +28,25 @@ func TestClassifyQualityHold(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		sig  QualityStreamSignals
+		sig  qualityStreamSignals
 		want QualityVerdict
 	}{
-		{name: "thinking delivers", sig: QualityStreamSignals{HasThinking: true, VisibleTokens: 10}, want: QualityDeliver},
+		{name: "thinking delivers", sig: qualityStreamSignals{HasThinking: true, VisibleTokens: 10}, want: QualityDeliver},
 		// ReasoningTokens without HasThinking is a usage claim, not stream
 		// evidence: degraded streams report large counts and must withhold.
-		{name: "usage reasoning claim still withholds", sig: QualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityWithhold},
-		{name: "visible 32 no think withhold", sig: QualityStreamSignals{VisibleTokens: 32, Terminal: true}, want: QualityWithhold},
-		{name: "output 40 no think withhold", sig: QualityStreamSignals{OutputTokens: 40, Terminal: true}, want: QualityWithhold},
-		{name: "short no think withholds (reasoning models always think)", sig: QualityStreamSignals{VisibleTokens: 10, Terminal: true}, want: QualityWithhold},
-		{name: "empty terminal waits for transport handling", sig: QualityStreamSignals{Terminal: true}, want: QualityWait},
-		{name: "midstream enough content withhold", sig: QualityStreamSignals{VisibleTokens: 64}, want: QualityWithhold},
-		{name: "wait for more", sig: QualityStreamSignals{VisibleTokens: 8}, want: QualityWait},
-		{name: "hold expired short withholds", sig: QualityStreamSignals{VisibleTokens: 8, HoldExpired: true}, want: QualityWithhold},
-		{name: "hold expired empty waits", sig: QualityStreamSignals{HoldExpired: true}, want: QualityWait},
-		{name: "hold expired zero tokens waits", sig: QualityStreamSignals{VisibleTokens: 0, OutputTokens: 0, HoldExpired: true}, want: QualityWait},
+		{name: "usage reasoning claim still withholds", sig: qualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityWithhold},
+		{name: "visible 32 no think withhold", sig: qualityStreamSignals{VisibleTokens: 32, Terminal: true}, want: QualityWithhold},
+		{name: "output 40 no think withhold", sig: qualityStreamSignals{OutputTokens: 40, Terminal: true}, want: QualityWithhold},
+		{name: "short no think withholds (reasoning models always think)", sig: qualityStreamSignals{VisibleTokens: 10, Terminal: true}, want: QualityWithhold},
+		{name: "empty terminal withholds defensively (empty-stream path owns it)", sig: qualityStreamSignals{Terminal: true}, want: QualityWithhold},
+		{name: "midstream enough content withhold", sig: qualityStreamSignals{VisibleTokens: 64}, want: QualityWithhold},
+		{name: "any visible output without thinking withholds (body outrun)", sig: qualityStreamSignals{VisibleTokens: 8}, want: QualityWithhold},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if got := ClassifyQualityHold(test.sig, 32); got != test.want {
-				t.Fatalf("ClassifyQualityHold() = %s, want %s", got, test.want)
+			if got := classifyQualityHold(test.sig); got != test.want {
+				t.Fatalf("classifyQualityHold() = %s, want %s", got, test.want)
 			}
 		})
 	}
@@ -57,22 +54,22 @@ func TestClassifyQualityHold(t *testing.T) {
 
 func TestDecideQualityRetry(t *testing.T) {
 	t.Parallel()
-	if got := DecideQualityRetry(QualityDeliver, 0, 2, qualityRetryFailOpen); got != QualityActionDeliver {
+	if got := decideQualityRetry(QualityDeliver, 0, 2, qualityRetryFailOpen); got != QualityActionDeliver {
 		t.Fatalf("deliver verdict: %s", got)
 	}
-	if got := DecideQualityRetry(QualityWithhold, 0, 2, qualityRetryFailOpen); got != QualityActionRetry {
+	if got := decideQualityRetry(QualityWithhold, 0, 2, qualityRetryFailOpen); got != QualityActionRetry {
 		t.Fatalf("first withhold: %s", got)
 	}
-	if got := DecideQualityRetry(QualityWithhold, 1, 2, qualityRetryFailOpen); got != QualityActionDeliverLast {
+	if got := decideQualityRetry(QualityWithhold, 1, 2, qualityRetryFailOpen); got != QualityActionDeliverLast {
 		t.Fatalf("last fail-open: %s", got)
 	}
-	if got := DecideQualityRetry(QualityWithhold, 1, 2, qualityRetryFailClosed); got != QualityActionReject {
+	if got := decideQualityRetry(QualityWithhold, 1, 2, qualityRetryFailClosed); got != QualityActionReject {
 		t.Fatalf("last fail-closed: %s", got)
 	}
-	if got := DecideQualityRetry(QualityWithhold, 0, 1, qualityRetryFailOpen); got != QualityActionDeliverLast {
+	if got := decideQualityRetry(QualityWithhold, 0, 1, qualityRetryFailOpen); got != QualityActionDeliverLast {
 		t.Fatalf("max 1 fail-open: %s", got)
 	}
-	if got := DecideQualityRetry(QualityWithhold, 5, 0, ""); got != QualityActionReject {
+	if got := decideQualityRetry(QualityWithhold, 5, 0, ""); got != QualityActionReject {
 		t.Fatalf("zero-value policy must use fail-closed default: %s", got)
 	}
 }
@@ -81,14 +78,14 @@ func TestDecideQualityRetryLastWithholdIsMaxAttemptsMinusOne(t *testing.T) {
 	t.Parallel()
 	for _, maxAttempts := range []int{1, 2, 3, 6} {
 		last := maxAttempts - 1
-		if got := DecideQualityRetry(QualityWithhold, last, maxAttempts, qualityRetryFailOpen); got != QualityActionDeliverLast {
+		if got := decideQualityRetry(QualityWithhold, last, maxAttempts, qualityRetryFailOpen); got != QualityActionDeliverLast {
 			t.Fatalf("fail-open last withhold max=%d index=%d got %s", maxAttempts, last, got)
 		}
-		if got := DecideQualityRetry(QualityWithhold, last, maxAttempts, qualityRetryFailClosed); got != QualityActionReject {
+		if got := decideQualityRetry(QualityWithhold, last, maxAttempts, qualityRetryFailClosed); got != QualityActionReject {
 			t.Fatalf("fail-closed last withhold max=%d index=%d got %s", maxAttempts, last, got)
 		}
 		if last > 0 {
-			if got := DecideQualityRetry(QualityWithhold, last-1, maxAttempts, qualityRetryFailOpen); got != QualityActionRetry {
+			if got := decideQualityRetry(QualityWithhold, last-1, maxAttempts, qualityRetryFailOpen); got != QualityActionRetry {
 				t.Fatalf("pre-last should retry max=%d index=%d got %s", maxAttempts, last-1, got)
 			}
 		}
@@ -147,9 +144,9 @@ func TestCommitQualityHold(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			got := CommitQualityHold(test.verdict, test.qualityAttempt, test.maxAttempts, test.hasNext, test.onExhausted)
+			got := commitQualityHold(test.verdict, test.qualityAttempt, test.maxAttempts, test.hasNext, test.onExhausted)
 			if got.Action != test.wantAction || got.Audit != test.wantAudit || got.KeepBody != test.wantKeep {
-				t.Fatalf("CommitQualityHold() = %+v, want action=%s audit=%t keep=%t", got, test.wantAction, test.wantAudit, test.wantKeep)
+				t.Fatalf("commitQualityHold() = %+v, want action=%s audit=%t keep=%t", got, test.wantAction, test.wantAudit, test.wantKeep)
 			}
 			if got.Action == QualityActionRetry && !test.hasNext {
 				t.Fatal("routing exhausted must not Retry")
@@ -160,16 +157,16 @@ func TestCommitQualityHold(t *testing.T) {
 
 func TestBoundQualityRetryWhenRoutingExhausted(t *testing.T) {
 	t.Parallel()
-	if got := BoundQualityRetry(QualityActionRetry, true, qualityRetryFailOpen); got != QualityActionRetry {
+	if got := boundQualityRetry(QualityActionRetry, true, qualityRetryFailOpen); got != QualityActionRetry {
 		t.Fatalf("has next: %s", got)
 	}
-	if got := BoundQualityRetry(QualityActionRetry, false, qualityRetryFailOpen); got != QualityActionDeliverLast {
+	if got := boundQualityRetry(QualityActionRetry, false, qualityRetryFailOpen); got != QualityActionDeliverLast {
 		t.Fatalf("no next fail-open: %s", got)
 	}
-	if got := BoundQualityRetry(QualityActionRetry, false, qualityRetryFailClosed); got != QualityActionReject {
+	if got := boundQualityRetry(QualityActionRetry, false, qualityRetryFailClosed); got != QualityActionReject {
 		t.Fatalf("no next fail-closed: %s", got)
 	}
-	if got := BoundQualityRetry(QualityActionDeliverLast, false, qualityRetryFailOpen); got != QualityActionDeliverLast {
+	if got := boundQualityRetry(QualityActionDeliverLast, false, qualityRetryFailOpen); got != QualityActionDeliverLast {
 		t.Fatalf("already last: %s", got)
 	}
 }
@@ -217,7 +214,7 @@ func sse(frames ...string) string {
 func TestObserveQualityChunkThinkingChat(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(&state, []byte(sse(
+	observeQualityChunk(&state, []byte(sse(
 		": grok2api-reasoning-start",
 		`data: {"choices":[{"delta":{"thinking_content":"plan the game"}}]}`,
 		`data: {"choices":[{"delta":{"content":"here is a game"}}]}`,
@@ -228,42 +225,41 @@ func TestObserveQualityChunkThinkingChat(t *testing.T) {
 	if !sig.HasThinking || !sig.Terminal || sig.ReasoningTokens != 40 {
 		t.Fatalf("thinking fixture signals = %#v", sig)
 	}
-	if ClassifyQualityHold(sig, 32) != QualityDeliver {
+	if classifyQualityHold(sig) != QualityDeliver {
 		t.Fatalf("thinking fixture withheld")
 	}
 }
 
-func TestObserveQualityChunkNoThinkEnoughChat(t *testing.T) {
+// TestObserveOutputWithoutThinkingWithholdsAnyLength：正文抢跑规则与长度
+// 无关——无思考的正文不论 200 rune 还是 2 rune 都扣留。两条用例源自
+// minOutputTokens 阈值时代（enough/short 各测一侧），阈值删除后合并为
+// 同一条长度无关性锁定；大尺寸侧同时锁定扫描器的可见输出记账。
+func TestObserveOutputWithoutThinkingWithholdsAnyLength(t *testing.T) {
 	t.Parallel()
-	state := qualityScanState{protocol: qualityProtocolChat}
+	large := qualityScanState{protocol: qualityProtocolChat}
 	content := strings.Repeat("word ", 40) // 200 runes → 50 tokens
-	ObserveQualityChunk(&state, []byte(sse(
+	observeQualityChunk(&large, []byte(sse(
 		`data: {"choices":[{"delta":{"content":"`+content+`"}}]}`,
 		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: {"usage":{"completion_tokens":50,"completion_tokens_details":{"reasoning_tokens":0}}}`,
 		"data: [DONE]",
 	)))
-	sig := state.signals()
+	sig := large.signals()
 	if sig.HasThinking || !sig.Terminal || sig.VisibleTokens < 32 {
 		t.Fatalf("no-think fixture signals = %#v", sig)
 	}
-	if ClassifyQualityHold(sig, 32) != QualityWithhold {
-		t.Fatalf("no-think enough should withhold, got %s (%#v)", ClassifyQualityHold(sig, 32), sig)
+	if classifyQualityHold(sig) != QualityWithhold {
+		t.Fatalf("no-think output must withhold, got %s (%#v)", classifyQualityHold(sig), sig)
 	}
-}
-
-func TestObserveQualityChunkShortNoThink(t *testing.T) {
-	t.Parallel()
 	// Even a 1-token answer normally carries reasoning: no thinking at
 	// terminal is degraded regardless of length and must withhold.
-	state := qualityScanState{protocol: qualityProtocolChat}
-	ObserveQualityChunk(&state, []byte(sse(
+	short := qualityScanState{protocol: qualityProtocolChat}
+	observeQualityChunk(&short, []byte(sse(
 		`data: {"choices":[{"delta":{"content":"ok"}}]}`,
 		"data: [DONE]",
 	)))
-	sig := state.signals()
-	if ClassifyQualityHold(sig, 32) != QualityWithhold {
-		t.Fatalf("short no-think should withhold, got %s (%#v)", ClassifyQualityHold(sig, 32), sig)
+	if classifyQualityHold(short.signals()) != QualityWithhold {
+		t.Fatalf("short no-think must withhold, got %s", classifyQualityHold(short.signals()))
 	}
 }
 
@@ -272,12 +268,12 @@ func TestObserveQualityChunkResponsesReasoningItem(t *testing.T) {
 	// A reasoning item header without any reasoning text delta is the
 	// responses-protocol B-form: withhold despite the usage claim.
 	state := qualityScanState{protocol: qualityProtocolResponses}
-	ObserveQualityChunk(&state, []byte(sse(
+	observeQualityChunk(&state, []byte(sse(
 		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
 		`data: {"type":"response.output_text.delta","delta":"hello"}`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":90,"output_tokens_details":{"reasoning_tokens":60}}}}`,
 	)))
-	if ClassifyQualityHold(state.signals(), 32) != QualityWithhold {
+	if classifyQualityHold(state.signals()) != QualityWithhold {
 		t.Fatalf("responses reasoning item header alone must withhold: %#v", state.signals())
 	}
 }
@@ -285,13 +281,13 @@ func TestObserveQualityChunkResponsesReasoningItem(t *testing.T) {
 func TestObserveQualityChunkResponsesReasoningDeltaDelivers(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolResponses}
-	ObserveQualityChunk(&state, []byte(sse(
+	observeQualityChunk(&state, []byte(sse(
 		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
 		`data: {"type":"response.reasoning_text.delta","delta":"consider the options"}`,
 		`data: {"type":"response.output_text.delta","delta":"hello"}`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":90,"output_tokens_details":{"reasoning_tokens":60}}}}`,
 	)))
-	if ClassifyQualityHold(state.signals(), 32) != QualityDeliver {
+	if classifyQualityHold(state.signals()) != QualityDeliver {
 		t.Fatalf("responses reasoning text delta should deliver: %#v", state.signals())
 	}
 }
@@ -303,7 +299,7 @@ func TestPeekQualityStreamThinkingDeliversRemainder(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"answer after think"}}]}`,
 		"data: [DONE]",
 	)))
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second})
+	replay, verdict, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +313,9 @@ func TestPeekQualityStreamThinkingDeliversRemainder(t *testing.T) {
 	}
 }
 
-func TestPeekQualityStreamWithholdsNoThinkEnough(t *testing.T) {
+// TestPeekWithholdsOutputWithoutThinkingAnyLength：正文抢跑扣留与长度无关
+// （阈值时代的 enough/short 两条合并）；大尺寸侧同时锁定 usage 记账。
+func TestPeekWithholdsOutputWithoutThinkingAnyLength(t *testing.T) {
 	t.Parallel()
 	content := strings.Repeat("abcd", 40) // 160 runes → 40 tokens
 	body := io.NopCloser(strings.NewReader(sse(
@@ -325,7 +323,7 @@ func TestPeekQualityStreamWithholdsNoThinkEnough(t *testing.T) {
 		`data: {"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":0}}}`,
 		"data: [DONE]",
 	)))
-	replay, verdict, usage, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second})
+	replay, verdict, usage, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,6 +333,19 @@ func TestPeekQualityStreamWithholdsNoThinkEnough(t *testing.T) {
 	}
 	if usage.ReasoningTokens != 0 || usage.OutputTokens < 32 {
 		t.Fatalf("usage=%#v", usage)
+	}
+	// 2-rune 答案同样必须扣留：无思考的正文不论长短都是降智形态。
+	short := io.NopCloser(strings.NewReader(sse(
+		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+		"data: [DONE]",
+	)))
+	sReplay, sVerdict, _, sErr := peekQualityStream(context.Background(), short, qualityProtocolChat, QualityRetryRuntime{})
+	if sErr != nil {
+		t.Fatal(sErr)
+	}
+	defer sReplay.Close()
+	if sVerdict != QualityWithhold {
+		t.Fatalf("short no-think verdict=%s, want withhold", sVerdict)
 	}
 }
 
@@ -346,9 +357,9 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 		`data: {"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":0}}}`,
 		"data: [DONE]",
 	)
-	cfg := QualityRetryRuntime{MinOutputTokens: 32, MaxAttempts: 2, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second}
+	cfg := QualityRetryRuntime{MaxAttempts: 2, OnExhausted: qualityRetryFailOpen}
 
-	replay, verdict, usage, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(fixture)), qualityProtocolChat, cfg)
+	replay, verdict, usage, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(fixture)), qualityProtocolChat, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,11 +367,11 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	if verdict != QualityWithhold {
 		t.Fatalf("first peek verdict=%s usage=%#v", verdict, usage)
 	}
-	if got := DecideQualityRetry(verdict, 0, cfg.MaxAttempts, cfg.OnExhausted); got != QualityActionRetry {
+	if got := decideQualityRetry(verdict, 0, cfg.MaxAttempts, cfg.OnExhausted); got != QualityActionRetry {
 		t.Fatalf("first withhold action=%s", got)
 	}
 
-	replay2, verdict2, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(fixture)), qualityProtocolChat, cfg)
+	replay2, verdict2, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(fixture)), qualityProtocolChat, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,8 +379,8 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	if verdict2 != QualityWithhold {
 		t.Fatalf("second peek verdict=%s", verdict2)
 	}
-	action2 := DecideQualityRetry(verdict2, 1, cfg.MaxAttempts, cfg.OnExhausted)
-	action2 = BoundQualityRetry(action2, false, cfg.OnExhausted)
+	action2 := decideQualityRetry(verdict2, 1, cfg.MaxAttempts, cfg.OnExhausted)
+	action2 = boundQualityRetry(action2, false, cfg.OnExhausted)
 	if action2 != QualityActionDeliverLast {
 		t.Fatalf("second withhold fail-open action=%s", action2)
 	}
@@ -379,23 +390,7 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	}
 }
 
-func TestPeekQualityStreamShortNoThinkWithholds(t *testing.T) {
-	t.Parallel()
-	body := io.NopCloser(strings.NewReader(sse(
-		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
-		"data: [DONE]",
-	)))
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer replay.Close()
-	if verdict != QualityWithhold {
-		t.Fatalf("short no-think verdict=%s, want withhold", verdict)
-	}
-}
-
-func TestPeekQualityStreamHoldTimeoutInterruptsBlockedReadAndPreservesRemainder(t *testing.T) {
+func TestPeekWithholdInterruptsBlockedReadAndPreservesRemainder(t *testing.T) {
 	t.Parallel()
 	reader, writer := io.Pipe()
 	first := sse(`data: {"choices":[{"delta":{"content":"hi"}}]}`)
@@ -419,17 +414,18 @@ func TestPeekQualityStreamHoldTimeoutInterruptsBlockedReadAndPreservesRemainder(
 	}()
 
 	started := time.Now()
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), reader, qualityProtocolChat, QualityRetryRuntime{
-		MinOutputTokens: 32,
-		HoldTimeout:     30 * time.Millisecond,
-	})
+	replay, verdict, _, err := peekQualityStream(context.Background(), reader, qualityProtocolChat, QualityRetryRuntime{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer replay.Close()
 	close(continueWrite)
-	if elapsed := time.Since(started); elapsed < 20*time.Millisecond || elapsed > 200*time.Millisecond {
-		t.Fatalf("peek returned after %s, want the 30ms hold timeout", elapsed)
+	// 正文抢跑规则（蓝图规则 3）：无思考的首个正文增量即刻扣留，无需等
+	// 30ms hold 窗口走完——零延迟状态机的核心承诺。
+	// 界限 500ms：正文抢跑必须即时扣留（不等任何截止），同时对 -race
+	// 高负载下的调度噪声免疫（旧 50ms 硬界限偶发翻牌）。
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("peek returned after %s, want immediate withhold on first content delta", elapsed)
 	}
 	if verdict != QualityWithhold {
 		t.Fatalf("short timed-out no-think response verdict = %s, want withhold", verdict)
@@ -446,7 +442,7 @@ func TestPeekQualityStreamHoldTimeoutInterruptsBlockedReadAndPreservesRemainder(
 	}
 }
 
-func TestPeekQualityStreamHoldTimeoutEmptyDoesNotFailOpen(t *testing.T) {
+func TestPeekEmptyStreamWaitsForDeadlineInsteadOfFailingOpen(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	reader, writer := io.Pipe()
@@ -456,10 +452,7 @@ func TestPeekQualityStreamHoldTimeoutEmptyDoesNotFailOpen(t *testing.T) {
 	var peekErr error
 	go func() {
 		defer close(done)
-		_, verdict, _, _, peekErr = peekQualityStream(ctx, reader, qualityProtocolChat, QualityRetryRuntime{
-			MinOutputTokens: 32,
-			HoldTimeout:     20 * time.Millisecond,
-		})
+		_, verdict, _, peekErr = peekQualityStream(ctx, reader, qualityProtocolChat, QualityRetryRuntime{})
 	}()
 	select {
 	case <-done:
@@ -482,11 +475,11 @@ func TestPeekQualityStreamHoldTimeoutEmptyDoesNotFailOpen(t *testing.T) {
 
 func TestPeekQualityStreamEmptyEOFRequestsAnotherAccount(t *testing.T) {
 	t.Parallel()
-	replay, verdict, _, _, err := peekQualityStream(
+	replay, verdict, _, err := peekQualityStream(
 		context.Background(),
 		io.NopCloser(strings.NewReader("")),
 		qualityProtocolResponses,
-		QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second},
+		QualityRetryRuntime{},
 	)
 	if replay != nil {
 		defer replay.Close()
@@ -502,9 +495,9 @@ func TestPeekQualityStreamEmptyEOFRequestsAnotherAccount(t *testing.T) {
 func TestPeekQualityStreamProcessesUnterminatedFinalEvent(t *testing.T) {
 	t.Parallel()
 	body := io.NopCloser(strings.NewReader(`data: {"type":"response.output_text.delta","delta":"ok"}`))
-	replay, verdict, _, _, err := peekQualityStream(
+	replay, verdict, _, err := peekQualityStream(
 		context.Background(), body, qualityProtocolResponses,
-		QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second},
+		QualityRetryRuntime{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +530,7 @@ func TestQualityPeekAbortErrorPrefersIdleCause(t *testing.T) {
 
 func TestShouldHoldQualityStreamGates(t *testing.T) {
 	t.Parallel()
-	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 2, MinOutputTokens: 32}
+	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 2}
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6", PublicID: "grok-4.6"}
 	input := Input{Streaming: true, PublicModel: "grok-4.6"}
 	if !shouldHoldQualityStream(input, nil, route, audit.OperationChat, cfg) {
@@ -552,8 +545,12 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 	if !shouldHoldQualityStream(input, &owned, route, audit.OperationChat, cfg) {
 		t.Fatal("pinned previous_response_id must still hold")
 	}
-	if shouldHoldQualityStream(input, nil, route, audit.OperationImage, cfg) {
-		t.Fatal("image must not hold")
+	// 非推理操作族全部走同一豁免分支——逐一钉住，防止未来有人在门里
+	// 加操作白名单时漏掉某个媒体操作（video/media/tts/embedding）。
+	for _, operation := range []audit.Operation{audit.OperationImage, audit.OperationImageEdit, audit.OperationVideo, audit.OperationTTS, audit.OperationSTT, audit.OperationRealtime, audit.OperationVoice} {
+		if shouldHoldQualityStream(input, nil, route, operation, cfg) {
+			t.Fatalf("%s must not hold", operation)
+		}
 	}
 	if shouldHoldQualityStream(input, nil, route, audit.OperationCompaction, cfg) {
 		t.Fatal("codex compaction operation must not hold")
@@ -568,6 +565,10 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 	if shouldHoldQualityStream(tui, nil, route, audit.OperationResponses, cfg) {
 		t.Fatal("tui compaction prompt must not hold even when tagged responses")
 	}
+	// reasoning_disabled 豁免已删除：守卫白名单内的模型
+	//（grok-4.5/4.6）均不支持 none——显式关闭是非法组合，照常进守卫
+	//（上游将以 400 拒绝，判决无从发生也不误罚账号）；白名单外的模型由
+	// model_out_of_scope 整体豁免。锁定：显式关闭不再构成豁免。
 	for _, test := range []struct {
 		name string
 		body string
@@ -576,12 +577,13 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		{name: "responses reasoning none", body: `{"reasoning":{"effort":"none"}}`},
 		{name: "messages thinking disabled", body: `{"thinking":{"type":"disabled"}}`},
 		{name: "messages zero thinking budget", body: `{"thinking":{"type":"enabled","budget_tokens":0}}`},
+		{name: "output_config effort none", body: `{"output_config":{"effort":"none"}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
-			if shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
-				t.Fatal("explicitly disabled reasoning requests must not be held")
+			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+				t.Fatal("explicit disable on none-incapable model must stay gated (exemption removed)")
 			}
 		})
 	}
@@ -607,7 +609,7 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 			}
 		})
 	}
-	// 带工具结果的轮次照常 hold(2026-08-25 回归锁定):扣留的响应从不发给
+	// 带工具结果的轮次照常 hold(回归锁定):扣留的响应从不发给
 	// 客户端,不存在客户端重放;判决只看这条响应自身的流特征。
 	for _, test := range []struct {
 		name string
@@ -637,40 +639,12 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 
 func TestAttemptLoopQualityHold(t *testing.T) {
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "quality-hold-loop.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
+	database, credentials := newGuardLoopDatabase(t, "grok-4.6", "quality-empty", "quality-no-think", "quality-thinking")
 	accountRepo := relational.NewAccountRepository(database)
 	modelRepo := relational.NewModelRepository(database)
 	auditRepo := relational.NewAuditRepository(database)
 	responseRepo := relational.NewResponseRepository(database)
 	keyRepo := relational.NewClientKeyRepository(database)
-
-	credentials := make([]accountdomain.Credential, 0, 3)
-	for index, name := range []string{"quality-empty", "quality-no-think", "quality-thinking"} {
-		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, accountdomain.Credential{
-			Provider: accountdomain.ProviderBuild, Name: name, SourceKey: name, EncryptedAccessToken: name,
-			EncryptedRefreshToken: "refresh-" + name, ExpiresAt: time.Now().Add(time.Hour),
-			Enabled: true, AuthStatus: accountdomain.AuthStatusActive, Priority: 200 - index, MaxConcurrent: 1,
-		})
-		if createErr != nil {
-			t.Fatal(createErr)
-		}
-		credentials = append(credentials, credential)
-	}
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, credential := range credentials {
-		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
-			t.Fatal(err)
-		}
-	}
 	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
 		Name: "quality-loop-key", Prefix: "qhold", SecretHash: strings.Repeat("f", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
@@ -700,7 +674,7 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second})
+	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailOpen})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-hold", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
@@ -842,7 +816,7 @@ func TestAttemptLoopQualityHoldFailOpenKeepsSingleAccountBody(t *testing.T) {
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 6, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second,
+		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailOpen,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
@@ -936,7 +910,7 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 6, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second,
+		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailOpen,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
@@ -972,7 +946,13 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 func TestNormalizeQualityRetryDefaults(t *testing.T) {
 	t.Parallel()
 	got := normalizeQualityRetry(QualityRetryRuntime{Enabled: true})
-	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 8 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 3*time.Second || got.AccountCooldown != 12*time.Hour || got.IdleAccountCooldown != 15*time.Minute {
+	if !got.Enabled || got.MaxAttempts != 2 || got.OnExhausted != qualityRetryFailClosed || got.AccountCooldown != 12*time.Hour || got.IdleAccountCooldown != 15*time.Minute {
 		t.Fatalf("defaults = %#v", got)
+	}
+	if got.EvidenceTimeout != 3500*time.Millisecond {
+		t.Fatalf("EvidenceTimeout default = %s, want 3.5s", got.EvidenceTimeout)
+	}
+	if got.CreatedTimeout != 5*time.Second {
+		t.Fatalf("CreatedTimeout default = %s, want 5s", got.CreatedTimeout)
 	}
 }

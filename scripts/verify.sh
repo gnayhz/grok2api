@@ -113,13 +113,26 @@ stage_staticcheck() {
 		SKIPPED_NOW="tool missing"
 	fi
 }
-stage_race() { go test -race -count=1 ./...; }
+stage_race() {
+	# 一次性竞态失败若不留痕将无从排查（verify-full 一次失败、
+	# 五次复跑全绿的无头绪案例）——把完整输出落盘再按需透传。
+	if ! go test -race -count=1 ./... >".race-output.log" 2>&1; then
+		cat ".race-output.log"
+		echo "race suite 完整输出已保存到 .race-output.log"
+		return 1
+	fi
+	rm -f ".race-output.log"
+}
 stage_fuzz_seeds() {
-	# 全部 8 个 fuzz 目标的种子回归：rsc/gateway 质量链 + egress 订阅/代理
-	# 解析与 provider URL 规范化（后两组处理外部不可信输入，round 35 补入）。
-	go test -count=1 -run 'FuzzParseRisk|FuzzObserveQualityChunk|FuzzPeekQualityBody' ./internal/infra/rsc/ ./internal/application/gateway/
+	# 全部 14 个 fuzz 目标的种子回归：gateway 质量扫描器/body 判决 + jsonpeek
+	# 零分配抽取（守卫热路径，蓝图 #5）+ egress 订阅/代理解析与 provider URL
+	# 规范化（处理外部不可信输入）+ 转换器 SSE 行解析。
+	# 注：FuzzParseRisk 已随 homepage 解析器删除（重构 round 11）。
+	go test -count=1 -run 'FuzzObserveQualityChunk|FuzzPeekQualityBody' ./internal/application/gateway/
+	go test -count=1 -run 'Fuzz' ./internal/pkg/jsonpeek/
 	go test -count=1 -run 'FuzzNormalizeURL' ./internal/infra/provider/searchresult/
 	go test -count=1 -run 'FuzzParseClashSubscription|FuzzResolveRotationTemplate|FuzzParseProxySubscription|FuzzNormalizeProxyURL' ./internal/application/egress/
+	go test -count=1 -run 'FuzzConsumeSSE' ./internal/infra/provider/conversation/
 }
 stage_govulncheck() {
 	if have govulncheck; then
@@ -135,10 +148,12 @@ stage_govulncheck() {
 }
 stage_flaky() {
 	# Repeat core packages three times to surface scheduling-dependent flakes.
-	go test -count=3 ./internal/application/gateway/ ./internal/application/account/risk/ ./internal/infra/rsc/ ./internal/infra/persistence/relational/ ./internal/app/
+	# transport/http/inference 自 round 25/33 起承载守卫检查器与 copyStream 的
+	# 流式测试（含并发泵），与 gateway 同属时序敏感核心，补入重复探测。
+	go test -count=3 ./internal/application/gateway/ ./internal/application/account/risk/ ./internal/infra/rsc/ ./internal/infra/persistence/relational/ ./internal/app/ ./internal/transport/http/inference/ ./internal/pkg/jsonpeek/
 }
 stage_fuzz_engines() {
-	go test -fuzz FuzzParseRisk -fuzztime 30s -run xxx ./internal/infra/rsc/
+	# 质量判决链（FuzzParseRisk 已随 homepage 解析器删除，重构 round 11）。
 	go test -fuzz FuzzPeekQualityBody -fuzztime 30s -run xxx ./internal/application/gateway/
 	go test -fuzz FuzzObserveQualityChunk -fuzztime 30s -run xxx ./internal/application/gateway/
 	# 外部不可信输入解析面（round 35 补入；此前 fuzz tier 只覆盖质量链）。

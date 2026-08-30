@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// 2026-08-28 生产事故回归:首批巡检 7 连发被整批降级服务,单次 denied
+// 生产事故回归:首批巡检密集探测被整批降级服务,单次 denied
 // 直接定罪+连坐,7 个健康身份被永久打标。新语义:连续确认(默认 2)才处置,
 // 未确认 denied 在 ErrorRetry 后重探,clean 复测覆盖旧 denied 自愈。
 func TestDeniedRequiresConfirmationsBeforeConsequences(t *testing.T) {
@@ -90,8 +90,8 @@ func TestDeniedFreshnessWindows(t *testing.T) {
 	}
 }
 
-// 旧数据/单次 denied(streak 0)不得被启动对账重放处置——2026-08-28 的
-// 21 个误标账号在新版上清标后,重启不会再被 reconcile 重新打标。
+// 旧数据/单次 denied(streak 0)不得被启动对账重放处置——历史
+// 误判批次在新版上清标后,重启不会再被 reconcile 重新打标。
 func TestReconcileSkipsUnconfirmedLegacyDenied(t *testing.T) {
 	accounts := newFakeAccounts()
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
@@ -107,7 +107,7 @@ func TestReconcileSkipsUnconfirmedLegacyDenied(t *testing.T) {
 	}
 }
 
-// 2026-08-28 自愈闭环:已确认 denied 被 rsc_denied 排除调度后,OnDegraded
+// 自愈闭环:已确认 denied 被 rsc_denied 排除调度后,OnDegraded
 // 永远不会再触发;DeniedTTL 过期必须由巡检重探,且 clean 必须真正清标
 // (含 SSO 连坐组成员),否则 TTL 只是 freshness 数字、误判永不恢复。
 func TestCleanPatrolUnflagsConfirmedDeniedIdentityGroup(t *testing.T) {

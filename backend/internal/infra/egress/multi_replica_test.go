@@ -38,6 +38,15 @@ func (r *sharedCursorRepo) storedCursor(poolID uint64) uint64 {
 	return r.pool[poolID].RotationCursorNodeID
 }
 
+// poolSnapshot 返回池行副本。selectRotationNode 异步持久化游标
+// （fire-and-forget goroutine），测试侧直接读 map 会与其加锁写竞争
+// （规模轮 170 race 实证）——一切读取必须走锁内快照。
+func (r *sharedCursorRepo) poolSnapshot(poolID uint64) domain.Pool {
+	r.Lock()
+	defer r.Unlock()
+	return r.pool[poolID]
+}
+
 func newSharedReplicaManagers(t *testing.T) (*Manager, *Manager, *sharedCursorRepo) {
 	t.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -104,12 +113,12 @@ func TestRotationCursorContinuityAcrossReplicas(t *testing.T) {
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRotation, FallbackMode: domain.PoolFallbackNone}
 
 	// 副本 A:冷启动选首成员 10;10 失效后续位 20 并持久化游标。
-	first := managerA.selectRotationNode(repo.pool[1], members, members)
+	first := managerA.selectRotationNode(repo.poolSnapshot(1), members, members)
 	if first.ID != 10 {
 		t.Fatalf("cold-start rotation member = %d, want 10", first.ID)
 	}
 	without10 := members[1:]
-	second := managerA.selectRotationNode(repo.pool[1], without10, members)
+	second := managerA.selectRotationNode(repo.poolSnapshot(1), without10, members)
 	if second.ID != 20 {
 		t.Fatalf("advanced rotation member = %d, want 20", second.ID)
 	}

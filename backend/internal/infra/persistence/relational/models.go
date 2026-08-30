@@ -361,7 +361,7 @@ type requestAuditModel struct {
 	FirstTokenMS            *int64  `gorm:"column:first_token_ms"`
 	// DeliveredEvents/DeliveredBytes 是流式转发到客户端的 SSE data 事件数与
 	// 累计字节（非流式为响应体字节/1）。回答「200 且带错误码的请求实际交付了
-	// 多少」——尾部挂起/中断场景的客户端可见性（2026-08-21 轮26）。
+	// 多少」——尾部挂起/中断场景的客户端可见性（轮26）。
 	DeliveredEvents int64  `gorm:"not null;default:0"`
 	DeliveredBytes  int64  `gorm:"not null;default:0"`
 	DurationMS      int64  `gorm:"not null;default:0"`
@@ -638,9 +638,7 @@ func (egressOperationsConfigModel) TableName() string { return "egress_operation
 type accountRiskVerdictModel struct {
 	AccountID  uint64    `gorm:"primaryKey"`
 	Verdict    string    `gorm:"size:16;not null;check:chk_account_risk_verdicts_verdict,verdict IN ('clean','denied','flagged','error')"`
-	BotFlagSrc int       `gorm:"not null;default:0"`
 	BotFlagDtl string    `gorm:"size:512;not null;default:''"`
-	RiskScore  float64   `gorm:"not null;default:0"`
 	HTTPStatus int       `gorm:"not null;default:0"`
 	Error      string    `gorm:"size:512;not null;default:''"`
 	Source     string    `gorm:"size:32;not null;default:''"`
@@ -653,7 +651,7 @@ type accountRiskVerdictModel struct {
 	Trigger string `gorm:"size:16;not null;default:''"`
 	// DeniedStreak 连续 denied 次数（0=旧数据/单次）：达到运行时设置的
 	// DeniedConfirmations 才处置。AutoMigrate 对既有表补列，旧行默认 0
-	// = 未确认，重启对账不会重放它们的处置（2026-08-28 误判批次因此
+	// = 未确认，重启对账不会重放它们的处置（误判批次因此
 	// 不会被 reconcile 重新打标）。
 	DeniedStreak int `gorm:"not null;default:0"`
 }

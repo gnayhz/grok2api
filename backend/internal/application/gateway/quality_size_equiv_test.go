@@ -34,18 +34,18 @@ type qualitySizeSnap struct {
 func qualitySizeSnapFrom(body []byte, chunk int) qualitySizeSnap {
 	state := qualityScanState{protocol: qualityProtocolResponses}
 	if chunk <= 0 || chunk >= len(body) {
-		ObserveQualityChunk(&state, body)
+		observeQualityChunk(&state, body)
 	} else {
 		for i := 0; i < len(body); i += chunk {
 			end := i + chunk
 			if end > len(body) {
 				end = len(body)
 			}
-			ObserveQualityChunk(&state, body[i:end])
+			observeQualityChunk(&state, body[i:end])
 		}
 	}
 	if len(state.pending) > 0 || state.skipUntilNewline {
-		ObserveQualityChunk(&state, []byte{10})
+		observeQualityChunk(&state, []byte{10})
 	}
 	return qualitySizeSnap{
 		terminal: state.terminal, thinking: state.hasThinking, id: state.responseID,

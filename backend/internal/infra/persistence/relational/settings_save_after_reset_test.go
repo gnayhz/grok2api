@@ -12,7 +12,7 @@ import (
 // 回归:重置删除持久化行但服务层 revision 前进,Save(expectedRevision>0)
 // 的 UPDATE 命中 0 行。行不存在时必须回退 Create(主键并发冲突仍按
 // ErrConflict),否则恢复默认后的第一次保存永远 409,直到进程重启
-// (2026-08-25 演示实例实测命中)。
+// (演示实例实测命中)。
 func TestRuntimeSettingsSaveAfterReset(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)

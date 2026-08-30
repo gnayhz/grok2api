@@ -21,7 +21,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
-// TestEgressCanaryPostsToResponsesPath 回归(2026-08-25 线上事故):canary 请求
+// TestEgressCanaryPostsToResponsesPath 回归(线上事故):canary 请求
 // 曾漏设 Path,适配器按 urlWithBase(base, "") 把请求 POST 到 base 根路径——
 // cli-chat-proxy.grok.com 对 /v1/ 恒 404,canary 因此对任何出口都判
 // degraded:换 IP 明明成功也被烧满 3 次尝试、耗尽后保持 24h 隔离。

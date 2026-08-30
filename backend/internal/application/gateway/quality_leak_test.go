@@ -35,10 +35,8 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 	const iterations = 50
 	cfg := QualityRetryRuntime{
 		Enabled:         true,
-		HoldTimeout:     40 * time.Millisecond,
 		EvidenceTimeout: 80 * time.Millisecond,
 		CreatedTimeout:  60 * time.Millisecond,
-		MinOutputTokens: 8,
 	}
 
 	stableWindow := []int{runtime.NumGoroutine(), runtime.NumGoroutine()}
@@ -100,20 +98,20 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 		drain func()
 	}{
 		{"deliver drained", func(int) {
-			replay, _, _, _, _ := peekQualityStream(context.Background(), healthy(), qualityProtocolResponses, cfg)
+			replay, _, _, _ := peekQualityStream(context.Background(), healthy(), qualityProtocolResponses, cfg)
 			_, _ = io.Copy(io.Discard, replay)
 			_ = replay.Close()
 		}, nil},
 		{"deliver client abandons mid-stream", func(int) {}, nil}, // 占位，下方覆写
 		{"withhold caller discards unread", func(int) {
-			replay, verdict, _, _, _ := peekQualityStream(context.Background(), withholdStream(), qualityProtocolResponses, cfg)
+			replay, verdict, _, _ := peekQualityStream(context.Background(), withholdStream(), qualityProtocolResponses, cfg)
 			if verdict != QualityWithhold {
 				t.Errorf("withhold scenario verdict = %s", verdict)
 			}
 			_ = replay.Close() // 生产侧丢弃：service.go 扣留路径的行为
 		}, nil},
 		{"empty stream error path", func(int) {
-			replay, _, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\"}\n\n")), qualityProtocolResponses, cfg)
+			replay, _, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\"}\n\n")), qualityProtocolResponses, cfg)
 			if err == nil {
 				t.Error("empty stream must yield error")
 			}
@@ -124,7 +122,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 	// 带后台生产者的三个场景：drain 等待 harness 协程退出后再测量。
 	var wg sync.WaitGroup
 	abandon := func(int) {
-		replay, _, _, _, _ := peekQualityStream(context.Background(), slowProducer(&wg), qualityProtocolResponses, cfg)
+		replay, _, _, _ := peekQualityStream(context.Background(), slowProducer(&wg), qualityProtocolResponses, cfg)
 		_ = replay.Close() // 不读完即放弃
 	}
 	createdTimeout := func(int) {
@@ -136,7 +134,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 			_, _ = w.Write([]byte("data: {}\n\n"))
 			_ = w.Close()
 		}()
-		replay, _, _, _, err := peekQualityStream(context.Background(), r, qualityProtocolResponses, cfg)
+		replay, _, _, err := peekQualityStream(context.Background(), r, qualityProtocolResponses, cfg)
 		if err == nil {
 			t.Error("created timeout must yield error")
 		}
@@ -153,7 +151,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 			_ = w.Close()
 		}()
-		replay, _, _, _, err := peekQualityStream(context.Background(), r, qualityProtocolResponses, cfg)
+		replay, _, _, err := peekQualityStream(context.Background(), r, qualityProtocolResponses, cfg)
 		if err == nil {
 			t.Error("evidence timeout must yield error")
 		}
@@ -175,7 +173,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 			time.Sleep(300 * time.Millisecond)
 			_ = w.Close()
 		}()
-		replay, _, _, _, _ := peekQualityStream(ctx, r, qualityProtocolResponses, cfg)
+		replay, _, _, _ := peekQualityStream(ctx, r, qualityProtocolResponses, cfg)
 		_ = replay.Close()
 		_ = w.Close()
 		cancel()
@@ -207,7 +205,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 		}{"body classifier roundtrip", func(int) {
 			body := io.NopCloser(strings.NewReader(
 				"{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}"))
-			replay, verdict, _, _, err := peekQualityBody(body, cfg)
+			replay, verdict, _, err := peekQualityBody(body, cfg)
 			if err != nil || verdict != QualityDeliver {
 				t.Errorf("body deliver verdict=%s err=%v", verdict, err)
 			}
@@ -221,7 +219,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 		}{"oversized body closes underlying body", func(int) {
 			var closed int32
 			raw := &countingReadCloser{Reader: bytes.NewReader(make([]byte, qualityBodyPeekLimit+1)), closed: &closed}
-			replay, verdict, _, _, err := peekQualityBody(raw, cfg)
+			replay, verdict, _, err := peekQualityBody(raw, cfg)
 			if err != nil || verdict != QualityDeliver {
 				t.Errorf("oversized verdict=%s err=%v", verdict, err)
 			}

@@ -19,7 +19,7 @@ import {
 export type EgressOperationsDraft = Omit<EgressOperationsConfigDTO, "updatedAt">;
 
 export const routingScopes: EgressRoutingScope[] = ["grok_build", "grok_web", "grok_console"];
-export const trafficClasses: EgressTrafficClass[] = ["inference", "credential", "billing", "model_sync", "video"];
+export const trafficClasses: EgressTrafficClass[] = ["inference", "credential", "billing", "model_sync", "video", "probe"];
 
 export const routingScopeLabelKeys: Record<EgressRoutingScope, string> = {
 	grok_build: "proxies.routing.scopeBuild",
@@ -33,6 +33,7 @@ export const trafficClassLabelKeys: Record<EgressTrafficClass, string> = {
 	billing: "proxies.routing.classBilling",
 	model_sync: "proxies.routing.classModelSync",
 	video: "proxies.routing.classVideo",
+	probe: "proxies.routing.classProbe",
 };
 
 const defaultOperationsForm: EgressOperationsDraft = {

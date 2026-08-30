@@ -155,18 +155,14 @@ type AccountsConfig struct {
 
 // RequestRetryEditable 是管理接口使用的实时路由守卫输入（时长为字符串）。
 type RequestRetryEditable struct {
-	Enabled                bool
-	MaxAttempts            int
-	HoldTimeout            string
-	MinOutputTokens        int
-	OnExhausted            string
-	AccountCooldown        string
-	EarlyHeaderAbort       string
-	SameAccountRetry       bool
-	EvidenceTimeout        string
-	CreatedTimeout         string
-	IdleAccountCooldown    string
-	TerminalBurstThreshold int
+	Enabled             bool
+	MaxAttempts         int
+	OnExhausted         string
+	AccountCooldown     string
+	SameAccountRetry    bool
+	EvidenceTimeout     string
+	CreatedTimeout      string
+	IdleAccountCooldown string
 }
 
 // AccountRiskEditable 是管理接口使用的账号风险归因输入（时长为字符串）。
@@ -600,12 +596,11 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 	if value.RequestRetry != nil {
 		base.RequestRetry = config.RequestRetryConfig{
 			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
-			HoldTimeout: config.Duration(value.RequestRetry.HoldTimeout), MinOutputTokens: value.RequestRetry.MinOutputTokens,
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: config.Duration(value.RequestRetry.AccountCooldown),
-			EarlyHeaderAbort: config.Duration(value.RequestRetry.EarlyHeaderAbort), SameAccountRetry: value.RequestRetry.SameAccountRetry,
-			EvidenceTimeout: config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
-			IdleAccountCooldown:    config.Duration(value.RequestRetry.IdleAccountCooldown),
-			TerminalBurstThreshold: value.RequestRetry.TerminalBurstThreshold,
+			SameAccountRetry: value.RequestRetry.SameAccountRetry,
+			EvidenceTimeout:  config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
+			IdleAccountCooldown: config.Duration(value.RequestRetry.IdleAccountCooldown),
+			GuardedModels:       value.RequestRetry.GuardedModels,
 		}
 	}
 	if value.AccountRisk != nil {
@@ -711,18 +706,15 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			AutoCleanIncludeDisabled:             value.Accounts.AutoCleanIncludeDisabled,
 		},
 		RequestRetry: &settingsdomain.RequestRetryConfig{
-			Enabled:                value.RequestRetry.Enabled,
-			MaxAttempts:            value.RequestRetry.MaxAttempts,
-			HoldTimeout:            value.RequestRetry.HoldTimeout.Value(),
-			MinOutputTokens:        value.RequestRetry.MinOutputTokens,
-			OnExhausted:            value.RequestRetry.OnExhausted,
-			AccountCooldown:        value.RequestRetry.AccountCooldown.Value(),
-			EarlyHeaderAbort:       value.RequestRetry.EarlyHeaderAbort.Value(),
-			SameAccountRetry:       value.RequestRetry.SameAccountRetry,
-			EvidenceTimeout:        value.RequestRetry.EvidenceTimeout.Value(),
-			CreatedTimeout:         value.RequestRetry.CreatedTimeout.Value(),
-			IdleAccountCooldown:    value.RequestRetry.IdleAccountCooldown.Value(),
-			TerminalBurstThreshold: value.RequestRetry.TerminalBurstThreshold,
+			Enabled:             value.RequestRetry.Enabled,
+			MaxAttempts:         value.RequestRetry.MaxAttempts,
+			OnExhausted:         value.RequestRetry.OnExhausted,
+			AccountCooldown:     value.RequestRetry.AccountCooldown.Value(),
+			SameAccountRetry:    value.RequestRetry.SameAccountRetry,
+			EvidenceTimeout:     value.RequestRetry.EvidenceTimeout.Value(),
+			CreatedTimeout:      value.RequestRetry.CreatedTimeout.Value(),
+			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown.Value(),
+			GuardedModels:       value.RequestRetry.GuardedModels,
 		},
 		AccountRisk: &settingsdomain.AccountRiskConfig{
 			Enabled:             value.AccountRisk.RSCCheck.Enabled,
@@ -856,10 +848,8 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	if input.RequestRetryProvided {
 		next.RequestRetry.Enabled = input.RequestRetry.Enabled
 		next.RequestRetry.MaxAttempts = input.RequestRetry.MaxAttempts
-		next.RequestRetry.MinOutputTokens = input.RequestRetry.MinOutputTokens
 		next.RequestRetry.OnExhausted = strings.TrimSpace(input.RequestRetry.OnExhausted)
 		next.RequestRetry.SameAccountRetry = input.RequestRetry.SameAccountRetry
-		next.RequestRetry.TerminalBurstThreshold = input.RequestRetry.TerminalBurstThreshold
 	}
 	if input.EgressRotationProvided {
 		next.Egress.Rotation.Enabled = input.EgressRotation.Enabled
@@ -952,9 +942,7 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	}
 	if input.RequestRetryProvided {
 		durations = append(durations,
-			durationInput{"requestRetry.holdTimeout", input.RequestRetry.HoldTimeout, func(value config.Duration) { next.RequestRetry.HoldTimeout = value }},
 			durationInput{"requestRetry.accountCooldown", input.RequestRetry.AccountCooldown, func(value config.Duration) { next.RequestRetry.AccountCooldown = value }},
-			durationInput{"requestRetry.earlyHeaderAbort", input.RequestRetry.EarlyHeaderAbort, func(value config.Duration) { next.RequestRetry.EarlyHeaderAbort = value }},
 			durationInput{"requestRetry.evidenceTimeout", input.RequestRetry.EvidenceTimeout, func(value config.Duration) { next.RequestRetry.EvidenceTimeout = value }},
 			durationInput{"requestRetry.createdTimeout", input.RequestRetry.CreatedTimeout, func(value config.Duration) { next.RequestRetry.CreatedTimeout = value }},
 			durationInput{"requestRetry.idleAccountCooldown", input.RequestRetry.IdleAccountCooldown, func(value config.Duration) { next.RequestRetry.IdleAccountCooldown = value }},
@@ -1071,12 +1059,10 @@ func toEditable(cfg config.Config) EditableConfig {
 		},
 		RequestRetry: RequestRetryEditable{
 			Enabled: cfg.RequestRetry.Enabled, MaxAttempts: cfg.RequestRetry.MaxAttempts,
-			HoldTimeout: cfg.RequestRetry.HoldTimeout.String(), MinOutputTokens: cfg.RequestRetry.MinOutputTokens,
 			OnExhausted: cfg.RequestRetry.OnExhausted, AccountCooldown: cfg.RequestRetry.AccountCooldown.String(),
-			EarlyHeaderAbort: cfg.RequestRetry.EarlyHeaderAbort.String(), SameAccountRetry: cfg.RequestRetry.SameAccountRetry,
-			EvidenceTimeout: cfg.RequestRetry.EvidenceTimeout.String(), CreatedTimeout: cfg.RequestRetry.CreatedTimeout.String(),
-			IdleAccountCooldown:    cfg.RequestRetry.IdleAccountCooldown.String(),
-			TerminalBurstThreshold: cfg.RequestRetry.TerminalBurstThreshold,
+			SameAccountRetry: cfg.RequestRetry.SameAccountRetry,
+			EvidenceTimeout:  cfg.RequestRetry.EvidenceTimeout.String(), CreatedTimeout: cfg.RequestRetry.CreatedTimeout.String(),
+			IdleAccountCooldown: cfg.RequestRetry.IdleAccountCooldown.String(),
 		},
 		RequestRetryProvided: true,
 		EgressRotation: EgressRotationEditable{

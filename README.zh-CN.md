@@ -361,24 +361,34 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 ```yaml
 requestRetry:
   enabled: true             # 生产推荐开启（Go 内置默认保持关闭，升级不翻转）
-  maxAttempts: 6
-  holdTimeout: 3s           # 小输出降智流的等待上限；健康流在首个可见思考增量即放行
-  minOutputTokens: 8
-  onExhausted: fail_closed # fail_open | fail_closed
-  earlyHeaderAbort: 0s     # 可选：响应头预算早断（建议 5s；2026-08-20 实测 clean 首字节 0.7-2.1s vs 降智 3.0-15.6s 零重叠）
-  sameAccountRetry: true   # 换号前先同号重试一次
-  accountCooldown: 12h
+  maxAttempts: 2            # 全局请求预算：1 次初始尝试 + 最多 1 次重试（硬上限 3）
+  guardedModels: []          # 守卫白名单（空=全部推理模型；如 ["grok-4.5","grok-4.6"]），名单外模型整体豁免
+  createdTimeout: 5s        # 首事件截止：任何 SSE data 事件到达前中止该次尝试
+  evidenceTimeout: 3.5s     # 零证据截止：防网络假死死锁的兜底（无思考证据且无任何输出）
+  onExhausted: fail_closed # fail_open | fail_closed（fail_closed 返回 503 upstream_degraded）
+  sameAccountRetry: true   # 仅旋转池出口生效——直连/固定出口强制禁用
+  accountCooldown: 12h     # missing-thinking 定罪的账号冷却
   idleAccountCooldown: 15m # 空流/静默冷却（独立配置）
 ```
 
-开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，先同号重试一次再换号重试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具和 stored response 钉账号请求。该段修改需重启进程生效——不在管理端运行时设置面内（实测：改文件不重启守卫行为不变）。
+两个截止按**请求类自动缩放**（2026-08 全链路轨迹摸底的制度表
+`qualityLivenessSchedule`）：携带服务端搜索工具（`web_search`/`x_search`）的请求
+两个截止不设界——搜索排队/执行/思考三段静默皆合法，死连接由传输层流空闲超时
+（Build 默认 2m）兜底；`high`/`xhigh` 重推理请求的首事件截止放宽到 30s（上游
+排队静默实测 >5s）；其余请求按上表默认值。截止触发只代表排队界，不构成降智
+证据——降智判定永远由证据规则（推理项密文闭合零增量等签名）承担。
+
+开启后，每条思考型模型的响应（流式与非流式）由零延迟状态机判决：可见思考增量即时放行（守卫随即退出路径）；推理项闭合却无任何思考增量——密文降智签名——0 毫秒扣留；无思考却抢跑的正文不论长度瞬间扣留；终态兜底拦截；零内容流走空流短路（短冷却 + RSC 归因 + 重试）而不是 missing-thinking 定罪。纯语义输出（工具调用）直接交付。豁免路径（非推理操作/模型、显式关闭推理、compaction）按原因计入 guard-stats，不再无痕放行。`fail_closed` 下预算耗尽返回 `503 upstream_degraded`。该节已纳入管理端运行时设置面（守卫页）热更新；`config.yaml` 只提供启动默认值。
+
+守卫的全部行为可在管理端「质量防护」页观测：「命中统计」面板列出四个特征信号（首事件截止/零证据截止/空流/缺少思考证据）的触发、救回与失败计数；豁免台账按八个原因统计守卫未介入的请求——排查“为什么这批降智请求没被拦”先看这里；同号补偿重试与预算耗尽的两条出路（放行最后一次/拒绝）也在同页汇总，canary 验证结论单独成表。审计明细提供逐尝试轨迹：`quality_hold`/`quality_idle` 阶段即守卫判决（含耗时），`terminal_burst` 档位让“末尾整包爆发+零思考”的最强签名在速度列空白处可见，fail-open 交付的行带专门交付标记；审计错误码过滤器提供守卫四码一键预设（降智扣留/零证据超时/首事件超时/空流）。仪表盘资源卡汇总冷却账号、风控标记与期内降智拦截数。
 
 ### 风险归因（RSC）
 
 
 扣留一条流并不等于账号本身降智——出口 IP 同样可能是元凶。启用 `accountRisk.rscCheck` 后，
-每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查。检测方式由
-`method` 选择（重启生效）：
+每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查（SSO 思考探针；
+旧 homepage 载荷解析已随重构删除——grok.com 改版后恒读作 clean，回滚语义由
+`enabled: false` 承担）：
 
 - **ssoProbe（默认，优先）**：用 SSO Cookie 发起一次临时 `fast` 会话（不落会话、不写记忆），
   首个流里出现 notetaker/thinking 通道 => 账号健康；答案文本直接到达且全程无 thinking =>
@@ -390,7 +400,6 @@ requestRetry:
   混淆项，因此降智时自动发起**差分第二次尝试**（旋转池节点=重摇新 IP / 固定节点=排除换路 /
   仅直连=不可差分记 error，绝不定罪）；双路降智还需库内近期 build 探测 clean 见证人才生效，
   否则压制为 error 重试。无可用推理 Build 模型时功能自动停用（保持行为兜底）。
-- **homepage（回滚用）**：旧版首页 RSC 载荷解析，grok.com 改版后已失效。
 
 - **denied/flagged**：已确认结论在 `deniedTTL`（默认 24h）内可信，且需连续
   `deniedConfirmations` 次（默认 2）才打标。请求路径降智**按通道隔离处置**——只有实际降智被抓的那个账号被打
@@ -475,9 +484,11 @@ URL 与 token 一起加密存储，管理端只回显「已配置」。内置 to
 
 - **fast**（`make verify`）：构建、vet、staticcheck、race 全量测试。
 - **full**（`make verify-full`）：追加 fuzz 种子回归、govulncheck 漏洞扫描、
-  守卫/风控包 count=3 稳定性探针。
+  七个时序敏感包（gateway/risk/rsc/relational/app/inference/jsonpeek）的
+  count=3 稳定性探针。
 - **fuzz**（`make fuzz`）：每个解析目标 30 秒变异引擎
-  （SSE 质量扫描器、RSC 载荷解析器）。
+  （SSE 质量扫描器与 body 判决、RSC 载荷解析器、jsonpeek 抽取器、
+  出口订阅载荷——共 7 个目标）。
 
 第三方工具缺失时降级为 SKIP 并附安装提示。
 完整加固记录（检测规则、归因流程、冷却分类、安全修复与生产实测）见 [HARDENING.md](./HARDENING.md)。
@@ -662,6 +673,21 @@ pnpm build
 ```bash
 make swagger
 ```
+
+## 上游形态观测工具链（调研资产）
+
+```bash
+# 常备报告：形态聚合 + 近30审计 + 整库回放 + 归档规模
+GROK2API_ADMIN_PASSWORD=... sh scripts/survey_report.sh 8003
+# 去重采集：把运行实例的原始上游轨迹增量并入本地语料库
+python3 scripts/survey_harvest.py upstream-traces/unique
+# 整库回放：全部真实轨迹过当前扫描器（降智类必须扣留、干净类必须交付）
+cd backend && GROK2API_TRACE_REPLAY_DIR=$PWD/../upstream-traces/unique go test ./internal/application/gateway/ -run TestCorpusReplay -v
+# 全库普查 / 时间线
+python3 scripts/trace_census.py && python3 scripts/trace_census_timeline.py
+```
+
+采集端为 `internal/pkg/upstreamtrace`（环境变量 `GROK2API_UPSTREAM_TRACE_DIR` 门控，默认零开销）。
 
 ## 相关文档
 

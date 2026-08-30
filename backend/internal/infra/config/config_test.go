@@ -192,8 +192,15 @@ bootstrapAdmin:
 func TestDefaultRequestRetryContract(t *testing.T) {
 	t.Parallel()
 	got := defaultConfig().RequestRetry
-	if got.Enabled || got.MaxAttempts != 6 || got.HoldTimeout.Value() != 3*time.Second || got.MinOutputTokens != 32 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour {
+	if got.Enabled || got.MaxAttempts != 2 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour {
 		t.Fatalf("requestRetry defaults = %#v", got)
+	}
+	// 零延迟拦截后的全局请求预算契约（蓝图 §3.2/§3.1 规则 4）。
+	if got.EvidenceTimeout.Value() != 3500*time.Millisecond {
+		t.Fatalf("evidenceTimeout default = %s, want 3.5s", got.EvidenceTimeout)
+	}
+	if !got.SameAccountRetry {
+		t.Fatal("sameAccountRetry default must stay true")
 	}
 }
 

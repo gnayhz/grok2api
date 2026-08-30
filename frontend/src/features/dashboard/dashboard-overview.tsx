@@ -153,6 +153,24 @@ export function DashboardResources({ dashboard, locale, loading }: DashboardData
               value={formatNumber(resources?.activeClientKeys ?? 0, locale)}
               detail={t("dashboard.keysAvailableSummary", { active: formatNumber(resources?.activeClientKeys ?? 0, locale), total: formatNumber(resources?.totalClientKeys ?? 0, locale) })}
             />
+            <ResourceSummary
+              color="bg-amber-500"
+              label={t("dashboard.cooldownAccounts")}
+              value={formatNumber(resources?.cooldownAccounts ?? 0, locale)}
+              detail={t("dashboard.cooldownAccountsSummary")}
+            />
+            <ResourceSummary
+              color="bg-orange-500"
+              label={t("dashboard.riskFlaggedAccounts")}
+              value={formatNumber(resources?.riskAccounts ?? 0, locale)}
+              detail={t("dashboard.riskFlaggedSummary")}
+            />
+            <ResourceSummary
+              color="bg-rose-500"
+              label={t("dashboard.degradedWithholdsCard")}
+              value={formatNumber(resources?.qualityDegradedRequests ?? 0, locale)}
+              detail={t("dashboard.degradedWithholdsSummary")}
+            />
           </div>
         </div>
       )}

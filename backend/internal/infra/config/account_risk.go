@@ -18,11 +18,11 @@ type AccountRiskConfig struct {
 
 type AccountRiskRSCConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// Method selects the check transport: ssoProbe (default) sends one tiny
-	// temporary mgw conversation with the SSO cookie and classifies by the
-	// presence of the reasoning stream; homepage keeps the legacy grok.com
-	// RSC payload parse (dead since grok.com stopped delivering botFlag
-	// fields — kept only for rollback).
+	// Method selects the check transport: ssoProbe (default and only value)
+	// sends one tiny temporary mgw conversation with the SSO cookie and
+	// classifies by the presence of the reasoning stream. The homepage
+	// parser was removed (dead since grok.com stopped delivering botFlag
+	// fields); the field stays accepted for config compatibility.
 	Method      string                  `yaml:"method"`
 	Concurrency int                     `yaml:"concurrency"`
 	Timeout     Duration                `yaml:"timeout"`
@@ -33,8 +33,8 @@ type AccountRiskRSCConfig struct {
 	// linked). Defaults to off.
 	BuildProbe *AccountRiskBuildProbeConfig `yaml:"buildProbe"`
 	// ProbeProxyURL 让 SSO 探针经代理出站（socks5/http(s)；空 = 直连）。
-	// 2026-08-28 生产事故：探针从机房裸 IP 直连，首批巡检 7 连发全部被
-	// 上游按降级模式服务（答案直接给、无思考头），7 个健康身份被误标
+	// 历史生产事故：探针从部署机直连，首批巡检密集探测全部被
+	// 上游按降级模式服务（答案直接给、无思考头），多个健康身份被误标
 	// 风控并连坐。部署机出口不干净时应把探针指向干净代理。
 	ProbeProxyURL string `yaml:"probeProxyURL"`
 	// DeniedConfirmations 是 denied 定罪所需的连续确认次数（0=默认 2，
@@ -78,9 +78,9 @@ func DefaultAccountRiskConfig() AccountRiskConfig {
 func (c AccountRiskConfig) Validate() error {
 	rsc := c.RSCCheck
 	switch strings.TrimSpace(rsc.Method) {
-	case "", "ssoProbe", "homepage":
+	case "", "ssoProbe":
 	default:
-		return fmt.Errorf("accountRisk.rscCheck.method 仅支持 ssoProbe 或 homepage")
+		return fmt.Errorf("accountRisk.rscCheck.method 仅支持 ssoProbe（homepage 解析器已删除：grok.com 改版后恒读作 clean，等效于关闭 enabled）")
 	}
 	if rsc.Concurrency != 0 && (rsc.Concurrency < 1 || rsc.Concurrency > 8) {
 		return fmt.Errorf("accountRisk.rscCheck.concurrency 必须在 1 到 8 之间")

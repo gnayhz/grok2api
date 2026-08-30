@@ -13,7 +13,7 @@ import (
 )
 
 // rscCheckerAdapter projects the concrete infra RSC probe (SSO thinking
-// probe by default, legacy homepage checker for rollback) onto the risk
+// probe) onto the risk
 // package's CheckResult port, keeping the application layer free of infra types.
 type rscCheckerAdapter struct {
 	Checker rsc.Probe
@@ -27,9 +27,9 @@ var _ risk.Checker = rscCheckerAdapter{}
 func (a rscCheckerAdapter) Check(ctx context.Context, ssoToken string) risk.CheckResult {
 	result := a.Checker.Check(ctx, ssoToken)
 	return risk.CheckResult{
-		Verdict: string(result.Verdict), BotFlagSource: result.BotFlagSource, BotFlagDetails: result.BotFlagDetails,
-		RiskScore: result.RiskScore, HTTPStatus: result.HTTPStatus,
-		Error: result.Error, CheckedAt: result.CheckedAt, Source: a.Source, Suppressed: result.Suppressed,
+		Verdict: string(result.Verdict), BotFlagDetails: result.BotFlagDetails,
+		HTTPStatus: result.HTTPStatus,
+		Error:      result.Error, CheckedAt: result.CheckedAt, Source: a.Source, Suppressed: result.Suppressed,
 	}
 }
 
@@ -90,16 +90,16 @@ func (s riskRelationalStore) GetRiskVerdict(ctx context.Context, accountID uint6
 		return risk.StoredVerdict{}, err
 	}
 	return risk.StoredVerdict{
-		Verdict: verdict.Verdict, BotFlagSrc: verdict.BotFlagSrc, BotFlagDtl: verdict.BotFlagDtl,
-		RiskScore: verdict.RiskScore, HTTPStatus: verdict.HTTPStatus, Error: verdict.Error,
+		Verdict: verdict.Verdict, BotFlagDtl: verdict.BotFlagDtl,
+		HTTPStatus: verdict.HTTPStatus, Error: verdict.Error,
 		Source: verdict.Source, CheckedAt: verdict.CheckedAt, OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
 	}, nil
 }
 
 func (s riskRelationalStore) SaveRiskVerdict(ctx context.Context, accountID uint64, verdict risk.StoredVerdict) error {
 	return s.Repo.SaveRiskVerdict(ctx, relational.AccountRiskVerdict{
-		AccountID: accountID, Verdict: verdict.Verdict, BotFlagSrc: verdict.BotFlagSrc,
-		BotFlagDtl: verdict.BotFlagDtl, RiskScore: verdict.RiskScore, HTTPStatus: verdict.HTTPStatus,
+		AccountID: accountID, Verdict: verdict.Verdict,
+		BotFlagDtl: verdict.BotFlagDtl, HTTPStatus: verdict.HTTPStatus,
 		Error: verdict.Error, Source: verdict.Source, CheckedAt: verdict.CheckedAt,
 		OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
 	})

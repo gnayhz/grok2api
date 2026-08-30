@@ -965,8 +965,6 @@ func (s *Selector) markSuccess(ctx context.Context, credential account.Credentia
 	}
 	if quotaProbe {
 		_ = s.accounts.ClearQuotaRecovery(ctx, credential.ID)
-	}
-	if quotaProbe {
 		s.evictCandidate(credential.Provider, credential.ID)
 	}
 }
@@ -1177,7 +1175,9 @@ func (s *Selector) MarkFailure(ctx context.Context, credential account.Credentia
 // from real 5xx cooldowns that a clean verdict must NOT clear).
 func (s *Selector) MarkQualityIdleFailure(ctx context.Context, credential account.Credential, cooldown time.Duration) error {
 	if cooldown <= 0 {
-		cooldown = defaultMissingThinkingCooldown
+		// 空流冷却的零值兜底必须落在 15m 空闲档——错用 12h missing-thinking
+		// 档会把一次空流的账号按定罪时长排班（调用方已归一化，这里防直接调用）。
+		cooldown = qualityIdleAccountCooldown
 	}
 	until := time.Now().UTC().Add(cooldown)
 	// 定向写 cooldown+marker：不回写 failure_count 快照——快照与并发

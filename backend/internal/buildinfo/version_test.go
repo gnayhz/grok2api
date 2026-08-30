@@ -26,7 +26,7 @@ func TestCleanVersionRejectsOversizeAndControlChars(t *testing.T) {
 }
 
 // TestCurrentCommitFallbackChain 锁定构建提交回退链:ldflags 注入 >
-// GROK2API_COMMIT 环境变量 > vcs 元数据/unknown。背景:2026-08-27 事故中
+// GROK2API_COMMIT 环境变量 > vcs 元数据/unknown。背景:事故中
 // 仓库已合并修复而线上容器未滚动,管理端却无字段区分运行的提交。
 func TestCurrentCommitFallbackChain(t *testing.T) {
 	t.Setenv("GROK2API_COMMIT", "abc123def456")

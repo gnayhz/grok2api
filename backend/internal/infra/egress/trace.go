@@ -174,6 +174,19 @@ func (t *Trace) Selection(scope domain.Scope) (Selection, bool) {
 	return value, ok
 }
 
+// Record appends an actual egress selection for a scope. It is the exported
+// counterpart of the manager-internal recordSelection: provider test doubles
+// use it to seed the trace (e.g. rotating-pool selections) so request-path
+// policies that depend on the egress shape can be exercised end to end.
+func (t *Trace) Record(value Selection) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.selections[value.Scope] = value
+	t.mu.Unlock()
+}
+
 // WithNodeExclusions attaches the request-scoped set of egress node IDs that
 // must not serve this request. The real-time quality guard populates it after
 // a degraded attempt so the in-request retry lands on a different fixed exit

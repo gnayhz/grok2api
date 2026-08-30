@@ -11,7 +11,7 @@ import (
 var Version string
 
 // Commit 可在发布构建时通过 -ldflags -X 注入（如 git rev-parse --short=12
-// HEAD）。背景：2026-08-27 线上质量守卫事故里，仓库已合并修复但线上容器
+// HEAD）。背景：线上质量守卫事故里，仓库已合并修复但线上容器
 // 未滚动部署，管理端却没有任何字段能区分"运行的到底是哪个提交"，只能靠
 // 审计行为特征反推。把 commit 暴露成一等字段，让"部署滞后"一眼可见。
 var Commit string

@@ -322,6 +322,79 @@ func TestGatewayErrorMapsResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+// 蓝图 §3.2 客户端契约：质量预算耗尽的 503 对客户端是 upstream_degraded
+// （标准客户端按码重试），审计分类学保持 quality_degraded（预设过滤、
+// 面板计数、error_code 索引）。
+// 蓝图 #15 首命中早断:首个生成增量命中后,后续帧不再进入
+// containsGeneratedDelta 解析,但 OutputObserved 与首 token 语义不变——
+// 非 delta 前缀帧仍不触发,命中恰一次,之后帧不改写结局。
+func TestResponseInspectorDeltaScanStopsAfterFirstHit(t *testing.T) {
+	marked := 0
+	inspector := &responseInspector{protocol: streamProtocolChat, onFirstToken: func() { marked++ }}
+	frames := []string{
+		`data: {"choices":[{"delta":{}}]}`,
+		`data: {"choices":[{"delta":{"content":"H"}}]}`,
+		`data: {"choices":[{"delta":{"content":"i"}}]}`,
+		`data: [DONE]`,
+	}
+	for _, frame := range frames {
+		inspector.Inspect([]byte(frame + "\n\n"))
+		inspector.markFirstTokenForwarded()
+	}
+	if marked != 1 {
+		t.Fatalf("first-token callbacks = %d, want exactly 1", marked)
+	}
+	meta := inspector.Metadata()
+	if !meta.Usage.OutputObserved {
+		t.Fatal("OutputObserved must stay set after first generated delta")
+	}
+
+	// 无生成增量的流:早断不得把任何帧误判为输出。
+	idle := &responseInspector{protocol: streamProtocolChat, onFirstToken: func() { marked++ }}
+	for i := 0; i < 5; i++ {
+		idle.Inspect([]byte(`data: {"choices":[{"delta":{}}]}` + "\n\n"))
+		idle.markFirstTokenForwarded()
+	}
+	if idle.Metadata().Usage.OutputObserved {
+		t.Fatal("non-delta frames must not set OutputObserved")
+	}
+}
+
+func TestGatewayErrorMapsQualityExhaustionContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	openAIRouter := gin.New()
+	openAIRouter.GET("/", func(c *gin.Context) {
+		writeGatewayError(c, &gateway.UpstreamFailure{
+			HTTPStatus: http.StatusServiceUnavailable, Code: gateway.ErrorQualityDegraded, PublicMessage: "上游模型暂不可用或缺少推理能力，请稍后重试",
+		})
+	})
+	openAIRecorder := httptest.NewRecorder()
+	openAIRouter.ServeHTTP(openAIRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := openAIRecorder.Body.String()
+	if openAIRecorder.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(body, `"code":"upstream_degraded"`) ||
+		!strings.Contains(body, `"type":"server_error"`) ||
+		!strings.Contains(body, "上游模型暂不可用或缺少推理能力") ||
+		strings.Contains(body, "quality_degraded") {
+		t.Fatalf("OpenAI exhausted contract status=%d body=%s", openAIRecorder.Code, body)
+	}
+
+	anthropicRouter := gin.New()
+	anthropicRouter.GET("/", func(c *gin.Context) {
+		writeGatewayAnthropicError(c, &gateway.UpstreamFailure{
+			HTTPStatus: http.StatusServiceUnavailable, Code: gateway.ErrorQualityDegraded, PublicMessage: "上游模型暂不可用或缺少推理能力，请稍后重试",
+		})
+	})
+	anthropicRecorder := httptest.NewRecorder()
+	anthropicRouter.ServeHTTP(anthropicRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	// Anthropic 形态不带机器码：503 + 蓝图文案，且不泄漏内部码。
+	if anthropicRecorder.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(anthropicRecorder.Body.String(), "上游模型暂不可用或缺少推理能力") ||
+		strings.Contains(anthropicRecorder.Body.String(), "quality_degraded") {
+		t.Fatalf("Anthropic exhausted contract status=%d body=%s", anthropicRecorder.Code, anthropicRecorder.Body.String())
+	}
+}
+
 func TestGatewayErrorHidesUpstreamCredentialStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	openAIRouter := gin.New()
@@ -913,41 +986,33 @@ func TestStreamInspectorDoesNotMarkImageEvents(t *testing.T) {
 	}
 }
 
-func TestStreamInspectorMarksChatReasoningComment(t *testing.T) {
+// TestStreamInspectorIgnoresSSEComments 私有时序注释注入/剥除链路已整体
+// 移除（蓝图 #14）：SSE 注释行不再参与首 token 判定，首个转发的 data
+// 事件才是首 token。
+func TestStreamInspectorIgnoresSSEComments(t *testing.T) {
 	marked := 0
 	inspector := &responseInspector{protocol: streamProtocolChat, onFirstToken: func() { marked++ }}
-	inspector.Inspect([]byte(": grok2api-reasoning-start\n\n"))
+	inspector.Inspect([]byte(": keepalive-comment\n\n"))
+	inspector.markFirstTokenForwarded()
 	if marked != 0 {
-		t.Fatalf("reasoning comment marked first token before forwarding %d times", marked)
+		t.Fatalf("SSE comment must not mark first token, got %d", marked)
 	}
+	inspector.Inspect([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
 	inspector.markFirstTokenForwarded()
 	if marked != 1 {
-		t.Fatalf("reasoning comment marked first token %d times", marked)
+		t.Fatalf("first generated delta must mark first token, got %d", marked)
 	}
 }
 
-func TestInternalSSEMarkerFilterAcrossChunkBoundaries(t *testing.T) {
-	markers := reasoningStartSSEComment + "\n\n"
-	input := []byte("data: before\n\n" + markers + "data: after\n\n")
-	want := "data: before\n\ndata: after\n\n"
-	for split := 0; split <= len(input); split++ {
-		filter := internalSSEMarkerFilter{enabled: true}
-		var output []byte
-		output = append(output, filter.Filter(input[:split], false)...)
-		output = append(output, filter.Filter(input[split:], false)...)
-		output = append(output, filter.Filter(nil, true)...)
-		if string(output) != want {
-			t.Fatalf("split %d output = %q, want %q", split, output, want)
-		}
-	}
-}
-
-func TestCopyStreamConsumesInternalReasoningMarker(t *testing.T) {
+// TestCopyStreamForwardsUpstreamCommentsVerbatim 转换器不再注入私有注释
+// （蓝图 #14）：上游自身的 keepalive 注释按 SSE 规范原样转发（客户端
+// 忽略注释行），专门的剥除扫描层已删除。
+func TestCopyStreamForwardsUpstreamCommentsVerbatim(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	body := `data: {"choices":[{"delta":{"role":"assistant"}}]}` + "\n\n" +
-		": grok2api-reasoning-start\n\n" +
+		": upstream keepalive\n\n" +
 		`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	marked := 0
@@ -957,8 +1022,8 @@ func TestCopyStreamConsumesInternalReasoningMarker(t *testing.T) {
 	if marked != 1 {
 		t.Fatalf("first token marked %d times", marked)
 	}
-	if strings.Contains(recorder.Body.String(), "grok2api-reasoning-") {
-		t.Fatalf("internal marker leaked to client: %q", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), ": upstream keepalive") {
+		t.Fatalf("upstream comment must forward verbatim: %q", recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), `"content":"hello"`) {
 		t.Fatalf("visible Chat delta missing: %q", recorder.Body.String())
@@ -1116,26 +1181,6 @@ func TestCopyStreamAbortTrailerAlwaysIncludesModel(t *testing.T) {
 	got := recorder.Body.String()
 	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"model":`) {
 		t.Fatalf("abort trailer missing response.failed or model: %q", got)
-	}
-}
-
-func TestCopyStreamStripsAllInternalSSEMarkers(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	body := []byte(": grok2api-reasoning-start\n\n" +
-		`data: {"choices":[{"delta":{"content":"answer"}}]}` + "\n\n" +
-		"data: [DONE]\n\n")
-	_, err := copyStream(context.Writer, bytes.NewReader(body), streamProtocolChat, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := recorder.Body.String()
-	if strings.Contains(got, "grok2api-reasoning-start") {
-		t.Fatalf("internal SSE marker leaked to client: %q", got)
-	}
-	if !strings.Contains(got, `"content":"answer"`) || !strings.Contains(got, "data: [DONE]") {
-		t.Fatalf("public events must survive marker stripping: %q", got)
 	}
 }
 

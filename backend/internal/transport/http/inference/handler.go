@@ -24,6 +24,7 @@ import (
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -1324,7 +1325,7 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	if err != nil {
 		if isClientDisconnectDuringCopy(c, err) {
 			// 客户端已断开（agent 流超时/取消/网络中断）：与上游故障分开记账。
-			// 差分复现（2026-08-21）：此前该形态与上游 RST 同被记为
+			// 差分复现：此前该形态与上游 RST 同被记为
 			// upstream_stream_interrupted，污染真实上游中断率观测。
 			errorCode = "client_disconnected"
 		} else {
@@ -1364,11 +1365,65 @@ func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProt
 	return copyStreamWithFallbackModel(writer, source, protocol, onFirstToken, "")
 }
 
+// internalSSEMarkerFilter 在转发前剥除转换器写入流的内部 SSE 注释
+// （conversation.ThinkingEvidenceComment——客户端未请求 thinking 的
+// Messages 请求的守卫思考证据）。跨 chunk 边界的标记以 pending 前缀
+// 保留，流结束时（final）冲刷剩余字节。
+type internalSSEMarkerFilter struct {
+	enabled bool
+	pending []byte
+}
+
+func (f *internalSSEMarkerFilter) Filter(chunk []byte, final bool) []byte {
+	if !f.enabled {
+		return chunk
+	}
+	f.pending = append(f.pending, chunk...)
+	result := make([]byte, 0, len(f.pending))
+	for {
+		index, markerLength := nextInternalSSEMarker(f.pending)
+		if index >= 0 {
+			result = append(result, f.pending[:index]...)
+			f.pending = f.pending[index+markerLength:]
+			continue
+		}
+		if final {
+			result = append(result, f.pending...)
+			f.pending = nil
+			return result
+		}
+		// 保留可能是标记前缀的尾部字节，等待下一 chunk 判定。
+		marker := []byte(conversation.ThinkingEvidenceComment + "\n\n")
+		keep := 0
+		limit := min(len(f.pending), len(marker)-1)
+		for size := limit; size > keep; size-- {
+			if bytes.Equal(f.pending[len(f.pending)-size:], marker[:size]) {
+				keep = size
+				break
+			}
+		}
+		result = append(result, f.pending[:len(f.pending)-keep]...)
+		f.pending = f.pending[len(f.pending)-keep:]
+		return result
+	}
+}
+
+// nextInternalSSEMarker 返回最早出现的内部注释及其长度（未找到时 index<0）。
+func nextInternalSSEMarker(value []byte) (int, int) {
+	index := bytes.Index(value, []byte(conversation.ThinkingEvidenceComment+"\n\n"))
+	if index < 0 {
+		return -1, 0
+	}
+	return index, len(conversation.ThinkingEvidenceComment) + 2
+}
+
 // copyStreamWithFallbackModel 把请求模型注入 compat 状态作为 model 兜底：
 // 流在首个 response 事件前中止时，trailer 的 model 键仍能带上真实值。
 func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func(), fallbackModel string) (metadata responseMetadata, returnErr error) {
 	inspector := &responseInspector{protocol: protocol, onFirstToken: onFirstToken}
-	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolChat || protocol == streamProtocolAnthropic}
+	// 仅 Anthropic Messages 下行会携带内部思考证据注释（chat/responses
+	// 的思考增量本身可见，无需注释通道）。
+	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolAnthropic}
 	var compat responsesCompatState
 	compat.model = strings.TrimSpace(fallbackModel)
 	buffer := make([]byte, responseCopyBufferBytes)
@@ -1387,33 +1442,32 @@ func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, pr
 		n, readErr := source.Read(buffer)
 		if n > 0 {
 			if received+n > maxStreamResponseTransferBytes {
+				inspector.Finish()
 				return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 			}
 			received += n
 			chunk := buffer[:n]
-			if protocol == streamProtocolChat {
-				// The internal reasoning marker is intentionally removed before
-				// forwarding, but still counts as generation start.
-				inspector.Inspect(chunk)
-			}
 			chunk = markerFilter.Filter(chunk, false)
 			if protocol == streamProtocolResponses {
 				chunk = rewriteResponsesStreamChunk(chunk, &compat)
 			}
-			if protocol != streamProtocolChat {
-				// Inspect the actual downstream representation so compatibility
-				// fields such as generated item IDs participate in timing and
-				// output-observed classification.
-				inspector.Inspect(chunk)
-			}
+			// Inspect the actual downstream representation so compatibility
+			// fields such as generated item IDs participate in timing and
+			// output-observed classification.
+			inspector.Inspect(chunk)
 			if transferred+len(chunk) > maxStreamResponseTransferBytes {
+				inspector.Finish()
 				return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 			}
 			if len(chunk) > 0 {
 				if err := setResponseWriteDeadline(writer); err != nil {
+					inspector.Finish()
 					return inspector.Metadata(), err
 				}
 				if _, err := writer.Write(chunk); err != nil {
+					// 客户端已断开也要冲刷 pending：其中的 usage 帧供计费/审计
+					// 结算，丢失会少计已真实消耗的 token。
+					inspector.Finish()
 					return inspector.Metadata(), err
 				}
 				writer.Flush()
@@ -1422,18 +1476,14 @@ func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, pr
 			inspector.markFirstTokenForwarded()
 		}
 		if readErr != nil {
-			if tail := markerFilter.Filter(nil, true); len(tail) > 0 {
-				if transferred+len(tail) > maxStreamResponseTransferBytes {
+			if markerTail := markerFilter.Filter(nil, true); len(markerTail) > 0 {
+				if transferred+len(markerTail) > maxStreamResponseTransferBytes {
 					return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 				}
-				if err := setResponseWriteDeadline(writer); err != nil {
-					return inspector.Metadata(), err
+				if _, err := writer.Write(markerTail); err == nil {
+					writer.Flush()
+					transferred += len(markerTail)
 				}
-				if _, err := writer.Write(tail); err != nil {
-					return inspector.Metadata(), err
-				}
-				writer.Flush()
-				transferred += len(tail)
 			}
 			if protocol == streamProtocolResponses {
 				if tail := flushResponsesStreamTail(&compat); len(tail) > 0 {
@@ -1559,59 +1609,6 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 	}
 }
 
-type internalSSEMarkerFilter struct {
-	enabled bool
-	pending []byte
-}
-
-func (f *internalSSEMarkerFilter) Filter(chunk []byte, final bool) []byte {
-	if !f.enabled {
-		return chunk
-	}
-	f.pending = append(f.pending, chunk...)
-	result := make([]byte, 0, len(f.pending))
-	for {
-		index, markerLength := nextInternalSSEMarker(f.pending)
-		if index >= 0 {
-			result = append(result, f.pending[:index]...)
-			f.pending = f.pending[index+markerLength:]
-			continue
-		}
-		if final {
-			result = append(result, f.pending...)
-			f.pending = nil
-			return result
-		}
-		keep := 0
-		for _, marker := range internalSSEMarkers {
-			limit := min(len(f.pending), len(marker)-1)
-			for size := limit; size > keep; size-- {
-				if bytes.Equal(f.pending[len(f.pending)-size:], marker[:size]) {
-					keep = size
-					break
-				}
-			}
-		}
-		result = append(result, f.pending[:len(f.pending)-keep]...)
-		f.pending = f.pending[len(f.pending)-keep:]
-		return result
-	}
-}
-
-// nextInternalSSEMarker 返回最早出现的内部注释及其长度（未找到时 index<0）。
-func nextInternalSSEMarker(value []byte) (int, int) {
-	index := -1
-	length := 0
-	for _, marker := range internalSSEMarkers {
-		candidate := bytes.Index(value, marker)
-		if candidate >= 0 && (index < 0 || candidate < index) {
-			index = candidate
-			length = len(marker)
-		}
-	}
-	return index, length
-}
-
 func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (metadata responseMetadata, returnErr error) {
 	buffer := make([]byte, responseCopyBufferBytes)
 	metadataBody := make([]byte, 0, responseCopyBufferBytes)
@@ -1671,17 +1668,10 @@ type responseInspector struct {
 	firstTokenReady bool
 	terminalSuccess bool
 	terminalFailure bool
-}
-
-const (
-	reasoningStartSSEComment = ": grok2api-reasoning-start"
-)
-
-// internalSSEMarkers 是发往客户端前必须剥除的内部 SSE 注释（转换器的
-// reasoning 时序标记）。新增内部注释必须同步加入此列表，否则会泄漏到
-// 公协议。
-var internalSSEMarkers = [][]byte{
-	[]byte(reasoningStartSSEComment + "\n\n"),
+	// deltaScanDone 在首个生成增量命中后置位:OutputObserved 与首 token
+	// 相位都已被该命中永久定局,后续帧的 containsGeneratedDelta 解析是
+	// 纯浪费(蓝图 #15:消除重复按行解析,长流从逐帧解码变为 1 次)。
+	deltaScanDone bool
 }
 
 func (i *responseInspector) Inspect(chunk []byte) {
@@ -1707,23 +1697,12 @@ func (i *responseInspector) Inspect(chunk []byte) {
 		}
 		line := bytes.TrimSpace(i.pending[:index])
 		i.pending = i.pending[index+1:]
-		if i.protocol == streamProtocolChat && bytes.Equal(line, []byte(reasoningStartSSEComment)) {
-			i.observeReasoningStart()
-			continue
-		}
 		if bytes.HasPrefix(line, []byte("data:")) {
 			i.metadata.DeliveredEvents++
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			i.inspectDataPayload(value)
 		}
 	}
-}
-
-func (i *responseInspector) observeReasoningStart() {
-	if i.firstTokenSeen || i.firstTokenReady || i.onFirstToken == nil {
-		return
-	}
-	i.firstTokenReady = true
 }
 
 func (i *responseInspector) markFirstTokenForwarded() {
@@ -2210,6 +2189,18 @@ func writeImageGenerationUserError(c *gin.Context, code, param, message string) 
 	}})
 }
 
+// clientFailureCode maps internal failure codes onto the stable client
+// contract. The quality-budget-exhausted 503 is prescribed by the final
+// architecture (§3.2) as upstream_degraded so standard clients retry on it;
+// the audit taxonomy keeps quality_degraded (preset filter, dashboard count,
+// error_code index).
+func clientFailureCode(code string) string {
+	if code == gateway.ErrorQualityDegraded {
+		return "upstream_degraded"
+	}
+	return code
+}
+
 func writeGatewayError(c *gin.Context, err error) {
 	status, code := http.StatusBadGateway, "upstream_unavailable"
 	message := "上游服务暂不可用"
@@ -2249,7 +2240,7 @@ func writeGatewayError(c *gin.Context, err error) {
 			}
 			status, message = http.StatusServiceUnavailable, credentialErrorMessage(code)
 		} else {
-			status, code, message = upstreamFailure.HTTPStatus, upstreamFailure.Code, upstreamFailure.PublicMessage
+			status, code, message = upstreamFailure.HTTPStatus, clientFailureCode(upstreamFailure.Code), upstreamFailure.PublicMessage
 		}
 		if !isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) && upstreamFailure.RetryAfter > 0 {
 			c.Header("Retry-After", strconv.FormatInt(max(1, int64(upstreamFailure.RetryAfter.Round(time.Second)/time.Second)), 10))

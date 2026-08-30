@@ -588,6 +588,61 @@ type preparedEgressProbe struct {
 	proxyURL string
 }
 
+// ProbeProxyURL resolves the routing target for the probe traffic class and
+// returns a usable proxy URL. Empty string = direct / unresolvable. The RSC
+// risk probe uses this to exit through the same egress infrastructure as
+// regular traffic (health checks, pool selection, routing UI) instead of a
+// hand-typed probeProxyURL.
+func (m *Manager) ProbeProxyURL(ctx context.Context) string {
+	config, supported, err := m.loadOperationsConfig(ctx, time.Now().UTC())
+	if err != nil || !supported {
+		return ""
+	}
+	target := config.TargetFor(domain.ScopeBuild, domain.TrafficClassProbe)
+	switch target.Mode.Normalized() {
+	case domain.RoutingTargetNode:
+		node, nodeErr := m.repository.GetEgressNode(ctx, target.NodeID)
+		if nodeErr != nil || !node.Enabled {
+			return ""
+		}
+		return m.decryptNodeProxyURL(node)
+	case domain.RoutingTargetPool:
+		nodes, listErr := m.repository.ListEgressNodes(ctx, repository.SortQuery{})
+		if listErr != nil {
+			return ""
+		}
+		for _, node := range nodes {
+			if !node.Enabled || node.Health <= 0 {
+				continue
+			}
+			for _, poolID := range node.PoolIDs {
+				if poolID == target.PoolID {
+					if url := m.decryptNodeProxyURL(node); url != "" {
+						return url
+					}
+				}
+			}
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// decryptNodeProxyURL decrypts and normalizes one node's proxy URL. Returns
+// empty string on any failure.
+func (m *Manager) decryptNodeProxyURL(node domain.Node) string {
+	proxyURL, err := m.cipher.Decrypt(node.EncryptedProxyURL)
+	if err != nil || strings.TrimSpace(proxyURL) == "" {
+		return ""
+	}
+	proxyURL, err = proxyurl.NormalizeProxyURL(proxyURL)
+	if err != nil {
+		return ""
+	}
+	return proxyURL
+}
+
 // ProbeEgressNode verifies IPv4 and IPv6 independently through fixed provider
 // endpoints. Both requests share one immutable node snapshot so a concurrent
 // administrator edit cannot mix results from different proxy configurations.
@@ -1272,7 +1327,11 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 		return nil, false, err
 	}
 	m.incrementInflight(selected.ID)
-	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != "", Pool: selected.ProxyPool})
+	// Pool 的文档语义是“旋转出口”（同节点连续请求出口 IP 不同）。只看 ProxyPool
+	// 成员标志会把固定 IP 代理误判为旋转池（生产实证：曾有代理商
+	// proxy_pool=1 但 rotation_enabled=0、v4/v6 同一静态出口 IP）——同号重试
+	// 与节点级降智标记等池语义随之作用在固定脏 IP 上。旋转开启才成立。
+	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != "", Pool: selected.ProxyPool && selected.RotationEnabled})
 	var once sync.Once
 	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, proxyPool: proxyPool, freshTunnel: freshTunnel, clearanceKey: clearanceKey, clearanceManager: m, release: func() {
 		once.Do(func() {

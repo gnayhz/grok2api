@@ -74,7 +74,7 @@ if [ -n "${TOKEN:-}" ]; then
   say "disabled accounts (info)"
   echo "${disabled:-?}（对照换血基线 30，激增需溯源）"
   # --- 6) 工具密钥残留（r34 教训：删除操作必须验证，探针密钥不许滞留）
-  # 2026-08-28 活体：8 把密钥里 3 把 tool-*（tool-dbg2/tool-rerun-z/tool-test-x）
+  # 历史活体：多把密钥里数把 tool-* 残留
   # 旧默认 patterns 只有 probe,drill,load-test,smoke-script，注释写了 tool
   # 却没进列表，巡检恒 PASS。必须含 tool-，并翻页扫完（total 可能 > pageSize）。
   residue=$(BASE="$BASE" TOKEN="$TOKEN" PATROL_TOOL_PATTERNS="${PATROL_TOOL_PATTERNS:-probe,drill,load-test,smoke-script,tool-}" python3 -c '

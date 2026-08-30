@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// 2026-08-28 生产事故回归:探针出口可配置(空=直连)。配置了非法代理必须
+// 生产事故回归:探针出口可配置(空=直连)。配置了非法代理必须
 // 以 error verdict 失败(可重试),绝不能退回直连——否则脏出口部署会在
 // 无感知的情况下继续用裸 IP 误判。
 func TestSSOProbeInvalidProxyFailsAsError(t *testing.T) {

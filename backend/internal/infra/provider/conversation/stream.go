@@ -23,6 +23,16 @@ const (
 	// JSON（通常是 encrypted_content）Unmarshal 进 map/结构体。
 	maxParsedSSEJSONBytes = 64 << 10
 
+	// ThinkingEvidenceComment 是转换器在「客户端未请求 thinking 的
+	// Messages 流式请求」上看到上游可见思考文本时写入的内部 SSE 注释。
+	// 推理模型对每个回答都会思考（语料复核：未指定强度的
+	// 首轮 36/36、续写轮 136/153 均产生思考），未请求 thinking 时转换器
+	// 不转发任何思考增量，质量守卫将失去区分健康与降智（零思考直接
+	// 正文）的唯一证据通道。该注释语义等同 thinking_delta，由 gateway
+	// 扫描器（quality_retry_scan.go）计为思考证据，并由 transport 层
+	// 剥离，不进入客户端流量。
+	ThinkingEvidenceComment = ": grok2api-thinking-evidence"
+
 	// contentDoomLoopThreshold 连续重复同一可见内容增量时终止流。真正的
 	// 内容循环会消耗配额和客户端上下文，因此远低于推理上限；但仍需容纳
 	// 合法重复：markdown 分隔线与表格边框会以相同单字符增量（"-"、"="、
@@ -77,7 +87,6 @@ type streamConverter struct {
 	thinkingClosed    bool
 	thinkingIndex     int
 	thinkingItemID    string
-	chatReasoningMark bool
 	reasoningItems    map[string]*reasoningStreamState
 	reasoningOrder    []string
 	activeReasoningID string
@@ -94,6 +103,8 @@ type streamConverter struct {
 	refused           bool
 	repeatTracker     streamRepeatTracker
 	outBuf            bytes.Buffer
+	// thinkingEvidenceMarked 保证 ThinkingEvidenceComment 至多写一次。
+	thinkingEvidenceMarked bool
 }
 
 // streamRepeatTracker 在协议转换、缓冲和 stop filter 之前跟踪上游增量，
@@ -352,9 +363,6 @@ func (c *streamConverter) handle(event string, data []byte) error {
 		if item.Type == "reasoning" && c.operation == OperationMessages && c.options.AnthropicThinking {
 			return c.thinkingStart(item.ID)
 		}
-		if item.Type == "reasoning" && item.ID != "" && c.operation == OperationChat {
-			return c.markChatReasoningStart()
-		}
 		if item.Type == "web_search_call" && c.operation == OperationMessages && c.options.AnthropicWebSearch {
 			if call, ok := parseWebSearchCallItem(item); ok {
 				return c.noteWebSearch(call, false)
@@ -468,8 +476,11 @@ func (c *streamConverter) ensureReasoningState(itemID string) (string, *reasonin
 }
 
 func (c *streamConverter) reasoningSummaryDelta(itemID, delta string) error {
-	if delta == "" || !c.reasoningOutputEnabled() {
+	if delta == "" {
 		return nil
+	}
+	if !c.reasoningOutputEnabled() {
+		return c.markThinkingEvidence()
 	}
 	_, state := c.ensureReasoningState(itemID)
 	if state.done || state.rawSeen {
@@ -487,8 +498,11 @@ func (c *streamConverter) reasoningSummaryDelta(itemID, delta string) error {
 }
 
 func (c *streamConverter) reasoningTextDelta(itemID, delta string) error {
-	if delta == "" || !c.reasoningOutputEnabled() {
+	if delta == "" {
 		return nil
+	}
+	if !c.reasoningOutputEnabled() {
+		return c.markThinkingEvidence()
 	}
 	_, state := c.ensureReasoningState(itemID)
 	if state.done {
@@ -499,6 +513,25 @@ func (c *streamConverter) reasoningTextDelta(itemID, delta string) error {
 		state.summary.Reset()
 	}
 	return c.emitReasoningDelta(delta)
+}
+
+// markThinkingEvidence 在客户端未请求 thinking 的 Messages 流式转换上，
+// 把「上游产出了可见思考文本」以内部 SSE 注释保留为守卫证据（常量
+// ThinkingEvidenceComment 详注）。仅此一种场景写入：thinking 已启用时
+// 转换器转发 thinking_delta，chat 协议始终转发 reasoning_content，均无
+// 需注释通道。注释行随后由 transport 层剥离。
+func (c *streamConverter) markThinkingEvidence() error {
+	if c.thinkingEvidenceMarked || c.operation != OperationMessages || c.options.AnthropicThinking {
+		return nil
+	}
+	if err := c.start(); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(c.writer, ThinkingEvidenceComment+"\n\n"); err != nil {
+		return err
+	}
+	c.thinkingEvidenceMarked = true
+	return nil
 }
 
 func (c *streamConverter) emitReasoningDelta(delta string) error {

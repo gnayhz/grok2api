@@ -7,6 +7,7 @@ import {
   ListTree,
   Network,
   Server,
+  ShieldAlert,
   TriangleAlert,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
@@ -227,6 +228,13 @@ function RequestOverviewPanel({ audit }: { audit: AuditDTO }) {
           copy
         />
       ) : null}
+      {audit.qualityFailOpen ? (
+        <OverviewField
+          className="sm:col-span-2"
+          label={t("audits.qualityFailOpenLabel")}
+          value={t("audits.qualityFailOpenValue")}
+        />
+      ) : null}
       {tokenSummary ? (
         <OverviewField
           className="sm:col-span-2"
@@ -422,8 +430,16 @@ function AttemptSummary({ attempt }: { attempt: AuditAttemptDTO }) {
   const { t } = useTranslation();
   const isHTTP = attempt.source === "upstream_http";
   const isStreamFailure = isHTTP && attempt.stage === "response_stream";
-  const Icon = isHTTP ? Server : attempt.source === "gateway_transport" ? Network : KeyRound;
-  const title = isStreamFailure
+  // 质量守卫的尝试不是上游失败:上游 HTTP 是 200,是网关主动扣留/中止。
+  // 误标成“上游 HTTP 失败”会掩盖“哪一尝试被守卫拦下”这条关键轨迹。
+  const isQualityHold = isHTTP && attempt.stage === "quality_hold";
+  const isQualityIdle = isHTTP && attempt.stage === "quality_idle";
+  const Icon = isQualityHold || isQualityIdle ? ShieldAlert : isHTTP ? Server : attempt.source === "gateway_transport" ? Network : KeyRound;
+  const title = isQualityHold
+    ? t("audits.qualityHoldAttempt", { status: attempt.upstreamStatusCode ?? "-" })
+    : isQualityIdle
+    ? t("audits.qualityIdleAttempt", { status: attempt.upstreamStatusCode ?? "-" })
+    : isStreamFailure
     ? t("audits.upstreamStreamFailure", { status: attempt.upstreamStatusCode ?? "-" })
     : isHTTP
     ? t("audits.upstreamHttpFailure", { status: attempt.upstreamStatusCode ?? "-" })

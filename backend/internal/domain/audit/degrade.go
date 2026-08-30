@@ -1,61 +1,42 @@
 package audit
 
+// 降智观测面（纯 KPI，不参与任何执行——执行在网关零延迟拦截）。
+// 历史上的 soft_tps/hard_tps/buffered_burst 速率档位是 TPS 时代守卫的
+// 遗物：零延迟拦截落地后不再有按速率的执行，档位也没有任何 UI/汇总
+// 消费方，随重构删除。保留的唯一档位 terminal_burst 用于让「速度列为
+// 空」的最强降智签名在审计明细里可见。
 const (
-	DegradeClassBurst         = "buffered_burst"
-	DegradeClassSoft          = "soft_tps"
-	DegradeClassHard          = "hard_tps"
-	DegradeClassThinking      = "missing_thinking"
 	DegradeClassTerminalBurst = "terminal_burst"
 	ErrorQualityDegraded      = "quality_degraded"
 )
 
 const (
-	DefaultDegradeSoftTPS   = 500.0
-	DefaultDegradeHardTPS   = 1000.0
 	DefaultDegradeMinGenMS  = int64(1000)
 	DefaultDegradeMinOutput = int64(32)
 )
 
-// ClassifyOutputSpeed matches the quality-guard panel formula:
-// output tokens / GenerationWindowMS. In fail-closed mode, short generation
-// windows with a soft-or-higher rate are buffered_burst; otherwise the hard
-// and soft thresholds apply in that order.
-func ClassifyOutputSpeed(outputTokens, reasoningTokens, firstTokenMS, durationMS int64, softTPS, hardTPS float64, minGenMS int64, failClosed bool) (class string, tps float64, genMS int64) {
-	genMS = GenerationWindowMS(firstTokenMS, durationMS, reasoningTokens)
-	if outputTokens <= 0 {
-		return "", 0, genMS
+// ClassifyTerminalBurst reports whether a successful streaming row carries
+// the terminal-burst degrade signature: the whole output arrived in one final
+// chunk (first token >= total duration) with output at or above the minimum
+// sighting threshold. Rows like this have no meaningful token/s (division by
+// ~0ms), so the throughput column shows empty - this class is what keeps the
+// signature visible (线上续聊链连续降智正是这个形态，此前在
+// 一切速率汇总里反而隐形)。
+func ClassifyTerminalBurst(outputTokens, reasoningTokens, firstTokenMS, durationMS int64) bool {
+	if durationMS <= 0 || outputTokens < DefaultDegradeMinOutput {
+		return false
 	}
-	// genMS<=0 且输出已达最小口径：整包在流末尾一次到达（首字节时间>=
-	// 总时长）。Token/s 是除以 ~0ms 的数学假象，此前这类行在速度列显示
-	// "—"、按速率分级也分不进任何档——2026-08-27 线上续聊链 7 连发降智
-	// 恰是这个形态，最强签名在所有汇总里反而隐形。单独归 terminal_burst。
-	if genMS <= 0 {
-		if durationMS > 0 && outputTokens >= DefaultDegradeMinOutput {
-			return DegradeClassTerminalBurst, 0, 0
-		}
-		return "", 0, genMS
-	}
-	tps = OutputTokensPerSecond(outputTokens, reasoningTokens, firstTokenMS, durationMS)
-	if failClosed && minGenMS > 0 && genMS < minGenMS && tps >= softTPS {
-		return DegradeClassBurst, tps, genMS
-	}
-	if tps >= hardTPS {
-		return DegradeClassHard, tps, genMS
-	}
-	if tps >= softTPS {
-		return DegradeClassSoft, tps, genMS
-	}
-	return "", tps, genMS
+	return GenerationWindowMS(firstTokenMS, durationMS, reasoningTokens) <= 0
 }
 
 // GenerationWindowMS is the Token/s denominator shared by the audit panel,
 // dashboard, probes, and quality guard.
 //
-// Normally that is duration − first token. Older audit rows may have measured
+// Normally that is duration - first token. Older audit rows may have measured
 // first token only when buffered reasoning was finally flushed. For rows that
 // actually report reasoning tokens, use the full duration when the remaining
-// tail is implausibly short. Rows without reasoning evidence retain the tail so
-// real buffered output bursts remain visible to the fail-closed guard.
+// tail is implausibly short. Rows without reasoning evidence retain the tail
+// so real buffered output bursts stay visible in the throughput column.
 func GenerationWindowMS(firstTokenMS, durationMS, reasoningTokens int64) int64 {
 	if durationMS <= 0 {
 		return 0

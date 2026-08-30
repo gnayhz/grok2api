@@ -56,6 +56,19 @@ func degradedEgressNodeID(trace *infraegress.Trace, provider accountdomain.Provi
 	return 0
 }
 
+// egressSelectionPooled reports whether the degraded attempt left through a
+// rotating proxy pool (every request through the same pool member exits via a
+// DIFFERENT IP). Same-account quality retries are only meaningful there;
+// under direct or fixed egress they re-enter the same dirty exit IP with ~0%
+// recovery probability.
+func egressSelectionPooled(trace *infraegress.Trace, provider accountdomain.Provider) bool {
+	if trace == nil {
+		return false
+	}
+	selection, ok := trace.Selection(primaryEgressScope(provider))
+	return ok && selection.Pool
+}
+
 func primaryEgressScope(provider accountdomain.Provider) egressdomain.Scope {
 	switch provider {
 	case accountdomain.ProviderWeb:

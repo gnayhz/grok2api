@@ -21,6 +21,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
 )
 
 type Config struct {
@@ -204,6 +205,12 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
 		lease.Release()
 		cancel()
+	}
+	if traceDir, ok := upstreamtrace.Enabled(); ok {
+		upstreamtrace.DumpRequest(traceDir, request.Operation, request.Model, request.Streaming, request.Body)
+		if request.Streaming && response.StatusCode >= 200 && response.StatusCode < 300 {
+			response.Body = upstreamtrace.TeeStream(traceDir, request.Operation, request.Model, response.Body)
+		}
 	}
 	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 		if request.Streaming && response.StatusCode >= 200 && response.StatusCode < 300 {

@@ -38,7 +38,7 @@ type Config struct {
 }
 
 // AccountRiskConfig 定义账号 RSC 风险归因的可热更新参数。Method 取值
-// ssoProbe(默认)/homepage；OnDenied 取值 flag/disable/markOnly；
+// 恒为 ssoProbe（homepage 解析器已删除，字段仅为兼容保留）；OnDenied 取值 flag/disable/markOnly；
 // 语义与 config.AccountRiskRSCConfig 一致(0 值表示代码默认)。
 type AccountRiskConfig struct {
 	Enabled          bool
@@ -51,7 +51,7 @@ type AccountRiskConfig struct {
 	PatrolInterval   time.Duration
 	PatrolBatchSize  int
 	// ProbeProxyURL 让 SSO 探针经代理出站(socks5/http(s);空=直连)。
-	// 2026-08-28 事故:机房裸 IP 直连的首批巡检整批被降级服务误判。
+	// 历史事故:服务器直连出口不干净时,首批巡检整批被降级服务误判。
 	ProbeProxyURL string
 	// DeniedConfirmations: denied 定罪所需连续确认次数(0=默认 2)。
 	DeniedConfirmations int
@@ -73,18 +73,15 @@ type ServerConfig struct {
 type RequestRetryConfig struct {
 	Enabled             bool
 	MaxAttempts         int
-	HoldTimeout         time.Duration
-	MinOutputTokens     int
 	OnExhausted         string
 	AccountCooldown     time.Duration
-	EarlyHeaderAbort    time.Duration
 	SameAccountRetry    bool
 	EvidenceTimeout     time.Duration
 	CreatedTimeout      time.Duration
 	IdleAccountCooldown time.Duration
-	// TerminalBurstThreshold：交付后"整包末尾爆发+零思考"连击熔断阈值
-	// (0=默认 3,范围 0-10)。见 gateway.terminalBurstTracker。
-	TerminalBurstThreshold int
+	// GuardedModels 是守卫介入的模型白名单（空=全部推理模型）。yaml 级
+	// 配置，不在管理端设置面内；settings 往返必须保持该字段不丢。
+	GuardedModels []string
 }
 
 // EgressRotationConfig 定义出口换 IP 轮换调度的可热更新参数。

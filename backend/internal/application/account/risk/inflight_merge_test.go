@@ -35,7 +35,7 @@ func TestErrorVerdictDoesNotClobberDenied(t *testing.T) {
 	accounts := newFakeAccounts()
 	accounts.token[90] = "sso"
 	store := &fakeStore{verdicts: map[uint64]StoredVerdict{
-		90: {Verdict: VerdictDenied, RiskScore: 0.9, CheckedAt: time.Now().UTC()},
+		90: {Verdict: VerdictDenied, CheckedAt: time.Now().UTC()},
 	}}
 	// decrypt 失败产生 error verdict 的路径。
 	accounts.token[91] = ""

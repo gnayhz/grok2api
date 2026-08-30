@@ -16,7 +16,14 @@ func StringField(data []byte, key string) string {
 	if len(data) == 0 || key == "" {
 		return ""
 	}
-	needle := make([]byte, 0, len(key)+2)
+	// 键长 <= 32 的热路径键（type/id/delta/model/sequence_number…）用栈上
+	// 缓冲拼 needle，免去每次探测的堆分配——这是扫描器/检查器每帧多次
+	// 调用的分配大头（500 帧流基准里约占剩余分配的一半）。
+	var stack [34]byte
+	needle := stack[:0]
+	if len(key)+2 > len(stack) {
+		needle = make([]byte, 0, len(key)+2)
+	}
 	needle = append(needle, '"')
 	needle = append(needle, key...)
 	needle = append(needle, '"')
@@ -88,7 +95,7 @@ func RootStringField(data []byte, key string) string {
 		if len(value) == 0 {
 			return ""
 		}
-		if string(field) == key && value[0] == '"' {
+		if bytesEqualString(field, key) && value[0] == '"' {
 			inner := matchJSONString(value)
 			if inner > 1 {
 				return string(value[1 : inner-1])
@@ -142,7 +149,7 @@ func RootStringFieldScan(data []byte, key string) string {
 			// buffer end. Callers wanting head-only semantics pass a prefix.
 			return ""
 		}
-		if string(field) == key && rest[0] == '"' {
+		if bytesEqualString(field, key) && rest[0] == '"' {
 			return string(rest[1 : valueEnd-1])
 		}
 		rest = skipJSONSpace(rest[valueEnd:])
@@ -244,6 +251,21 @@ func skipJSONSpace(data []byte) []byte {
 	return data
 }
 
+// bytesEqualString 比较字节切片与字符串而无分配——根层键遍历对每个
+// 非目标键都要比较一次，string(field) 转换曾是 jsonpeek 的分配大头
+// （检查器流基准 ~98% 的分配来自 RootStringField 的逐键转换）。
+func bytesEqualString(field []byte, key string) bool {
+	if len(field) != len(key) {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		if field[i] != key[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func Prefix(data []byte, n int) []byte {
 	if n <= 0 || len(data) <= n {
 		return data
@@ -262,7 +284,11 @@ func HasKey(data []byte, key string) bool {
 	if len(data) == 0 || key == "" {
 		return false
 	}
-	needle := make([]byte, 0, len(key)+2)
+	var stack [34]byte
+	needle := stack[:0]
+	if len(key)+2 > len(stack) {
+		needle = make([]byte, 0, len(key)+2)
+	}
 	needle = append(needle, '"')
 	needle = append(needle, key...)
 	needle = append(needle, '"')

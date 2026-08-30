@@ -50,7 +50,7 @@ func runClassification(t *testing.T, name string, reqCtx context.Context, source
 	return captured
 }
 
-// TestClientDisconnectClassification 差分回归（2026-08-21 差分复现定案）：
+// TestClientDisconnectClassification 差分回归（差分复现定案）：
 // A 客户端断开（请求 ctx 已取消 + Read 返回 context.Canceled，生产中
 //
 //	client FIN 的真实形态）→ 必须记 client_disconnected，不得再污染

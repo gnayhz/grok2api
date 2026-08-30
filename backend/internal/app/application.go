@@ -355,7 +355,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.RequestRetry))
 	// 账号风险归因服务始终构建(含关闭状态)：全部运行入口按 Enabled() 门控，
 	// enabled/patrol.enabled 属运行时设置面，可在管理端即时翻转无需重启。
-	riskService := newAccountRiskService(cfg, database, accountService, logger)
+	riskService := newAccountRiskService(ctx, cfg, database, accountService, logger, egressManager)
 	gatewayService.UpdateAccountRisk(riskService)
 	// RSC 归因 clean → 出口 IP 嫌疑：交给 egress 服务隔离+换 IP。
 	riskService.SetEgressQuarantiner(egressService)
@@ -365,7 +365,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetRiskVerdictClearer(riskService)
 	// 当前探针构建键(method+timeout)：设置回调仅在键变化时重建探针，
 	// 避免无关保存重置 SSO 探针的通道活力熔断窗口。
-	currentRSCCheckerKey := rscCheckerBuildKey(cfg.AccountRisk.RSCCheck)
+	currentRSCProxyURL := ""
+	if egressManager != nil {
+		currentRSCProxyURL = egressManager.ProbeProxyURL(ctx)
+	}
+	currentRSCCheckerKey := rscCheckerBuildKey(cfg.AccountRisk.RSCCheck, currentRSCProxyURL)
 	// 出口降级观测（跨账号确认兜底）+ canary 验证都由 gateway 提供。
 	gatewayService.UpdateEgressGuard(egressService)
 	gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(cfg))
@@ -426,10 +430,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		// 账号风险归因热更：enabled/并发/onDenied/巡检即时生效；
 		// method/timeout 变化时按构建键重建探针。
 		riskService.UpdateConfig(accountRiskRuntime(next))
-		if key := rscCheckerBuildKey(next.AccountRisk.RSCCheck); key != currentRSCCheckerKey {
+		// 探针出口重新解析（路由表变更时 probe 类目标可能变化）。
+		nextRSCProxyURL := ""
+		if egressManager != nil {
+			nextRSCProxyURL = egressManager.ProbeProxyURL(context.WithoutCancel(ctx))
+		}
+		if key := rscCheckerBuildKey(next.AccountRisk.RSCCheck, nextRSCProxyURL); key != currentRSCCheckerKey {
 			currentRSCCheckerKey = key
 			tag := rscCheckerSourceTag(next.AccountRisk.RSCCheck)
-			riskService.UpdateChecker(rscCheckerAdapter{Checker: buildRSCChecker(next.AccountRisk.RSCCheck), Source: tag}, tag)
+			riskService.UpdateChecker(rscCheckerAdapter{Checker: buildRSCChecker(context.WithoutCancel(ctx), next.AccountRisk.RSCCheck, egressManager), Source: tag}, tag)
 			// 方法切换：旧方法的 clean 缓存立即失效（一次性清理，双向生效）。
 			riskService.InvalidateStaleCleanVerdicts(context.WithoutCancel(ctx))
 		}
@@ -516,10 +525,10 @@ func gatewayEgressCanaryConfig(cfg config.Config) gateway.EgressCanaryRuntime {
 
 // config; nil means attribution stays off and the gateway relies on its
 // escalating behavioral penalties alone.
-func newAccountRiskService(cfg config.Config, database *relational.Database, accounts *accountapp.Service, logger *slog.Logger) *risk.Service {
+func newAccountRiskService(ctx context.Context, cfg config.Config, database *relational.Database, accounts *accountapp.Service, logger *slog.Logger, egressManager *infraegress.Manager) *risk.Service {
 	store := riskRelationalStore{Repo: relational.NewRiskRepository(database)}
 	tag := rscCheckerSourceTag(cfg.AccountRisk.RSCCheck)
-	adapter := rscCheckerAdapter{Checker: buildRSCChecker(cfg.AccountRisk.RSCCheck), Source: tag}
+	adapter := rscCheckerAdapter{Checker: buildRSCChecker(ctx, cfg.AccountRisk.RSCCheck, egressManager), Source: tag}
 	service := risk.New(accountRiskRuntime(cfg), accounts, store, adapter, logger)
 	// 播种探针溯源标记：freshness 按方法匹配的闸门依赖它。
 	service.UpdateChecker(adapter, tag)
@@ -547,39 +556,43 @@ func accountRiskRuntime(cfg config.Config) risk.Config {
 	}
 }
 
-// buildRSCChecker selects the probe implementation by method: SSO thinking
-// probe by default (grok.com stopped delivering RSC botFlag payload fields);
-// homepage keeps the legacy parse for rollback.
-func buildRSCChecker(rscCfg config.AccountRiskRSCConfig) rsc.Probe {
-	if strings.EqualFold(strings.TrimSpace(rscCfg.Method), "homepage") {
-		return rsc.NewChecker(rscCfg.Timeout.Value())
-	}
+// buildRSCChecker builds the SSO thinking probe (the sole transport since
+// the homepage parser was removed — grok.com stopped delivering RSC botFlag
+// payload fields, so the homepage method read every account as clean).
+// The probe exit resolves in priority order:
+//  1. egress routing table's "probe" class (node/pool target) — configured
+//     in the same routing UI as other traffic classes, inherits health checks
+//     and pool selection. This is the recommended path.
+//  2. accountRisk.rscCheck.probeProxyURL — raw proxy URL fallback for
+//     deployments without the egress routing table.
+//  3. direct connection (empty) — last resort; dirty server IPs will
+//     contaminate verdicts (incident).
+func buildRSCChecker(ctx context.Context, rscCfg config.AccountRiskRSCConfig, egressManager *infraegress.Manager) rsc.Probe {
 	probe := rsc.NewSSOProbeChecker(rscCfg.Timeout.Value())
-	// 探针出口可配置:空=直连。2026-08-28 生产首批巡检从机房裸 IP 直连,
-	// 整批被降级服务误判;部署机出口不干净时应指向干净代理。
+	// 优先从路由表解析（probe 类的出口目标）。
+	if egressManager != nil {
+		if routed := egressManager.ProbeProxyURL(ctx); routed != "" {
+			probe.ProxyURL = routed
+			return probe
+		}
+	}
+	// 回退到手填 URL。
 	probe.ProxyURL = rscCfg.ProbeProxyURL
 	return probe
 }
 
-// rscCheckerSourceTag names the probe method for verdict provenance:
-// "rsc" for homepage (identical to every legacy stored verdict, so a
-// rollback keeps its own cache) and "sso_probe" for the new probe.
+// rscCheckerSourceTag names the probe for verdict provenance. Legacy rows
+// written by the removed homepage method keep their "rsc" source and are
+// invalidated by the tag mismatch on read.
 func rscCheckerSourceTag(rscCfg config.AccountRiskRSCConfig) string {
-	if strings.EqualFold(strings.TrimSpace(rscCfg.Method), "homepage") {
-		return "rsc"
-	}
 	return "sso_probe"
 }
 
 // rscCheckerBuildKey identifies the built checker (method + timeout); the
 // settings apply chain rebuilds the probe only when this key changes so
 // unrelated saves never reset the SSO probe's channel-vitality breaker.
-func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig) string {
-	method := strings.ToLower(strings.TrimSpace(rscCfg.Method))
-	if method == "" {
-		method = "ssoprobe"
-	}
-	return method + "|" + rscCfg.Timeout.String() + "|" + strings.TrimSpace(rscCfg.ProbeProxyURL)
+func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig, routedProxyURL string) string {
+	return rscCfg.Timeout.String() + "|" + strings.TrimSpace(rscCfg.ProbeProxyURL) + "|" + routedProxyURL
 }
 
 // runAccountRiskPatrol runs the bucketed verdict re-check loop. Each tick
@@ -764,18 +777,15 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 
 func qualityRetryRuntime(value config.RequestRetryConfig) gateway.QualityRetryRuntime {
 	return gateway.QualityRetryRuntime{
-		Enabled:                value.Enabled,
-		MaxAttempts:            value.MaxAttempts,
-		HoldTimeout:            value.HoldTimeout.Value(),
-		MinOutputTokens:        int64(value.MinOutputTokens),
-		OnExhausted:            value.OnExhausted,
-		AccountCooldown:        value.AccountCooldown.Value(),
-		SameAccountRetry:       value.SameAccountRetry,
-		EarlyHeaderAbort:       value.EarlyHeaderAbort.Value(),
-		IdleAccountCooldown:    value.IdleAccountCooldown.Value(),
-		EvidenceTimeout:        value.EvidenceTimeout.Value(),
-		CreatedTimeout:         value.CreatedTimeout.Value(),
-		TerminalBurstThreshold: value.TerminalBurstThreshold,
+		Enabled:             value.Enabled,
+		MaxAttempts:         value.MaxAttempts,
+		OnExhausted:         value.OnExhausted,
+		AccountCooldown:     value.AccountCooldown.Value(),
+		SameAccountRetry:    value.SameAccountRetry,
+		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
+		EvidenceTimeout:     value.EvidenceTimeout.Value(),
+		CreatedTimeout:      value.CreatedTimeout.Value(),
+		GuardedModels:       value.GuardedModels,
 	}
 }
 

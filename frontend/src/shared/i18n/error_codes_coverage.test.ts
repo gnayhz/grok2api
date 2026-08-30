@@ -37,6 +37,16 @@ function extractBackendCodes(): Set<string> {
     // clientErrorCode 的 snake_case return 只在 auth.go 内扫描——
     // 其他文件的 snake_case return 多为操作类型分类(image_edit 等),会误报。
     { pattern: 'return "[a-z]+(_[a-z]+)+"', extract: '"[a-z]+(_[a-z]+)+"$', path: "backend/internal/transport/http/middleware/auth.go" },
+    // clientFailureCode(inference/handler.go) 经函数返回的 snake_case 码
+    // (quality_degraded→upstream_degraded, 重构 round 2 引入)无法被上面的
+    // 行尾锚定模式提取——定向补一条,该映射需与 clientFailureCode 同步。
+    { pattern: 'return "upstream_degraded"', extract: '"upstream_degraded"', path: "backend/internal/transport/http/inference/handler.go" },
+    // Guard idle codes are inline literals in failure.go multi-assignments;
+    // the end-anchored patterns above cannot extract them. Targeted pattern so
+    // the audit filter preset codes never drift from the backend literals
+    // (preset labels errorCode{QualityEvidenceTimeout,QualityCreatedTimeout,
+    // UpstreamStreamEmpty} must exist in i18n).
+    { pattern: 'status, code, message = http\\.[A-Za-z]+, "(upstream_stream_empty|quality_evidence_timeout|quality_created_timeout)"', extract: '$1', path: "backend/internal/application/gateway/failure.go" },
   ];
   const codes = new Set<string>();
   for (const { pattern, extract, path } of patterns) {

@@ -128,7 +128,7 @@ func TestFailureAttemptRecorderBoundsTotalBodyAndErrorChain(t *testing.T) {
 		t.Fatalf("captured = %d, final attempt = %#v", captured, stored[4])
 	}
 
-	var wrapped error = errors.New("root")
+	wrapped := errors.New("root")
 	for index := 0; index < 20; index++ {
 		wrapped = fmt.Errorf("layer %d: %w", index, wrapped)
 	}

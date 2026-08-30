@@ -31,6 +31,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
+	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
 )
 
 type Config struct {
@@ -437,6 +438,15 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			resp.Header.Set("Content-Type", "application/json")
 		}
 	}
+	if traceDir, ok := upstreamTraceEnabled(); ok {
+		traceUpstreamRequest(traceDir, request.Operation, request.Model, request.Streaming, body)
+		if request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			resp.Body = teeUpstreamStream(traceDir, request.Operation, request.Model, resp.Body)
+		} else if !request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 && request.Operation == conversation.OperationResponses {
+			// native responses 非流式：body 直通下游读取，用读取镜像包装捕获。
+			resp.Body = upstreamtrace.TeeBody(traceDir, request.Operation, request.Model, resp.Body)
+		}
+	}
 	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 		if request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			resp.Body = conversation.ConvertResponseStreamWithOptions(resp.Body, request.Operation, conversationOptions)
@@ -461,6 +471,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			var diagnostic *provider.DiagnosticResponse
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				diagnostic = &provider.DiagnosticResponse{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: data, BodyTruncated: diagnosticTruncated || rateLimitDiagnostic != nil}
+			}
+			if traceDir, ok := upstreamTraceEnabled(); ok {
+				traceUpstreamBody(traceDir, request.Operation, request.Model, data)
 			}
 			converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
 			if convertErr != nil {

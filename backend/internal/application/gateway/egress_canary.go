@@ -98,7 +98,7 @@ func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64) (result
 		Credential: credential, Billing: lease.Billing, Method: "POST", Model: route.UpstreamModel,
 		// Path 必须显式指向 /responses:适配器按 urlWithBase(base, Path) 拼 URL,
 		// 空 Path 会 POST 到 base 根路径——cli-chat-proxy 对 /v1/ 恒 404, canary
-		// 因此永远判 degraded, 换 IP 成功也被烧满尝试耗尽隔离(2026-08-25
+		// 因此永远判 degraded, 换 IP 成功也被烧满尝试耗尽隔离(
 		// 线上双节点 rotation exhausted 实测即此因)。
 		Path: "/responses", Body: body, Streaming: true, NormalizeBody: true, Operation: "responses",
 	}
@@ -122,12 +122,12 @@ func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64) (result
 		lease.Release()
 		return egressapp.EgressQualityProbeResult{Outcome: egressapp.EgressQualityProbeDegraded, Reason: fmt.Sprintf("upstream HTTP %d", response.StatusCode)}
 	}
+	// 验证路径只消费两个判决预算（CreatedTimeout/EvidenceTimeout）：canary
+	// 直接按 verdict 分类，不走重试/耗尽策略，其余 Runtime 字段不适用。
 	hold := QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 1, HoldTimeout: 2 * time.Second,
 		CreatedTimeout: cfg.CreatedTimeout, EvidenceTimeout: cfg.CreatedTimeout + 5*time.Second,
-		MinOutputTokens: 1, OnExhausted: qualityRetryFailClosed,
 	}
-	replay, verdict, _, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolResponses, hold)
+	replay, verdict, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolResponses, hold)
 	if replay != nil {
 		replay.Close()
 	} else {

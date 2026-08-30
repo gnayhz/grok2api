@@ -488,12 +488,16 @@ const (
 	// TrafficClassVideo covers video job submission, polling, and asset
 	// downloads.
 	TrafficClassVideo TrafficClass = "video"
+	// TrafficClassProbe covers risk-attribution probes (SSO thinking probe,
+	// Build differential probe) that verify account/exit health. These are
+	// low-volume but must exit through a clean IP for reliable verdicts.
+	TrafficClassProbe TrafficClass = "probe"
 )
 
 // IsValid reports whether the value is a known traffic class.
 func (value TrafficClass) IsValid() bool {
 	switch value {
-	case TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo:
+	case TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo, TrafficClassProbe:
 		return true
 	default:
 		return false
@@ -502,7 +506,7 @@ func (value TrafficClass) IsValid() bool {
 
 // TrafficClasses lists every schedulable class in stable order.
 func TrafficClasses() []TrafficClass {
-	return []TrafficClass{TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo}
+	return []TrafficClass{TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo, TrafficClassProbe}
 }
 
 // MaxRoutingTargets caps each routing level so a degenerate payload fails

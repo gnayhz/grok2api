@@ -26,8 +26,11 @@ func TestRunDueClaimsBoundedBatchAndProcessesConcurrently(t *testing.T) {
 	if queue.claimLimit != defaultRecoveryWorkers || queue.claimLease != recoveryClaimLease {
 		t.Fatalf("claim limit = %d, lease = %s", queue.claimLimit, queue.claimLease)
 	}
-	if syncer.maxConcurrent != defaultRecoveryWorkers {
-		t.Fatalf("max concurrent probes = %d", syncer.maxConcurrent)
+	// 并发高水位是调度依赖量：满载机器上 25 个 worker 未必全部同时在飞
+	//（规模轮 130 verify-full 实测 20/25 触发误报）。语义断言取两侧：
+	// 确实并发（>1）且被池上界约束（<= workers）。
+	if syncer.maxConcurrent <= 1 || syncer.maxConcurrent > defaultRecoveryWorkers {
+		t.Fatalf("max concurrent probes = %d (want (1, %d])", syncer.maxConcurrent, defaultRecoveryWorkers)
 	}
 	if queue.acked != defaultRecoveryWorkers {
 		t.Fatalf("acked events = %d", queue.acked)

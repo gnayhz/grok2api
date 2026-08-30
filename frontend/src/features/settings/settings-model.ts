@@ -12,7 +12,7 @@ export const UNLIMITED_ROUTING_ATTEMPTS = -1;
 
 
 const durationSchema = z.object({ value: z.number().positive(), unit: z.enum(["s", "m", "h", "d"]) });
-// 0 是有意义值(关闭)的时长字段(如 earlyHeaderAbort)。
+// 0 是有意义值(关闭/默认)的时长字段(如 idleAccountCooldown)。
 const nonNegativeDurationSchema = z.object({ value: z.number().nonnegative(), unit: z.enum(["s", "m", "h", "d"]) });
 const positiveInteger = z.number().int().positive();
 const byteSizeSchema = z.object({ value: z.number().positive(), unit: z.enum(["MiB", "GiB"]) });
@@ -193,18 +193,9 @@ export const settingsSchema = z.object({
     }),
     evidenceTimeout: durationSchema.refine((value) => {
       const seconds = durationSeconds(value);
-      return seconds >= 3 && seconds <= 300;
+      return seconds >= 1 && seconds <= 300;
     }),
-    holdTimeout: durationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds >= 0.2 && seconds <= 30;
-    }),
-    earlyHeaderAbort: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 3 && seconds <= 60);
-    }),
-    maxAttempts: z.number().int().min(1).max(6),
-    minOutputTokens: z.number().int().min(1).max(256),
+    maxAttempts: z.number().int().min(1).max(3),
     sameAccountRetry: z.boolean(),
     onExhausted: z.enum(["fail_closed", "fail_open"]),
     accountCooldown: durationSchema.refine((value) => {
@@ -215,12 +206,12 @@ export const settingsSchema = z.object({
       const seconds = durationSeconds(value);
       return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
     }),
-    terminalBurstThreshold: z.number().int().min(0).max(10),
   }),
   // 账号风险归因(RSC 检测/处置)。边界与后端 AccountRiskRSCConfig 校验对齐。
   accountRisk: z.object({
     enabled: z.boolean(),
-    method: z.enum(["ssoProbe", "homepage"]),
+    // homepage 解析器已删除(恒读作 clean):字段仅为配置兼容保留,恒为 ssoProbe。
+    method: z.literal("ssoProbe"),
     concurrency: z.number().int().min(1).max(8),
     timeout: durationSchema.refine((value) => {
       const seconds = durationSeconds(value);
@@ -340,16 +331,12 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
     requestRetry: {
       enabled: requestRetry.enabled,
       maxAttempts: requestRetry.maxAttempts,
-      holdTimeout: parseDuration(requestRetry.holdTimeout),
-      minOutputTokens: requestRetry.minOutputTokens,
       onExhausted: requestRetry.onExhausted === "fail_open" ? "fail_open" : "fail_closed",
       accountCooldown: parseDuration(requestRetry.accountCooldown),
-      earlyHeaderAbort: parseDuration(requestRetry.earlyHeaderAbort),
       sameAccountRetry: requestRetry.sameAccountRetry,
       evidenceTimeout: parseDuration(requestRetry.evidenceTimeout),
       createdTimeout: parseDuration(requestRetry.createdTimeout),
       idleAccountCooldown: parseDuration(requestRetry.idleAccountCooldown),
-      terminalBurstThreshold: requestRetry.terminalBurstThreshold ?? 3,
     },
     egressRotation: {
       enabled: egressRotation.enabled,
@@ -366,7 +353,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
     },
     accountRisk: {
       enabled: accountRisk.enabled,
-      method: accountRisk.method === "homepage" ? "homepage" : "ssoProbe",
+      method: "ssoProbe",
       concurrency: accountRisk.concurrency,
       timeout: parseDuration(accountRisk.timeout),
       onDenied: accountRisk.onDenied === "disable" || accountRisk.onDenied === "markOnly" ? accountRisk.onDenied : "flag",
@@ -431,16 +418,12 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
     requestRetry: {
       enabled: config.requestRetry.enabled,
       maxAttempts: config.requestRetry.maxAttempts,
-      holdTimeout: formatDuration(config.requestRetry.holdTimeout),
-      minOutputTokens: config.requestRetry.minOutputTokens,
       onExhausted: config.requestRetry.onExhausted,
       accountCooldown: formatDuration(config.requestRetry.accountCooldown),
-      earlyHeaderAbort: formatNonNegativeDuration(config.requestRetry.earlyHeaderAbort),
       sameAccountRetry: config.requestRetry.sameAccountRetry,
       evidenceTimeout: formatDuration(config.requestRetry.evidenceTimeout),
       createdTimeout: formatDuration(config.requestRetry.createdTimeout),
       idleAccountCooldown: formatNonNegativeDuration(config.requestRetry.idleAccountCooldown),
-      terminalBurstThreshold: config.requestRetry.terminalBurstThreshold,
     },
     egressRotation: {
       enabled: config.egressRotation.enabled,

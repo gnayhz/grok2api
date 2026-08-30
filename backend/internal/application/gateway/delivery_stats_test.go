@@ -70,7 +70,7 @@ func TestDeliveredStatsRecordedFromTransportCallback(t *testing.T) {
 	clientService := clientkeyapp.NewService(nil, nil, nil, 60, 4, nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, MinOutputTokens: 8, OnExhausted: qualityRetryFailClosed, HoldTimeout: 50 * time.Millisecond, EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond})
+	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed, EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond})
 
 	result, err := service.CreateResponse(ctx, Input{RequestID: "deliv-cb", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true, Body: []byte("{\"model\":\"grok-4.6\",\"stream\":true,\"input\":\"hi\"}")})
 	if err != nil {

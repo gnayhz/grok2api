@@ -10,7 +10,7 @@ import (
 
 // TestRotateNodeResetsExhaustedCycle 手动轮换必须能重开已耗尽的隔离周期:
 // attempts>=max 时,RotateNode 清账本并入队,而不是"已排队"后在 worker 里
-// 被 attempts 检查静默丢弃(2026-08-25 线上:两节点 rotation exhausted,
+// 被 attempts 检查静默丢弃(线上:两节点 rotation exhausted,
 // 管理端点击更换出口无任何效果)。
 func TestRotateNodeResetsExhaustedCycle(t *testing.T) {
 	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.10"}

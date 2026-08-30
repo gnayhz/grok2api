@@ -31,13 +31,13 @@ func FuzzObserveQualityChunk(f *testing.F) {
 			if end > len(chunk) {
 				end = len(chunk)
 			}
-			ObserveQualityChunk(state, chunk[start:end])
+			observeQualityChunk(state, chunk[start:end])
 			signals := state.signals()
 			if signals.VisibleTokens < 0 || signals.OutputTokens < 0 || signals.ReasoningTokens < 0 {
 				t.Fatalf("negative counters after %q: %#v", chunk[start:end], signals)
 			}
-			_ = ClassifyQualityHold(signals, 32)
+			_ = classifyQualityHold(signals)
 		}
-		ObserveQualityChunk(state, nil) // nil must be a no-op
+		observeQualityChunk(state, nil) // nil must be a no-op
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -40,8 +41,13 @@ func convertSizeEquiv(t *testing.T, cipher string, op string, opts ResponseOptio
 	if err != nil {
 		t.Fatal(err)
 	}
-	return converted
+	// 归一化墙钟字段：转换器的 created 取 time.Now().Unix()，基准与后续
+	// 转换跨秒边界时该字段差 1（同长度不同内容）——race 全量
+	// 门实测翻牌根因。等价性比的是密文尺寸是否影响输出，不是时间戳。
+	return createdRe.ReplaceAll(converted, []byte(`"created":0`))
 }
+
+var createdRe = regexp.MustCompile(`"created":[0-9]+`)
 
 func TestChatConversionSizeEquivalence(t *testing.T) {
 	t.Parallel()

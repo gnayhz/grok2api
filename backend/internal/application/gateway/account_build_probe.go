@@ -92,10 +92,10 @@ func (s *Service) ProbeBuildThinking(ctx context.Context, accountID, degradedNod
 		// cli-chat-proxy 对 /v1/ 恒 404,探针会永远误判降智)。
 		Path: "/responses", Body: body, Streaming: true, NormalizeBody: true, Operation: "responses",
 	}
+	// 验证路径只消费两个判决预算（CreatedTimeout/EvidenceTimeout）：探针
+	// 直接按 verdict 分类，不走重试/耗尽策略，其余 Runtime 字段不适用。
 	hold := QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 1, HoldTimeout: 2 * time.Second,
 		CreatedTimeout: 10 * time.Second, EvidenceTimeout: 15 * time.Second,
-		MinOutputTokens: 1, OnExhausted: qualityRetryFailClosed,
 	}
 	// 尝试一:钉扎降智节点复现该路径(canary 同款 verification 钉扎,绕过
 	// 降智事件留下的节点软冷却——否则探针会被自己触发的冷却挤到别的
@@ -163,7 +163,7 @@ func (s *Service) buildProbeAttempt(ctx context.Context, adapter provider.Respon
 		response.Body.Close()
 		return buildProbeError, fmt.Sprintf("upstream HTTP %d", response.StatusCode)
 	}
-	replay, verdict, _, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolResponses, hold)
+	replay, verdict, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolResponses, hold)
 	if replay != nil {
 		replay.Close()
 	} else {
@@ -178,7 +178,7 @@ func (s *Service) buildProbeAttempt(ctx context.Context, adapter provider.Respon
 	case verdict == QualityWithhold:
 		return buildProbeDegraded, "withheld: no thinking evidence"
 	case verdict == QualityDeliver:
-		// 只有真实思考证据(或与其同判的 oversized-line fail-open)算 clean。
+		// 只有真实思考证据(可见思考文本增量)算 clean。
 		return buildProbeClean, ""
 	default:
 		// QualityWait 等不可判定形态:绝不能当 clean 落库(会洗掉降智嫌疑),

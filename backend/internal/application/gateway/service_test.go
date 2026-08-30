@@ -281,8 +281,8 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	// the quality hold and is labeled compaction only in the audit record, so
 	// Provider routing and stored-response ownership must remain intact.
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 2, MinOutputTokens: 32,
-		OnExhausted: qualityRetryFailClosed, HoldTimeout: time.Second,
+		Enabled: true, MaxAttempts: 2,
+		OnExhausted: qualityRetryFailClosed,
 	})
 	adapter.resetAttempts()
 	tuiCompacted, err := service.CreateResponse(ctx, Input{
@@ -3906,6 +3906,9 @@ type scriptedBuildResponse struct {
 	// headerDelay 在返回响应头前阻塞：模拟上游头迟滞（降智路径特征）。
 	// 可被 context 取消打断，用于响应头预算早断测试。
 	headerDelay time.Duration
+	// poolEgress 把本次尝试的出口选择记录为旋转代理池（每请求换新 IP）：
+	// 同号重试等出口形态敏感的请求路径策略只在池出口下生效。
+	poolEgress bool
 }
 
 type barePermissionEgressAdapter struct {
@@ -3950,6 +3953,11 @@ func (a *scriptedBuildAdapter) ForwardResponse(ctx context.Context, request prov
 	defer a.mu.Unlock()
 	a.attempts = append(a.attempts, request.Credential.ID)
 	queue := a.responses[request.Credential.ID]
+	if len(queue) > 0 && queue[0].poolEgress {
+		if trace := infraegress.TraceFromContext(ctx); trace != nil {
+			trace.Record(infraegress.Selection{NodeID: 1, NodeName: "pool-node", Scope: egressdomain.ScopeBuild, Proxied: true, Pool: true})
+		}
+	}
 	if len(queue) == 0 {
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"resp-default"}`))}, nil
 	}

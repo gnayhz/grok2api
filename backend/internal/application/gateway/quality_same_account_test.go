@@ -91,6 +91,12 @@ func (f *sameAccountFixture) scriptAccount(index int, body string) {
 	f.adapter.responses[f.credentials[index].ID] = append(f.adapter.responses[f.credentials[index].ID], scriptedBuildResponse{status: http.StatusOK, body: body})
 }
 
+// scriptAccountPool 在旋转代理池出口（每请求换新 IP）下投递该响应：同号
+// 重试仅在池出口下生效（蓝图 #9），测试用它构造差分重试的前提条件。
+func (f *sameAccountFixture) scriptAccountPool(index int, body string) {
+	f.adapter.responses[f.credentials[index].ID] = append(f.adapter.responses[f.credentials[index].ID], scriptedBuildResponse{status: http.StatusOK, body: body, poolEgress: true})
+}
+
 func (f *sameAccountFixture) service(t *testing.T, cfg QualityRetryRuntime) *Service {
 	t.Helper()
 	auditRepo := relational.NewAuditRepository(f.database)
@@ -141,15 +147,15 @@ func (f *sameAccountFixture) assertCooldown(t *testing.T, index int, wantCooled 
 
 func baseSameAccountRuntime() QualityRetryRuntime {
 	return QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 3, MinOutputTokens: 32, OnExhausted: qualityRetryFailClosed,
-		HoldTimeout: time.Second, AccountCooldown: time.Hour, SameAccountRetry: true,
+		Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailClosed,
+		AccountCooldown: time.Hour, SameAccountRetry: true,
 	}
 }
 
 func TestSameAccountRetryDeliversAndSkipsPenalty(t *testing.T) {
 	t.Parallel()
 	fixture := newSameAccountFixture(t)
-	fixture.scriptAccount(0, bFormStream())
+	fixture.scriptAccountPool(0, bFormStream())
 	fixture.scriptAccount(0, aFormStream())
 	fixture.scriptAccount(1, aFormStream())
 
@@ -173,7 +179,7 @@ func TestSameAccountRetryDeliversAndSkipsPenalty(t *testing.T) {
 func TestSameAccountRetryExhaustedSwitchesAccount(t *testing.T) {
 	t.Parallel()
 	fixture := newSameAccountFixture(t)
-	fixture.scriptAccount(0, bFormStream())
+	fixture.scriptAccountPool(0, bFormStream())
 	fixture.scriptAccount(0, bFormStream())
 	fixture.scriptAccount(1, aFormStream())
 
@@ -188,6 +194,30 @@ func TestSameAccountRetryExhaustedSwitchesAccount(t *testing.T) {
 	}
 	fixture.assertCooldown(t, 0, true)
 	fixture.assertAttempts(t, 0, 2)
+	fixture.assertAttempts(t, 1, 1)
+}
+
+// TestSameAccountRetryForceDisabledUnderFixedEgress 蓝图 #9：直连/固定
+// 出口下同号重试恢复概率≈0（再次进入同一脏 IP），必须强制禁用——扣留
+// 直接惩罚换号，不浪费请求预算在同号重试上。
+func TestSameAccountRetryForceDisabledUnderFixedEgress(t *testing.T) {
+	t.Parallel()
+	fixture := newSameAccountFixture(t)
+	// 直连（无池出口记录）：第一次扣留后不得发起同号重试。
+	fixture.scriptAccount(0, bFormStream())
+	fixture.scriptAccount(1, aFormStream())
+
+	result, err := fixture.service(t, baseSameAccountRuntime()).CreateChatCompletion(context.Background(), fixture.request())
+	if err != nil {
+		t.Fatalf("fixed-egress switch should deliver, err=%v", err)
+	}
+	body, _ := io.ReadAll(result.Body)
+	_ = result.Body.Close()
+	if !strings.Contains(string(body), "good answer") {
+		t.Fatal("delivered body should come from the second account")
+	}
+	fixture.assertCooldown(t, 0, true)
+	fixture.assertAttempts(t, 0, 1)
 	fixture.assertAttempts(t, 1, 1)
 }
 

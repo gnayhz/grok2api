@@ -363,24 +363,39 @@ The real-time routing guard (`requestRetry`) is a top-level `config.yaml` sectio
 ```yaml
 requestRetry:
   enabled: true             # production-recommended (Go built-in default stays off)
-  maxAttempts: 6
-  holdTimeout: 3s           # wait cap for small-output degraded streams; healthy streams deliver on first visible thinking delta
-  minOutputTokens: 8
-  onExhausted: fail_closed # fail_open | fail_closed
-  earlyHeaderAbort: 0s     # optional header-budget early abort (5s recommended: clean first byte 0.7-2.1s vs degraded 3.0-15.6s, zero overlap, 2026-08-20 measured)
-  sameAccountRetry: true   # retry the same account once before switching
-  accountCooldown: 12h
+  maxAttempts: 2            # global request budget: initial attempt + at most one retry (hard cap 3)
+  guardedModels: []          # guard whitelist (empty = all reasoning models, e.g. ["grok-4.5","grok-4.6"]); outside models exempt
+  createdTimeout: 5s        # first-event deadline: abort before any SSE data event arrives
+  evidenceTimeout: 3.5s     # zero-evidence deadline: anti-deadlock backstop (no thinking evidence AND no output)
+  onExhausted: fail_closed # fail_open | fail_closed (fail_closed returns 503 upstream_degraded)
+  sameAccountRetry: true   # pool egress only - force-disabled under direct/fixed exits
+  accountCooldown: 12h     # missing-thinking conviction cooldown
   idleAccountCooldown: 15m # empty/silent-stream cooldown (independent)
 ```
 
-When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; the same account is retried once, then another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, and stored-response requests are unchanged. Changes to this section require a process restart — it is not part of the runtime-settings hot-reload surface (verified: flipping the file without restart leaves the guard behavior unchanged).
+Both deadlines **scale by request class** (the evidence-backed regime table
+`qualityLivenessSchedule`, from the 2026-08 full-chain trace survey): requests
+carrying server-side search tools (`web_search`/`x_search`) get NO guard
+deadline - queueing/executing/thinking silences are all legitimate work, and
+dead connections are bounded by the transport stream-idle timeout (Build
+default 2m); `high`/`xhigh` reasoning requests get a 30s first-event budget
+(upstream queueing silence measured >5s); everything else uses the defaults
+above. A deadline firing only bounds queueing - it is never evidence of
+degradation; that judgment always belongs to the evidence rules (the
+ciphertext-item-closed-without-deltas signature et al).
+
+When enabled, every thinking-model response (streaming and non-streaming) is judged by the zero-delay state machine: visible thinking deltas deliver instantly (the guard then steps out of the way); a reasoning item that closes without any thinking delta - the ciphertext degrade signature - withholds in 0 ms; visible output racing ahead of thinking withholds immediately regardless of length; a terminal event with neither is a defensive withhold; zero-content streams short-circuit to the idle path (short cooldown + RSC attribution + retry) instead of a missing-thinking conviction. Purely semantic output (tool calls) delivers. Exempt paths (non-reasoning operations/models, explicitly disabled reasoning, compaction) are counted per reason in guard-stats instead of passing silently. Under `fail_closed` an exhausted budget returns `503 upstream_degraded`. This section is hot-reloadable through the admin runtime-settings surface (guard page); `config.yaml` provides the boot defaults.
+
+Every guard behavior is observable in the admin Quality Guard page: the signal-hits panel tracks the four signals (first-event deadline, zero-evidence deadline, empty stream, missing thinking) with triggered/rescued/failed counts; the exempt ledger counts requests the guard did NOT engage, by reason - the first place to look when degraded output slips through; same-account retry and both exhaustion outcomes (deliver-last/reject) summarize below, with canary verdicts in their own table. Request-audit details carry the per-attempt guard trail (quality_hold/quality_idle stages with timing), the terminal_burst class makes the whole-output-burst signature visible where the throughput column is empty, fail-open delivered rows carry a dedicated delivery marker; the audit error-code filter offers one-click presets for all four guard codes (quality degraded / zero-evidence timeout / first-event timeout / empty stream). The dashboard resource cards total cooling accounts, risk-flagged accounts, and degraded withholds in period.
 
 ### Risk attribution (RSC)
 
 A withheld stream does not by itself prove the account is degraded - the exit
 IP may be the culprit. When `accountRisk.rscCheck` is enabled, a withhold triggers
 an async registration-risk check against grok.com through the linked Web SSO
-identity. The check transport is selected by `method` (restart to apply):
+identity. The check runs the SSO thinking probe (the legacy homepage payload
+parse was removed with this refactor - it read every account as clean after
+the grok.com redesign; rollback-to-no-attribution is the `enabled` switch):
 
 - **ssoProbe (default, priority)**: opens one tiny temporary `fast` conversation with the
   SSO cookie (no persisted chat, no memory writes). A notetaker/thinking channel in
@@ -400,8 +415,6 @@ identity. The check transport is selected by `method` (restart to apply):
   requires a recent build-probe clean witness, otherwise it is suppressed to
   error and retried. Without any reasoning Build model the fallback stays
   disabled (behavioral penalties only).
-- **homepage (rollback only)**: the legacy grok.com RSC payload parse, dead since
-  the payload change.
 
 - **denied/flagged**: a confirmed verdict stays trusted for `deniedTTL` (default 24h)
   and requires `deniedConfirmations` consecutive denials (default 2) before flagging.
@@ -475,9 +488,11 @@ gates established during hardening:
 
 - **fast** (`make verify`): build, vet, staticcheck, race-enabled test suite.
 - **full** (`make verify-full`): + fuzz seed regressions, govulncheck,
-  and a count=3 flaky probe over the guard/risk packages.
+  and a count=3 flaky probe over the seven timing-sensitive packages
+  (gateway, risk, rsc, relational, app, inference, jsonpeek).
 - **fuzz** (`make fuzz`): 30s of the mutation engines per parse target
-  (SSE quality scanner, RSC payload parser).
+  (SSE quality scanner + body peek, RSC payload parser, jsonpeek
+  extractors, egress subscription payloads — 7 targets in total).
 
 Third-party tools degrade to SKIP with install hints when absent.
 See [HARDENING.md](./HARDENING.md) for the complete hardening log: detection rules, attribution flow, cooldown taxonomy, security fixes, and production measurements.
@@ -645,6 +660,17 @@ Restore by stopping the instance, replacing the database and media files, keepin
 ### Monitoring
 
 Runtime metrics are emitted as structured JSON log lines (`msg="performance_metric"`, one per metric family) every minute — there is no HTTP `/metrics` scrape endpoint. Ship container stdout to your log pipeline and alert on `level":"WARN"` task failures plus `upstream_*`/`egress_*` metric anomalies.
+
+## Upstream Shape Survey Tooling
+
+```bash
+GROK2API_ADMIN_PASSWORD=... sh scripts/survey_report.sh 8003
+python3 scripts/survey_harvest.py upstream-traces/unique
+cd backend && GROK2API_TRACE_REPLAY_DIR=$PWD/../upstream-traces/unique go test ./internal/application/gateway/ -run TestCorpusReplay -v
+python3 scripts/trace_census.py && python3 scripts/trace_census_timeline.py
+```
+
+Capture side is `internal/pkg/upstreamtrace` (env-gated, zero cost by default).
 
 ## Development
 

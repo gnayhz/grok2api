@@ -32,7 +32,7 @@ func TestRewrittenFailedAndIncompleteFramesClassified(t *testing.T) {
 	}
 }
 
-// 复现线上 upstream_stream_incomplete 回归（2026-08-27 线上 5/5 失败）:
+// 复现线上 upstream_stream_incomplete 回归（线上全部失败）:
 // copyStream 对 streamProtocolResponses 先 rewriteResponsesStreamChunk 再 Inspect。
 // completed 帧被 sanitize 后经 map[string]any 重排键序（字母序 response < type），
 // "type" 落到多 KB response 对象之后；sseEventType 只看头 4096 字节的根层键，

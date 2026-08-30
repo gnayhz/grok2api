@@ -49,8 +49,8 @@ func TestConcurrentPeekStreamsKeepReplayIsolated(t *testing.T) {
 					body = body[n:]
 				}
 			}()
-			replay, verdict, _, _, err := peekQualityStream(context.Background(), reader, qualityProtocolChat,
-				QualityRetryRuntime{MinOutputTokens: 8, HoldTimeout: 2 * time.Second})
+			replay, verdict, _, err := peekQualityStream(context.Background(), reader, qualityProtocolChat,
+				QualityRetryRuntime{})
 			if err != nil {
 				errCh <- fmt.Errorf("stream %d: %w", idx, err)
 				return

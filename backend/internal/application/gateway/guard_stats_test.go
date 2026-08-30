@@ -94,8 +94,8 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 		selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 		service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 		service.UpdateQualityRetry(QualityRetryRuntime{
-			Enabled: true, MaxAttempts: maxAttempts, MinOutputTokens: 32,
-			OnExhausted: qualityRetryFailClosed, HoldTimeout: time.Second,
+			Enabled: true, MaxAttempts: maxAttempts,
+			OnExhausted: qualityRetryFailClosed,
 		})
 		return service
 	}

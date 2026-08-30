@@ -16,7 +16,7 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 	collector := newGuardStatsCollector()
 	collector.recordExempt(QualityExemptMessagesNoThink)
 	collector.recordExempt(QualityExemptMessagesNoThink)
-	collector.recordExempt(QualityExemptReasoningOff)
+	collector.recordExempt(QualityExemptModelScope)
 	collector.recordExempt("totally_unknown_reason")
 
 	snapshot := collector.Snapshot()
@@ -30,8 +30,8 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 	if got := byReason[QualityExemptMessagesNoThink].Count; got != 2 {
 		t.Fatalf("messages_thinking_off count = %d", got)
 	}
-	if got := byReason[QualityExemptReasoningOff].Count; got != 1 {
-		t.Fatalf("reasoning_disabled count = %d", got)
+	if got := byReason[QualityExemptModelScope].Count; got != 1 {
+		t.Fatalf("model_out_of_scope count = %d", got)
 	}
 	if got := byReason[QualityExemptDisabled].Count; got != 0 {
 		t.Fatalf("untouched reason must stay zero, got %d", got)
@@ -56,8 +56,8 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 		seenOrder = append(seenOrder, stat.Signal)
 	}
 	want := strings.Join([]string{
-		string(GuardSignalHeaderBudget), string(GuardSignalCreatedTimeout), string(GuardSignalEvidenceTimeout),
-		string(GuardSignalEmptyStream), string(GuardSignalWithhold), string(GuardSignalTerminalBurst),
+		string(GuardSignalCreatedTimeout), string(GuardSignalEvidenceTimeout),
+		string(GuardSignalEmptyStream), string(GuardSignalWithhold),
 	}, ",")
 	if strings.Join(seenOrder, ",") != want {
 		t.Fatalf("signal order = %v", seenOrder)
@@ -67,7 +67,7 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 // TestQualityHoldExemptReasonPaths 锁定豁免原因与 hold 判定的一致性：
 // reason=="" 当且仅当 shouldHoldQualityStream 为真，各豁免路径返回专属 token。
 func TestQualityHoldExemptReasonPaths(t *testing.T) {
-	cfg := QualityRetryRuntime{Enabled: true, MinOutputTokens: 8}
+	cfg := QualityRetryRuntime{Enabled: true}
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6", PublicID: "grok-4.6"}
 	input := Input{Streaming: true, PublicModel: "grok-4.6", Body: []byte("{}")}
 
@@ -91,12 +91,37 @@ func TestQualityHoldExemptReasonPaths(t *testing.T) {
 	if reason := qualityHoldExemptReason(input, nil, webRoute, audit.OperationChat, cfg); reason != QualityExemptProvider {
 		t.Fatalf("web provider = %q", reason)
 	}
+	// reasoning_disabled 豁免已删除：白名单内模型（4.5/4.6）
+	// 不支持 none，显式关闭是非法组合——不再豁免，照常进守卫（上游会以
+	// 400 拒绝该请求，守卫判决无从发生，也不会误罚账号）。
 	none := Input{Streaming: true, PublicModel: "grok-4.6", Body: []byte("{\"reasoning_effort\":\"none\"}")}
-	if reason := qualityHoldExemptReason(none, nil, route, audit.OperationChat, cfg); reason != QualityExemptReasoningOff {
-		t.Fatalf("reasoning none = %q", reason)
+	if reason := qualityHoldExemptReason(none, nil, route, audit.OperationChat, cfg); reason != "" {
+		t.Fatalf("explicit none on none-incapable model must stay gated, got %q", reason)
 	}
-	if reason := qualityHoldExemptReason(input, nil, route, audit.OperationMessages, cfg); reason != QualityExemptMessagesNoThink {
-		t.Fatalf("messages without thinking = %q", reason)
+	// 模型白名单：名单外模型整体豁免（model_out_of_scope），先于其他判定。
+	scoped := cfg
+	scoped.GuardedModels = []string{"grok-4.5", "grok-4.6"}
+	if reason := qualityHoldExemptReason(none, nil, route, audit.OperationChat, scoped); reason != "" {
+		t.Fatalf("in-scope model must stay gated, got %q", reason)
+	}
+	outOfScope := Input{Streaming: true, PublicModel: "grok-4.3", Body: []byte("{}")}
+	route43 := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.3", PublicID: "grok-4.3"}
+	if reason := qualityHoldExemptReason(outOfScope, nil, route43, audit.OperationChat, scoped); reason != QualityExemptModelScope {
+		t.Fatalf("out-of-scope model = %q", reason)
+	}
+	// 档位后缀别名按前缀归入基模型（grok-4.6 覆盖 grok-4.6-xhigh）。
+	alias := Input{Streaming: true, PublicModel: "grok-4.6-xhigh", Body: []byte("{}")}
+	if reason := qualityHoldExemptReason(alias, nil, route, audit.OperationChat, scoped); reason != "" {
+		t.Fatalf("effort-suffixed alias of in-scope model = %q, want gated", reason)
+	}
+	// 修正：流式 messages 未请求 thinking 照常 hold（转换器以
+	// ThinkingEvidenceComment 保留证据）；仅非流式保留豁免。
+	if reason := qualityHoldExemptReason(input, nil, route, audit.OperationMessages, cfg); reason != "" {
+		t.Fatalf("streaming messages without thinking = %q, want gated", reason)
+	}
+	nonStream := Input{Streaming: false, PublicModel: "grok-4.6", Body: input.Body}
+	if reason := qualityHoldExemptReason(nonStream, nil, route, audit.OperationMessages, cfg); reason != QualityExemptMessagesNoThink {
+		t.Fatalf("non-stream messages without thinking = %q", reason)
 	}
 	nonReasoningInput := Input{Streaming: true, PublicModel: "not-a-grok-model", Body: []byte("{}")}
 	nonReasoning := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "not-a-grok-model", PublicID: "not-a-grok-model"}

@@ -20,8 +20,8 @@ func FuzzPeekQualityBody(f *testing.F) {
 	f.Add([]byte(`{"output":[{"type":"function_call","call_id":"c1","name":"read"}]}`))
 	f.Add([]byte(`{"output":[{"type":"message","content":[{"type":"refusal","refusal":"no"}]},{"type":"web_search_call"}]}`))
 	f.Fuzz(func(t *testing.T, body []byte) {
-		cfg := QualityRetryRuntime{Enabled: true, MinOutputTokens: 8}
-		replay, verdict, usage, _, err := peekQualityBody(io.NopCloser(newByteReader(body)), cfg)
+		cfg := QualityRetryRuntime{Enabled: true}
+		replay, verdict, usage, err := peekQualityBody(io.NopCloser(newByteReader(body)), cfg)
 		if replay == nil {
 			t.Fatalf("replay reader must never be nil")
 		}

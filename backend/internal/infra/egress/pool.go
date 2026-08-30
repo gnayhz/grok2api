@@ -37,7 +37,7 @@ func (m *Manager) SetDegradeEvidenceCooldowns(base, max time.Duration) {
 }
 
 // MarkDegradeEvidence applies the pending soft cooldown after one degrade
-// verdict (withhold / idle / header-budget). The node is avoided by every
+// verdict (withhold / idle abort). The node is avoided by every
 // account until attribution confirms (CLEAN upgrades to quarantine) or the
 // escalated deadline expires. Repeat evidence inside the window doubles the
 // cooldown, bounded by max — with attribution unavailable this converges the

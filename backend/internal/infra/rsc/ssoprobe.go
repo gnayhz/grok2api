@@ -17,17 +17,14 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 )
 
-// Probe is the transport contract behind every RSC check method. The legacy
-// homepage parser (*Checker) and the SSO thinking probe (*SSOProbeChecker)
-// both project onto it so the risk service stays method-agnostic.
+// Probe is the transport contract behind the RSC check. The SSO thinking
+// probe (*SSOProbeChecker) projects onto it so the risk service stays
+// transport-agnostic.
 type Probe interface {
 	Check(ctx context.Context, ssoToken string) Result
 }
 
-var (
-	_ Probe = (*Checker)(nil)
-	_ Probe = (*SSOProbeChecker)(nil)
-)
+var _ Probe = (*SSOProbeChecker)(nil)
 
 // 2026-08: grok.com stopped delivering the botFlag fields through the Next.js
 // RSC payload, so the homepage check reads every account as clean. The only
@@ -97,7 +94,7 @@ func probeAnswerChannel(channel string) bool {
 // The turn protocol and thinking-channel vocabulary match the live Web
 // gateway (split item.create + response.create; ANALYSIS/REASONING/NOTETAKER).
 //
-// ProxyURL is configurable (empty = direct): the 2026-08-28 production
+// ProxyURL is configurable (empty = direct): the production
 // incident falsified the old "the signal is account-level, not IP-level,
 // direct is fine" assumption — the first patrol burst dialed direct from
 // the datacenter IP and grok.com served every healthy identity without a
@@ -173,8 +170,7 @@ func NewSSOProbeChecker(timeout time.Duration) *SSOProbeChecker {
 //   - error : transport/stream trouble (rate limits, challenges, timeouts).
 //     Never treated as clean or denied; callers retry later.
 //
-// Transient statuses (403/429/502/503) retry once on a fresh client, mirroring
-// the legacy homepage checker.
+// Transient statuses (403/429/502/503) retry once on a fresh client.
 func (p *SSOProbeChecker) Check(ctx context.Context, ssoToken string) Result {
 	ssoToken = strings.TrimSpace(ssoToken)
 	if ssoToken == "" {
@@ -236,7 +232,7 @@ func transientHTTPStatus(status int) bool {
 // WithProxyUrl for plain http(s) proxies, direct when ProxyURL is empty.
 func (p *SSOProbeChecker) newClient() (tlsclient.HttpClient, error) {
 	options := []tlsclient.HttpClientOption{
-		tlsclient.WithTimeoutSeconds(int(p.Timeout.Seconds())+1),
+		tlsclient.WithTimeoutSeconds(int(p.Timeout.Seconds()) + 1),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithNotFollowRedirects(),
 	}

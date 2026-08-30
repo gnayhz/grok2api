@@ -187,8 +187,6 @@ func newTransportUpstreamFailure(err error, accountID uint64, accountName string
 		status, code, message = http.StatusGatewayTimeout, "quality_evidence_timeout", "上游流式响应长时间无思考证据"
 	} else if errors.Is(err, errQualityCreatedTimeout) {
 		status, code, message = http.StatusGatewayTimeout, "quality_created_timeout", "上游流式响应长时间无首事件（排队特征）"
-	} else if errors.Is(err, errQualityHeaderBudget) {
-		status, code, message = http.StatusGatewayTimeout, "quality_degraded_header_budget", "上游响应头迟滞（降智路径特征）"
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		code, message = "upstream_timeout", "上游服务响应超时"
 	}

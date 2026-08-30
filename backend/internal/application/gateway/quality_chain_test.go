@@ -144,8 +144,8 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 	selector := NewSelector(accountRepo, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 3, MinOutputTokens: 8,
-		OnExhausted: qualityRetryFailClosed, HoldTimeout: 50 * time.Millisecond,
+		Enabled: true, MaxAttempts: 3,
+		OnExhausted:     qualityRetryFailClosed,
 		EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond,
 		SameAccountRetry: false, AccountCooldown: 12 * time.Hour,
 	})

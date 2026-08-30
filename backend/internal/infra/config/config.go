@@ -253,45 +253,43 @@ type AuditConfig struct {
 	Retention Duration `yaml:"retention"`
 }
 
-// RequestRetryConfig holds the real-time routing guard policy（实时路由守卫）：
-// withholds a thinking-model stream that already has enough visible output and
-// no reasoning, then retries on the same account once and on other accounts.
+// RequestRetryConfig holds the real-time routing guard policy（实时路由守卫，
+// 零延迟状态机）：缺少思考证据的流在毫秒内扣留并换号重试，预算耗尽
+// Fail-Closed 503。判定与长度阈值无关（正文抢跑即扣留），与 hold 窗口
+// 无关（判决性信号即时生效）。
 type RequestRetryConfig struct {
 	Enabled         bool     `yaml:"enabled"`
 	MaxAttempts     int      `yaml:"maxAttempts"`
-	HoldTimeout     Duration `yaml:"holdTimeout"`
-	MinOutputTokens int      `yaml:"minOutputTokens"`
 	OnExhausted     string   `yaml:"onExhausted"`
 	AccountCooldown Duration `yaml:"accountCooldown"`
 
-	// EarlyHeaderAbort 是实验性的响应头预算早断（0=关闭）：quality hold 激活
-	// 的流式请求若超过该预算仍未收到上游响应头，视为降智路径特征立即中止
-	// 换路径重试。健康推理路径的头恒定秒级返回；降智路径要等生成完成。
-	EarlyHeaderAbort Duration `yaml:"earlyHeaderAbort"`
-	// SameAccountRetry retries the withholding account once before switching:
-	// tunnel-pool egress rotates the exit IP per request, so this retry
-	// separates transient exit-IP pollution from a degraded account.
-	// 默认开启（生产实测有效区分瞬时 IP 污染与降智账号）；显式置 false 关闭。
+	// GuardedModels 限定守卫介入的模型白名单（空=全部推理模型，向后兼容）。
+	// 守卫价值集中在主力推理模型（grok-4.5/4.6）；边缘/退役模型介入只会
+	// 产出噪声拦截（grok-4.3 四连 503 实证）。条目匹配 public/
+	// upstream 模型名，"grok-4.6" 前缀覆盖 "grok-4.6-xhigh" 档位别名。
+	// yaml 级配置，重启生效；管理端保存不会清空该字段。
+	GuardedModels []string `yaml:"guardedModels"`
+
+	// SameAccountRetry retries the withholding account once before switching.
+	// 仅在旋转代理池出口（每请求换新 IP）下生效：直连/固定出口时网关会
+	// 强制忽略该开关——同号重试再次进入同一脏 IP 的恢复概率≈0。
+	// 默认开启；显式置 false 关闭。
 	SameAccountRetry bool `yaml:"sameAccountRetry"`
 	// EvidenceTimeout 是流式请求的零证据截止：静默期超过该时长仍无思考
 	// 证据且无任何可见输出时，中止该次上游尝试并按空闲路径重试
-	// （0=默认 15s）。复杂提示词在降智路径的首输出静默期实测 75-121s，
-	// 而干净流首个思考增量 2.1s 即达（含复杂提示词），15s 有 7 倍安全边际。
+	// （0=默认 3.5s）。降智流已被 item.done 零延迟拦截截胡，该截止仅作为
+	// 网络假死/静默丢包的防死锁兜底（旧默认 15s 是"死等密文证据"时代的
+	// 产物）；干净流首个思考增量 2.1s 即达，3.5s 仍有安全边际。
 	EvidenceTimeout Duration `yaml:"evidenceTimeout"`
 	// CreatedTimeout 是流式请求的首事件截止：连任何 SSE data 事件（实践中
 	// 即 response.created / 首 chunk / message_start）都未到达时，中止该次
 	// 上游尝试并重试（0=默认 5s）。直连复测证实排队延迟在上游时钟内：
 	// clean 首 created 0.8-2.2s（与提示词复杂度无关），降智 68-125s——
-	// 5s 截止有 2.3 倍安全边际，比证据截止更早（4-5s vs 15s）。
+	// 5s 截止有 2.3 倍安全边际，比证据截止更早。
 	CreatedTimeout Duration `yaml:"createdTimeout"`
 	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 15m），独立于
 	// missing-thinking 的 AccountCooldown；上下限与 AccountCooldown 相同。
 	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
-	// TerminalBurstThreshold 是交付后"整包末尾爆发+零思考"签名的账号连击
-	// 熔断阈值（0=默认 3，范围 0-10）：达到即按 missing-thinking 语义冷却
-	// 账号并触发 RSC 归因。流级质量守卫之外的纵深防御——2026-08-27 线上
-	// previous_response_id 续聊链 7 连发降智零惩罚的直接对策。
-	TerminalBurstThreshold int `yaml:"terminalBurstThreshold"`
 }
 
 type ClientKeyDefaultsConfig struct {
@@ -793,22 +791,24 @@ func validateRequestRetry(value RequestRetryConfig) error {
 	if !value.Enabled {
 		return nil
 	}
-	if value.MaxAttempts != 0 && (value.MaxAttempts < 1 || value.MaxAttempts > 6) {
-		return errors.New("requestRetry.maxAttempts 必须在 1 到 6 之间")
-	}
-	if d := value.HoldTimeout.Value(); d != 0 && (d < 200*time.Millisecond || d > 30*time.Second) {
-		return errors.New("requestRetry.holdTimeout 必须在 200ms 到 30s 之间")
-	}
-	if value.MinOutputTokens != 0 && (value.MinOutputTokens < 8 || value.MinOutputTokens > 256) {
-		return errors.New("requestRetry.minOutputTokens 必须在 8 到 256 之间")
-	}
-	if d := value.EarlyHeaderAbort.Value(); d != 0 && (d < 3*time.Second || d > 60*time.Second) {
-		return errors.New("requestRetry.earlyHeaderAbort 必须在 3s 到 60s 之间（0 表示关闭）")
+	// 预算是安全属性而非调优旋钮（蓝图 §3.2）：上限 3 = 默认 2（初始+1 次
+	// 重试）留一档旋转池同号重试余量；历史上限 6 会重建零延迟拦截前的
+	// 90-120s 串行黑洞性时延。
+	if value.MaxAttempts != 0 && (value.MaxAttempts < 1 || value.MaxAttempts > 3) {
+		return errors.New("requestRetry.maxAttempts 必须在 1 到 3 之间（全局请求预算上限，默认 2）")
 	}
 	switch strings.TrimSpace(value.OnExhausted) {
 	case "", "fail_open", "fail_closed":
 	default:
 		return errors.New("requestRetry.onExhausted 必须是 fail_open 或 fail_closed")
+	}
+	if len(value.GuardedModels) > 32 {
+		return errors.New("requestRetry.guardedModels 最多 32 个条目")
+	}
+	for _, name := range value.GuardedModels {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("requestRetry.guardedModels 含空条目")
+		}
 	}
 	if d := value.AccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
 		return errors.New("requestRetry.accountCooldown 必须在 1m 到 168h 之间")
@@ -816,14 +816,11 @@ func validateRequestRetry(value RequestRetryConfig) error {
 	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
 		return errors.New("requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间（0 表示默认 15m）")
 	}
-	if d := value.EvidenceTimeout.Value(); d != 0 && (d < 3*time.Second || d > 5*time.Minute) {
-		return errors.New("requestRetry.evidenceTimeout 必须在 3s 到 5m 之间（0 表示默认 15s）")
+	if d := value.EvidenceTimeout.Value(); d != 0 && (d < time.Second || d > 5*time.Minute) {
+		return errors.New("requestRetry.evidenceTimeout 必须在 1s 到 5m 之间（0 表示默认 3.5s）")
 	}
 	if d := value.CreatedTimeout.Value(); d != 0 && (d < time.Second || d > 2*time.Minute) {
 		return errors.New("requestRetry.createdTimeout 必须在 1s 到 2m 之间（0 表示默认 5s）")
-	}
-	if value.TerminalBurstThreshold < 0 || value.TerminalBurstThreshold > 10 {
-		return errors.New("requestRetry.terminalBurstThreshold 必须在 0 到 10 之间（0 表示默认 3）")
 	}
 	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
 		return errors.New("qualityGuard.requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间")
@@ -939,8 +936,8 @@ func defaultConfig() Config {
 
 		AccountRisk: DefaultAccountRiskConfig(),
 		RequestRetry: RequestRetryConfig{
-			MaxAttempts: 6, HoldTimeout: Duration(3 * time.Second), MinOutputTokens: 32, OnExhausted: "fail_closed", SameAccountRetry: true,
-			AccountCooldown: Duration(24 * time.Hour), TerminalBurstThreshold: 3},
+			MaxAttempts: 2, OnExhausted: "fail_closed", SameAccountRetry: true,
+			AccountCooldown: Duration(24 * time.Hour), EvidenceTimeout: Duration(3500 * time.Millisecond), CreatedTimeout: Duration(5 * time.Second)},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{
 			MarkBuildForbiddenReauth:             false,

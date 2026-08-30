@@ -71,7 +71,7 @@ func BenchmarkSelectorMultiModelCandidateLoad(b *testing.B) {
 // 快照缓存命中（固定 now < expiresAt，免 30s TTL 失效）。这是选号在每个
 // 请求上实际发生的事——cold-load（上方 models_N 基准）只在 TTL 过期后
 // 每 30s 一次，且被 singleflight 合并。区分两者避免把冷启动成本误当
-// 每请求成本（2026-08-21 轮4甄别记录）。
+// 每请求成本（轮4甄别记录）。
 func BenchmarkSelectorCandidateCacheHit(b *testing.B) {
 	const accountCount = 300
 	models := []string{"benchmark-model-1", "benchmark-model-2"}

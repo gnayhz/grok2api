@@ -23,8 +23,10 @@ import (
 
 // Verdict strings persisted by the store.
 const (
-	VerdictClean   = "clean"
-	VerdictDenied  = "denied"
+	VerdictClean  = "clean"
+	VerdictDenied = "denied"
+	// VerdictFlagged 仅由已删除的 homepage 解析器产生（遗留数据类）：无生产者，
+	// 但 Risky()/patrol/reconcile 必须继续承接历史行直到 DeniedTTL 过期被复测覆盖。
 	VerdictFlagged = "flagged"
 	VerdictError   = "error"
 )
@@ -32,9 +34,7 @@ const (
 // StoredVerdict is the persisted form of one RSC check.
 type StoredVerdict struct {
 	Verdict    string
-	BotFlagSrc int
 	BotFlagDtl string
-	RiskScore  float64
 	HTTPStatus int
 	Error      string
 	Source     string
@@ -248,9 +248,7 @@ type checkCall struct {
 // composition root adapts the concrete RSC checker onto this port type.
 type CheckResult struct {
 	Verdict        string
-	BotFlagSource  int
 	BotFlagDetails string
-	RiskScore      float64
 	HTTPStatus     int
 	Error          string
 	CheckedAt      time.Time
@@ -638,7 +636,7 @@ func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Cr
 	perfmetrics.Default.Inc("account_rsc_check_total", perfmetrics.Labels{
 		Subsystem: "account", Operation: "rsc_check", Outcome: verdict.Verdict,
 	})
-	s.logger.Info("account_rsc_checked", "account_id", credential.ID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+	s.logger.Info("account_rsc_checked", "account_id", credential.ID, "verdict", verdict.Verdict, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 	return verdict
 }
 
@@ -839,7 +837,7 @@ func (s *Service) checkNow(ctx context.Context, webID, originAccountID uint64, t
 	})
 	// 日志与落库同一脱敏规则（rsc.RedactSecrets）：BotFlagDtl 是上游可控
 	// 文本，此前仓储层落库前脱敏但日志打原始值——同一载荷两套口径。
-	s.logger.Info("account_rsc_checked", "account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+	s.logger.Info("account_rsc_checked", "account_id", webID, "verdict", verdict.Verdict, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 	return verdict
 }
 
@@ -862,16 +860,16 @@ func storedFromCheck(result CheckResult) StoredVerdict {
 		source = "rsc" // legacy default; the adapter always tags real probes
 	}
 	return StoredVerdict{
-		Verdict: result.Verdict, BotFlagSrc: result.BotFlagSource, BotFlagDtl: result.BotFlagDetails,
-		RiskScore: result.RiskScore, HTTPStatus: result.HTTPStatus, Error: result.Error,
+		Verdict: result.Verdict, BotFlagDtl: result.BotFlagDetails,
+		HTTPStatus: result.HTTPStatus, Error: result.Error,
 		Source: source, CheckedAt: result.CheckedAt,
 	}
 }
 
 // nextDeniedStreak 统计一个身份的连续 denied 次数:已有 denied/flagged
 // verdict(saveVerdictGuarded 使其对 error 具有粘性)则 +1,否则从 1 起。
-// 连续次数达到 DeniedConfirmations 才进入处置——单次瞬时误读(2026-08-28
-// 生产首批 7 连发被整批降级服务)不可能再直接定罪。
+// 连续次数达到 DeniedConfirmations 才进入处置——单次瞬时误读(
+// 生产首批密集探测被整批降级服务)不可能再直接定罪。
 func (s *Service) nextDeniedStreak(ctx context.Context, webID uint64) int {
 	if existing, err := s.store.GetRiskVerdict(ctx, webID); err == nil && existing.Risky() {
 		return existing.DeniedStreak + 1
@@ -1041,10 +1039,10 @@ func (s *Service) flagAccount(ctx context.Context, id, webID uint64, verdict Sto
 	}
 	s.clearCooldownQuietly(ctx, id)
 	if id != webID {
-		s.logger.Warn("account_risk_flagged", "account_id", id, "web_account_id", webID, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+		s.logger.Warn("account_risk_flagged", "account_id", id, "web_account_id", webID, "verdict", verdict.Verdict, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 		return
 	}
-	s.logger.Warn("account_risk_flagged", "account_id", id, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+	s.logger.Warn("account_risk_flagged", "account_id", id, "verdict", verdict.Verdict, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 }
 
 // unflagAccount 收敛 risk_status 到 clean 结论:写空标记并清归因列。
@@ -1068,7 +1066,7 @@ func (s *Service) disableAccount(ctx context.Context, id, webID uint64, verdict 
 		s.logger.Warn("account_risk_disabled", "account_id", id, "web_account_id", webID, "verdict", verdict.Verdict)
 		return
 	}
-	s.logger.Warn("account_risk_disabled", "account_id", id, "verdict", verdict.Verdict, "risk_score", verdict.RiskScore, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
+	s.logger.Warn("account_risk_disabled", "account_id", id, "verdict", verdict.Verdict, "details", rsc.RedactSecrets(verdict.BotFlagDtl))
 }
 
 // clearCooldownQuietly lifts a missing-thinking/empty-stream cooldown after a
@@ -1174,7 +1172,7 @@ func (s *Service) patrolTick(ctx context.Context, dueIDs []uint64, force bool) {
 		// 已标风控后 Build 再降智时无法再调度 SSO 探针,Build 会永远停在冷却。
 		verdict := s.checkNow(ctx, webID, webID, accountdomain.RiskTriggerPatrol)
 		s.applyConsequences(ctx, webID, webID, verdict, 0)
-		// 探针间隔抖动:2026-08-28 首批 7 连发(9 秒)触发上游对整批连接的
+		// 探针间隔抖动:首批密集探测触发上游对整批连接的
 		// 降级服务,7 个健康身份被一次性误判。0.5-1.2s 随机间隔打散批次
 		// 节奏,期间保持可取消。
 		if index < len(dueIDs)-1 {

@@ -16,24 +16,16 @@ const (
 	GuardSignalEvidenceTimeout GuardSignal = "evidence_timeout"
 	// GuardSignalEmptyStream: 流结束但零内容零推理。
 	GuardSignalEmptyStream GuardSignal = "empty_stream"
-	// GuardSignalHeaderBudget: 响应头预算早断。
-	GuardSignalHeaderBudget GuardSignal = "header_budget"
 	// GuardSignalWithhold: 有输出但缺少思考证据被判扣留。
 	GuardSignalWithhold GuardSignal = "missing_thinking"
-	// GuardSignalTerminalBurst: 交付后"整包末尾爆发+零思考"签名连击熔断
-	// (2026-08-27 续聊链事故对策)。它是交付后的纵深防御信号,按拦截
-	// 时机排在所有实时信号之后。
-	GuardSignalTerminalBurst GuardSignal = "terminal_burst"
 )
 
 // guardSignalOrder 定义 UI 展示顺序(按拦截时机从早到晚)。
 var guardSignalOrder = []GuardSignal{
-	GuardSignalHeaderBudget,
 	GuardSignalCreatedTimeout,
 	GuardSignalEvidenceTimeout,
 	GuardSignalEmptyStream,
 	GuardSignalWithhold,
-	GuardSignalTerminalBurst,
 }
 
 // guardExemptOrder 定义守卫豁免原因的展示顺序,与 quality_retry.go 中的
@@ -45,7 +37,7 @@ var guardExemptOrder = []string{
 	QualityExemptOperation,
 	QualityExemptCompaction,
 	QualityExemptProvider,
-	QualityExemptReasoningOff,
+	QualityExemptModelScope,
 	QualityExemptMessagesNoThink,
 	QualityExemptModelNoReasoning,
 }

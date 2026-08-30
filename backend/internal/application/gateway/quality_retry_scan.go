@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 )
 
@@ -19,7 +20,7 @@ const (
 	qualityProtocolResponses  = "responses"
 	qualityProtocolAnthropic  = "anthropic"
 	qualityHoldMaxBufferBytes = 4 << 20
-	qualityOversizedLineBytes = 1 << 20
+	qualityHugeLineBytes      = 1 << 20
 	qualitySkipHeadBytes      = 4096
 	qualitySkipTailBytes      = 8192
 	qualityReadChunkBytes     = 32 << 10
@@ -27,17 +28,26 @@ const (
 	// 非流式此前无界。取 32MiB——足够容纳任何合法的完整 JSON 响应, 超过即视为
 	// 异常形态, 放弃判决直接透传。
 	qualityBodyPeekLimit = 32 << 20
-	// 注：chat 流转换器在 reasoning item 打开时发出的时序注释
-	// ": grok2api-reasoning-start"（见 chat_stream.go markChatReasoningStart）
-	// 不是思考证据——降智流同样会发；扫描器按 SSE 注释行（非 data: 前缀）
-	// 统一跳过，语义见 ObserveQualityChunk 行循环内的 NOTE。
+	// 注：SSE 注释行（": " 前缀，含上游 keepalive）不是思考证据——降智
+	// 流同样会发；扫描器按非 data: 行统一跳过。历史上转换器发过私有时序
+	// 注释 ": grok2api-reasoning-start"，该注入/剥除链路已随私有注释清理
+	// （蓝图 #14）整体移除。
 )
 
 type qualityScanState struct {
-	protocol     string
-	pending      []byte
-	hasThinking  bool
-	visibleRunes int
+	protocol string
+	pending  []byte
+	// hasThinking 仅由可见思考文本增量置位（三个协议同语义）：密文、
+	// 注释、usage 声明都不构成思考证据。
+	hasThinking bool
+	// reasoningEndedWithoutThinking 推理阶段已闭合（Responses 的
+	// output_item.done 携 reasoning item / Anthropic 的 thinking
+	// content_block_stop）而未产出任何思考增量——零延迟拦截信号。
+	reasoningEndedWithoutThinking bool
+	// anthropicThinkingStarted 跟踪 Messages 协议 thinking 块已开启：
+	// 块停止事件不携带类型，只能用该状态识别"thinking 块闭合"。
+	anthropicThinkingStarted bool
+	visibleRunes             int
 	// aggregateRunes 记录仅在终态聚合形式到达的文本（completed.output[].
 	// content[].text，无增量 delta）：同样是真实可见输出，计入可见估计。
 	aggregateRunes int
@@ -49,8 +59,6 @@ type qualityScanState struct {
 	usage           Usage
 	responseID      string
 	terminal        bool
-	// oversizedLine 保留给决策表/旧测试：扫描器不再用它 fail-open。
-	oversizedLine bool
 	// skipUntilNewline 丢弃当前超长 SSE 行的中间分片（换行到达前的
 	// encrypted_content 等），避免 1MiB 未完成行把降智流 fail-open。
 	// skipHead/skipTail 保留行首与滚动行尾，这样 2MiB completed 仍能
@@ -173,7 +181,25 @@ func (s *qualityScanState) semanticOutputOnly() bool {
 	return s.semanticOutput && s.visibleRunes == 0 && s.aggregateRunes == 0 && !s.hasThinking
 }
 
-func (s *qualityScanState) signals() QualityStreamSignals {
+// emptyEvidence 报告"零思考证据且零可见文本"形态。它是三个判决收口点
+// （流内终态短路 / EOF 收尾 / 非流式完整 body）共用的空流判定前提——
+// usage 声明（含声称 reasoning tokens）不得把该形态洗成"有内容"。
+// 推理阶段已闭合却零增量（reasoningEndedWithoutThinking）不算空证据：
+// 那是最强降智签名（EOF 补齐的末行同样携带它），必须走扣留而不是空流。
+func (s *qualityScanState) emptyEvidence() bool {
+	return !s.hasThinking && !s.reasoningEndedWithoutThinking && s.visibleRunes == 0 && s.aggregateRunes == 0
+}
+
+// emptyStreamVerdict 是空证据形态的终态判决:纯语义输出（工具调用等）
+// 不是空流——交付，不按空流冷却惩罚;其余为空流（可重试的空闲路径）。
+func (s *qualityScanState) emptyStreamVerdict() (QualityVerdict, error) {
+	if s.semanticOutputOnly() {
+		return QualityDeliver, nil
+	}
+	return QualityWait, errQualityEmptyStream
+}
+
+func (s *qualityScanState) signals() qualityStreamSignals {
 	visibleRunes := max(s.visibleRunes, s.aggregateRunes)
 	visible := int64((visibleRunes + 3) / 4)
 	// usage 声明仅在流本身已有内容/推理证据时才补充 output 估计：零内容
@@ -191,19 +217,18 @@ func (s *qualityScanState) signals() QualityStreamSignals {
 	}
 	// Thinking evidence is stream events only: non-empty reasoning text deltas
 	// across all three protocols. A degraded upstream opens the reasoning item
-	// (and the converter emits the SSE reasoning-start comment) but never
-	// streams reasoning text, while usage still claims reasoning tokens;
-	// treating item headers, the marker, or the usage claim as evidence
+	// but never streams reasoning text, while usage still claims reasoning tokens;
+	// treating item headers, SSE comments, or the usage claim as evidence
 	// delivered those streams to clients (observed live).
 	// usage.ReasoningTokens stays recorded for audit but never flips the
 	// verdict.
-	return QualityStreamSignals{
-		HasThinking:     s.hasThinking,
-		VisibleTokens:   visible,
-		ReasoningTokens: max(s.reasoningTokens, s.usage.ReasoningTokens),
-		OutputTokens:    output,
-		Terminal:        s.terminal,
-		OversizedLine:   s.oversizedLine,
+	return qualityStreamSignals{
+		HasThinking:                   s.hasThinking,
+		ReasoningEndedWithoutThinking: s.reasoningEndedWithoutThinking,
+		VisibleTokens:                 visible,
+		ReasoningTokens:               max(s.reasoningTokens, s.usage.ReasoningTokens),
+		OutputTokens:                  output,
+		Terminal:                      s.terminal,
 	}
 }
 
@@ -237,9 +262,10 @@ type qualityChatEvent struct {
 }
 
 // qualityReasoningItem 覆盖终态聚合输出的观测面（type + content）。注意
-// encrypted_content 不在观测面内：2026-08-20 实测降智流（RSC risk）与
+// encrypted_content 不在观测面内：实测降智流（RSC risk）与
 // clean 流都携带密文，它对降智判定毫无判别力，不是思考证据。
 type qualityReasoningItem struct {
+	ID      string `json:"id"`
 	Type    string `json:"type"`
 	Content []struct {
 		Type    string `json:"type"`
@@ -320,9 +346,9 @@ type qualityAnthropicEvent struct {
 	} `json:"usage"`
 }
 
-// ObserveQualityChunk feeds one SSE chunk into the hold classifier state.
+// observeQualityChunk feeds one SSE chunk into the hold classifier state.
 // This is the shipped scanner used by peekQualityStream.
-func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
+func observeQualityChunk(state *qualityScanState, chunk []byte) {
 	if state == nil || len(chunk) == 0 {
 		return
 	}
@@ -346,10 +372,10 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 		}
 		index := bytes.IndexByte(state.pending, '\n')
 		if index < 0 {
-			if len(state.pending) > qualityOversizedLineBytes {
+			if len(state.pending) > qualityHugeLineBytes {
 				// 换行前已超过 1MiB：生产 grok-4.6 xhigh 降智是
 				// encrypted_content 单行。丢掉中间密文，但保留行首/行尾。
-				classifyOversizedQualityLine(state, state.pending)
+				classifyHugeQualityLine(state, state.pending)
 				state.skipHead = append(state.skipHead[:0], state.pending[:min(len(state.pending), qualitySkipHeadBytes)]...)
 				state.skipTail = keepQualityTail(state.skipTail[:0], state.pending, qualitySkipTailBytes)
 				state.skipUntilNewline = true
@@ -362,9 +388,16 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 		if len(line) == 0 {
 			continue
 		}
-		// NOTE: SSE comments（如转换器发出的 ": grok2api-reasoning-start"）
-		// 不构成思考证据——降智流同样会发。仅有可见的推理文本增量
-		// （reasoning_text / reasoning_summary_text.delta 等）证明思考。
+		// NOTE: SSE 注释行（keepalive 等）不构成思考证据——降智流同样
+		// 会发。仅有可见的推理文本增量（reasoning_text /
+		// reasoning_summary_text.delta 等）证明思考。唯一例外：
+		// ThinkingEvidenceComment 由转换器在「客户端未请求 thinking 的
+		// Messages 请求」看到可见思考文本时写入（conversation/
+		// stream.go markThinkingEvidence），语义等同 thinking_delta。
+		if bytes.HasPrefix(line, []byte(conversation.ThinkingEvidenceComment)) {
+			state.hasThinking = true
+			continue
+		}
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
@@ -378,11 +411,11 @@ func ObserveQualityChunk(state *qualityScanState, chunk []byte) {
 	}
 }
 
-// classifyOversizedQualityLine 处理换行前已超过 1MiB 的 SSE 前缀。
-// 生产 2026-08-27：grok-4.6 xhigh 降智在 output_item.done 上推数 MiB
+// classifyHugeQualityLine 处理换行前已超过 1MiB 的 SSE 前缀。
+// 生产：grok-4.6 xhigh 降智在 output_item.done 上推数 MiB
 // encrypted_content、零可见思考；旧 fail-open 把后续答案原样交给客户端。
 // 思考增量不会到 1MiB，超长行按类型分流后丢掉本行。
-func classifyOversizedQualityLine(state *qualityScanState, line []byte) {
+func classifyHugeQualityLine(state *qualityScanState, line []byte) {
 	if state == nil || len(line) == 0 {
 		return
 	}
@@ -396,8 +429,26 @@ func classifyOversizedQualityLine(state *qualityScanState, line []byte) {
 		state.hasThinking = true
 		return
 	}
-	if bytes.Contains(line, []byte("output_text.delta")) {
+	// 三协议的可见正文标记对称覆盖：Responses 的 output_text.delta、Chat 的
+	// delta.content、Anthropic 的 text_delta。真实增量不会到 1MiB，这里只是
+	// 防御性对称——超长正文行不得因协议差异被静默丢弃成"零输出"。
+	if bytes.Contains(line, []byte("output_text.delta")) ||
+		bytes.Contains(line, []byte("text_delta")) ||
+		bytes.Contains(line, []byte(`"content":"`)) {
 		state.visibleRunes += 32
+	}
+	// 工具调用 item（联网搜索等）在超长行形态下同样是语义输出进行中
+	// ——与上方 item.added 的修复同源，防御性对称。item 的 type 字段位于
+	// 行首：只扫头部窗口，避免在数 MiB 密文行上增加三次全行扫描
+	//（规模轮 5 基准：全行扫描使 256KiB 路径回归 +13-19%）。
+	head := line
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	if bytes.Contains(head, []byte("web_search_call")) ||
+		bytes.Contains(head, []byte("function_call")) ||
+		bytes.Contains(head, []byte("mcp_call")) {
+		state.semanticOutput = true
 	}
 }
 
@@ -439,13 +490,22 @@ func observeHugeQualityPayload(state *qualityScanState, payload []byte) {
 	if state == nil {
 		return
 	}
-	classifyOversizedQualityLine(state, payload)
+	classifyHugeQualityLine(state, payload)
 	head := jsonpeek.Prefix(payload, 4096)
 	tail := jsonpeek.Suffix(payload, 8192)
 	typ := jsonpeek.StringField(head, "type")
 	switch typ {
 	case "response.completed", "response.incomplete", "response.failed", "message_stop":
 		state.terminal = true
+	case "response.output_item.done":
+		// 数 MiB encrypted_content 密文正是以超长 output_item.done 行到达：
+		// 零延迟拦截同样适用于超长行形态（保留首尾即可识别类型与 ID）。
+		isReasoningItem := bytes.Contains(head, []byte(`"type":"reasoning"`)) ||
+			bytes.Contains(head, []byte(`"type": "reasoning"`)) ||
+			bytes.Contains(head, []byte(`"id":"rs_`))
+		if isReasoningItem && !state.hasThinking {
+			state.reasoningEndedWithoutThinking = true
+		}
 	}
 	if jsonpeek.HasKey(head, "finish_reason") || jsonpeek.HasKey(tail, "finish_reason") {
 		state.terminal = true
@@ -540,6 +600,9 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 		if delta.Reasoning != "" || delta.ReasoningContent != "" || delta.ThinkingContent != "" {
 			state.hasThinking = true
 		}
+		// 注意：refusal 增量有意不计入可见正文。合法的即时拒绝可能没有思考，
+		// 若按规则 3 扣留会给账号记 12h missing-thinking——refusal-only 流走
+		// 空流路径（15m 空闲冷却）是更安全的归类，勿把 Refusal 加进 noteVisible。
 		if delta.Content != "" {
 			noteVisibleContent(state, delta.Content)
 		}
@@ -566,10 +629,34 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 		if event.Delta != "" {
 			state.hasThinking = true
 		}
-	case "response.output_item.added", "response.output_item.done":
+	case "response.output_item.added":
 		// A reasoning item header alone is not delivered thinking: degraded
-		// streams open the item (and even deliver encrypted_content ciphertext
-		// on item.done) while never emitting visible reasoning text deltas.
+		// streams open the item while never emitting visible reasoning text
+		// deltas.
+		//
+		// 工具 item 头（web_search_call/function_call/mcp_call 等）是语义输出
+		// 进行中：服务端联网搜索期间流会静默数秒（生产复现：创作
+		// 控制台开联网搜索，搜索静默 >3.5s 被证据截止误杀，504 连环）。与
+		// Anthropic 分支 content_block_start 的 tool_use 语义对称——置
+		// semanticOutput 让证据截止不把搜索等待当降智静默。reasoning/message
+		// 头不置：前者保持规则 2 的零延迟语义，后者随后即有文本增量。
+		switch event.Item.Type {
+		case "reasoning", "message", "":
+		default:
+			state.semanticOutput = true
+		}
+	case "response.output_item.done":
+		// 零延迟拦截（规则 2）：reasoning item 闭合（type=reasoning 或
+		// rs_/reasoning_ 前缀 ID，常携数 MiB encrypted_content）而本流未
+		// 产出任何思考增量——降智包的确切签名，0ms 判定 QualityWithhold，
+		// 无需等待证据超时。
+		if (event.Item.Type == "reasoning" || strings.HasPrefix(event.Item.ID, "rs_") || strings.HasPrefix(event.Item.ID, "reasoning_")) && !state.hasThinking {
+			state.reasoningEndedWithoutThinking = true
+		}
+		// item.done 也能携带聚合形式的 message 全文（部分上游不发增量、
+		// 也不在 completed 帧重放 output）——与 completed 帧的聚合语义一致，
+		// 计入可见估计；工具调用等非文本 item 计入语义输出。
+		state.aggregateRunes = max(state.aggregateRunes, noteResponsesAggregateOutput(state, event.Item))
 	case "response.output_text.delta":
 		if event.Delta != "" {
 			noteVisibleContent(state, event.Delta)
@@ -616,11 +703,24 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 	case "content_block_start":
 		// A thinking block start alone is not delivered thinking; only a
 		// non-empty thinking_delta below proves streamed thinking content.
-		if event.ContentBlock.Type != "" && event.ContentBlock.Type != "text" && event.ContentBlock.Type != "thinking" {
+		if event.ContentBlock.Type == "thinking" {
+			state.anthropicThinkingStarted = true
+		} else if event.ContentBlock.Type == "redacted_thinking" {
+			// redacted_thinking 是加密思考块（Anthropic 对 encrypted_content 的
+			// 表达）：与密文同理不构成思考证据，也不是语义输出——只有它而没有
+			// 可见思考增量的流必须维持待判/扣留，不得被"纯语义输出直接交付"
+			// 洗白。
+		} else if event.ContentBlock.Type != "" && event.ContentBlock.Type != "text" {
 			// tool_use 等非文本内容块是语义输出。
 			state.semanticOutput = true
 		}
 	case "content_block_stop":
+		// 零延迟拦截（规则 2 的 Messages 形态）：thinking 块闭合（停止事件
+		// 不携带类型，靠 anthropicThinkingStarted 状态识别）而未产出任何
+		// thinking_delta——降智流在此 0ms 判定 QualityWithhold。
+		if state.anthropicThinkingStarted && !state.hasThinking {
+			state.reasoningEndedWithoutThinking = true
+		}
 		if event.ContentBlock.Type == "text" && event.ContentBlock.Text != "" {
 			// 部分 Messages 兼容上游只在 block 结束时给出全文（聚合送达）。
 			noteVisibleContent(state, event.ContentBlock.Text)
@@ -657,65 +757,50 @@ func noteVisibleContent(state *qualityScanState, text string) {
 	state.visibleRunes += utf8.RuneCountInString(text)
 }
 
-func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, string, error) {
+func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
 	cfg = normalizeQualityRetry(cfg)
 	if body == nil {
-		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, "", errQualityEmptyStream
+		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, errQualityEmptyStream
 	}
 	pump := newQualityReadPump(body)
 	state := qualityScanState{protocol: protocol}
 	var held bytes.Buffer
-	holdTimer := time.NewTimer(cfg.HoldTimeout)
-	defer holdTimer.Stop()
-	// 零证据截止：复杂提示词的降智流首输出静默期实测 75-121s（2026-08-21
-	// 魔法球实测），干净流首思考增量 2.1s 即达。截止内无证据且无输出即中止
-	// 该次尝试（走空闲路径重试），把降智流式尝试从“完整静默期”压到预算内。
+	// 零证据截止（唯一的防死锁预算，蓝图规则 4）：静默期超过该时长仍无
+	// 思考证据且无可见输出即中止该次尝试（走空闲路径：短冷却+RSC 归因+
+	// 重试）。降智流已被 item.done 零延迟拦截截胡，干净流首思考增量 2.1s
+	// 即达，3.5s 有安全边际。旧的 hold 窗口已删：零延迟状态机下任何判决
+	// 性信号在主循环即刻生效，窗口到期无信号可翻盘。
 	evidenceTimer := time.NewTimer(cfg.EvidenceTimeout)
 	defer evidenceTimer.Stop()
 	// 首事件截止：直连复测证实降智排队期间上游零 data 事件（仅 keepalive
 	// 注释或零字节，response.created 等 68-125s），clean 恒定 0.8-2.2s。
-	// 比证据截止更早一档（5s vs 15s），把降智尝试成本再压低 2/3。
+	// 比证据截止更早一档，把降智排队尝试成本再压低。
 	createdTimer := time.NewTimer(cfg.CreatedTimeout)
 	defer createdTimer.Stop()
-	// holdExpired 粘性：timer 只触发一次，之后到达的小输出也必须按“hold
-	// 已超时”立即扣留，而不是退回 Wait 等待 EOF——否则慢速降智流会把首
-	// 字节无限推迟到流关闭。
-	holdExpired := false
 	for {
 		// 空流短路（与 finishQualityPeek 同语义）：terminal 已到而零内容零
 		// 推理时，usage 声明（含 output_tokens>0 的形式）不得把空流洗成可
 		// 扣留的“有内容”流——那会走扣留重试而不是空流冷却路径。
 		// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
-		// oversizedLine 时跳过：超长行证据不可靠应 fail-open，而非空流。
-		if state.terminal && !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.oversizedLine {
-			if state.semanticOutputOnly() {
-				return newPrefixReplay(&held, pump), QualityDeliver, state.usage, state.responseID, nil
-			}
-			return newPrefixReplay(&held, pump), QualityWait, state.usage, state.responseID, errQualityEmptyStream
+		if state.terminal && state.emptyEvidence() {
+			verdict, verdictErr := state.emptyStreamVerdict()
+			return newPrefixReplay(&held, pump), verdict, state.usage, verdictErr
 		}
-		sig := state.signals()
-		sig.HoldExpired = holdExpired
-		if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
-			return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
+		if verdict := classifyQualityHold(state.signals()); verdict != QualityWait {
+			return newPrefixReplay(&held, pump), verdict, state.usage, nil
 		}
 
 		select {
 		case <-ctx.Done():
 			_ = pump.Close()
-			return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, qualityPeekAbortError(ctx, ctx.Err())
-		case <-holdTimer.C:
-			holdExpired = true
-			sig.HoldExpired = true
-			if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
-				return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
-			}
+			return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, qualityPeekAbortError(ctx, ctx.Err())
 		case <-evidenceTimer.C:
 			// 截止触发时仍零思考证据、零可见/聚合输出、非语义输出流：该次
 			// 尝试按零证据超时中止（服务端走空闲冷却+RSC 归因+重试）。已有
 			// 任何输出或证据的流不受影响（证据提前放行/输出达到阈值扣留）。
-			if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.semanticOutput && !state.oversizedLine {
+			if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.semanticOutput {
 				_ = pump.Close()
-				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, errQualityEvidenceTimeout
+				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, errQualityEvidenceTimeout
 			}
 		case <-createdTimer.C:
 			// 首事件截止：连一个 data 事件都没到（keepalive 注释不算）。降智
@@ -723,7 +808,7 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 			// 尝试走空闲路径；任何 data 事件已到达则本截止失效（由证据截止接管）。
 			if !state.sawDataEvent {
 				_ = pump.Close()
-				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, errQualityCreatedTimeout
+				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, errQualityCreatedTimeout
 			}
 		case result, ok := <-pump.results:
 			if !ok {
@@ -732,51 +817,168 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 			if len(result.data) > 0 {
 				if held.Len()+len(result.data) > qualityHoldMaxBufferBytes {
 					_, _ = held.Write(result.data)
-					ObserveQualityChunk(&state, result.data)
+					observeQualityChunk(&state, result.data)
 					if state.hasThinking {
-						return newPrefixReplay(&held, pump), QualityDeliver, state.usage, state.responseID, nil
+						return newPrefixReplay(&held, pump), QualityDeliver, state.usage, nil
 					}
 					// 无思考证据的超大前缀几乎一定是降智密文堆，扣留而不是放行。
-					return newPrefixReplay(&held, pump), QualityWithhold, state.usage, state.responseID, nil
+					return newPrefixReplay(&held, pump), QualityWithhold, state.usage, nil
 				}
 				_, _ = held.Write(result.data)
-				ObserveQualityChunk(&state, result.data)
+				observeQualityChunk(&state, result.data)
 			}
 			if result.err == io.EOF {
 				return finishQualityPeek(&held, pump, &state, cfg)
 			}
 			if result.err != nil {
 				_ = pump.Close()
-				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, qualityPeekAbortError(ctx, result.err)
+				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, qualityPeekAbortError(ctx, result.err)
 			}
 		}
 	}
 }
 
-func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *qualityScanState, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, string, error) {
+func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *qualityScanState, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
 	if state == nil {
-		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, "", errQualityEmptyStream
+		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, errQualityEmptyStream
 	}
 	if len(state.pending) > 0 || state.skipUntilNewline {
 		// Process a final valid SSE data line even when the upstream omitted its
 		// trailing newline. Also flush a skipped huge line that never saw '\n'.
-		ObserveQualityChunk(state, []byte{'\n'})
+		observeQualityChunk(state, []byte{'\n'})
 	}
 	state.terminal = true
 	signals := state.signals()
 	// 空流判定只看流证据：只有 usage 帧（声称 reasoning tokens）而零内容零
 	// 推理事件的流同样是空流——usage 声明不能把空 200 洗成可投递响应。
 	// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
-	// oversizedLine 优先走 fail-open（调用方 ClassifyQualityHold 已处理）。
-	if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.oversizedLine {
-		if state.semanticOutput {
-			return newPrefixReplay(held, pump), QualityDeliver, state.usage, state.responseID, nil
-		}
-		return newPrefixReplay(held, pump), QualityWait, state.usage, state.responseID, errQualityEmptyStream
+	if state.emptyEvidence() {
+		verdict, verdictErr := state.emptyStreamVerdict()
+		return newPrefixReplay(held, pump), verdict, state.usage, verdictErr
 	}
-	return newPrefixReplay(held, pump), ClassifyQualityHold(signals, cfg.MinOutputTokens), state.usage, state.responseID, nil
+	return newPrefixReplay(held, pump), classifyQualityHold(signals), state.usage, nil
 }
 
+// qualityChatJSONBody 是非流式 chat 请求经 adapter 转换后的客户端形态。
+type qualityChatJSONBody struct {
+	ID    string `json:"id"`
+	Model string `json:"model"`
+	Usage *struct {
+		PromptTokens            int64 `json:"prompt_tokens"`
+		CompletionTokens        int64 `json:"completion_tokens"`
+		TotalTokens             int64 `json:"total_tokens"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+	} `json:"usage"`
+	Choices []struct {
+		Message struct {
+			Content          string            `json:"content"`
+			Reasoning        string            `json:"reasoning"`
+			ReasoningContent string            `json:"reasoning_content"`
+			ThinkingContent  string            `json:"thinking_content"`
+			Refusal          string            `json:"refusal"`
+			ToolCalls        []json.RawMessage `json:"tool_calls"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// qualityAnthropicJSONBody 是非流式 Messages 请求经 adapter 转换后的形态。
+type qualityAnthropicJSONBody struct {
+	ID    string `json:"id"`
+	Model string `json:"model"`
+	Usage *struct {
+		InputTokens         int64 `json:"input_tokens"`
+		OutputTokens        int64 `json:"output_tokens"`
+		OutputTokensDetails struct {
+			ThinkingTokens int64 `json:"thinking_tokens"`
+		} `json:"output_tokens_details"`
+	} `json:"usage"`
+	Content []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	} `json:"content"`
+}
+
+// parseQualityClientJSONBody 识别转换后的客户端 JSON 形态并把证据映射进
+// 扫描状态。识别失败返回 ok=false（调用方 fail-open）。证据规则与流式
+// 契约一致：可见思考文本是唯一健康证据，工具调用是语义输出，refusal
+// 不计可见（流式侧 round 34 已文档化同一取舍）。
+func parseQualityClientJSONBody(data []byte) (*qualityScanState, bool) {
+	var chat qualityChatJSONBody
+	if err := json.Unmarshal(data, &chat); err == nil && chat.Choices != nil {
+		state := &qualityScanState{protocol: qualityProtocolChat, responseID: chat.ID}
+		if chat.Usage != nil {
+			state.usage = Usage{
+				Reported: true, InputTokens: chat.Usage.PromptTokens,
+				OutputTokens:    chat.Usage.CompletionTokens,
+				ReasoningTokens: chat.Usage.CompletionTokensDetails.ReasoningTokens,
+				TotalTokens:     chat.Usage.TotalTokens, ResponseModel: chat.Model,
+			}
+			state.outputTokens = chat.Usage.CompletionTokens
+			state.reasoningTokens = chat.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		for _, choice := range chat.Choices {
+			message := choice.Message
+			if strings.TrimSpace(message.Reasoning) != "" || strings.TrimSpace(message.ReasoningContent) != "" || strings.TrimSpace(message.ThinkingContent) != "" {
+				state.hasThinking = true
+			}
+			if message.Content != "" {
+				state.aggregateRunes += utf8.RuneCountInString(message.Content)
+			}
+			if len(message.ToolCalls) > 0 {
+				state.semanticOutput = true
+			}
+		}
+		state.terminal = true
+		return state, true
+	}
+	var anthropic qualityAnthropicJSONBody
+	if err := json.Unmarshal(data, &anthropic); err == nil && anthropic.Content != nil {
+		state := &qualityScanState{protocol: qualityProtocolAnthropic, responseID: anthropic.ID}
+		if anthropic.Usage != nil {
+			state.usage = Usage{
+				Reported: true, InputTokens: anthropic.Usage.InputTokens,
+				OutputTokens:    anthropic.Usage.OutputTokens,
+				ReasoningTokens: anthropic.Usage.OutputTokensDetails.ThinkingTokens,
+				TotalTokens:     anthropic.Usage.OutputTokens, ResponseModel: anthropic.Model,
+			}
+			state.outputTokens = anthropic.Usage.OutputTokens
+			state.reasoningTokens = anthropic.Usage.OutputTokensDetails.ThinkingTokens
+		}
+		for _, block := range anthropic.Content {
+			switch block.Type {
+			case "thinking", "redacted_thinking":
+				if block.Type == "thinking" && strings.TrimSpace(block.Thinking) != "" {
+					state.hasThinking = true
+				}
+				// redacted_thinking 是密文：既非证据也非语义输出（round 32）。
+			case "text":
+				if block.Text != "" {
+					state.aggregateRunes += utf8.RuneCountInString(block.Text)
+				}
+			default:
+				if block.Type != "" {
+					state.semanticOutput = true
+				}
+			}
+		}
+		state.terminal = true
+		return state, true
+	}
+	return nil, false
+}
+
+// verdictForBodyState 收口客户端形态 body 的终态判决（与 Responses 形状
+// 的收口同语义：空证据走空流，纯语义输出交付，其余按分类器）。
+func verdictForBodyState(replay io.ReadCloser, state *qualityScanState) (io.ReadCloser, QualityVerdict, Usage, error) {
+	if state.emptyEvidence() {
+		verdict, verdictErr := state.emptyStreamVerdict()
+		return replay, verdict, state.usage, verdictErr
+	}
+	return replay, classifyQualityHold(state.signals()), state.usage, nil
+}
 func newPrefixReplay(held *bytes.Buffer, rest io.ReadCloser) io.ReadCloser {
 	if rest == nil {
 		rest = io.NopCloser(bytes.NewReader(nil))
@@ -789,7 +991,7 @@ func newPrefixReplay(held *bytes.Buffer, rest io.ReadCloser) io.ReadCloser {
 
 // qualityResponseBody 覆盖非流式上游响应（Build/Console 均为 Responses 形状）
 // 的观测面。summary/content 的可见思考文本与流式扫描器同语义；
-// encrypted_content 与 usage 声明不构成证据（2026-08-20 实测：降智响应
+// encrypted_content 与 usage 声明不构成证据（实测：降智响应
 // 密文与非零 reasoning_tokens 照常存在，无判别力）。
 type qualityResponseBody struct {
 	ID     string `json:"id"`
@@ -827,13 +1029,13 @@ func (c *chainedBody) Close() error               { return c.closer.Close() }
 
 // peekQualityBody 非流式响应的完整 body 判决。客户端本就要等完整 JSON 才能
 // 收到任何字节，读完再判的扣留附加延迟为零：不存在流式路径的时序复杂度
-// （无 hold 窗口/阈值/早断/前缀重放）。证据规则与流式扫描器一致：可见思考
+// （读完即判，无窗口/阈值等待）。证据规则与流式扫描器一致：可见思考
 // 文本是唯一健康证据。无法识别的响应形状（无 output 数组的合法 JSON）
-// fail-open 放行，与 oversizedLine 同语义——不猜测质量。
-func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, string, error) {
+// fail-open 放行——不猜测质量。
+func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
 	cfg = normalizeQualityRetry(cfg)
 	if body == nil {
-		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, "", errQualityEmptyStream
+		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, errQualityEmptyStream
 	}
 	data, readErr := io.ReadAll(io.LimitReader(body, qualityBodyPeekLimit+1))
 	if int64(len(data)) > qualityBodyPeekLimit {
@@ -842,21 +1044,27 @@ func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser
 		// 被劫持上游的超大 200 body 会在判决前全量驻留内存, 并发下 OOM。
 		// Close 必须传导给原始 body: Build 路径的 egressResponseBody.Close 同时
 		// 释放上游连接与 egress 租约, NopCloser 会两者都泄漏。
-		return &chainedBody{Reader: io.MultiReader(bytes.NewReader(data), body), closer: body}, QualityDeliver, Usage{}, "", nil
+		return &chainedBody{Reader: io.MultiReader(bytes.NewReader(data), body), closer: body}, QualityDeliver, Usage{}, nil
 	}
 	_ = body.Close()
 	replay := io.NopCloser(bytes.NewReader(data))
 	if readErr != nil {
-		return replay, QualityWait, Usage{}, "", readErr
+		return replay, QualityWait, Usage{}, readErr
 	}
 	var parsed qualityResponseBody
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		// 200 但 body 非合法 JSON：按空流处理（可重试），不猜质量。
-		return replay, QualityWait, Usage{}, "", errQualityEmptyStream
+		return replay, QualityWait, Usage{}, errQualityEmptyStream
 	}
 	if parsed.Output == nil {
-		// 合法 JSON 但非 Responses 形状：fail-open，不猜质量。
-		return replay, QualityDeliver, Usage{}, parsed.ID, nil
+		// 合法 JSON 但非 Responses 形状：非流式 chat/messages 请求的 body 已被
+		// adapter 转换成客户端形态（ForwardResponse 内完成）。按转换后的形状
+		// 判决——证据规则与流式契约一致（rounds 18/19 锁定的发射面）。
+		if clientState, ok := parseQualityClientJSONBody(data); ok {
+			return verdictForBodyState(replay, clientState)
+		}
+		// 仍无法识别的形状：fail-open，不猜质量。
+		return replay, QualityDeliver, Usage{}, nil
 	}
 	state := qualityScanState{protocol: qualityProtocolResponses}
 	for _, item := range parsed.Output {
@@ -865,15 +1073,24 @@ func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser
 		case "reasoning":
 			// 与流式一致：reasoning item 的可见文本（summary/内容）是思考
 			// 证据；仅携带密文的 reasoning item 不是。
+			seenThinkingText := false
 			for _, summary := range item.Summary {
 				if strings.TrimSpace(summary.Text) != "" {
 					state.hasThinking = true
+					seenThinkingText = true
 				}
 			}
 			for _, content := range item.Content {
 				if strings.TrimSpace(content.Text) != "" {
 					state.hasThinking = true
+					seenThinkingText = true
 				}
+			}
+			// 差分一致性（流式规则 2 的 body 形态）：reasoning item 闭合而零
+			// 可见思考文本——流式路径在 item.done 上判 reasoningEndedWithoutThinking，
+			// body 路径此前把它漏成空流。密文有无不改变判定（流式同此）。
+			if !seenThinkingText {
+				state.reasoningEndedWithoutThinking = true
 			}
 		case "message":
 			for _, content := range item.Content {
@@ -908,14 +1125,12 @@ func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser
 		}
 	}
 	// 空响应判定与 finishQualityPeek 同语义：零内容零思考且非纯语义输出 = 空流。
-	if !state.hasThinking && state.aggregateRunes == 0 {
-		if state.semanticOutput {
-			return replay, QualityDeliver, usage, parsed.ID, nil
-		}
-		return replay, QualityWait, usage, parsed.ID, errQualityEmptyStream
+	if state.emptyEvidence() {
+		verdict, verdictErr := state.emptyStreamVerdict()
+		return replay, verdict, usage, verdictErr
 	}
 	// body 已完整到达：恒为终态证据。
 	sig := state.signals()
 	sig.Terminal = true
-	return replay, ClassifyQualityHold(sig, cfg.MinOutputTokens), usage, parsed.ID, nil
+	return replay, classifyQualityHold(sig), usage, nil
 }

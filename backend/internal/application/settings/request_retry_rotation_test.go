@@ -22,7 +22,6 @@ func TestRequestRetryAndEgressRotationRuntimeOverride(t *testing.T) {
 	input := service.Get().Config
 	input.RequestRetryProvided = true
 	input.RequestRetry.CreatedTimeout = "12s"
-	input.RequestRetry.EarlyHeaderAbort = "0s"
 	input.EgressRotationProvided = true
 	input.EgressRotation.MinNodeInterval = "3m"
 
@@ -41,9 +40,6 @@ func TestRequestRetryAndEgressRotationRuntimeOverride(t *testing.T) {
 	}
 	if applied.Egress.Rotation.MinNodeInterval.Value() != 3*time.Minute {
 		t.Fatalf("apply fanout minNodeInterval = %v", applied.Egress.Rotation.MinNodeInterval)
-	}
-	if applied.RequestRetry.EarlyHeaderAbort.Value() != 0 {
-		t.Fatalf("earlyHeaderAbort must support explicit 0 (disabled): %v", applied.RequestRetry.EarlyHeaderAbort)
 	}
 
 	// 旧持久化载荷(整节缺失)沿用文件基线。

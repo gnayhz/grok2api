@@ -129,6 +129,13 @@ func TestAdmissionCapDropsAndRecovers(t *testing.T) {
 	accounts.linkedWeb[200] = 90
 	accounts.linkedBack[90] = append(builds[:n:n], 200)
 	service.OnDegraded(context.Background(), accountdomain.Credential{ID: 200, Provider: accountdomain.ProviderBuild}, 0)
+	// 准入递增发生在事件协程内：-race 高负载下立即读 pending 可能早于
+	// 递增（全量 race 门两次翻牌根因；fuzz 层并发下 2s 仍不够，
+	// 提至 5s——round 59 教训：时序界限给足余量而非贴边）。
+	deadline = time.Now().Add(5 * time.Second)
+	for service.pending.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := service.pending.Load(); got != 1 {
 		t.Fatalf("post-drain pending = %d, want 1 (cap must recover)", got)
 	}
