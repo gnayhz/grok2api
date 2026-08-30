@@ -480,6 +480,11 @@ func (c *streamConverter) reasoningSummaryDelta(itemID, delta string) error {
 		return nil
 	}
 	if !c.reasoningOutputEnabled() {
+		// 空白增量不是思考证据（生产抓流：summary 尾部会补纯换行增量），
+		// 不得写证据注释——守卫扫描端同样按非空白判定。
+		if strings.TrimSpace(delta) == "" {
+			return nil
+		}
 		return c.markThinkingEvidence()
 	}
 	_, state := c.ensureReasoningState(itemID)
@@ -502,6 +507,11 @@ func (c *streamConverter) reasoningTextDelta(itemID, delta string) error {
 		return nil
 	}
 	if !c.reasoningOutputEnabled() {
+		// 空白增量不是思考证据（生产抓流：summary 尾部会补纯换行增量），
+		// 不得写证据注释——守卫扫描端同样按非空白判定。
+		if strings.TrimSpace(delta) == "" {
+			return nil
+		}
 		return c.markThinkingEvidence()
 	}
 	_, state := c.ensureReasoningState(itemID)

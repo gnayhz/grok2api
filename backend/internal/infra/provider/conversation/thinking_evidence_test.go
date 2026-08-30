@@ -36,6 +36,30 @@ func TestThinkingEvidenceCommentOnRawTextDelta(t *testing.T) {
 	}
 }
 
+// 空白增量（summary 尾部补发的纯换行等）不是思考证据，不得写证据
+// 注释——否则守卫扫描端会把零思考降智流误判为有证据而整包放行。
+func TestBlankDeltaDoesNotEmitEvidenceComment(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	converter := newStreamConverter(&out, OperationMessages, ResponseOptions{})
+	if err := converter.handle("response.reasoning_summary_text.delta", []byte(`{"type":"response.reasoning_summary_text.delta","delta":"
+"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := converter.handle("response.reasoning_text.delta", []byte(`{"type":"response.reasoning_text.delta","delta":" 	 "}`)); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out.Bytes(), []byte(ThinkingEvidenceComment)) {
+		t.Fatalf("blank delta must not emit evidence comment, got: %q", out.String())
+	}
+	if err := converter.handle("response.reasoning_text.delta", []byte(`{"type":"response.reasoning_text.delta","delta":"hmm"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte(ThinkingEvidenceComment)) {
+		t.Fatal("visible delta must still emit evidence comment")
+	}
+}
+
 // thinking 已启用 / chat 协议：思考增量本身可见，不得出现证据注释。
 func TestNoEvidenceCommentWhenThinkingEnabledOrChat(t *testing.T) {
 	t.Parallel()

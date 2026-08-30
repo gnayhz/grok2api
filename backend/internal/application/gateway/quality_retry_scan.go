@@ -691,7 +691,7 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 	}
 	for _, choice := range event.Choices {
 		delta := choice.Delta
-		if delta.Reasoning != "" || delta.ReasoningContent != "" || delta.ThinkingContent != "" {
+		if hasVisibleThinkingText(delta.Reasoning) || hasVisibleThinkingText(delta.ReasoningContent) || hasVisibleThinkingText(delta.ThinkingContent) {
 			state.hasThinking = true
 		}
 		// 注意：refusal 增量有意不计入可见正文。合法的即时拒绝可能没有思考，
@@ -722,7 +722,7 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 	case "response.completed", "response.incomplete", "response.failed":
 		state.terminal = true
 	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-		if event.Delta != "" {
+		if hasVisibleThinkingText(event.Delta) {
 			state.hasThinking = true
 		}
 	case "response.output_item.added":
@@ -824,7 +824,7 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 			state.semanticOutput = true
 		}
 	case "content_block_delta":
-		if event.Delta.Type == "thinking_delta" && event.Delta.Thinking != "" {
+		if event.Delta.Type == "thinking_delta" && hasVisibleThinkingText(event.Delta.Thinking) {
 			state.hasThinking = true
 		}
 		// signature_delta（Messages 对 encrypted_content 的表达）不是思考
@@ -847,6 +847,15 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 		state.reasoningTokens = event.Usage.OutputTokensDetails.ThinkingTokens
 	}
 }
+// hasVisibleThinkingText 报告思考增量是否携带非空白内容。生产抓流实证：
+// 健康 summary 尾部会补发只含换行的增量，降智流的空推理项在末尾整包
+// flush 时也可能只携带空白增量。空白不含可见思考、不产生 reasoning
+// token（usage 结算为 0），作为证据会在规则 1 瞬间放行整包降智响应
+// （terminal_burst 事故形态：零思考答案末尾一次交付且守卫零计数）。
+func hasVisibleThinkingText(delta string) bool {
+	return strings.TrimSpace(delta) != ""
+}
+
 func noteVisibleContent(state *qualityScanState, text string) {
 	if text == "" {
 		return
