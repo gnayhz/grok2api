@@ -69,10 +69,100 @@ type qualityScanState struct {
 	// sawDataEvent 标记已解析到至少一个 SSE data 事件（任意类型）。供首事件
 	// 截止使用：keepalive 注释不算——降智排队期间上游只发注释或零字节。
 	sawDataEvent bool
+	// 指纹采样（quality_hold attempt 存档）：事件类型去重序列与关键时序。
+	// 不含文本/密文。startedAt 在 peek 入口赋值。
+	startedAt    time.Time
+	firstEventAt time.Time
+	itemDoneAt   time.Time
+	summaryAt    time.Time
+	eventTypes   []string
+	sawEncrypted bool
 	// 逐帧解码 scratch：事件结构体挂在 state 上复用（见类型注释）。
 	chatEvent      qualityChatEvent
 	responsesEvent qualityResponsesEvent
 	anthropicEvent qualityAnthropicEvent
+}
+
+const qualityFingerprintEventCap = 12
+
+func noteQualityEvent(state *qualityScanState, typ string) {
+	if state == nil || typ == "" {
+		return
+	}
+	now := time.Now()
+	if state.firstEventAt.IsZero() {
+		state.firstEventAt = now
+	}
+	switch typ {
+	case "response.output_item.done", "content_block_stop":
+		if state.itemDoneAt.IsZero() {
+			state.itemDoneAt = now
+		}
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "thinking_delta":
+		if state.summaryAt.IsZero() {
+			state.summaryAt = now
+		}
+	}
+	if len(state.eventTypes) >= qualityFingerprintEventCap {
+		return
+	}
+	for _, existing := range state.eventTypes {
+		if existing == typ {
+			return
+		}
+	}
+	state.eventTypes = append(state.eventTypes, typ)
+}
+
+func noteQualityEncrypted(state *qualityScanState, payload []byte) {
+	if state == nil || state.sawEncrypted || len(payload) == 0 {
+		return
+	}
+	if bytes.Contains(payload, []byte("encrypted_content")) && !bytes.Contains(payload, []byte("encrypted_content\":\"\"")) {
+		state.sawEncrypted = true
+	}
+}
+
+func relMS(start, at time.Time) int64 {
+	if start.IsZero() || at.IsZero() {
+		return 0
+	}
+	ms := at.Sub(start).Milliseconds()
+	if ms < 0 {
+		return 0
+	}
+	return ms
+}
+
+func (s *qualityScanState) fingerprint(verdict QualityVerdict, err error) qualityHoldFingerprint {
+	if s == nil {
+		return qualityHoldFingerprint{}
+	}
+	sig := s.signals()
+	fp := qualityHoldFingerprint{
+		Protocol:        s.protocol,
+		Verdict:         string(verdict),
+		Rule:            qualityHoldRule(sig, err),
+		HasThinking:     s.hasThinking,
+		ReasoningEnded:  s.reasoningEndedWithoutThinking,
+		SemanticOutput:  s.semanticOutput,
+		SawDataEvent:    s.sawDataEvent,
+		Encrypted:       s.sawEncrypted,
+		VisibleRunes:    max(s.visibleRunes, s.aggregateRunes),
+		OutputTokens:    sig.OutputTokens,
+		ReasoningTokens: sig.ReasoningTokens,
+		Events:          append([]string(nil), s.eventTypes...),
+		FirstEventMS:    relMS(s.startedAt, s.firstEventAt),
+		ItemDoneMS:      relMS(s.startedAt, s.itemDoneAt),
+		SummaryMS:       relMS(s.startedAt, s.summaryAt),
+	}
+	if !s.startedAt.IsZero() {
+		fp.PeekMS = time.Since(s.startedAt).Milliseconds()
+	}
+	if err != nil {
+		fp.Error = err.Error()
+	}
+	return fp
 }
 
 type qualityReadResult struct {
@@ -494,6 +584,8 @@ func observeHugeQualityPayload(state *qualityScanState, payload []byte) {
 	head := jsonpeek.Prefix(payload, 4096)
 	tail := jsonpeek.Suffix(payload, 8192)
 	typ := jsonpeek.StringField(head, "type")
+	noteQualityEvent(state, typ)
+	noteQualityEncrypted(state, payload)
 	switch typ {
 	case "response.completed", "response.incomplete", "response.failed", "message_stop":
 		state.terminal = true
@@ -560,6 +652,7 @@ func observeQualityPayload(state *qualityScanState, payload []byte) {
 		observeHugeQualityPayload(state, payload)
 		return
 	}
+	noteQualityEncrypted(state, payload)
 	switch state.protocol {
 	case qualityProtocolChat:
 		observeQualityChat(state, payload)
@@ -582,6 +675,7 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 	if json.Unmarshal(payload, event) != nil {
 		return
 	}
+	noteQualityEvent(state, "chat.chunk")
 	if state.responseID == "" {
 		state.responseID = event.ID
 	}
@@ -613,6 +707,7 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 		}
 		if choice.FinishReason != "" {
 			state.terminal = true
+			noteQualityEvent(state, "chat.finish")
 		}
 	}
 }
@@ -622,6 +717,7 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 	if json.Unmarshal(payload, event) != nil {
 		return
 	}
+	noteQualityEvent(state, event.Type)
 	switch event.Type {
 	case "response.completed", "response.incomplete", "response.failed":
 		state.terminal = true
@@ -697,6 +793,7 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 	if json.Unmarshal(payload, event) != nil {
 		return
 	}
+	noteQualityEvent(state, event.Type)
 	switch event.Type {
 	case "message_stop":
 		state.terminal = true
@@ -758,12 +855,18 @@ func noteVisibleContent(state *qualityScanState, text string) {
 }
 
 func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
+	replay, verdict, usage, _, err := peekQualityStreamReport(ctx, body, protocol, cfg)
+	return replay, verdict, usage, err
+}
+
+func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
 	cfg = normalizeQualityRetry(cfg)
+	empty := qualityScanState{protocol: protocol, startedAt: time.Now()}
 	if body == nil {
-		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, errQualityEmptyStream
+		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, empty.fingerprint(QualityWait, errQualityEmptyStream), errQualityEmptyStream
 	}
 	pump := newQualityReadPump(body)
-	state := qualityScanState{protocol: protocol}
+	state := qualityScanState{protocol: protocol, startedAt: time.Now()}
 	var held bytes.Buffer
 	// 零证据截止（唯一的防死锁预算，蓝图规则 4）：静默期超过该时长仍无
 	// 思考证据且无可见输出即中止该次尝试（走空闲路径：短冷却+RSC 归因+
@@ -777,6 +880,9 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 	// 比证据截止更早一档，把降智排队尝试成本再压低。
 	createdTimer := time.NewTimer(cfg.CreatedTimeout)
 	defer createdTimer.Stop()
+	emit := func(replay io.ReadCloser, verdict QualityVerdict, usage Usage, err error) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
+		return replay, verdict, usage, state.fingerprint(verdict, err), err
+	}
 	for {
 		// 空流短路（与 finishQualityPeek 同语义）：terminal 已到而零内容零
 		// 推理时，usage 声明（含 output_tokens>0 的形式）不得把空流洗成可
@@ -784,23 +890,23 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 		// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
 		if state.terminal && state.emptyEvidence() {
 			verdict, verdictErr := state.emptyStreamVerdict()
-			return newPrefixReplay(&held, pump), verdict, state.usage, verdictErr
+			return emit(newPrefixReplay(&held, pump), verdict, state.usage, verdictErr)
 		}
 		if verdict := classifyQualityHold(state.signals()); verdict != QualityWait {
-			return newPrefixReplay(&held, pump), verdict, state.usage, nil
+			return emit(newPrefixReplay(&held, pump), verdict, state.usage, nil)
 		}
 
 		select {
 		case <-ctx.Done():
 			_ = pump.Close()
-			return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, qualityPeekAbortError(ctx, ctx.Err())
+			return emit(io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, qualityPeekAbortError(ctx, ctx.Err()))
 		case <-evidenceTimer.C:
 			// 截止触发时仍零思考证据、零可见/聚合输出、非语义输出流：该次
 			// 尝试按零证据超时中止（服务端走空闲冷却+RSC 归因+重试）。已有
 			// 任何输出或证据的流不受影响（证据提前放行/输出达到阈值扣留）。
 			if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.semanticOutput {
 				_ = pump.Close()
-				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, errQualityEvidenceTimeout
+				return emit(io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, errQualityEvidenceTimeout)
 			}
 		case <-createdTimer.C:
 			// 首事件截止：连一个 data 事件都没到（keepalive 注释不算）。降智
@@ -808,31 +914,33 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 			// 尝试走空闲路径；任何 data 事件已到达则本截止失效（由证据截止接管）。
 			if !state.sawDataEvent {
 				_ = pump.Close()
-				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, errQualityCreatedTimeout
+				return emit(io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, errQualityCreatedTimeout)
 			}
 		case result, ok := <-pump.results:
 			if !ok {
-				return finishQualityPeek(&held, pump, &state, cfg)
+				replay, verdict, usage, err := finishQualityPeek(&held, pump, &state, cfg)
+				return emit(replay, verdict, usage, err)
 			}
 			if len(result.data) > 0 {
 				if held.Len()+len(result.data) > qualityHoldMaxBufferBytes {
 					_, _ = held.Write(result.data)
 					observeQualityChunk(&state, result.data)
 					if state.hasThinking {
-						return newPrefixReplay(&held, pump), QualityDeliver, state.usage, nil
+						return emit(newPrefixReplay(&held, pump), QualityDeliver, state.usage, nil)
 					}
 					// 无思考证据的超大前缀几乎一定是降智密文堆，扣留而不是放行。
-					return newPrefixReplay(&held, pump), QualityWithhold, state.usage, nil
+					return emit(newPrefixReplay(&held, pump), QualityWithhold, state.usage, nil)
 				}
 				_, _ = held.Write(result.data)
 				observeQualityChunk(&state, result.data)
 			}
 			if result.err == io.EOF {
-				return finishQualityPeek(&held, pump, &state, cfg)
+				replay, verdict, usage, err := finishQualityPeek(&held, pump, &state, cfg)
+				return emit(replay, verdict, usage, err)
 			}
 			if result.err != nil {
 				_ = pump.Close()
-				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, qualityPeekAbortError(ctx, result.err)
+				return emit(io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, qualityPeekAbortError(ctx, result.err))
 			}
 		}
 	}
@@ -908,7 +1016,7 @@ type qualityAnthropicJSONBody struct {
 func parseQualityClientJSONBody(data []byte) (*qualityScanState, bool) {
 	var chat qualityChatJSONBody
 	if err := json.Unmarshal(data, &chat); err == nil && chat.Choices != nil {
-		state := &qualityScanState{protocol: qualityProtocolChat, responseID: chat.ID}
+		state := &qualityScanState{protocol: qualityProtocolChat, responseID: chat.ID, startedAt: time.Now(), sawDataEvent: true}
 		if chat.Usage != nil {
 			state.usage = Usage{
 				Reported: true, InputTokens: chat.Usage.PromptTokens,
@@ -936,7 +1044,7 @@ func parseQualityClientJSONBody(data []byte) (*qualityScanState, bool) {
 	}
 	var anthropic qualityAnthropicJSONBody
 	if err := json.Unmarshal(data, &anthropic); err == nil && anthropic.Content != nil {
-		state := &qualityScanState{protocol: qualityProtocolAnthropic, responseID: anthropic.ID}
+		state := &qualityScanState{protocol: qualityProtocolAnthropic, responseID: anthropic.ID, startedAt: time.Now(), sawDataEvent: true}
 		if anthropic.Usage != nil {
 			state.usage = Usage{
 				Reported: true, InputTokens: anthropic.Usage.InputTokens,
@@ -1033,9 +1141,15 @@ func (c *chainedBody) Close() error               { return c.closer.Close() }
 // 文本是唯一健康证据。无法识别的响应形状（无 output 数组的合法 JSON）
 // fail-open 放行——不猜测质量。
 func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
+	replay, verdict, usage, _, err := peekQualityBodyReport(body, cfg)
+	return replay, verdict, usage, err
+}
+
+func peekQualityBodyReport(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
 	cfg = normalizeQualityRetry(cfg)
+	empty := qualityScanState{protocol: qualityProtocolResponses, startedAt: time.Now()}
 	if body == nil {
-		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, errQualityEmptyStream
+		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, empty.fingerprint(QualityWait, errQualityEmptyStream), errQualityEmptyStream
 	}
 	data, readErr := io.ReadAll(io.LimitReader(body, qualityBodyPeekLimit+1))
 	if int64(len(data)) > qualityBodyPeekLimit {
@@ -1044,31 +1158,35 @@ func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser
 		// 被劫持上游的超大 200 body 会在判决前全量驻留内存, 并发下 OOM。
 		// Close 必须传导给原始 body: Build 路径的 egressResponseBody.Close 同时
 		// 释放上游连接与 egress 租约, NopCloser 会两者都泄漏。
-		return &chainedBody{Reader: io.MultiReader(bytes.NewReader(data), body), closer: body}, QualityDeliver, Usage{}, nil
+		return &chainedBody{Reader: io.MultiReader(bytes.NewReader(data), body), closer: body}, QualityDeliver, Usage{}, qualityHoldFingerprint{Verdict: string(QualityDeliver), Rule: "unbounded"}, nil
 	}
 	_ = body.Close()
 	replay := io.NopCloser(bytes.NewReader(data))
 	if readErr != nil {
-		return replay, QualityWait, Usage{}, readErr
+		return replay, QualityWait, Usage{}, empty.fingerprint(QualityWait, readErr), readErr
 	}
 	var parsed qualityResponseBody
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		// 200 但 body 非合法 JSON：按空流处理（可重试），不猜质量。
-		return replay, QualityWait, Usage{}, errQualityEmptyStream
+		return replay, QualityWait, Usage{}, empty.fingerprint(QualityWait, errQualityEmptyStream), errQualityEmptyStream
 	}
 	if parsed.Output == nil {
 		// 合法 JSON 但非 Responses 形状：非流式 chat/messages 请求的 body 已被
 		// adapter 转换成客户端形态（ForwardResponse 内完成）。按转换后的形状
 		// 判决——证据规则与流式契约一致（rounds 18/19 锁定的发射面）。
 		if clientState, ok := parseQualityClientJSONBody(data); ok {
-			return verdictForBodyState(replay, clientState)
+			replay, verdict, usage, err := verdictForBodyState(replay, clientState)
+			return replay, verdict, usage, clientState.fingerprint(verdict, err), err
 		}
 		// 仍无法识别的形状：fail-open，不猜质量。
-		return replay, QualityDeliver, Usage{}, nil
+		return replay, QualityDeliver, Usage{}, qualityHoldFingerprint{Verdict: string(QualityDeliver), Rule: "unrecognized"}, nil
 	}
-	state := qualityScanState{protocol: qualityProtocolResponses}
+	state := qualityScanState{protocol: qualityProtocolResponses, startedAt: time.Now(), sawDataEvent: true}
+	noteQualityEncrypted(&state, data)
+	noteQualityEvent(&state, "response.completed")
 	for _, item := range parsed.Output {
 		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		noteQualityEvent(&state, itemType)
 		switch itemType {
 		case "reasoning":
 			// 与流式一致：reasoning item 的可见文本（summary/内容）是思考
@@ -1127,10 +1245,11 @@ func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser
 	// 空响应判定与 finishQualityPeek 同语义：零内容零思考且非纯语义输出 = 空流。
 	if state.emptyEvidence() {
 		verdict, verdictErr := state.emptyStreamVerdict()
-		return replay, verdict, usage, verdictErr
+		return replay, verdict, usage, state.fingerprint(verdict, verdictErr), verdictErr
 	}
 	// body 已完整到达：恒为终态证据。
 	sig := state.signals()
 	sig.Terminal = true
-	return replay, classifyQualityHold(sig), usage, nil
+	verdict := classifyQualityHold(sig)
+	return replay, verdict, usage, state.fingerprint(verdict, nil), nil
 }

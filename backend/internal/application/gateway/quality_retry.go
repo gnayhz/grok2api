@@ -115,6 +115,63 @@ type qualityStreamSignals struct {
 	Terminal                      bool
 }
 
+// qualityHoldFingerprint 是守卫判决的紧凑存档：生产 quality_hold/idle
+// attempt 此前只写 stage+耗时、正文与响应头全空，无法回放「为何扣留」。
+// 真实 SSE 归档证明判别力在事件序列与时序（D-a: created→item.done 0ms；
+// 干净流: created→summary.delta 0-6ms），不在请求头/请求体键。本结构只
+// 记录类型与毫秒，不含增量文本或密文。
+type qualityHoldFingerprint struct {
+	Protocol        string   `json:"protocol"`
+	Verdict         string   `json:"verdict,omitempty"`
+	Rule            string   `json:"rule,omitempty"`
+	HasThinking     bool     `json:"has_thinking"`
+	ReasoningEnded  bool     `json:"reasoning_ended_without_thinking"`
+	SemanticOutput  bool     `json:"semantic_output,omitempty"`
+	SawDataEvent    bool     `json:"saw_data_event"`
+	Encrypted       bool     `json:"encrypted_content"`
+	VisibleRunes    int      `json:"visible_runes,omitempty"`
+	OutputTokens    int64    `json:"output_tokens,omitempty"`
+	ReasoningTokens int64    `json:"reasoning_tokens,omitempty"`
+	Events          []string `json:"events,omitempty"`
+	FirstEventMS    int64    `json:"first_event_ms,omitempty"`
+	ItemDoneMS      int64    `json:"item_done_ms,omitempty"`
+	SummaryMS       int64    `json:"summary_ms,omitempty"`
+	PeekMS          int64    `json:"peek_ms,omitempty"`
+	Error           string   `json:"error,omitempty"`
+}
+
+func qualityHoldRule(sig qualityStreamSignals, err error) string {
+	switch {
+	case errors.Is(err, errQualityCreatedTimeout):
+		return "created_timeout"
+	case errors.Is(err, errQualityEvidenceTimeout):
+		return "evidence_timeout"
+	case errors.Is(err, errQualityEmptyStream):
+		return "empty"
+	case sig.HasThinking:
+		return "thinking"
+	case sig.ReasoningEndedWithoutThinking:
+		return "item_done"
+	case sig.VisibleTokens > 0 || sig.OutputTokens > 0:
+		return "outrun"
+	case sig.Terminal:
+		return "terminal"
+	default:
+		return "wait"
+	}
+}
+
+func (fp qualityHoldFingerprint) json() []byte {
+	if fp.Protocol == "" && fp.Verdict == "" && fp.Rule == "" && len(fp.Events) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(fp)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 // QualityVerdict is the hold decision for one upstream stream.
 type QualityVerdict string
 

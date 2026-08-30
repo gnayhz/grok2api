@@ -56,6 +56,7 @@ def main(dirs):
 			f = r["first"]
 			p1 = "P1!" if f["summary"] is None and (f["text"] if f["text"] is not None else 99999) > 3500 else ""
 			print(f"{r['cell']:5s} {r['op']:4s} ev={f['event']:>5}ms sum={str(f['summary']):>6}ms text={str(f['text']):>6}ms srch={str(f['search_item']):>6}ms dur={r['dur']:>6}ms gaps=[{g}] enc={int(r['enc'])} done={int(r['done'])} {p1}")
+	return all_rows
 
 def summarize(rows):
     by = {}
@@ -72,5 +73,4 @@ def summarize(rows):
               f"maxgap={max((b for _, b in allgaps), default=0)}ms enc_all={all(r['enc'] for r in rs)}")
 
 if __name__ == "__main__":
-	main(sys.argv[1:] or ["upstream-traces/latest"])
-	summarize(all_rows)
+	summarize(main(sys.argv[1:] or ["upstream-traces/latest"]))

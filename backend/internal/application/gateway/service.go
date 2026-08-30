@@ -1328,6 +1328,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		credential        accountdomain.Credential
 		usage             Usage
 		upstreamStartedAt time.Time
+		fingerprint       qualityHoldFingerprint
 	}
 	var fallback *qualityFallback
 	discardFallback := func(recordDegraded bool) {
@@ -1335,7 +1336,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return
 		}
 		if recordDegraded {
-			failureAttempts.captureQualityDegraded(fallback.credential, fallback.upstreamStartedAt)
+			failureAttempts.captureQualityDegraded(fallback.credential, fallback.upstreamStartedAt, fallback.response, fallback.fingerprint)
 		}
 		_ = fallback.response.Body.Close()
 		fallback = nil
@@ -1701,16 +1702,17 @@ attemptLoop:
 				var verdict QualityVerdict
 				var peekUsage Usage
 				var peekErr error
+				var peekFingerprint qualityHoldFingerprint
 				// 活跃度预算制度表（qualityLivenessSchedule）：按请求类（搜索工具/
 				// 重推理/默认）给 created/evidence 预算——证据与依据见该函数注释。
 				// 流式/非流式共用：预算只对流式生效；完整 body 判决与流式共用
 				// 同一套证据规则。
 				peekCfg := qualityLivenessSchedule(input.Body, string(operation), holdCfg)
 				if input.Streaming {
-					replay, verdict, peekUsage, peekErr = peekQualityStream(ctx, response.Body, proto, peekCfg)
+					replay, verdict, peekUsage, peekFingerprint, peekErr = peekQualityStreamReport(ctx, response.Body, proto, peekCfg)
 				} else {
 					// 非流式：完整 body 判决（零扣留延迟），证据规则与流式一致。
-					replay, verdict, peekUsage, peekErr = peekQualityBody(response.Body, peekCfg)
+					replay, verdict, peekUsage, peekFingerprint, peekErr = peekQualityBodyReport(response.Body, peekCfg)
 				}
 				response.Body = replay
 				// 池出口判定（空闲节点标记/降智节点标记/同号重试三处共用；固定或直连
@@ -1746,7 +1748,7 @@ attemptLoop:
 					if neterrorpkg.IsUpstreamStreamIdleTimeout(peekErr) || neterrorpkg.IsUpstreamStreamIdleTimeout(context.Cause(ctx)) || errors.Is(peekErr, errQualityEmptyStream) || errors.Is(peekErr, errQualityEvidenceTimeout) || errors.Is(peekErr, errQualityCreatedTimeout) {
 						// 守卫空闲路径的尝试进审计明细（round 41：此前多账号轮换
 						// 轨迹在 attempts 里不可见；对照 quality_hold 路径有明细）。
-						failureAttempts.captureQualityIdle(credential, responseStartedAt, lastFailure.Code)
+						failureAttempts.captureQualityIdle(credential, responseStartedAt, lastFailure.Code, response, peekFingerprint)
 						logPrefix := "quality_peek_idle"
 						if errors.Is(peekErr, errQualityEmptyStream) {
 							logPrefix = "quality_peek_empty"
@@ -1835,13 +1837,13 @@ attemptLoop:
 				// events=0，一行成功放行——列表看起来像「有的抓住有的漏」。
 				deferFailOpenAudit := commit.Action == QualityActionRetry && holdCfg.OnExhausted == qualityRetryFailOpen
 				if verdict == QualityWithhold && !deferFailOpenAudit {
-					failureAttempts.captureQualityDegraded(credential, responseStartedAt)
+					failureAttempts.captureQualityDegraded(credential, responseStartedAt, response, peekFingerprint)
 				}
 				switch commit.Action {
 				case QualityActionRetry:
 					if deferFailOpenAudit {
 						discardFallback(true)
-						fallback = &qualityFallback{response: response, lease: lease, credential: credential, usage: peekUsage, upstreamStartedAt: responseStartedAt}
+						fallback = &qualityFallback{response: response, lease: lease, credential: credential, usage: peekUsage, upstreamStartedAt: responseStartedAt, fingerprint: peekFingerprint}
 						lease.completeSelectorObservation(true)
 						lease.Release()
 					} else {

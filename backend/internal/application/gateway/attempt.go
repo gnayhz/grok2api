@@ -171,10 +171,14 @@ func (r *failureAttemptRecorder) captureStreamFailure(credential accountdomain.C
 	})
 }
 
-func (r *failureAttemptRecorder) captureQualityDegraded(credential accountdomain.Credential, startedAt time.Time) {
+func (r *failureAttemptRecorder) captureQualityDegraded(credential accountdomain.Credential, startedAt time.Time, response *provider.Response, fp qualityHoldFingerprint) {
 	// Upstream HTTP is still 200; the gateway withheld. Parent audit is the
 	// request outcome (success after retry, or 503 if exhausted).
 	status := http.StatusOK
+	var headers map[string][]string
+	if response != nil {
+		headers = sanitizeDiagnosticHeaders(response.Header)
+	}
 	r.append(audit.Attempt{
 		Source:             audit.AttemptSourceUpstreamHTTP,
 		Stage:              "quality_hold",
@@ -186,6 +190,8 @@ func (r *failureAttemptRecorder) captureQualityDegraded(credential accountdomain
 		DurationMS:         time.Since(startedAt).Milliseconds(),
 		UpstreamStatusCode: &status,
 		UpstreamStatus:     "200 OK",
+		ResponseHeaders:    headers,
+		ResponseBody:       fp.json(),
 		TransportError:     ErrorQualityDegraded,
 	})
 }
@@ -193,10 +199,14 @@ func (r *failureAttemptRecorder) captureQualityDegraded(credential accountdomain
 // captureQualityIdle 记录守卫空闲路径中止的尝试（empty/evidence-timeout/
 // created-timeout）——此前该路径不写 attempt 明细，多账号轮换轨迹在审计
 // 里不可见（round 41 活体发现 938 号审计零 attempt；对照 quality_hold 有）。
-func (r *failureAttemptRecorder) captureQualityIdle(credential accountdomain.Credential, startedAt time.Time, errorCode string) {
+func (r *failureAttemptRecorder) captureQualityIdle(credential accountdomain.Credential, startedAt time.Time, errorCode string, response *provider.Response, fp qualityHoldFingerprint) {
 	status := http.StatusOK
 	if errorCode == "" {
 		errorCode = ErrorQualityDegraded
+	}
+	var headers map[string][]string
+	if response != nil {
+		headers = sanitizeDiagnosticHeaders(response.Header)
 	}
 	r.append(audit.Attempt{
 		Source:             audit.AttemptSourceUpstreamHTTP,
@@ -209,6 +219,8 @@ func (r *failureAttemptRecorder) captureQualityIdle(credential accountdomain.Cre
 		DurationMS:         time.Since(startedAt).Milliseconds(),
 		UpstreamStatusCode: &status,
 		UpstreamStatus:     "200 OK",
+		ResponseHeaders:    headers,
+		ResponseBody:       fp.json(),
 		TransportError:     errorCode,
 	})
 }
