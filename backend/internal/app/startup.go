@@ -437,12 +437,26 @@ func (a *Application) runConsoleUsageMigration(ctx context.Context) {
 			nextRun = consoleUsageMigrationRetry
 		} else if failed > 0 {
 			a.logger.Warn("console_usage_migration_incomplete", "succeeded", succeeded, "failed", failed)
-			nextRun = consoleUsageMigrationRetry
+			nextRun = consoleUsageMigrationNextRun(succeeded)
 		} else if succeeded > 0 {
 			a.logger.Info("console_usage_migration_completed", "succeeded", succeeded, "failed", failed)
 		}
 		resetTimer(timer, nextRun)
 	}
+}
+
+// consoleUsageMigrationNextRun 决定一次不完整迁移后的下一轮节奏。5 分钟
+// 快重试只在“本轮仍有账号成功同步”时保留（追赶进度有意义）；当一轮全部
+// 失败（succeeded==0——剩余集合是死凭据/被拒账号）时，快重试只剩锤上游
+// 的作用：不完整集合每 5 分钟被整批重试一次，25 工人池下即持续打满的
+// 无效流量（历史线上排查实测）。全败
+// 轮退回 24h 常规节奏，让账号级熔断（quota_refresh_retry_parked）接管
+// 逐账号处置。
+func consoleUsageMigrationNextRun(succeeded int) time.Duration {
+	if succeeded > 0 {
+		return consoleUsageMigrationRetry
+	}
+	return consoleUsageMigrationEvery
 }
 
 func (a *Application) runConsoleQuotaCatchup(ctx context.Context) {

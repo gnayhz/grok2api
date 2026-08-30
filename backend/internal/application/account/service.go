@@ -78,7 +78,17 @@ const (
 	quotaRefreshPollInterval                      = 500 * time.Millisecond
 	quotaRefreshSharedPoll                        = time.Second
 	quotaRefreshBackoffBase                       = time.Second
-	quotaRefreshBackoffMax                        = time.Minute
+	// quotaRefreshBackoffMax：失败重试的退避上限。历史值 1 分钟在含死凭据/
+	// 被拒账号的 fleet 下构成重试风暴——每个永远失败的账号以 ~1 分钟一轮的
+	// 节奏重试，死凭据规模即可打满工人池（历史线上实测：持续高强度的
+	// 无效上游请求）。提到 30 分钟，并配合
+	// quotaRefreshFailureBudget 熔断停靠。
+	quotaRefreshBackoffMax = 30 * time.Minute
+	// quotaRefreshFailureBudget：同一 (account,mode) 连续失败达到该值后熔断
+	// 停靠——requeue 循环删除状态并告警，不再自动重试；外部再次显式入队
+	//（请求路径 429 核实 / 迁移任务 / 巡检）会开启全新 episode（failures
+	// 归零，见 QueueQuotaRefresh），重试预算按 episode 有界。
+	quotaRefreshFailureBudget                     = 8
 	consoleQuotaRefreshMinInterval                = 30 * time.Second
 	unknownRemoteQuotaProbeDelay    time.Duration = 5 * time.Minute
 	consolePredictedQuotaProbeDelay time.Duration = 24 * time.Hour
@@ -3363,6 +3373,9 @@ func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
 		state = &quotaRefreshState{}
 		s.quotaRefreshes[key] = state
 	}
+	// 显式入队代表新的刷新需求（429 核实 / 迁移任务 / 巡检扫描）：失败
+	// 计数归零、开启全新重试 episode，避免历史失败把新需求立即推进熔断停靠。
+	state.failures = 0
 	state.generation++
 	state.pending = true
 	enqueued := state.queued || state.running || now.Before(state.nextAttemptAt) || s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: id, mode: mode}, state)
@@ -3665,7 +3678,9 @@ func quotaRefreshRetryDelay(failures int) time.Duration {
 	if failures < 1 {
 		failures = 1
 	}
-	shift := min(failures-1, 6)
+	// 11 档让指数曲线在 ~12 次失败后自然逼近 30 分钟上限（1s<<11≈34min，
+	// 由 max 截断）；预算内（8 次）爬到 ~2 分钟，余量留给未来预算上调。
+	shift := min(failures-1, 11)
 	delay := quotaRefreshBackoffBase * time.Duration(1<<shift)
 	if delay > quotaRefreshBackoffMax {
 		delay = quotaRefreshBackoffMax
@@ -3701,6 +3716,7 @@ func (s *Service) runQuotaRefreshRecovery(ctx context.Context) {
 
 func (s *Service) requeueQuotaRefreshes() {
 	now := s.now().UTC()
+	var parked []string
 	s.quotaRefreshMu.Lock()
 	for key, state := range s.quotaRefreshes {
 		if state == nil {
@@ -3711,6 +3727,16 @@ func (s *Service) requeueQuotaRefreshes() {
 			if !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
 				delete(s.quotaRefreshes, key)
 			}
+			continue
+		}
+		// 熔断停靠：连续失败耗尽预算的 (account,mode) 不再自动重试——删除
+		// 状态并在锁外告警一次。此前退避上限仅 1 分钟且失败永不清除，死凭据
+		// 账号以 ~1 分钟/轮永久重试，死凭据规模即可打满工人池（历史线上
+		// 重试风暴实测）。queued/running 中的在途尝试让
+		// 其自然结束，下一次扫描停靠。
+		if state.failures >= quotaRefreshFailureBudget && !state.queued && !state.running {
+			delete(s.quotaRefreshes, key)
+			parked = append(parked, key)
 			continue
 		}
 		if state.queued || state.running || now.Before(state.nextAttemptAt) {
@@ -3729,6 +3755,16 @@ func (s *Service) requeueQuotaRefreshes() {
 		}
 	}
 	s.quotaRefreshMu.Unlock()
+	for _, key := range parked {
+		accountID, mode := uint64(0), key
+		if separator := strings.IndexByte(key, ':'); separator > 0 && separator < len(key)-1 {
+			if parsed, err := strconv.ParseUint(key[:separator], 10, 64); err == nil {
+				accountID, mode = parsed, key[separator+1:]
+			}
+		}
+		perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "parked"}, 1)
+		s.logger.Warn("quota_refresh_retry_parked", "account_id", accountID, "mode", mode, "failures", quotaRefreshFailureBudget, "hint", "连续配额同步失败已达熔断预算，自动重试已停止；请检查该账号凭据/出口可达性，或手动触发刷新开启新轮次")
+	}
 }
 
 func (s *Service) recoverSharedQuotaRefreshes(parent context.Context, now time.Time) {

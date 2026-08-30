@@ -62,6 +62,7 @@ EXPERIMENT-*.md
 HARDENING.md
 EXIT-*.md
 EGRESS-*.md
+ANTI_DEGRADATION_*.md
 
 # 本地演示部署（含编译二进制与独立数据目录，勿入库）。
 /local-demo/

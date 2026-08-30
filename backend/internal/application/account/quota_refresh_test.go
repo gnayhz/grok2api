@@ -156,10 +156,10 @@ func TestQuotaRefreshFailureUsesBoundedExponentialBackoff(t *testing.T) {
 	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	service.quotaRefreshes["1:console"] = &quotaRefreshState{running: true}
-	for failure := 1; failure <= 10; failure++ {
+	for failure := 1; failure <= 13; failure++ {
 		service.deferQuotaRefresh("1:console")
 		state := service.quotaRefreshes["1:console"]
-		maximum := quotaRefreshBackoffBase * time.Duration(1<<min(failure-1, 6))
+		maximum := quotaRefreshBackoffBase * time.Duration(1<<min(failure-1, 11))
 		if maximum > quotaRefreshBackoffMax {
 			maximum = quotaRefreshBackoffMax
 		}
@@ -167,6 +167,71 @@ func TestQuotaRefreshFailureUsesBoundedExponentialBackoff(t *testing.T) {
 		if state.failures != failure || !state.pending || delay < maximum/2 || delay > maximum {
 			t.Fatalf("failure=%d state=%#v delay=%s range=[%s,%s]", failure, state, delay, maximum/2, maximum)
 		}
+	}
+	// 13 次失败后必须已抵达 30 分钟上限（clamp 生效，不再是历史的 1 分钟）。
+	if got := quotaRefreshRetryDelay(50); got < quotaRefreshBackoffMax/2 || got > quotaRefreshBackoffMax {
+		t.Fatalf("deep-failure delay = %s, want within [%s,%s]", got, quotaRefreshBackoffMax/2, quotaRefreshBackoffMax)
+	}
+	if quotaRefreshBackoffMax < 15*time.Minute {
+		t.Fatalf("backoff max = %s, storm-safe floor is >=15m", quotaRefreshBackoffMax)
+	}
+}
+
+// TestQuotaRefreshParksAfterFailureBudget：熔断停靠——连续失败耗尽预算的
+// (account,mode) 在 requeue 扫描中被清除且不再自动入队（历史线上
+// 重试风暴对策）；预算内的失败仍按退避正常重排。
+func TestQuotaRefreshParksAfterFailureBudget(t *testing.T) {
+	service := NewService(nil, nil, nil, nil, nil, nil, nil)
+	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	// 预算外：连续失败到预算值 → requeue 必须停靠（删除状态、队列为空）。
+	service.quotaRefreshes["7:console"] = &quotaRefreshState{running: true}
+	for range quotaRefreshFailureBudget {
+		service.deferQuotaRefresh("7:console")
+	}
+	service.requeueQuotaRefreshes()
+	service.quotaRefreshMu.Lock()
+	_, parkedExists := service.quotaRefreshes["7:console"]
+	service.quotaRefreshMu.Unlock()
+	if parkedExists {
+		t.Fatal("state at failure budget must be parked (deleted), not retained")
+	}
+	if drained := len(service.quotaRefreshQueue); drained != 0 {
+		t.Fatalf("parked state must not be re-enqueued, queue length = %d", drained)
+	}
+
+	// 预算内（budget-1 次）：时钟推进过退避窗口后必须正常重排。
+	service.quotaRefreshes["8:console"] = &quotaRefreshState{running: true}
+	for range quotaRefreshFailureBudget - 1 {
+		service.deferQuotaRefresh("8:console")
+	}
+	now = now.Add(quotaRefreshBackoffMax + time.Minute)
+	service.requeueQuotaRefreshes()
+	service.quotaRefreshMu.Lock()
+	below := service.quotaRefreshes["8:console"]
+	service.quotaRefreshMu.Unlock()
+	if below == nil || !below.queued {
+		t.Fatalf("below-budget failure must be requeued: %#v", below)
+	}
+}
+
+// TestQueueQuotaRefreshResetsFailureEpisode：显式入队开启全新重试 episode
+// （失败计数归零）——熔断不阻断外部新需求，只终止无人认领的自动重试。
+func TestQueueQuotaRefreshResetsFailureEpisode(t *testing.T) {
+	service := NewService(nil, nil, nil, nil, nil, nil, nil)
+	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	service.quotaRefreshes["9:console"] = &quotaRefreshState{
+		pending: true, failures: quotaRefreshFailureBudget - 1,
+		nextAttemptAt: now.Add(-time.Minute), // 退避窗口已过：显式入队应立即排入队列
+	}
+	service.QueueQuotaRefresh(9, "console")
+	service.quotaRefreshMu.Lock()
+	state := service.quotaRefreshes["9:console"]
+	service.quotaRefreshMu.Unlock()
+	if state == nil || state.failures != 0 || !state.queued {
+		t.Fatalf("explicit enqueue must reset the failure episode: %#v", state)
 	}
 }
 
