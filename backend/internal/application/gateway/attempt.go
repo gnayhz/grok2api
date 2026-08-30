@@ -269,6 +269,18 @@ type replayReadCloser struct {
 
 func (r *replayReadCloser) Close() error { return r.source.Close() }
 
+// applyDeferredStreamConversion runs the provider's client-protocol converter
+// after quality peek has already classified the raw upstream SSE.
+func applyDeferredStreamConversion(response *provider.Response) {
+	if response == nil || response.ConvertStream == nil {
+		return
+	}
+	if response.Body != nil {
+		response.Body = response.ConvertStream(response.Body)
+	}
+	response.ConvertStream = nil
+}
+
 // readResponseBody 只读取诊断上限，同时把已读取前缀接回原始响应供后续错误处理。
 func readResponseBody(body io.ReadCloser) ([]byte, io.ReadCloser, bool, error) {
 	if body == nil {

@@ -214,10 +214,14 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	}
 	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 		if request.Streaming && response.StatusCode >= 200 && response.StatusCode < 300 {
-			response.Body = conversation.ConvertResponseStreamWithOptions(response.Body, request.Operation, conversationOptions)
 			response.Header.Del("Content-Length")
 			response.Header.Set("Content-Type", "text/event-stream")
+			convertOp := request.Operation
+			convertOpts := conversationOptions
 			result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
+			result.ConvertStream = func(raw io.ReadCloser) io.ReadCloser {
+				return conversation.ConvertResponseStreamWithOptions(raw, convertOp, convertOpts)
+			}
 			result.RateLimit = rateLimit
 			return result, nil
 		}

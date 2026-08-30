@@ -388,6 +388,11 @@ type Response struct {
 	// ModelCatalogChanged indicates that the model catalog ETag in an inference response differs from
 	// the ETag from the account's most recent successful /models sync.
 	ModelCatalogChanged bool
+	// ConvertStream, if set, turns the raw upstream SSE into the client
+	// protocol (chat/messages). The gateway must quality-peek the raw body
+	// first: converting before peek delays thinking evidence until item.done
+	// and inflates client TTFB to the full reasoning duration.
+	ConvertStream func(io.ReadCloser) io.ReadCloser
 }
 
 const (

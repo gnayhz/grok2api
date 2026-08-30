@@ -447,11 +447,16 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			resp.Body = upstreamtrace.TeeBody(traceDir, request.Operation, request.Model, resp.Body)
 		}
 	}
+	var convertStream func(io.ReadCloser) io.ReadCloser
 	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 		if request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			resp.Body = conversation.ConvertResponseStreamWithOptions(resp.Body, request.Operation, conversationOptions)
 			resp.Header.Del("Content-Length")
 			resp.Header.Set("Content-Type", "text/event-stream")
+			convertOp := request.Operation
+			convertOpts := conversationOptions
+			convertStream = func(raw io.ReadCloser) io.ReadCloser {
+				return conversation.ConvertResponseStreamWithOptions(raw, convertOp, convertOpts)
+			}
 		} else {
 			var data []byte
 			var readErr error
@@ -488,7 +493,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
 		}
 	}
-	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged, ConvertStream: convertStream}, nil
 }
 
 func (a *Adapter) shouldCaptureReplay(request provider.ResponseResourceRequest, resp *http.Response, replayKey string) bool {

@@ -1184,6 +1184,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return result, err
 	}
 	handoffResponse := func(response *provider.Response, lease *accountLease, credential accountdomain.Credential, upstreamStartedAt time.Time, qualityFailOpen bool) *Result {
+		applyDeferredStreamConversion(response)
 		accountID := credential.ID
 		var once sync.Once
 		// 交付统计由 transport 在转发完成后回填，finalize 时进审计行。
@@ -1698,6 +1699,13 @@ attemptLoop:
 			// 直连矩阵证实 clean/降智头部完全一致（零判别力），已移除该噪声日志。
 			if qualityHoldEnabled {
 				proto := qualityProtocolForOperation(operation)
+				if response.ConvertStream != nil {
+					// Peek the raw upstream Responses SSE. Converting first
+					// hides summary deltas until item.done and makes chat TTFB
+					// equal the full thinking duration (8003 live: 0ms upstream
+					// summary vs 9-19s client first byte).
+					proto = qualityProtocolResponses
+				}
 				var replay io.ReadCloser
 				var verdict QualityVerdict
 				var peekUsage Usage

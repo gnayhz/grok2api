@@ -5,10 +5,9 @@ import (
 	"time"
 )
 
-// TestQualityLivenessSchedule：活跃度预算制度表行锁——依据
-// 全链路轨迹摸底（33+ 捕获；t3 修订：总静默时证据截止先于首事件截止；
-// z2/q2 修订：转换流（chat/messages）的 summary 证据被结构性延迟到
-// item.done，证据截止对转换流不适用——q2 low 档无工具被误杀实证）。
+// TestQualityLivenessSchedule：活跃度预算制度表行锁。
+// 守卫已改为在转换器之前看原始 SSE，chat/messages 与 native responses
+// 共用同一套 created/evidence 预算（无工具=默认，搜索=无界，heavy=30s）。
 func TestQualityLivenessSchedule(t *testing.T) {
 	t.Parallel()
 	base := QualityRetryRuntime{Enabled: true, CreatedTimeout: 5 * time.Second, EvidenceTimeout: 3500 * time.Millisecond}
@@ -26,17 +25,14 @@ func TestQualityLivenessSchedule(t *testing.T) {
 	}
 	{
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m"}`), "chat", base)
-		if cfg.EvidenceTimeout != qualitySearchSilenceBudget {
-			t.Fatal("converted chat: evidence deadline must not apply (deferred-summary window, z2/q2)")
-		}
-		if cfg.CreatedTimeout != base.CreatedTimeout {
-			t.Fatal("converted chat: created deadline stays (created events pass through the converter)")
+		if cfg.EvidenceTimeout != base.EvidenceTimeout || cfg.CreatedTimeout != base.CreatedTimeout {
+			t.Fatal("chat without tools: raw peek uses default budgets")
 		}
 	}
 	{
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m"}`), "messages", base)
-		if cfg.EvidenceTimeout != qualitySearchSilenceBudget {
-			t.Fatal("converted messages: evidence deadline must not apply")
+		if cfg.EvidenceTimeout != base.EvidenceTimeout || cfg.CreatedTimeout != base.CreatedTimeout {
+			t.Fatal("messages without tools: raw peek uses default budgets")
 		}
 	}
 	{
@@ -57,11 +53,8 @@ func TestQualityLivenessSchedule(t *testing.T) {
 	}
 	{
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m","tool_choice":{"type":"tool","name":"web_search"}}`), "chat", base)
-		if cfg.EvidenceTimeout != qualitySearchSilenceBudget {
-			t.Fatal("object tool_choice without tools: converted evidence row must still apply")
-		}
-		if cfg.CreatedTimeout != base.CreatedTimeout {
-			t.Fatal("object tool_choice without tools: created budget stays")
+		if cfg.EvidenceTimeout != base.EvidenceTimeout || cfg.CreatedTimeout != base.CreatedTimeout {
+			t.Fatal("object tool_choice without tools: no tools array, default budgets")
 		}
 	}
 	{
@@ -69,11 +62,8 @@ func TestQualityLivenessSchedule(t *testing.T) {
 		// >30s 未到 item.done 即被 30s 证据截止误杀（ai5 批次 504，原始流 27 条
 		// 思考增量被杀于进行中）。converted 证据无界必须优先；created 保留 30s。
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m","reasoning_effort":"xhigh"}`), "chat", base)
-		if cfg.EvidenceTimeout != qualitySearchSilenceBudget {
-			t.Fatal("chat heavy: converted evidence row must override heavy (deferred visibility)")
-		}
-		if cfg.CreatedTimeout != qualityHeavyReasoningCreatedBudget {
-			t.Fatal("chat heavy: created deadline stays tightened")
+		if cfg.EvidenceTimeout != qualityHeavyReasoningCreatedBudget || cfg.CreatedTimeout != qualityHeavyReasoningCreatedBudget {
+			t.Fatal("chat heavy: raw peek uses the same heavy budgets as native responses")
 		}
 	}
 	{

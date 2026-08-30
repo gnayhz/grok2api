@@ -569,13 +569,9 @@ const qualityHeavyReasoningCreatedBudget = 30 * time.Second
 //
 // deadline 触发只代表排队界，不构成降智证据；降智判定永远由证据规则承担。
 func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRuntime) QualityRetryRuntime {
-	// 转换后流（chat/messages 操作）的证据可见性被结构性推迟：转换器为
-	// raw 优先去重把 summary 增量延迟到 reasoning item.done 才发射（z2/q2
-	// 批次实证——q1/q3 high 档仅因 30s heavy 行幸存，q2 low 档无工具被
-	// 3.5s 证据截止误杀）。证据截止的“首增量 ~2.1s”前提只对原始流成立；
-	// 转换流不适用。规则 1/2/3 在 item.done/正文恢复瞬间照常判降智，死连接
-	// 由传输层流空闲兜底。
-	converted := operation == "chat" || operation == "messages"
+	// 守卫在转换器之前看原始 Responses SSE（summary 增量 0-6ms 即达）。
+	// chat/messages 不再需要「证据截止不适用」行——那是转换器把 summary
+	// 推迟到 item.done 时的补偿，会把客户端 TTFB 拉成整段思考时长。
 	// 单次解析同时取 tools 与 effort（基准：128KB body 两次全量解析
 	// 1.3ms/请求，合并后减半；小 body ~3µs 本可忽略，长对话场景值得）。
 	// 历史消息（续写检测）不再解析：语料复核推翻了「续写轮可
@@ -622,16 +618,6 @@ func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRunt
 	if search {
 		cfg.EvidenceTimeout = qualitySearchSilenceBudget
 		cfg.CreatedTimeout = qualitySearchSilenceBudget
-	} else if converted {
-		// 转换流（chat、messages，与 effort 无关）：证据截止不适用——可见性被
-		// 结构性推迟到 item.done。规模轮 106 实证：行序曾让 heavy 压过 converted，
-		// xhigh 思考 >30s 未到 item.done 即被 30s 证据截止误杀（ai5 批次，原始流
-		// 27 条思考增量被杀于进行中；q1/q3 high 档仅因思考时长 <30s 幸存）。
-		// heavy 仅收紧 created 首事件截止（created 事件直通转换器不受推迟影响）。
-		cfg.EvidenceTimeout = qualitySearchSilenceBudget
-		if heavy {
-			cfg.CreatedTimeout = qualityHeavyReasoningCreatedBudget
-		}
 	} else if heavy {
 		cfg.EvidenceTimeout = qualityHeavyReasoningCreatedBudget
 		cfg.CreatedTimeout = qualityHeavyReasoningCreatedBudget
