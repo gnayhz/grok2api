@@ -561,11 +561,9 @@ const qualityHeavyReasoningCreatedBudget = 30 * time.Second
 // 请求类无关——33+ 捕获含 Console 通道全部同签名）与活跃度截止（排队界，
 // 非降智证据，前提随请求类变化）。表按请求侧信号给预算：
 //
-//	任意工具（搜索/函数）  | 无界    | 无界     | 服务端搜索三位静默（t 系实证）；客户端函数调用的静默组织期 + chat
-//	                               |          | 转换器延迟摘要窗口使转换流零事件（z2 实证）。传输层 2m 兜底；证据规则照常。
-//	搜索工具（web/x）     | 无界    | 无界     | P0/P1/P2 三位静默皆合法（搜索排队/执行/思考），传输层 2m 兜底
-//	重推理（high/xhigh）  | 30s     | 不变     | P0 排队实测 >5s；created 后干净增量 0-6ms；D-b 降智晚到 5.6-16s 由规则 2 定罪
-//	其余                  | 默认 5s | 默认 3.5s| 干净流 created 后首增量 0-6ms（n≈25）
+//	任意启用工具          | 无界    | 无界     | 搜索/函数执行期静默合法，传输层 2m 兜底；证据规则照常
+//	重推理（high/xhigh）  | 30s     | 30s      | P0 排队实测 >5s；created 后干净增量 0-6ms；D-b 由规则 2 定罪
+//	其余                  | 默认 5s | 默认 3.5s| 原始 SSE 首增量 0-6ms（守卫在转换器之前判决）
 //
 // deadline 触发只代表排队界，不构成降智证据；降智判定永远由证据规则承担。
 func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRuntime) QualityRetryRuntime {
@@ -601,9 +599,8 @@ func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRunt
 	// 形态（"auto"/"required"/对象强制）均视为启用。
 	toolsEnabled := !bytes.Equal(bytes.TrimSpace(probe.ToolChoice), []byte(`"none"`))
 	for _, tool := range probe.Tools {
-		// 任意工具（服务端搜索 / 客户端函数 / MCP）都改变时序形态：z2 批次
-		// 实证——chat 转换器把 summary 增量延迟到 item.done（raw 优先），函数
-		// 调用的静默组织期内转换流零事件，3.5s 证据截止误杀工作中的请求。
+		// 任意启用工具都改变时序：搜索排队/执行与函数组织期会出现数秒静默，
+		// 3.5s 证据截止会误杀工作中的请求。
 		if toolsEnabled && strings.TrimSpace(tool.Type) != "" {
 			search = true
 			break
