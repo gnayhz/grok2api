@@ -115,8 +115,10 @@ func TestBlankThinkingDeltaNeverSetsHasThinking(t *testing.T) {
 	responses := qualityScanState{protocol: qualityProtocolResponses}
 	observeQualityChunk(&responses, []byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"\\r\\n\"}\n\n"))
 	observeQualityChunk(&responses, []byte("data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\" \\t \"}\n\n"))
+	// 零宽/格式字符（U+200B、U+FEFF）不是可见思考文本。
+	observeQualityChunk(&responses, []byte("data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"\\u200b\\ufeff\"}\n\n"))
 	if responses.hasThinking {
-		t.Fatal("responses 空白增量不得置 hasThinking")
+		t.Fatal("responses 空白/零宽增量不得置 hasThinking")
 	}
 	observeQualityChunk(&responses, []byte("data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"x\"}\n\n"))
 	if !responses.hasThinking {

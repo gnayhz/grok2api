@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
@@ -281,9 +282,16 @@ func (s *qualityScanState) emptyEvidence() bool {
 }
 
 // emptyStreamVerdict 是空证据形态的终态判决:纯语义输出（工具调用等）
-// 不是空流——交付，不按空流冷却惩罚;其余为空流（可重试的空闲路径）。
-func (s *qualityScanState) emptyStreamVerdict() (QualityVerdict, error) {
+// 不是空流——不按空流冷却惩罚。思考期望内（推理模型的正常请求）的
+// 纯语义输出是降智账号的裸工具调用形态（零思考零文本，整包末尾
+// flush），按 missing-thinking 扣留换号重试；未期望思考（effort=none
+// 等合法零思考请求）或无请求语义的调用方（探针）保持放行。
+// 其余为空流（可重试的空闲路径）。
+func (s *qualityScanState) emptyStreamVerdict(reasoningExpected bool) (QualityVerdict, error) {
 	if s.semanticOutputOnly() {
+		if reasoningExpected {
+			return QualityWithhold, nil
+		}
 		return QualityDeliver, nil
 	}
 	return QualityWait, errQualityEmptyStream
@@ -852,8 +860,14 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 // flush 时也可能只携带空白增量。空白不含可见思考、不产生 reasoning
 // token（usage 结算为 0），作为证据会在规则 1 瞬间放行整包降智响应
 // （terminal_burst 事故形态：零思考答案末尾一次交付且守卫零计数）。
+// 零宽/格式字符（U+200B、U+FEFF 等 Cf 类）同样不可见，一并排除。
 func hasVisibleThinkingText(delta string) bool {
-	return strings.TrimSpace(delta) != ""
+	for _, r := range delta {
+		if !unicode.IsSpace(r) && !unicode.Is(unicode.Cf, r) {
+			return true
+		}
+	}
+	return false
 }
 
 func noteVisibleContent(state *qualityScanState, text string) {
@@ -896,9 +910,10 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 		// 空流短路（与 finishQualityPeek 同语义）：terminal 已到而零内容零
 		// 推理时，usage 声明（含 output_tokens>0 的形式）不得把空流洗成可
 		// 扣留的“有内容”流——那会走扣留重试而不是空流冷却路径。
-		// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
+		// 纯语义输出（工具调用等）不是空流：思考期望内按扣留收口，
+		// 其余交付，均不按空流冷却惩罚。
 		if state.terminal && state.emptyEvidence() {
-			verdict, verdictErr := state.emptyStreamVerdict()
+			verdict, verdictErr := state.emptyStreamVerdict(cfg.ReasoningExpected)
 			return emit(newPrefixReplay(&held, pump), verdict, state.usage, verdictErr)
 		}
 		if verdict := classifyQualityHold(state.signals()); verdict != QualityWait {
@@ -968,9 +983,9 @@ func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *quality
 	signals := state.signals()
 	// 空流判定只看流证据：只有 usage 帧（声称 reasoning tokens）而零内容零
 	// 推理事件的流同样是空流——usage 声明不能把空 200 洗成可投递响应。
-	// 纯语义输出（工具调用等）不是空流：交付，不按空流冷却惩罚。
+	// 纯语义输出（工具调用等）不是空流：思考期望内按扣留收口，其余交付。
 	if state.emptyEvidence() {
-		verdict, verdictErr := state.emptyStreamVerdict()
+		verdict, verdictErr := state.emptyStreamVerdict(cfg.ReasoningExpected)
 		return newPrefixReplay(held, pump), verdict, state.usage, verdictErr
 	}
 	return newPrefixReplay(held, pump), classifyQualityHold(signals), state.usage, nil
@@ -1089,9 +1104,9 @@ func parseQualityClientJSONBody(data []byte) (*qualityScanState, bool) {
 
 // verdictForBodyState 收口客户端形态 body 的终态判决（与 Responses 形状
 // 的收口同语义：空证据走空流，纯语义输出交付，其余按分类器）。
-func verdictForBodyState(replay io.ReadCloser, state *qualityScanState) (io.ReadCloser, QualityVerdict, Usage, error) {
+func verdictForBodyState(replay io.ReadCloser, state *qualityScanState, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
 	if state.emptyEvidence() {
-		verdict, verdictErr := state.emptyStreamVerdict()
+		verdict, verdictErr := state.emptyStreamVerdict(cfg.ReasoningExpected)
 		return replay, verdict, state.usage, verdictErr
 	}
 	return replay, classifyQualityHold(state.signals()), state.usage, nil
@@ -1184,7 +1199,7 @@ func peekQualityBodyReport(body io.ReadCloser, cfg QualityRetryRuntime) (io.Read
 		// adapter 转换成客户端形态（ForwardResponse 内完成）。按转换后的形状
 		// 判决——证据规则与流式契约一致（rounds 18/19 锁定的发射面）。
 		if clientState, ok := parseQualityClientJSONBody(data); ok {
-			replay, verdict, usage, err := verdictForBodyState(replay, clientState)
+			replay, verdict, usage, err := verdictForBodyState(replay, clientState, cfg)
 			return replay, verdict, usage, clientState.fingerprint(verdict, err), err
 		}
 		// 仍无法识别的形状：fail-open，不猜质量。
@@ -1253,7 +1268,7 @@ func peekQualityBodyReport(body io.ReadCloser, cfg QualityRetryRuntime) (io.Read
 	}
 	// 空响应判定与 finishQualityPeek 同语义：零内容零思考且非纯语义输出 = 空流。
 	if state.emptyEvidence() {
-		verdict, verdictErr := state.emptyStreamVerdict()
+		verdict, verdictErr := state.emptyStreamVerdict(cfg.ReasoningExpected)
 		return replay, verdict, usage, state.fingerprint(verdict, verdictErr), verdictErr
 	}
 	// body 已完整到达：恒为终态证据。

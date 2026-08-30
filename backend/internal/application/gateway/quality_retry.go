@@ -89,6 +89,14 @@ type QualityRetryRuntime struct {
 	// 证实该延迟在上游时钟内：clean 0.8-2.2s（与复杂度无关），降智
 	// 68-125s（排队期间仅有 keepalive 注释或零字节）。
 	CreatedTimeout time.Duration
+	// ReasoningExpected 是从请求侧解析出的思考期望（resolved effort !=
+	// none；空档视为期望——语料：未指定强度的推理模型对每个回答都会
+	// 思考）。终态"纯语义输出"（仅工具调用、零思考零文本）在期望思考
+	// 时按 missing-thinking 扣留：降智账号的裸工具调用此前经语义放行
+	// 出口整包交付且守卫零计数。零值 false 保持旧语义（语义放行），
+	// 供 effort=none 请求与探针等无请求语义的调用方使用；业务路径由
+	// service 按 resolved effort 显式赋值。
+	ReasoningExpected bool
 	// GuardedModels 是守卫介入的模型白名单（requestRetry.guardedModels）：
 	// 非空时仅名单内模型进入判决，其余模型整体豁免（台账 model_out_of_scope）。
 	// 空 = 全部推理模型介入（向后兼容默认）。守卫的价值集中在主力推理模型
@@ -525,6 +533,13 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 // qualityModelGuarded 报告模型是否在守卫白名单内（cfg.GuardedModels 为空
 // = 全部模型）。条目匹配 public 或 upstream 模型名；"grok-4.6" 前缀覆盖
 // "grok-4.6-xhigh" 等档位后缀别名。
+// reasoningExpectedForEffort 报告该次请求是否期望思考：effort=none 是
+// 唯一合法零思考形态；空档/其余档位一律期望（语料：未指定强度的推理
+// 模型对每个回答都会思考，零思考仅出现在降智时刻）。
+func reasoningExpectedForEffort(effort string) bool {
+	return !strings.EqualFold(strings.TrimSpace(effort), modeldomain.ReasoningEffortNone)
+}
+
 func qualityModelGuarded(cfg QualityRetryRuntime, publicModel, upstreamModel string) bool {
 	if len(cfg.GuardedModels) == 0 {
 		return true

@@ -1716,6 +1716,10 @@ attemptLoop:
 				// 流式/非流式共用：预算只对流式生效；完整 body 判决与流式共用
 				// 同一套证据规则。
 				peekCfg := qualityLivenessSchedule(input.Body, string(operation), holdCfg)
+			// 思考期望来自 resolved effort（含别名档位）：终态纯语义输出
+			// （裸工具调用）在期望思考时按 missing-thinking 扣留，堵住
+			// 语义放行出口的降智交付。
+			peekCfg.ReasoningExpected = reasoningExpectedForEffort(normalizedMetadata.ReasoningEffort)
 				if input.Streaming {
 					replay, verdict, peekUsage, peekFingerprint, peekErr = peekQualityStreamReport(ctx, response.Body, proto, peekCfg)
 				} else {
