@@ -700,15 +700,6 @@ func ProxyDisplay(proxyURL string) string {
 	return parsed.String()
 }
 
-func isASCII(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if value[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
 // NormalizeProxyURL delegates to pkg/proxyurl: the implementation moved to
 // a neutral package so infra no longer imports the application layer
 // (dependency direction is strictly downward again).

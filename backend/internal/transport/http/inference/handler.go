@@ -2095,56 +2095,6 @@ func (value responseUsageDTO) toGatewayUsage(responseModel string) gateway.Usage
 	}
 }
 
-func hasUsageMetadata(usage gateway.Usage) bool {
-	return usage.Reported || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.TotalTokens > 0 ||
-		usage.CachedInputTokens > 0 || usage.ReasoningTokens > 0 || usage.CostInUSDTicks > 0 ||
-		usage.NumSourcesUsed > 0 || usage.NumServerSideToolsUsed > 0 ||
-		usage.ContextInputTokens > 0 || usage.ContextOutputTokens > 0
-}
-
-// mergeGatewayUsage merges usage from multiple streaming frames; non-zero fields overwrite,
-// preventing a later partial frame from erasing an already parsed cache hit.
-func mergeGatewayUsage(base, next gateway.Usage) gateway.Usage {
-	base.Reported = base.Reported || next.Reported
-	if next.InputTokens > 0 {
-		base.InputTokens = next.InputTokens
-	}
-	if next.OutputTokens > 0 {
-		base.OutputTokens = next.OutputTokens
-	}
-	if next.TotalTokens > 0 {
-		base.TotalTokens = next.TotalTokens
-	}
-	if next.CachedInputTokens > 0 {
-		base.CachedInputTokens = next.CachedInputTokens
-	}
-	if next.ReasoningTokens > 0 {
-		base.ReasoningTokens = next.ReasoningTokens
-	}
-	if next.CostInUSDTicks > 0 {
-		base.CostInUSDTicks = next.CostInUSDTicks
-	}
-	if next.NumSourcesUsed > 0 {
-		base.NumSourcesUsed = next.NumSourcesUsed
-	}
-	if next.NumServerSideToolsUsed > 0 {
-		base.NumServerSideToolsUsed = next.NumServerSideToolsUsed
-	}
-	if next.ContextInputTokens > 0 {
-		base.ContextInputTokens = next.ContextInputTokens
-	}
-	if next.ContextOutputTokens > 0 {
-		base.ContextOutputTokens = next.ContextOutputTokens
-	}
-	if next.ResponseModel != "" {
-		base.ResponseModel = next.ResponseModel
-	}
-	if base.TotalTokens == 0 && (base.InputTokens > 0 || base.OutputTokens > 0) {
-		base.TotalTokens = base.InputTokens + base.OutputTokens
-	}
-	return base
-}
-
 func copyHeaders(destination, source http.Header) {
 	excluded := map[string]struct{}{
 		"connection": {}, "content-length": {}, "keep-alive": {}, "proxy-authenticate": {},

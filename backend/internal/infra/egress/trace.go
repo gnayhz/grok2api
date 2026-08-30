@@ -198,16 +198,6 @@ func WithNodeExclusions(ctx context.Context, nodeIDs map[uint64]struct{}) contex
 	return context.WithValue(ctx, nodeExclusionsContextKey{}, nodeIDs)
 }
 
-// NodeExclusionsFromContext returns the request-scoped exclusion set. It is
-// exported so tests and future callers can inspect what the guard excluded.
-func NodeExclusionsFromContext(ctx context.Context) map[uint64]struct{} {
-	if ctx == nil {
-		return nil
-	}
-	excluded, _ := ctx.Value(nodeExclusionsContextKey{}).(map[uint64]struct{})
-	return excluded
-}
-
 func nodeExcluded(ctx context.Context, nodeID uint64) bool {
 	if ctx == nil || nodeID == 0 {
 		return false
