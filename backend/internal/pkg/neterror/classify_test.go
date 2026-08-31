@@ -3,6 +3,8 @@ package neterror
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"testing"
 )
@@ -36,5 +38,10 @@ func TestIsUpstreamStreamIdleTimeout(t *testing.T) {
 	}
 	if IsUpstreamStreamIdleTimeout(context.DeadlineExceeded) {
 		t.Fatal("generic context deadline was misclassified as stream-idle timeout")
+	}
+}
+func TestIsUpstreamOutputLoop(t *testing.T) {
+	if !IsUpstreamOutputLoop(fmt.Errorf("read body: %w", ErrUpstreamOutputLoop)) || IsUpstreamOutputLoop(io.EOF) {
+		t.Fatal("output-loop sentinel classification failed")
 	}
 }
