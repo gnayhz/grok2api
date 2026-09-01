@@ -180,3 +180,118 @@ func TestAccumulateStrictPrefixExtension(t *testing.T) {
 		t.Fatalf("unexpected upstream3: %s", upstream3)
 	}
 }
+
+// 历史回归:累计去重曾按整条目字节比较,两轮 assistant 文本相同(如重复的
+// 简短答复)时第二条消息被丢弃,拆散 [reasoning, message] 轮次结构,孤儿
+// reasoning 失去锚点被跳过,上游前缀在该轮分叉。去重必须只看 reasoning 密文。
+func TestAccumulateKeepsDuplicateTextMessages(t *testing.T) {
+	store := memory.NewReasoningReplayStore(64)
+	replay := New(store, Config{Enabled: true, TTL: time.Hour}, slog.Default())
+	ctx := context.Background()
+	model, session := "grok-4.5", "sess-dup-text"
+	respond := func(seed byte, text string) {
+		enc := validEncrypted(seed)
+		payload := mustBody([]string{
+			`{"output":[{"type":"reasoning","encrypted_content":"`, enc, `"},`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"`, text, `"}]}]}`,
+		})
+		replay.StoreFromCompleted(ctx, model, session, payload)
+	}
+	respond(61, "完成。")
+	respond(62, "完成。")
+	items, ok, err := store.Get(ctx, model, session, time.Now().UTC(), time.Hour)
+	if err != nil || !ok {
+		t.Fatalf("store miss: ok=%v err=%v", ok, err)
+	}
+	// 两轮各 2 条(re+msg),重复文本的第二条消息不得被去重丢弃。
+	if len(items) != 4 {
+		t.Fatalf("items=%d want 4 (duplicate-text message must survive): %v", len(items), items)
+	}
+	body := mustBody([]string{
+		`{"input":[`,
+		`{"type":"message","role":"user","content":"u1"},`,
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"完成。"}]},`,
+		`{"type":"message","role":"user","content":"u2"},`,
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"完成。"}]},`,
+		`{"type":"message","role":"user","content":"u3"}]}`,
+	})
+	out := replay.Apply(ctx, model, session, body)
+	var got struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	reasonings := 0
+	for _, item := range got.Input {
+		if item["type"] == "reasoning" {
+			reasonings++
+		}
+	}
+	if reasonings != 2 {
+		t.Fatalf("both turns must replay reasoning, got %d: %s", reasonings, out)
+	}
+}
+
+// 历史回归:文本锚点曾按「从尾向前找最后一条同文消息」绑定,重复文本
+// (循环样式的简短回答)会让旧轮次的 reasoning 漂移到最新重复消息之前,
+// 相邻两轮上游序列在该位置分叉,缓存部分失效。顺序对齐后每轮绑定到
+// 自己的匹配项,序列保持纯前缀扩展。
+func TestAccumulateAnchorsDuplicateTextsInOrder(t *testing.T) {
+	store := memory.NewReasoningReplayStore(64)
+	replay := New(store, Config{Enabled: true, TTL: time.Hour}, slog.Default())
+	ctx := context.Background()
+	model, session := "grok-4.5", "sess-dup-order"
+	turn := 0
+	respond := func() {
+		turn++
+		enc := validEncrypted(byte(70 + turn))
+		payload := mustBody([]string{
+			`{"output":[{"type":"reasoning","encrypted_content":"`, enc, `"},`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"同样的回答"}]}]}`,
+		})
+		replay.StoreFromCompleted(ctx, model, session, payload)
+	}
+	inputSequence := func(body []byte) []string {
+		var got struct {
+			Input []map[string]any `json:"input"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		seq := make([]string, 0, len(got.Input))
+		for _, item := range got.Input {
+			kind, _ := item["type"].(string)
+			if enc, ok := item["encrypted_content"].(string); ok && enc != "" {
+				kind += fmt.Sprintf(":%d", len(enc))
+			}
+			seq = append(seq, kind)
+		}
+		return seq
+	}
+	build := func(n int) []byte {
+		items := []string{`{"type":"message","role":"user","content":"u1"}`}
+		for i := 2; i <= n; i++ {
+			items = append(items, `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"同样的回答"}]}`, `{"type":"message","role":"user","content":"u"}`)
+		}
+		return mustBody([]string{`{"input":[`, strings.Join(items, ","), `]}`})
+	}
+	respond()
+	up2 := build(2)
+	seq2 := inputSequence(replay.Apply(ctx, model, session, up2))
+	respond()
+	seq3 := inputSequence(replay.Apply(ctx, model, session, build(3)))
+	respond()
+	seq4 := inputSequence(replay.Apply(ctx, model, session, build(4)))
+	for i := range seq3 {
+		if i < len(seq2) && seq2[i] != seq3[i] {
+			t.Fatalf("duplicate-text turns must keep strict prefix extension at %d: seq2=%v seq3=%v", i, seq2, seq3)
+		}
+	}
+	for i := range seq4 {
+		if i < len(seq3) && seq3[i] != seq4[i] {
+			t.Fatalf("duplicate-text turns must keep strict prefix extension at %d: seq3=%v seq4=%v", i, seq3, seq4)
+		}
+	}
+	_ = up2
+}

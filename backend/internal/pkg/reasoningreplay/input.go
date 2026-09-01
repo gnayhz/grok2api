@@ -140,19 +140,25 @@ func groupReplayTurns(items [][]byte) []replayTurn {
 	return turns
 }
 
-// anchorIndex 计算该轮在输入中的插入位置(返回 -1 表示找不到锚点)。
-// 锚点优先级:
-//  1. 输入中与该轮工具调用 call_id 匹配的 function_call_output 之前——工具
-//     循环轮的 reasoning 必须紧邻它自己的调用簇,插到别处会破坏前缀;
-//  2. 输入中与该轮工具调用 call_id 匹配的 function_call 之前——客户端重发
-//     了调用但剥掉了 reasoning 的形态;
-//  3. 输入中最后一条与该轮 assistant 文本一致的 assistant 消息之前——
-//     纯文本轮的稳定追加位。
+// anchorIndex 计算该轮在输入中的插入位置(返回 -1 表示找不到锚点),
+// 只搜索 input[from:] 区间。锚点优先级:
+//  1. 与该轮工具调用 call_id 匹配的 function_call_output 之前——工具循环
+//     轮的 reasoning 必须紧邻它自己的调用簇;
+//  2. 与该轮工具调用 call_id 匹配的 function_call 之前——客户端重发了调用
+//     但剥掉了 reasoning 的形态;
+//  3. 第一条与该轮 assistant 文本一致的 assistant 消息之前。
 //
+// 调用方按轮次顺序推进 from(上一轮锚点之后),使每个轮次绑定到自己
+// 的匹配项而不是后面的重复项——文本可能重复(简短答复/循环样式的回答),
+// 若按「从尾向前找最后一条同文消息」绑定,旧轮次的 reasoning 会漂移到
+// 最新重复消息之前,相邻两轮上游序列在该位置分叉。
 // 没有任何锚点时返回 -1:宁可放弃这一轮的回放,也不把外轮内容插进请求
 // 头部。历史回归:无锚点注入曾把上一会话的推理塞进新对话的最前面,上游
 // 前缀在第一个缓存块后分叉,大会话每轮全量重算。
-func (t replayTurn) anchorIndex(input []map[string]json.RawMessage) int {
+func (t replayTurn) anchorIndex(input []map[string]json.RawMessage, from int) int {
+	if from < 0 {
+		from = 0
+	}
 	callIDs := map[string]bool{}
 	for _, raw := range t.items {
 		var item map[string]json.RawMessage
@@ -174,13 +180,13 @@ func (t replayTurn) anchorIndex(input []map[string]json.RawMessage) int {
 		// 客户端已重发 function_call 时,reasoning 锚在它自己的调用之前;
 		// 只有调用未被重发(仅剩输出)时,才把 [reasoning, call] 一并插到
 		// 匹配输出之前。
-		for index, item := range input {
-			if toolCallAnchor(item, callIDs, false) {
+		for index := from; index < len(input); index++ {
+			if toolCallAnchor(input[index], callIDs, false) {
 				return index
 			}
 		}
-		for index, item := range input {
-			if toolCallAnchor(item, callIDs, true) {
+		for index := from; index < len(input); index++ {
+			if toolCallAnchor(input[index], callIDs, true) {
 				return index
 			}
 		}
@@ -196,7 +202,7 @@ func (t replayTurn) anchorIndex(input []map[string]json.RawMessage) int {
 		if strings.TrimSpace(typeName) != "message" || !strings.EqualFold(strings.TrimSpace(role), "assistant") {
 			continue
 		}
-		for index := len(input) - 1; index >= 0; index-- {
+		for index := from; index < len(input); index++ {
 			inputType, inputRole := "", ""
 			_ = json.Unmarshal(input[index]["type"], &inputType)
 			_ = json.Unmarshal(input[index]["role"], &inputRole)
@@ -256,11 +262,15 @@ func insertReplayItems(body []byte, replayItems [][]byte) ([]byte, bool) {
 	turns := groupReplayTurns(replayItems)
 	pending := make(map[int][][]byte, len(turns))
 	injected := 0
+	// 顺序对齐:轮次按时间序排列,锚点搜索从上一轮锚点之后开始,保证
+	// 每轮绑定到自己的匹配项(见 anchorIndex)。
+	searchFrom := 0
 	for _, turn := range turns {
-		anchor := turn.anchorIndex(inputItems)
+		anchor := turn.anchorIndex(inputItems, searchFrom)
 		if anchor < 0 {
 			continue
 		}
+		searchFrom = anchor + 1
 		kept := turn.filterItems(index)
 		if len(kept) == 0 {
 			continue

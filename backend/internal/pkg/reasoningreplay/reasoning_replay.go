@@ -2,6 +2,7 @@ package reasoningreplay
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -129,22 +130,37 @@ func (r *ReasoningReplay) StoreFromCompleted(ctx context.Context, model, session
 // 缓存只复用严格前缀扩展:若每轮只保留最新一轮的回放,上一轮注入的
 // reasoning 在本轮消失,前缀在该位置分叉,每轮损失约一轮上下文的缓存;
 // 换账号(回放键含账号作用域)后的第一轮同理。累计保留让「本轮上游序列」
-// 恒等于「上一轮上游序列 + 追加项」。已存在的项(同密文/同调用)不重复
-// 追加;超出单会话字节预算时从最旧轮次开始丢弃。
+// 恒等于「上一轮上游序列 + 追加项」。去重只针对 reasoning 密文(同一响应
+// 重复捕获的幂等保护):assistant 消息按内容规范化后,文本相同的两轮会
+// 产生字节相同的条目,若一并去重会拆散 [reasoning, message] 轮次结构,
+// 让孤儿 reasoning 失去锚点被跳过——上游前缀随之分叉。
 func accumulateReplayItems(ctx context.Context, store repository.ReasoningReplayRepository, model, sessionKey string, ttl time.Duration, latest [][]byte) [][]byte {
 	existing, ok, err := store.Get(ctx, model, sessionKey, time.Now().UTC(), ttl)
 	if err != nil || !ok || len(existing) == 0 {
 		return latest
 	}
-	seen := make(map[string]struct{}, len(existing))
+	seenCiphers := make(map[string]struct{}, len(existing))
 	for _, item := range existing {
-		seen[string(item)] = struct{}{}
+		var typed struct {
+			Type             string "json:\"type\""
+			EncryptedContent string "json:\"encrypted_content\""
+		}
+		if json.Unmarshal(item, &typed) == nil && strings.TrimSpace(typed.Type) == "reasoning" && typed.EncryptedContent != "" {
+			seenCiphers[typed.EncryptedContent] = struct{}{}
+		}
 	}
 	merged := make([][]byte, 0, len(existing)+len(latest))
 	merged = append(merged, existing...)
 	for _, item := range latest {
-		if _, duplicate := seen[string(item)]; duplicate {
-			continue
+		var typed struct {
+			Type             string "json:\"type\""
+			EncryptedContent string "json:\"encrypted_content\""
+		}
+		if json.Unmarshal(item, &typed) == nil && strings.TrimSpace(typed.Type) == "reasoning" && typed.EncryptedContent != "" {
+			if _, duplicate := seenCiphers[typed.EncryptedContent]; duplicate {
+				continue
+			}
+			seenCiphers[typed.EncryptedContent] = struct{}{}
 		}
 		merged = append(merged, item)
 	}
