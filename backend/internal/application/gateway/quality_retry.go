@@ -32,9 +32,9 @@ const (
 	// 的产物，在零延迟拦截下纯属浪费客户端时间）；也是健康流思考增量的
 	// 到达窗口（实测 clean 首增量 2.1s 内到达）。
 	defaultQualityEvidenceTimeout = 3500 * time.Millisecond
-	// 首事件截止：降智排队期间上游只发 keepalive 注释或零字节（直连复测
-	// response.created 要等 68-125s；clean 恒定 0.8-2.2s），比证据截止更早
-	// 一档掐断换号。
+	// 首事件截止：零 data 事件（keepalive 不算）时中止该次尝试。
+	// 仅当 CreatedTimeout 短于 EvidenceTimeout 时比证据截止更早；
+	// 默认 5s>3.5s，空流先走证据臂。
 	defaultQualityCreatedTimeout     = 5 * time.Second
 	defaultMissingThinkingCooldown   = 12 * time.Hour
 	lastErrorMissingThinking         = accountdomain.LastErrorMissingThinking
@@ -141,11 +141,15 @@ type qualityHoldFingerprint struct {
 	OutputTokens    int64    `json:"output_tokens,omitempty"`
 	ReasoningTokens int64    `json:"reasoning_tokens,omitempty"`
 	Events          []string `json:"events,omitempty"`
-	FirstEventMS    int64    `json:"first_event_ms,omitempty"`
-	ItemDoneMS      int64    `json:"item_done_ms,omitempty"`
-	SummaryMS       int64    `json:"summary_ms,omitempty"`
-	PeekMS          int64    `json:"peek_ms,omitempty"`
-	Error           string   `json:"error,omitempty"`
+	// FirstItem 是第一个 output item / content_block 的 type。
+	// 真实归档里 D-a 为 reasoning，真抢跑为 message；二者 rule 都可能
+	// 落成 outrun（tee 在 item.done 之后还读到正文），单靠 rule 分不开。
+	FirstItem    string `json:"first_item,omitempty"`
+	FirstEventMS int64  `json:"first_event_ms,omitempty"`
+	ItemDoneMS   int64  `json:"item_done_ms,omitempty"`
+	SummaryMS    int64  `json:"summary_ms,omitempty"`
+	PeekMS       int64  `json:"peek_ms,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 func qualityHoldRule(sig qualityStreamSignals, err error) string {
@@ -454,7 +458,7 @@ const (
 	QualityExemptDisabled         = "disabled"              // requestRetry.enabled=false
 	QualityExemptSkipInput        = "skip_input"            // 受信网关侧分类器显式跳过
 	QualityExemptOperation        = "operation"             // 非推理操作（image/media/embedding...）
-	QualityExemptCompaction       = "compaction"            // TUI compaction 请求
+	QualityExemptCompaction       = "compaction"            // 请求体命中 compaction 标记（CreateResponse TUI 记 skip_input）
 	QualityExemptProvider         = "provider"              // 非 Build/Console 供应商
 	QualityExemptMessagesNoThink  = "messages_thinking_off" // Messages 协议未请求 thinking
 	QualityExemptModelScope       = "model_out_of_scope"    // 模型不在守卫白名单（guardedModels）
@@ -462,8 +466,7 @@ const (
 )
 
 // qualityHoldExemptReason 返回守卫不介入该请求的原因；空串表示应介入。
-// 判定顺序与 shouldHoldQualityStream 完全一致（后者是它的布尔投影），
-// 新增豁免路径必须两处同步演进。
+// shouldHoldQualityStream 是它的布尔投影（reason==""）。
 func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) string {
 	// 非流式与流式同样纳入 hold：peekQualityBody 对完整 body 判决，证据规则
 	// 一致（此前 !input.Streaming 豁免导致非流式降智响应直接交付，

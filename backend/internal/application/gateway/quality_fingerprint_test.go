@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func TestQualityHoldFingerprintMatchesRealDaSignature(t *testing.T) {
 	if verdict != QualityWithhold {
 		t.Fatalf("verdict = %s, want withhold", verdict)
 	}
-	if fp.Rule != "item_done" || !fp.ReasoningEnded || fp.HasThinking || !fp.Encrypted {
+	if fp.Rule != "item_done" || !fp.ReasoningEnded || fp.HasThinking || !fp.Encrypted || fp.FirstItem != "reasoning" {
 		t.Fatalf("fingerprint rule/flags = %+v", fp)
 	}
 	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.output_item.done"}
@@ -82,7 +84,7 @@ func TestQualityHoldFingerprintCleanThinking(t *testing.T) {
 	if verdict != QualityDeliver {
 		t.Fatalf("verdict = %s, want deliver", verdict)
 	}
-	if fp.Rule != "thinking" || !fp.HasThinking || fp.ReasoningEnded {
+	if fp.Rule != "thinking" || !fp.HasThinking || fp.ReasoningEnded || fp.FirstItem != "reasoning" {
 		t.Fatalf("fingerprint = %+v", fp)
 	}
 	found := false
@@ -94,4 +96,57 @@ func TestQualityHoldFingerprintCleanThinking(t *testing.T) {
 	if !found {
 		t.Fatalf("events = %v, missing summary delta", fp.Events)
 	}
+}
+
+func TestQualityHoldFingerprintMessageFirstOutrun(t *testing.T) {
+	t.Parallel()
+	outrun := sseData(`{"type":"response.created","response":{"id":"resp_out"}}`) +
+		sseData(`{"type":"response.in_progress"}`) +
+		sseData(`{"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}`) +
+		sseData(`{"type":"response.content_part.added"}`) +
+		sseData(`{"type":"response.output_text.delta","delta":"hello"}`)
+	replay, verdict, _, fp, err := peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(outrun)), qualityProtocolResponses, QualityRetryRuntime{})
+	if err != nil {
+		t.Fatalf("peek err = %v", err)
+	}
+	defer replay.Close()
+	if verdict != QualityWithhold {
+		t.Fatalf("verdict = %s, want withhold", verdict)
+	}
+	if fp.Rule != "outrun" || fp.FirstItem != "message" || fp.Encrypted || fp.HasThinking {
+		t.Fatalf("fingerprint = %+v", fp)
+	}
+}
+
+func TestFingerprintFirstItemOnArchivedShapes(t *testing.T) {
+	dir := strings.TrimSpace(os.Getenv("GROK2API_TRACE_REPLAY_DIR"))
+	if dir == "" {
+		t.Skip("GROK2API_TRACE_REPLAY_DIR not set")
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sse"))
+	if err != nil || len(files) == 0 {
+		t.Skip("no sse traces")
+	}
+	cfg := QualityRetryRuntime{Enabled: true, CreatedTimeout: 30 * time.Second, EvidenceTimeout: 30 * time.Second}
+	reasoning, message := 0, 0
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		_, verdict, _, fp, peekErr := peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(string(raw))), qualityProtocolResponses, cfg)
+		if peekErr != nil || verdict != QualityWithhold {
+			continue
+		}
+		switch fp.FirstItem {
+		case "reasoning":
+			reasoning++
+		case "message":
+			message++
+		}
+	}
+	if reasoning == 0 {
+		t.Fatalf("archived withhold with first_item=reasoning: 0 (wanted D-a/D-b shapes)")
+	}
+	t.Logf("archived withhold first_item reasoning=%d message=%d", reasoning, message)
 }

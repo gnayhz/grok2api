@@ -53,7 +53,8 @@ type qualityScanState struct {
 	// content[].text，无增量 delta）：同样是真实可见输出，计入可见估计。
 	aggregateRunes int
 	// semanticOutput 表示流携带非文本的语义输出（工具调用参数、非文本
-	// 内容块）：既不是空流，也不适合按 token 阈值扣留——直接交付。
+	// 内容块）：既不是空流，证据截止也不把搜索静默当降智。终态由
+	// emptyStreamVerdict 按思考期望扣留或放行，不是无条件交付。
 	semanticOutput  bool
 	reasoningTokens int64
 	outputTokens    int64
@@ -72,12 +73,13 @@ type qualityScanState struct {
 	sawDataEvent bool
 	// 指纹采样（quality_hold attempt 存档）：事件类型去重序列与关键时序。
 	// 不含文本/密文。startedAt 在 peek 入口赋值。
-	startedAt    time.Time
-	firstEventAt time.Time
-	itemDoneAt   time.Time
-	summaryAt    time.Time
-	eventTypes   []string
-	sawEncrypted bool
+	startedAt     time.Time
+	firstEventAt  time.Time
+	itemDoneAt    time.Time
+	summaryAt     time.Time
+	eventTypes    []string
+	sawEncrypted  bool
+	firstItemType string
 	// 逐帧解码 scratch：事件结构体挂在 state 上复用（见类型注释）。
 	chatEvent      qualityChatEvent
 	responsesEvent qualityResponsesEvent
@@ -113,6 +115,17 @@ func noteQualityEvent(state *qualityScanState, typ string) {
 		}
 	}
 	state.eventTypes = append(state.eventTypes, typ)
+}
+
+func noteQualityItem(state *qualityScanState, itemType string) {
+	if state == nil || state.firstItemType != "" {
+		return
+	}
+	itemType = strings.ToLower(strings.TrimSpace(itemType))
+	if itemType == "" {
+		return
+	}
+	state.firstItemType = itemType
 }
 
 func noteQualityEncrypted(state *qualityScanState, payload []byte) {
@@ -153,6 +166,7 @@ func (s *qualityScanState) fingerprint(verdict QualityVerdict, err error) qualit
 		OutputTokens:    sig.OutputTokens,
 		ReasoningTokens: sig.ReasoningTokens,
 		Events:          append([]string(nil), s.eventTypes...),
+		FirstItem:       s.firstItemType,
 		FirstEventMS:    relMS(s.startedAt, s.firstEventAt),
 		ItemDoneMS:      relMS(s.startedAt, s.itemDoneAt),
 		SummaryMS:       relMS(s.startedAt, s.summaryAt),
@@ -266,8 +280,8 @@ func qualityProtocolForOperation(operation audit.Operation) string {
 }
 
 // semanticOutputOnly 报告"仅语义输出"形态：流有工具调用等非文本输出，
-// 没有任何文本、思考或聚合内容。这样的流既不是空流也不适合按 token
-// 阈值扣留——调用决策的重放收益低而不确定性非零，直接交付。
+// 没有任何文本、思考或聚合内容。这样的流不是空流；终态走
+// emptyStreamVerdict（思考期望内扣留，未期望则放行）。
 func (s *qualityScanState) semanticOutputOnly() bool {
 	return s.semanticOutput && s.visibleRunes == 0 && s.aggregateRunes == 0 && !s.hasThinking
 }
@@ -672,6 +686,33 @@ func observeQualityPayload(state *qualityScanState, payload []byte) {
 }
 
 func observeQualityChat(state *qualityScanState, payload []byte) {
+	// 高频增量帧只有 delta.content / reasoning_* ；usage 与 tool_calls
+	// 仍走完整解码。finish_reason 是字符串才算终态（null 不是）。
+	if jsonpeek.HasKey(payload, "usage") || jsonpeek.HasKey(payload, "tool_calls") || jsonpeek.HasKey(payload, "function_call") {
+		observeQualityChatDecoded(state, payload)
+		return
+	}
+	noteQualityEvent(state, "chat.chunk")
+	if state.responseID == "" {
+		if id := jsonpeek.StringField(payload, "id"); id != "" {
+			state.responseID = id
+		}
+	}
+	if hasVisibleThinkingBytes(jsonpeek.UnquotedBytes(payload, "reasoning")) ||
+		hasVisibleThinkingBytes(jsonpeek.UnquotedBytes(payload, "reasoning_content")) ||
+		hasVisibleThinkingBytes(jsonpeek.UnquotedBytes(payload, "thinking_content")) {
+		state.hasThinking = true
+	}
+	if content := jsonpeek.UnquotedBytes(payload, "content"); len(content) > 0 {
+		noteVisibleContentBytes(state, content)
+	}
+	if fr := jsonpeek.StringField(payload, "finish_reason"); fr != "" {
+		state.terminal = true
+		noteQualityEvent(state, "chat.finish")
+	}
+}
+
+func observeQualityChatDecoded(state *qualityScanState, payload []byte) {
 	event := &state.chatEvent
 	// json.Unmarshal reuses slice backing WITHOUT resetting fields absent
 	// from the new frame: clear each element first or stale content/reasoning
@@ -708,8 +749,8 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 		if delta.Content != "" {
 			noteVisibleContent(state, delta.Content)
 		}
-		// 工具调用参数是语义输出：纯 tool_calls 流不是空流，也不按 token
-		// 阈值扣留（调用决策的重放收益低、不确定性非零，直接交付）。
+		// 工具调用参数是语义输出：纯 tool_calls 流不是空流；终态走
+		// emptyStreamVerdict（思考期望内扣留）。
 		if len(delta.ToolCalls) > 0 || delta.FunctionCall != nil {
 			state.semanticOutput = true
 		}
@@ -720,6 +761,70 @@ func observeQualityChat(state *qualityScanState, payload []byte) {
 	}
 }
 func observeQualityResponses(state *qualityScanState, payload []byte) {
+	// 高频帧与 item.added / reasoning item.done 只取 type+item 字段。
+	// completed 与「无增量的 message item.done」仍走完整解码（usage / 聚合正文）。
+	typ := jsonpeek.InternType(jsonpeek.RootStringBytes(payload, "type"))
+	switch typ {
+	case "response.created", "response.in_progress",
+		"response.reasoning_summary_part.added", "response.content_part.added":
+		noteQualityEvent(state, typ)
+		if state.responseID == "" {
+			if id := jsonpeek.StringField(payload, "id"); id != "" {
+				state.responseID = id
+			}
+		}
+		return
+	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+		noteQualityEvent(state, typ)
+		if hasVisibleThinkingBytes(jsonpeek.UnquotedBytes(payload, "delta")) {
+			state.hasThinking = true
+		}
+		return
+	case "response.output_text.delta":
+		noteQualityEvent(state, typ)
+		if delta := jsonpeek.UnquotedBytes(payload, "delta"); len(delta) > 0 {
+			noteVisibleContentBytes(state, delta)
+		}
+		return
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.mcp_call_arguments.delta":
+		noteQualityEvent(state, typ)
+		if len(jsonpeek.UnquotedBytes(payload, "delta")) > 0 {
+			state.semanticOutput = true
+		}
+		return
+	case "response.output_item.added":
+		noteQualityEvent(state, typ)
+		item := jsonpeek.RawValue(payload, "item")
+		itemType := string(jsonpeek.RootStringBytes(item, "type"))
+		noteQualityItem(state, itemType)
+		switch itemType {
+		case "reasoning", "message", "":
+		default:
+			state.semanticOutput = true
+		}
+		return
+	case "response.output_item.done":
+		noteQualityEvent(state, typ)
+		item := jsonpeek.RawValue(payload, "item")
+		itemType := string(jsonpeek.RootStringBytes(item, "type"))
+		itemID := string(jsonpeek.RootStringBytes(item, "id"))
+		if (itemType == "reasoning" || strings.HasPrefix(itemID, "rs_") || strings.HasPrefix(itemID, "reasoning_")) && !state.hasThinking {
+			state.reasoningEndedWithoutThinking = true
+		}
+		switch itemType {
+		case "message":
+			// 无增量、只在 item.done 带全文的形态仍走解码吃聚合文本。
+			observeQualityResponsesDecoded(state, payload)
+		case "reasoning", "":
+		default:
+			state.semanticOutput = true
+		}
+		return
+	}
+	observeQualityResponsesDecoded(state, payload)
+}
+
+func observeQualityResponsesDecoded(state *qualityScanState, payload []byte) {
 	event := &state.responsesEvent
 	*event = qualityResponsesEvent{}
 	if json.Unmarshal(payload, event) != nil {
@@ -734,6 +839,7 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 			state.hasThinking = true
 		}
 	case "response.output_item.added":
+		noteQualityItem(state, event.Item.Type)
 		// A reasoning item header alone is not delivered thinking: degraded
 		// streams open the item while never emitting visible reasoning text
 		// deltas.
@@ -796,6 +902,34 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 	}
 }
 func observeQualityAnthropic(state *qualityScanState, payload []byte) {
+	// 高频帧是 content_block_delta（thinking/text/partial_json）。
+	// start/stop 需要嵌套 content_block.type，仍走完整解码。
+	typ := jsonpeek.InternType(jsonpeek.RootStringBytes(payload, "type"))
+	switch typ {
+	case "message_stop":
+		noteQualityEvent(state, typ)
+		state.terminal = true
+		return
+	case "ping":
+		noteQualityEvent(state, typ)
+		return
+	case "content_block_delta":
+		noteQualityEvent(state, typ)
+		if hasVisibleThinkingBytes(jsonpeek.UnquotedBytes(payload, "thinking")) {
+			state.hasThinking = true
+		}
+		if text := jsonpeek.UnquotedBytes(payload, "text"); len(text) > 0 {
+			noteVisibleContentBytes(state, text)
+		}
+		if len(jsonpeek.UnquotedBytes(payload, "partial_json")) > 0 {
+			state.semanticOutput = true
+		}
+		return
+	}
+	observeQualityAnthropicDecoded(state, payload)
+}
+
+func observeQualityAnthropicDecoded(state *qualityScanState, payload []byte) {
 	event := &state.anthropicEvent
 	*event = qualityAnthropicEvent{}
 	if json.Unmarshal(payload, event) != nil {
@@ -806,6 +940,7 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 	case "message_stop":
 		state.terminal = true
 	case "content_block_start":
+		noteQualityItem(state, event.ContentBlock.Type)
 		// A thinking block start alone is not delivered thinking; only a
 		// non-empty thinking_delta below proves streamed thinking content.
 		if event.ContentBlock.Type == "thinking" {
@@ -813,8 +948,8 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 		} else if event.ContentBlock.Type == "redacted_thinking" {
 			// redacted_thinking 是加密思考块（Anthropic 对 encrypted_content 的
 			// 表达）：与密文同理不构成思考证据，也不是语义输出——只有它而没有
-			// 可见思考增量的流必须维持待判/扣留，不得被"纯语义输出直接交付"
-			// 洗白。
+			// 可见思考增量的流必须维持待判/扣留，不得被标成 semanticOutput
+			// 而绕过规则 2。
 		} else if event.ContentBlock.Type != "" && event.ContentBlock.Type != "text" {
 			// tool_use 等非文本内容块是语义输出。
 			state.semanticOutput = true
@@ -855,6 +990,7 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 		state.reasoningTokens = event.Usage.OutputTokensDetails.ThinkingTokens
 	}
 }
+
 // hasVisibleThinkingText 报告思考增量是否携带非空白内容。生产抓流实证：
 // 健康 summary 尾部会补发只含换行的增量，降智流的空推理项在末尾整包
 // flush 时也可能只携带空白增量。空白不含可见思考、不产生 reasoning
@@ -862,7 +998,13 @@ func observeQualityAnthropic(state *qualityScanState, payload []byte) {
 // （terminal_burst 事故形态：零思考答案末尾一次交付且守卫零计数）。
 // 零宽/格式字符（U+200B、U+FEFF 等 Cf 类）同样不可见，一并排除。
 func hasVisibleThinkingText(delta string) bool {
-	for _, r := range delta {
+	return hasVisibleThinkingBytes([]byte(delta))
+}
+
+func hasVisibleThinkingBytes(delta []byte) bool {
+	for i := 0; i < len(delta); {
+		r, n := utf8.DecodeRune(delta[i:])
+		i += n
 		if !unicode.IsSpace(r) && !unicode.Is(unicode.Cf, r) {
 			return true
 		}
@@ -871,10 +1013,14 @@ func hasVisibleThinkingText(delta string) bool {
 }
 
 func noteVisibleContent(state *qualityScanState, text string) {
-	if text == "" {
+	noteVisibleContentBytes(state, []byte(text))
+}
+
+func noteVisibleContentBytes(state *qualityScanState, text []byte) {
+	if len(text) == 0 {
 		return
 	}
-	state.visibleRunes += utf8.RuneCountInString(text)
+	state.visibleRunes += utf8.RuneCount(text)
 }
 
 func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
@@ -898,9 +1044,8 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 	// 性信号在主循环即刻生效，窗口到期无信号可翻盘。
 	evidenceTimer := time.NewTimer(cfg.EvidenceTimeout)
 	defer evidenceTimer.Stop()
-	// 首事件截止：直连复测证实降智排队期间上游零 data 事件（仅 keepalive
-	// 注释或零字节，response.created 等 68-125s），clean 恒定 0.8-2.2s。
-	// 比证据截止更早一档，把降智排队尝试成本再压低。
+	// 首事件截止：零 data 事件（keepalive 不算）。仅当本截止短于证据截止
+	// 时更早触发；默认 5s>3.5s 时空流由证据截止先赢。
 	createdTimer := time.NewTimer(cfg.CreatedTimeout)
 	defer createdTimer.Stop()
 	emit := func(replay io.ReadCloser, verdict QualityVerdict, usage Usage, err error) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
@@ -1210,6 +1355,7 @@ func peekQualityBodyReport(body io.ReadCloser, cfg QualityRetryRuntime) (io.Read
 	noteQualityEvent(&state, "response.completed")
 	for _, item := range parsed.Output {
 		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		noteQualityItem(&state, itemType)
 		noteQualityEvent(&state, itemType)
 		switch itemType {
 		case "reasoning":
