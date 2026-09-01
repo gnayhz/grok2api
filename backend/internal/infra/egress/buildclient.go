@@ -88,17 +88,19 @@ func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Durati
 			return nil, fmt.Errorf("Grok Build 不支持代理协议 %q", parsed.Scheme)
 		}
 	}
-	if _, err := buildtransport.ConfigureHTTP2Health(transport); err != nil {
-		return nil, fmt.Errorf("配置 Grok Build HTTP/2 健康探测: %w", err)
-	}
 	// 会话客户端的拨号观测:每次向上游代理新建 TCP 连接时回调一次,
-	// 用于从日志侧核对「同一会话是否真的全程复用一条连接」。
+	// 用于从日志侧核对「同一会话是否真的全程复用一条连接」。必须在
+	// ConfigureHTTP2Health 之前安装——HTTP/2 层在配置时会固化拨号路径,
+	// 事后替换 http1 字段对 h2 连接不生效。
 	if sessionPinned && onDial != nil {
 		inner := transport.DialContext
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			onDial()
 			return inner(ctx, network, address)
 		}
+	}
+	if _, err := buildtransport.ConfigureHTTP2Health(transport); err != nil {
+		return nil, fmt.Errorf("配置 Grok Build HTTP/2 健康探测: %w", err)
 	}
 	return &http.Client{
 		Transport: transport,
