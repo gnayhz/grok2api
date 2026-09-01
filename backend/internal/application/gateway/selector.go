@@ -986,7 +986,13 @@ func (s *Selector) markFreeQuotaExhaustedAt(ctx context.Context, credential acco
 		return err
 	}
 	_ = s.sticky.DeleteByAccount(ctx, credential.ID)
-	s.invalidateCandidates(credential.Provider)
+	// 配额恢复状态由 base 层承载:只失效 base 层(清 assembled 快照,重组时
+	// 从 DB 带回新鲜的耗尽状态,选号仍能给出 quota-exhausted 的 429 语义),
+	// 保留 overlay 层缓存。此前这里同时全量失效 overlay 层——配额重置窗口
+	// 内每个 (model,quotaMode) 键都要重查 overlay SQL,与配额变更无关的
+	// 模型键也被卷入,是重载风暴的放大器。仓储的 SaveQuotaRecovery 亦同步
+	// 发布同层事件,此处显式调用保证失效不依赖观察者装配。
+	s.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: credential.Provider})
 	return nil
 }
 
@@ -1006,7 +1012,11 @@ func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential accou
 	})
 	// The model block makes affected bindings ineligible and they are rebound on
 	// the next request. Preserve unrelated model/session affinity for this account.
-	s.invalidateCandidates(credential.Provider)
+	// 模型配额块由 overlay 层承载:只失效 overlay 层(assembled 随之清理、重组
+	// 时从 DB 带回新的 ModelQuotaBlock)。此前叠加的两条失效事件中
+	// AccountStateChanged 属 base 层——base 重查(凭据/计费/配额恢复五条 SQL)
+	// 与模型配额块无关,白白放大 DB 负载。
+	s.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountCapabilityChanged, Provider: credential.Provider})
 }
 
 // MarkModelAccessDenied isolates a permission failure to the rejected model.
@@ -1045,7 +1055,8 @@ func (s *Selector) MarkPaymentQuotaExhausted(ctx context.Context, credential acc
 				return err
 			}
 			_ = s.sticky.DeleteByAccount(ctx, credential.ID)
-			s.invalidateCandidates(credential.Provider)
+			// 与 markFreeQuotaExhaustedAt 同理:只失效 base 层,保留 overlay 缓存。
+			s.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: credential.Provider})
 			return nil
 		}
 	}

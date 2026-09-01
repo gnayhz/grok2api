@@ -330,12 +330,16 @@ func (s *responsesCompatState) itemID(outputIndex int64) string {
 // responsesDeltaAlreadyAddressed 报告常见增量帧是否已带 item_id。
 // 这类帧 sanitizeResponsesEvent 不会改任何字段，跳过 map 解码可避免
 // 推理阶段每个 token 都分配 map[string]any。
+// 检测用 RootStringBytes+InternType 零分配口径(与 sseEventType 同源):
+// 此前每行两次 StringField 各分配一个 string——流式基准中约 97% 的分配
+// 来自这里。type/item_id 在 Responses 增量帧中均为根级字段,根级限定
+// 也避免了 StringField 全缓冲搜索误中嵌套键的歧义。
 func responsesDeltaAlreadyAddressed(payload []byte) bool {
-	typ := jsonpeek.StringField(payload, "type")
+	typ := jsonpeek.InternType(jsonpeek.RootStringBytes(payload, "type"))
 	if !responsesEventNeedsItemID(typ) {
 		return false
 	}
-	return jsonpeek.StringField(payload, "item_id") != ""
+	return len(jsonpeek.RootStringBytes(payload, "item_id")) > 0
 }
 
 func responsesEventNeedsItemID(eventType string) bool {

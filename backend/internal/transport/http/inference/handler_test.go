@@ -1623,6 +1623,80 @@ func TestWriteResultRecordsStreamFailureDiagnostic(t *testing.T) {
 	}
 }
 
+func TestWriteResultStreamDisablesProxyBuffering(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	stream := "data: {\"type\":\"response.created\"}\n\n"
+	// Build/Console 通道上游只带 Content-Type,不带 X-Accel-Buffering。
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(stream)),
+		Finalize:   func(_ gateway.Usage, _, _ string) {},
+	}
+	router := gin.New()
+	router.POST("/stream", func(c *gin.Context) {
+		handler.writeResult(c, result, true, streamProtocolResponses)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/stream", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	if got := recorder.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("streaming response X-Accel-Buffering = %q, want %q", got, "no")
+	}
+	if values := recorder.Header().Values("X-Accel-Buffering"); len(values) != 1 {
+		t.Fatalf("X-Accel-Buffering duplicated: %v", values)
+	}
+}
+
+func TestWriteResultStreamKeepsSingleProxyBufferingHeaderWhenUpstreamProvides(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	// Web 通道上游已自带该头:copyHeaders 透传后不得出现重复值。
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": {"text/event-stream"}, "X-Accel-Buffering": {"no"}},
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.created\"}\n\n")),
+		Finalize:   func(_ gateway.Usage, _, _ string) {},
+	}
+	router := gin.New()
+	router.POST("/", func(c *gin.Context) {
+		handler.writeResult(c, result, true, streamProtocolResponses)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
+	if values := recorder.Header().Values("X-Accel-Buffering"); len(values) != 1 || values[0] != "no" {
+		t.Fatalf("X-Accel-Buffering values = %v, want single %q", values, "no")
+	}
+}
+
+func TestWriteResultNonStreamOmitsProxyBufferingHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	// 非流式 JSON 响应不得携带该头:关闭代理缓冲对完整 body 无收益,
+	// 反而让小响应失去代理聚合。
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader("{\"id\":\"resp_1\"}")),
+		Finalize:   func(_ gateway.Usage, _, _ string) {},
+	}
+	router := gin.New()
+	router.POST("/", func(c *gin.Context) {
+		handler.writeResult(c, result, false, streamProtocolResponses)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
+	if got := recorder.Header().Get("X-Accel-Buffering"); got != "" {
+		t.Fatalf("non-stream response X-Accel-Buffering = %q, want empty", got)
+	}
+}
+
 func TestWriteResultUpstreamCutStaysUpstreamInterrupted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(nil, nil, 1<<20)

@@ -72,6 +72,15 @@ func newBrowserClient(proxyURL, userAgent string) (*browserClient, error) {
 		tlsclient.WithTimeoutSeconds(7200),
 		tlsclient.WithClientProfile(browserProfile(userAgent)),
 		tlsclient.WithNotFollowRedirects(),
+		// 连接池:不设置时底层 Transport 落到 Go 默认 MaxIdleConnsPerHost=2。
+		// 浏览器客户端按(节点,scope,出口指纹)共享,同出口并发>2 的请求每条
+		// 都重复 TCP+uTLS(+代理 CONNECT)握手,直接抬高 Web/Console 首字延迟
+		// 与 CPU。对齐 Build 通道的显式池配置(见 buildclient.go);空闲超时
+		// 保持指针为零值→库默认 90s,不改变现有空闲行为。
+		tlsclient.WithTransportOptions(&tlsclient.TransportOptions{
+			MaxIdleConns:        256,
+			MaxIdleConnsPerHost: 64,
+		}),
 	}
 	if proxyURL != "" {
 		parsed, err := url.Parse(proxyURL)

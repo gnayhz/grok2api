@@ -1301,6 +1301,13 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 		return
 	}
 	copyHeaders(c.Writer.Header(), result.Header)
+	if stream {
+		// SSE 不得被反向代理缓冲：Web 通道上游自带该头，Build/Console 通道
+		// 只设 Content-Type——nginx 默认 proxy_buffering on 会攒住首批事件，
+		// 真实部署的首字延迟被代理放大。统一在传输层补齐，覆盖全部协议与
+		// 上游组合；非流式 JSON 不设置，避免不必要地关闭代理缓冲。
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+	}
 	c.Status(result.StatusCode)
 	if result.StatusCode >= 400 {
 		errorCode = "upstream_error"

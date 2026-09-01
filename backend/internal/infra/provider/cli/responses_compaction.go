@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,9 @@ const (
 	minGatewayCompactionRunes    = 500
 	gatewayCompactionMaxAttempts = 3
 )
+
+// compactionTypeLiteral 是 input 项 type 字段的压缩类型字面量,预筛用。
+var compactionTypeLiteral = []byte(`"compaction"`)
 
 // Generated from xai-org/grok-build's full_replace_summary_prompt.txt using
 // build_summary_prompt(None), so the optional {user_context_section} slot is
@@ -90,6 +94,15 @@ func (c *gatewayCompactionCodec) decode(session, blob string) (summary string, o
 // portable developer message. Foreign OpenAI/Claude/Gemini blobs are never
 // forwarded to Grok Build: its decoder cannot decrypt those provider states.
 func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, session string) ([]byte, int, int, error) {
+	// 字面量预筛:body 中不存在 "compaction" 时不可能有 type=="compaction"
+	// 的 input 项,直接跳过 map[string]any 全量装箱解码——该解码对每个
+	// Responses 请求都会执行,而绝大多数请求不含压缩项(128KB body 的装箱
+	// 解码是毫秒级,字面量扫描是微秒级)。JSON 转义(\u0063...)理论上可
+	// 绕过字面量检查,但本网关与主流客户端序列化器均不转义 ASCII 字母,
+	// 与质量扫描器 hot-path 预筛同口径;命中歧义时预筛只多做一次全量解码。
+	if !bytes.Contains(body, compactionTypeLiteral) {
+		return body, 0, 0, nil
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body, 0, 0, nil // normalizeResponsesRequest owns the public JSON error.
