@@ -33,6 +33,25 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
+func clientJSON(t *testing.T, response *provider.Response) io.Reader {
+	t.Helper()
+	if response == nil || response.ConvertJSON == nil {
+		return response.Body
+	}
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	converted, err := response.ConvertJSON(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.ConvertJSON = nil
+	response.Body = io.NopCloser(bytes.NewReader(converted))
+	return response.Body
+}
+
 func TestBuildDirectTransportEnablesHTTP2Health(t *testing.T) {
 	transport := newBuildHTTPTransport(5 * time.Minute)
 	if transport.IdleConnTimeout != buildtransport.IdleConnTimeout {
@@ -370,6 +389,91 @@ func TestForwardResponseReplaysReasoningAcrossMessagesTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	if requestCount != 3 {
+		t.Fatalf("request count = %d", requestCount)
+	}
+}
+
+func TestForwardResponseKeepsReplayWhenWebSearchToolChoiceNone(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawEncrypted := make([]byte, 64)
+	for index := range rawEncrypted {
+		rawEncrypted[index] = byte(index)
+	}
+	replayEncrypted := base64.RawStdEncoding.EncodeToString(rawEncrypted)
+	requestCount := 0
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
+	adapter.SetReasoningReplay(reasoningreplay.New(
+		memory.NewReasoningReplayStore(16),
+		reasoningreplay.Config{Enabled: true, TTL: time.Hour},
+		nil,
+	))
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		var payload struct {
+			Input []map[string]any `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if requestCount == 2 {
+			found := false
+			for _, item := range payload.Input {
+				if item["type"] == "reasoning" && item["encrypted_content"] == replayEncrypted {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("tool_choice none dropped replay: %#v", payload.Input)
+			}
+		}
+		body := `{"id":"resp_none","model":"grok-4.5","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"none"}]}]}`
+		if requestCount == 1 {
+			body = `{"id":"resp_1","model":"grok-4.5","status":"completed","output":[{"type":"reasoning","encrypted_content":"` + replayEncrypted + `"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}]}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK",
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   io.NopCloser(strings.NewReader(body)), Request: request,
+		}, nil
+	})
+	credential := account.Credential{ID: 7, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted}
+	first, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.5",
+		NormalizeBody: true, Operation: conversation.OperationMessages, PromptCacheKey: "messages-cache-key", ReasoningReplayKey: "messages-replay-key",
+		Body: []byte(`{"model":"public","max_tokens":128,"messages":[{"role":"user","content":"first"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(first.Body)
+	_ = first.Body.Close()
+
+	none, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.5",
+		NormalizeBody: true, Operation: conversation.OperationMessages, PromptCacheKey: "messages-cache-key", ReasoningReplayKey: "messages-replay-key",
+		Body: []byte(`{
+			"model":"public","max_tokens":128,
+			"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"first"},{"role":"user","content":"next"}],
+			"tools":[{"type":"web_search_20250305","name":"web_search"}],
+			"tool_choice":{"type":"none"}
+		}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer none.Body.Close()
+	if _, err := io.ReadAll(none.Body); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 2 {
 		t.Fatalf("request count = %d", requestCount)
 	}
 }
@@ -825,7 +929,7 @@ func TestForwardResponseDowngradesServerToolSearchBeforeUpstream(t *testing.T) {
 		t.Fatalf("compatibility warnings = %q", response.Header.Get("X-Grok2API-Compatibility-Warnings"))
 	}
 	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(clientJSON(t, response)).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
 	if payload["id"] != "resp_search" {
@@ -881,7 +985,7 @@ func TestForwardResponseRestoresNamespaceResponse(t *testing.T) {
 		t.Fatalf("compatibility warnings = %q", response.Header.Get("X-Grok2API-Compatibility-Warnings"))
 	}
 	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(clientJSON(t, response)).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
 	call := payload["output"].([]any)[0].(map[string]any)
@@ -948,7 +1052,7 @@ func TestForwardResponsePreservesClaudeCodeMessagesOptions(t *testing.T) {
 	}
 	defer response.Body.Close()
 	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(clientJSON(t, response)).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
 	content := payload["content"].([]any)
@@ -1010,7 +1114,7 @@ func TestForwardResponseMapsClaudeCodeWebSearchEndToEnd(t *testing.T) {
 	}
 	defer response.Body.Close()
 	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(clientJSON(t, response)).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
 	content := payload["content"].([]any)
@@ -1086,7 +1190,7 @@ func TestForwardResponseInjectsPromptCacheKeyAfterChatConversion(t *testing.T) {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
 	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(clientJSON(t, response)).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
 	usage := payload["usage"].(map[string]any)

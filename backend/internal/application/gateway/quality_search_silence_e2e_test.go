@@ -33,10 +33,14 @@ func TestSearchSilentStreamDeliversThroughLoop(t *testing.T) {
 	if plainErr == nil || plainVerdict != QualityWait {
 		t.Fatalf("plain silence must abort: verdict=%s err=%v", plainVerdict, plainErr)
 	}
-	// 主组：搜索请求的扫描器级预算豁免（service 层把 EvidenceTimeout 提到
-	// qualitySearchSilenceBudget）。
-	searchCfg := cfg
-	searchCfg.EvidenceTimeout = qualitySearchSilenceBudget
+	// 主组：走 shipped qualityLivenessSchedule（任意启用工具把
+	// EvidenceTimeout 与 CreatedTimeout 都提到 qualitySearchSilenceBudget）。
+	// 本夹具虽先发 response.created（created 臂本就不会在 300ms 静默里触发），
+	// 仍不得手写只抬证据截止——制度表回归由本调用锁双预算。
+	searchCfg := qualityLivenessSchedule([]byte(`{"model":"m","tools":[{"type":"web_search"}]}`), "responses", cfg)
+	if searchCfg.EvidenceTimeout != qualitySearchSilenceBudget || searchCfg.CreatedTimeout != qualitySearchSilenceBudget {
+		t.Fatal("search schedule must lift both budgets")
+	}
 	replay, verdict, _, err := peekQualityStream(context.Background(), silentSearchStream(), qualityProtocolResponses, searchCfg)
 	if replay != nil {
 		_ = replay.Close()

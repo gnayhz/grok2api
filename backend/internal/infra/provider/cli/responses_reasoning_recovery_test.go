@@ -97,7 +97,7 @@ func TestRecoverReasoningDecodeFailureRetriesSameUpstreamOnce(t *testing.T) {
 	if calls.Load() != 2 || response.StatusCode != http.StatusOK || !strings.Contains(response.Header.Get("X-Grok2API-Compatibility-Warnings"), "reasoning_encrypted_content_downgraded") {
 		t.Fatalf("calls=%d status=%d headers=%#v", calls.Load(), response.StatusCode, response.Header)
 	}
-	data, _ := io.ReadAll(response.Body)
+	data, _ := io.ReadAll(clientJSON(t, response))
 	if !strings.Contains(string(data), `"type":"message"`) {
 		t.Fatalf("converted response = %s", data)
 	}
@@ -433,6 +433,23 @@ func TestRecoverReasoningDecodeFailurePreservesOriginalWhenRetryFails(t *testing
 	data, _ := io.ReadAll(response.Body)
 	if calls.Load() != 2 || response.StatusCode != http.StatusBadRequest || !strings.Contains(string(data), "Could not decode") || !strings.Contains(response.Header.Get("X-Grok2API-Compatibility-Warnings"), "reasoning_recovery_failed") {
 		t.Fatalf("calls=%d status=%d headers=%#v body=%s", calls.Load(), response.StatusCode, response.Header, data)
+	}
+}
+
+// D-a / 健康 200 流带 encrypted_content，不是「无法解码密文」的 400。
+// 恢复路径不得把密文 item 当 decode failure，否则会误重试或洗成健康。
+func TestIsReasoningDecodeFailureIgnoresDaCipherItem(t *testing.T) {
+	t.Parallel()
+	da := []byte(`{"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"sig"}}`)
+	if isReasoningDecodeFailure(da) {
+		t.Fatal("D-a encrypted item.done must not look like a decode-failure 400")
+	}
+	ok200 := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","encrypted_content":"sig"}]}}`)
+	if isReasoningDecodeFailure(ok200) {
+		t.Fatal("completed stream with ciphertext must not look like a decode-failure 400")
+	}
+	if !isReasoningDecodeFailure([]byte(`{"error":"Could not decrypt the provided encrypted_content"}`)) {
+		t.Fatal("explicit decrypt error must still match")
 	}
 }
 

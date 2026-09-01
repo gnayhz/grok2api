@@ -65,4 +65,63 @@ func TestExampleConfigMatchesCodeDefaults(t *testing.T) {
 	if cfg.Provider.Web.ChatTimeout.Value() != 2*time.Minute {
 		t.Fatalf("provider.web.chatTimeout 语义应为 2m, got %s", cfg.Provider.Web.ChatTimeout.Value())
 	}
+	// requestRetry 其它字段（如 accountCooldown 12h vs 代码 24h）有意分叉，
+	// 不能整节比较。白名单两边都必须空（空=全部推理模型）。
+	if len(cfg.RequestRetry.GuardedModels) != 0 {
+		t.Fatalf("example guardedModels = %#v, want empty (all models gated)", cfg.RequestRetry.GuardedModels)
+	}
+	if len(defaults.RequestRetry.GuardedModels) != 0 {
+		t.Fatalf("defaultConfig GuardedModels = %#v, want empty (all models gated)", defaults.RequestRetry.GuardedModels)
+	}
+	if cfg.RequestRetry.CreatedTimeout.Value() != 5*time.Second {
+		t.Fatalf("example createdTimeout = %s, want 5s", cfg.RequestRetry.CreatedTimeout.Value())
+	}
+	if defaults.RequestRetry.CreatedTimeout.Value() != 5*time.Second {
+		t.Fatalf("defaultConfig createdTimeout = %s, want 5s", defaults.RequestRetry.CreatedTimeout.Value())
+	}
+	if cfg.RequestRetry.EvidenceTimeout.Value() != 3500*time.Millisecond {
+		t.Fatalf("example evidenceTimeout = %s, want 3.5s", cfg.RequestRetry.EvidenceTimeout.Value())
+	}
+	if defaults.RequestRetry.EvidenceTimeout.Value() != 3500*time.Millisecond {
+		t.Fatalf("defaultConfig evidenceTimeout = %s, want 3.5s", defaults.RequestRetry.EvidenceTimeout.Value())
+	}
+	if cfg.RequestRetry.OnExhausted != "fail_closed" {
+		t.Fatalf("example onExhausted = %q, want fail_closed", cfg.RequestRetry.OnExhausted)
+	}
+	if defaults.RequestRetry.OnExhausted != "fail_closed" {
+		t.Fatalf("defaultConfig onExhausted = %q, want fail_closed", defaults.RequestRetry.OnExhausted)
+	}
+	if cfg.RequestRetry.MaxAttempts != 2 {
+		t.Fatalf("example maxAttempts = %d, want 2", cfg.RequestRetry.MaxAttempts)
+	}
+	if defaults.RequestRetry.MaxAttempts != 2 {
+		t.Fatalf("defaultConfig maxAttempts = %d, want 2", defaults.RequestRetry.MaxAttempts)
+	}
+	if !cfg.RequestRetry.SameAccountRetry {
+		t.Fatal("example sameAccountRetry = false, want true")
+	}
+	if !defaults.RequestRetry.SameAccountRetry {
+		t.Fatal("defaultConfig sameAccountRetry = false, want true")
+	}
+	// idleAccountCooldown：示例 15m；defaultConfig 为 0，由 normalize 填 15m。
+	if cfg.RequestRetry.IdleAccountCooldown.Value() != 15*time.Minute {
+		t.Fatalf("example idleAccountCooldown = %s, want 15m", cfg.RequestRetry.IdleAccountCooldown.Value())
+	}
+	if defaults.RequestRetry.IdleAccountCooldown.Value() != 0 {
+		t.Fatalf("defaultConfig idleAccountCooldown = %s, want 0 (normalize fills 15m)", defaults.RequestRetry.IdleAccountCooldown.Value())
+	}
+	// accountCooldown：示例 12h；defaultConfig 24h。有意分叉，不能整节比较。
+	if cfg.RequestRetry.AccountCooldown.Value() != 12*time.Hour {
+		t.Fatalf("example accountCooldown = %s, want 12h", cfg.RequestRetry.AccountCooldown.Value())
+	}
+	if defaults.RequestRetry.AccountCooldown.Value() != 24*time.Hour {
+		t.Fatalf("defaultConfig accountCooldown = %s, want 24h", defaults.RequestRetry.AccountCooldown.Value())
+	}
+	// enabled：示例 true（运维复制即开守卫）；defaultConfig 省略为 false。
+	if !cfg.RequestRetry.Enabled {
+		t.Fatal("example enabled = false, want true")
+	}
+	if defaults.RequestRetry.Enabled {
+		t.Fatal("defaultConfig enabled = true, want false (yaml/example turns it on)")
+	}
 }

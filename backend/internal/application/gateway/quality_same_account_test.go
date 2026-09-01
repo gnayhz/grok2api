@@ -25,8 +25,7 @@ func bFormStream() string {
 }
 
 func aFormStream() string {
-	return ": grok2api-reasoning-start" + "\n\n" +
-		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}" + "\n\n" +
+	return "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}" + "\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\"good answer\"}}]}" + "\n\n" +
 		"data: {\"usage\":{\"completion_tokens\":30,\"completion_tokens_details\":{\"reasoning_tokens\":12}}}" + "\n\n" +
 		"data: [DONE]" + "\n\n"
@@ -286,4 +285,36 @@ func TestProbeLaneNeverSameAccountRetries(t *testing.T) {
 	fixture.assertAttempts(t, 1, 1)
 	fixture.assertAttempts(t, 0, 1)
 	fixture.assertCooldown(t, 1, true)
+}
+
+func TestCommitableSameAccountRetryRequiresPool(t *testing.T) {
+	t.Parallel()
+	cfgOn := QualityRetryRuntime{SameAccountRetry: true}
+	cfgOff := QualityRetryRuntime{SameAccountRetry: false}
+	session := &selectionSession{}
+	cases := []struct {
+		name       string
+		cfg        QualityRetryRuntime
+		used       bool
+		quotaProbe bool
+		selection  *selectionSession
+		poolEgress bool
+		want       bool
+	}{
+		{name: "rotating pool", cfg: cfgOn, selection: session, poolEgress: true, want: true},
+		{name: "fixed proxy not pool", cfg: cfgOn, selection: session, poolEgress: false, want: false},
+		{name: "flag off even on pool", cfg: cfgOff, selection: session, poolEgress: true, want: false},
+		{name: "already used", cfg: cfgOn, used: true, selection: session, poolEgress: true, want: false},
+		{name: "quota probe origin", cfg: cfgOn, quotaProbe: true, selection: session, poolEgress: true, want: false},
+		{name: "nil selection", cfg: cfgOn, poolEgress: true, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := commitableSameAccountRetry(tc.cfg, tc.used, tc.quotaProbe, tc.selection, tc.poolEgress)
+			if got != tc.want {
+				t.Fatalf("commitableSameAccountRetry = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

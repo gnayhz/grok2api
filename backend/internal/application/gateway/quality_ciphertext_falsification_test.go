@@ -102,7 +102,107 @@ func TestAnthropicSignatureDeltaIsNotEvidence(t *testing.T) {
 	}
 }
 
-// chat 转换的 reasoning-start 注释不是证据。
+// peek 层：分类器已证伪 signature_delta 当证据，但空流短路在分类器之前。
+// 签名+可见正文必须扣留，不得被密文洗成交付。
+func TestPeekAnthropicSignatureDeltaWithTextWithholds(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("word ", 40)
+	body := sse(
+		`data: {"type":"content_block_start","content_block":{"type":"thinking"}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"signature_delta","signature":"EqoBCkgIYj"}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"`+content+`"}}`,
+		`data: {"type":"message_stop"}`,
+	)
+	replay, verdict, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolAnthropic, QualityRetryRuntime{})
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if err != nil || verdict != QualityWithhold {
+		t.Fatalf("signature_delta+text peek = %s err=%v, want withhold (not deliver)", verdict, err)
+	}
+}
+
+// 思考块开闭 + 仅 signature_delta（无可见正文）是 Messages 的 item.done
+// 密文形态：规则 2 扣留，不是空流 idle，也不是交付。
+func TestPeekAnthropicSignatureDeltaOnlyWithholds(t *testing.T) {
+	t.Parallel()
+	body := sse(
+		`data: {"type":"content_block_start","content_block":{"type":"thinking"}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"signature_delta","signature":"EqoBCkgIYj"}}`,
+		`data: {"type":"content_block_stop"}`,
+		`data: {"type":"message_stop"}`,
+	)
+	replay, verdict, _, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolAnthropic, QualityRetryRuntime{ReasoningExpected: true})
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if err != nil || verdict != QualityWithhold {
+		t.Fatalf("thinking-block + signature_delta only peek = %s err=%v, want withhold (not deliver, not idle)", verdict, err)
+	}
+}
+
+// Encrypted 指纹只认 encrypted_content 子串。signature_delta 不得把该位
+// 洗成 true（那是 Responses 密文遥测），也不得因此改判决——仍扣留。
+func TestPeekAnthropicSignatureDeltaFingerprintNotEncrypted(t *testing.T) {
+	t.Parallel()
+	body := sse(
+		`data: {"type":"content_block_start","content_block":{"type":"thinking"}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"signature_delta","signature":"EqoBCkgIYj"}}`,
+		`data: {"type":"content_block_stop"}`,
+		`data: {"type":"message_stop"}`,
+	)
+	replay, verdict, _, fp, err := peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(body)), qualityProtocolAnthropic, QualityRetryRuntime{ReasoningExpected: true})
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if err != nil || verdict != QualityWithhold {
+		t.Fatalf("verdict=%s err=%v, want withhold", verdict, err)
+	}
+	if fp.Encrypted {
+		t.Fatalf("signature_delta must not set encrypted_content fingerprint: %+v", fp)
+	}
+	if fp.HasThinking {
+		t.Fatalf("signature_delta must not be thinking: %+v", fp)
+	}
+}
+
+// RootStringBytes 取根上第一个 type；encoding/json 后写覆盖。快路径因此
+// 看不到 content_block_delta 时，解码臂必须仍把 thinking_delta 当证据，
+// 且仍不得把 signature_delta 当证据。
+func TestAnthropicDecodedDeltaArmDuplicateTypeThinkingDelivers(t *testing.T) {
+	t.Parallel()
+	state := qualityScanState{protocol: qualityProtocolAnthropic}
+	observeQualityChunk(&state, []byte(sse(
+		`data: {"type":"content_block_start","content_block":{"type":"thinking"}}`,
+		`data: {"type":"x","type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"先想一步"}}`,
+	)))
+	if !state.hasThinking {
+		t.Fatal("duplicate-type thinking_delta must still be evidence via decoded arm")
+	}
+	if v := classifyQualityHold(state.signals()); v != QualityDeliver {
+		t.Fatalf("verdict=%s, want deliver", v)
+	}
+}
+
+func TestAnthropicDecodedDeltaArmDuplicateTypeSignatureWithholds(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("word ", 40)
+	state := qualityScanState{protocol: qualityProtocolAnthropic}
+	observeQualityChunk(&state, []byte(sse(
+		`data: {"type":"content_block_start","content_block":{"type":"thinking"}}`,
+		`data: {"type":"x","type":"content_block_delta","delta":{"type":"signature_delta","signature":"EqoBCkgIYj"}}`,
+		`data: {"type":"x","type":"content_block_delta","delta":{"type":"text_delta","text":"`+content+`"}}`,
+		`data: {"type":"message_stop"}`,
+	)))
+	if state.hasThinking {
+		t.Fatalf("duplicate-type signature_delta must not be evidence: %#v", state.signals())
+	}
+	if v := classifyQualityHold(state.signals()); v != QualityWithhold {
+		t.Fatalf("duplicate-type signature+text = %s, want withhold", v)
+	}
+}
+
+// 历史私有注释（已从注入链路删除）不得当思考证据。
 func TestChatReasoningStartCommentIsNotEvidence(t *testing.T) {
 	t.Parallel()
 	content := strings.Repeat("word ", 40)

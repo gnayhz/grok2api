@@ -75,4 +75,28 @@ func TestExampleConfigQualityRetryWiring(t *testing.T) {
 	if runtime.CreatedTimeout != wants.createdTimeout {
 		t.Errorf("CreatedTimeout = %s", runtime.CreatedTimeout)
 	}
+	// example yaml is guardedModels: [] (empty = all models gated). A dropped
+	// qualityRetryRuntime mapping still yields len 0, so also drive a non-empty
+	// list through the same Load → mapping chain.
+	if len(runtime.GuardedModels) != 0 {
+		t.Errorf("example GuardedModels = %#v, want empty (all models gated)", runtime.GuardedModels)
+	}
+
+	wantModels := []string{"grok-4.5", "grok-4.6"}
+	scoped := strings.Replace(sanitized, "guardedModels: []", `guardedModels: ["grok-4.5", "grok-4.6"]`, 1)
+	if scoped == sanitized {
+		t.Fatal("example yaml missing guardedModels: []")
+	}
+	scopedPath := filepath.Join(t.TempDir(), "config-scoped.yaml")
+	if err := os.WriteFile(scopedPath, []byte(scoped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scopedCfg, err := config.Load(scopedPath)
+	if err != nil {
+		t.Fatalf("load scoped example: %v", err)
+	}
+	scopedRuntime := qualityRetryRuntime(scopedCfg.RequestRetry)
+	if len(scopedRuntime.GuardedModels) != 2 || scopedRuntime.GuardedModels[0] != wantModels[0] || scopedRuntime.GuardedModels[1] != wantModels[1] {
+		t.Errorf("GuardedModels mapping = %#v, want %#v", scopedRuntime.GuardedModels, wantModels)
+	}
 }

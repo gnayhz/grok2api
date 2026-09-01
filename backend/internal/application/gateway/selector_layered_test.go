@@ -113,6 +113,20 @@ func (r *layeredAccountRepository) UpdateHealth(_ context.Context, id uint64, _ 
 	return nil
 }
 
+func (r *layeredAccountRepository) UpdateQualityIdleCooldown(_ context.Context, id uint64, provider account.Provider, until time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if provider == "" {
+		provider = account.ProviderBuild
+	}
+	copied := until
+	r.healthUpdates = append(r.healthUpdates, repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
+		CooldownUntil: &copied, HealthMarker: account.LastErrorQualityIdle,
+	})
+	return nil
+}
+
 func (r *layeredAccountRepository) TouchLastUsed(_ context.Context, id uint64, usedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -224,6 +238,56 @@ func TestSelectorHealthInvalidationDoesNotRebuildProviderSnapshots(t *testing.T)
 	}
 	if currentBase, currentOverlay := repo.callCounts("model-a"); currentBase != baseCalls || currentOverlay != overlayCalls {
 		t.Fatalf("mark failure rebuilt snapshots: base %d->%d overlay %d->%d", baseCalls, currentBase, overlayCalls, currentOverlay)
+	}
+}
+
+func TestMarkQualityIdleFailureDoesNotRebuildProviderSnapshots(t *testing.T) {
+	repo := newLayeredRepositoryFixture()
+	repo.bases = append(repo.bases, account.RoutingAccountBase{
+		Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive},
+	})
+	for model, overlay := range repo.overlays {
+		overlay.Values = append(overlay.Values, account.RoutingAccountOverlay{AccountID: 2, ModelCapabilityKnown: true, SupportsModel: true})
+		repo.overlays[model] = overlay
+	}
+	selector := NewSelector(repo, nil, nil, nil, time.Hour, time.Second, time.Minute)
+	if _, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	baseCalls, overlayCalls := repo.callCounts("model-a")
+	baseVersion := selector.routingBaseVersion(account.ProviderBuild)
+	overlayVersion := selector.routingOverlayVersion(account.ProviderBuild)
+
+	if err := selector.MarkQualityIdleFailure(context.Background(), account.Credential{ID: 1, Provider: account.ProviderBuild}, 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := selector.routingBaseVersion(account.ProviderBuild); got != baseVersion {
+		t.Fatalf("idle health invalidation bumped base version: %#v -> %#v", baseVersion, got)
+	}
+	if got := selector.routingOverlayVersion(account.ProviderBuild); got != overlayVersion {
+		t.Fatalf("idle health invalidation bumped overlay version: %#v -> %#v", overlayVersion, got)
+	}
+	now := time.Now().UTC()
+	marked := selector.applyRoutingHealth(account.Credential{ID: 1, Provider: account.ProviderBuild}, now)
+	if marked.LastError != account.LastErrorQualityIdle || marked.CooldownUntil == nil || !now.Before(*marked.CooldownUntil) {
+		t.Fatalf("idle health overlay = %#v", marked)
+	}
+
+	key := candidateCacheKey{provider: account.ProviderBuild, upstreamModel: "model-a"}
+	snapshot, ok := selector.candidates[key]
+	if !ok {
+		t.Fatal("idle path cleared the provider candidate snapshot")
+	}
+	if len(snapshot.values) != 1 || snapshot.values[0].Credential.ID != 2 {
+		t.Fatalf("evict should drop only the idle account, got %#v", snapshot.values)
+	}
+
+	if _, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false); err != nil {
+		t.Fatalf("remaining account should still schedule: %v", err)
+	}
+	if currentBase, currentOverlay := repo.callCounts("model-a"); currentBase != baseCalls || currentOverlay != overlayCalls {
+		t.Fatalf("idle path rebuilt snapshots: base %d->%d overlay %d->%d", baseCalls, currentBase, overlayCalls, currentOverlay)
 	}
 }
 

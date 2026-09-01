@@ -254,3 +254,81 @@ func TestCaptureBodyStreamingDropsDeltasButKeepsItemDone(t *testing.T) {
 		t.Fatalf("delta-heavy SSE did not store reasoning: %s", updated)
 	}
 }
+
+func TestCaptureBodyStreamingDaFingerprintDoesNotStore(t *testing.T) {
+	// D-a 四事件指纹无 completed；extractCompletedPayloadFromSSE 需要 completed/done。
+	// 扣留在 item.done 关闭，Close 不排空未读的 completed 尾。
+	store := memory.NewReasoningReplayStore(100)
+	replay := New(store, Config{Enabled: true, TTL: time.Hour}, slog.Default())
+	nextBody := []byte(`{"input":[{"type":"message","role":"user","content":"next"}]}`)
+
+	encFP := validEncrypted(22)
+	var fingerprint strings.Builder
+	fingerprint.WriteString("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_deg\"}}\n\n")
+	fingerprint.WriteString("data: {\"type\":\"response.in_progress\"}\n\n")
+	fingerprint.WriteString("data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}\n\n")
+	fingerprint.WriteString("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"" + encFP + "\"}}\n\n")
+	wrapped := replay.CaptureBody(io.NopCloser(strings.NewReader(fingerprint.String())), "grok-4.5", "session-da-fp", true, false)
+	if _, err := io.Copy(io.Discard, wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	updated := replay.Apply(context.Background(), "grok-4.5", "session-da-fp", nextBody)
+	if strings.Contains(string(updated), encFP) {
+		t.Fatalf("D-a fingerprint without completed stored replay: %s", updated)
+	}
+
+	encHold := validEncrypted(23)
+	itemDone := "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"" + encHold + "\"}}\n\n"
+	completed := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n"
+	holdWrapped := replay.CaptureBody(io.NopCloser(strings.NewReader(itemDone+completed)), "grok-4.5", "session-da-hold", true, false)
+	if _, err := io.ReadFull(holdWrapped, make([]byte, len(itemDone))); err != nil {
+		t.Fatal(err)
+	}
+	if err := holdWrapped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	held := replay.Apply(context.Background(), "grok-4.5", "session-da-hold", nextBody)
+	if strings.Contains(string(held), encHold) {
+		t.Fatalf("withhold close before completed stored replay: %s", held)
+	}
+}
+
+func TestCaptureBodyStreamingStoresCompletedDespiteReadError(t *testing.T) {
+	// 流式 Close 不看 readErr：completed 已入缓冲则仍入库（空闲包装在 Capture 内侧）。
+	store := memory.NewReasoningReplayStore(100)
+	replay := New(store, Config{Enabled: true, TTL: time.Hour}, slog.Default())
+	enc := validEncrypted(24)
+	payload := "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"" + enc + "\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n"
+	wrapped := replay.CaptureBody(&readThenErr{payload: payload, err: io.ErrUnexpectedEOF}, "grok-4.5", "session-readerr", true, false)
+	if _, err := io.Copy(io.Discard, wrapped); err != io.ErrUnexpectedEOF {
+		t.Fatalf("copy err = %v, want unexpected EOF", err)
+	}
+	if err := wrapped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	updated := replay.Apply(context.Background(), "grok-4.5", "session-readerr", []byte(`{"input":[{"type":"message","role":"user","content":"next"}]}`))
+	if !strings.Contains(string(updated), enc) {
+		t.Fatalf("completed-then-readErr did not store replay: %s", updated)
+	}
+}
+
+type readThenErr struct {
+	payload string
+	off     int
+	err     error
+}
+
+func (r *readThenErr) Read(p []byte) (int, error) {
+	if r.off >= len(r.payload) {
+		return 0, r.err
+	}
+	n := copy(p, r.payload[r.off:])
+	r.off += n
+	return n, nil
+}
+
+func (r *readThenErr) Close() error { return nil }

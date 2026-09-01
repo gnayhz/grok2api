@@ -64,6 +64,37 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 	}
 }
 
+// TestGuardExemptOrderCoversQualityExemptTokens 锁定展示序与豁免常量同集：
+// 新 token 若未进 guardExemptOrder，recordExempt 会静默丢弃，管理端看不见。
+func TestGuardExemptOrderCoversQualityExemptTokens(t *testing.T) {
+	t.Parallel()
+	constants := []string{
+		QualityExemptDisabled,
+		QualityExemptSkipInput,
+		QualityExemptOperation,
+		QualityExemptCompaction,
+		QualityExemptProvider,
+		QualityExemptModelScope,
+		QualityExemptMessagesNoThink,
+		QualityExemptModelNoReasoning,
+	}
+	if len(guardExemptOrder) != len(constants) {
+		t.Fatalf("guardExemptOrder len=%d constants=%d", len(guardExemptOrder), len(constants))
+	}
+	got := make(map[string]struct{}, len(guardExemptOrder))
+	for _, reason := range guardExemptOrder {
+		if _, dup := got[reason]; dup {
+			t.Fatalf("duplicate %q", reason)
+		}
+		got[reason] = struct{}{}
+	}
+	for _, reason := range constants {
+		if _, ok := got[reason]; !ok {
+			t.Fatalf("guardExemptOrder missing %q", reason)
+		}
+	}
+}
+
 // TestQualityHoldExemptReasonPaths 锁定豁免原因与 hold 判定的一致性：
 // reason=="" 当且仅当 shouldHoldQualityStream 为真，各豁免路径返回专属 token。
 func TestQualityHoldExemptReasonPaths(t *testing.T) {
@@ -73,6 +104,11 @@ func TestQualityHoldExemptReasonPaths(t *testing.T) {
 
 	if reason := qualityHoldExemptReason(input, nil, route, audit.OperationChat, cfg); reason != "" {
 		t.Fatalf("reasoning-capable chat must hold, got %q", reason)
+	}
+	injected := input
+	injected.Body = []byte(`{"tools":[{"type":"web_search"},{"type":"x_search"}],"tool_choice":"none"}`)
+	if reason := qualityHoldExemptReason(injected, nil, route, audit.OperationChat, cfg); reason != "" {
+		t.Fatalf("injected search tools must still hold, got %q", reason)
 	}
 	off := cfg
 	off.Enabled = false
@@ -84,8 +120,24 @@ func TestQualityHoldExemptReasonPaths(t *testing.T) {
 	if reason := qualityHoldExemptReason(skip, nil, route, audit.OperationChat, cfg); reason != QualityExemptSkipInput {
 		t.Fatalf("skip input = %q", reason)
 	}
-	if reason := qualityHoldExemptReason(input, nil, route, audit.OperationImage, cfg); reason != QualityExemptOperation {
-		t.Fatalf("image = %q", reason)
+	for _, op := range []audit.Operation{
+		audit.OperationImage, audit.OperationImageEdit, audit.OperationVideo,
+		audit.OperationTTS, audit.OperationSTT, audit.OperationRealtime, audit.OperationVoice,
+		audit.OperationCompaction,
+	} {
+		if reason := qualityHoldExemptReason(input, nil, route, op, cfg); reason != QualityExemptOperation {
+			t.Fatalf("non-reasoning op %q = %q, want operation", op, reason)
+		}
+	}
+	tui := input
+	tui.Body = []byte(`{"input":[{"role":"user","content":"` + tuiCompactionPrompt + `"}]}`)
+	if reason := qualityHoldExemptReason(tui, nil, route, audit.OperationResponses, cfg); reason != QualityExemptCompaction {
+		t.Fatalf("tui compaction body = %q", reason)
+	}
+	tuiSkip := tui
+	tuiSkip.skipQualityHold = true
+	if reason := qualityHoldExemptReason(tuiSkip, nil, route, audit.OperationResponses, cfg); reason != QualityExemptSkipInput {
+		t.Fatalf("CreateResponse TUI skip must win over body token, got %q", reason)
 	}
 	webRoute := modeldomain.Route{Provider: accountdomain.ProviderWeb, UpstreamModel: "grok-4.6"}
 	if reason := qualityHoldExemptReason(input, nil, webRoute, audit.OperationChat, cfg); reason != QualityExemptProvider {
@@ -120,6 +172,9 @@ func TestQualityHoldExemptReasonPaths(t *testing.T) {
 		t.Fatalf("streaming messages without thinking = %q, want gated", reason)
 	}
 	nonStream := Input{Streaming: false, PublicModel: "grok-4.6", Body: input.Body}
+	if reason := qualityHoldExemptReason(nonStream, nil, route, audit.OperationChat, cfg); reason != "" {
+		t.Fatalf("non-stream chat must hold, got %q", reason)
+	}
 	if reason := qualityHoldExemptReason(nonStream, nil, route, audit.OperationMessages, cfg); reason != QualityExemptMessagesNoThink {
 		t.Fatalf("non-stream messages without thinking = %q", reason)
 	}

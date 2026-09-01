@@ -10,18 +10,27 @@ import (
 // 共用同一套 created/evidence 预算（无工具=默认，搜索=无界，heavy=30s）。
 func TestQualityLivenessSchedule(t *testing.T) {
 	t.Parallel()
-	base := QualityRetryRuntime{Enabled: true, CreatedTimeout: 5 * time.Second, EvidenceTimeout: 3500 * time.Millisecond}
+	wantModels := []string{"grok-4.5", "grok-4.6"}
+	base := QualityRetryRuntime{Enabled: true, CreatedTimeout: 5 * time.Second, EvidenceTimeout: 3500 * time.Millisecond, GuardedModels: wantModels}
+	assertScope := func(cfg QualityRetryRuntime) {
+		t.Helper()
+		if len(cfg.GuardedModels) != 2 || cfg.GuardedModels[0] != wantModels[0] || cfg.GuardedModels[1] != wantModels[1] {
+			t.Fatalf("GuardedModels = %#v, want %#v", cfg.GuardedModels, wantModels)
+		}
+	}
 	{
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m","tools":[{"type":"web_search"}]}`), "responses", base)
 		if cfg.CreatedTimeout != qualitySearchSilenceBudget || cfg.EvidenceTimeout != qualitySearchSilenceBudget {
 			t.Fatal("search: both budgets must be unbounded")
 		}
+		assertScope(cfg)
 	}
 	{
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m","reasoning":{"effort":"high"}}`), "responses", base)
 		if cfg.CreatedTimeout != qualityHeavyReasoningCreatedBudget || cfg.EvidenceTimeout != qualityHeavyReasoningCreatedBudget {
 			t.Fatal("heavy: both budgets must scale (t3 trace)")
 		}
+		assertScope(cfg)
 	}
 	{
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m"}`), "chat", base)
@@ -43,6 +52,12 @@ func TestQualityLivenessSchedule(t *testing.T) {
 		}
 	}
 	{
+		cfg := qualityLivenessSchedule([]byte(`{"model":"m","tools":[{"type":"web_search"},{"type":"x_search"}],"tool_choice":"none"}`), "chat", base)
+		if cfg.EvidenceTimeout != base.EvidenceTimeout || cfg.CreatedTimeout != base.CreatedTimeout {
+			t.Fatal("injected web_search+x_search with choice none: default budgets, not search silence")
+		}
+	}
+	{
 		// 规模轮 76 实证回归：forced 对象形态曾使 string 字段探测整体失败，
 		// 回退默认行——chat 请求连 converted 无界证据行都落空，搜索静默期
 		// 3.5s 误杀 504（f6 批次，可复现）。
@@ -58,9 +73,8 @@ func TestQualityLivenessSchedule(t *testing.T) {
 		}
 	}
 	{
-		// 规模轮 106 实证回归：行序曾让 heavy 压过 converted——chat xhigh 思考
-		// >30s 未到 item.done 即被 30s 证据截止误杀（ai5 批次 504，原始流 27 条
-		// 思考增量被杀于进行中）。converted 证据无界必须优先；created 保留 30s。
+		// chat xhigh：与 native responses 同用 30s created/evidence（排队 >5s）。
+		// 思考增量仍 0ms 放行；item.done 无思考仍 0ms 扣留。证据截止只收静默。
 		cfg := qualityLivenessSchedule([]byte(`{"model":"m","reasoning_effort":"xhigh"}`), "chat", base)
 		if cfg.EvidenceTimeout != qualityHeavyReasoningCreatedBudget || cfg.CreatedTimeout != qualityHeavyReasoningCreatedBudget {
 			t.Fatal("chat heavy: raw peek uses the same heavy budgets as native responses")
@@ -73,8 +87,6 @@ func TestQualityLivenessSchedule(t *testing.T) {
 		if cfg.EvidenceTimeout != base.EvidenceTimeout || cfg.CreatedTimeout != base.CreatedTimeout {
 			t.Fatal("native responses default: budgets unchanged")
 		}
-		if len(cfg.GuardedModels) != len(base.GuardedModels) {
-			t.Fatal("native responses default: scope unchanged")
-		}
+		assertScope(cfg)
 	}
 }

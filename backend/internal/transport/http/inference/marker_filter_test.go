@@ -29,6 +29,21 @@ func TestInternalSSEMarkerFilterStripsEvidenceComment(t *testing.T) {
 	}
 }
 
+// 客户端可见 thinking_delta 不是内部注释，不得被剥掉。
+func TestInternalSSEMarkerFilterKeepsThinkingDelta(t *testing.T) {
+	t.Parallel()
+	filter := internalSSEMarkerFilter{enabled: true}
+	in := []byte("event: content_block_delta\n\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n")
+	got := append([]byte(nil), filter.Filter(in, false)...)
+	got = append(got, filter.Filter(nil, true)...)
+	if !bytes.Contains(got, []byte(`"thinking":"plan"`)) {
+		t.Fatalf("thinking_delta must not be stripped: %q", got)
+	}
+	if bytes.Contains(got, []byte(conversation.ThinkingEvidenceComment)) {
+		t.Fatal("filter must not inject the internal marker")
+	}
+}
+
 // 关闭（非 Anthropic 协议）时透传。
 func TestInternalSSEMarkerFilterDisabledPassthrough(t *testing.T) {
 	t.Parallel()

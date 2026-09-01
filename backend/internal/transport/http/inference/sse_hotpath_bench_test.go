@@ -20,72 +20,24 @@ func hugeCiphertextLine(n int) []byte {
 	return []byte(b.String())
 }
 
-func legacyRewriteResponsesDataLine(line []byte, state *responsesCompatState) []byte {
-	trimmed := bytes.TrimSpace(line)
-	if !bytes.HasPrefix(trimmed, []byte("data:")) {
-		return line
-	}
-	payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
-		return line
-	}
-	var event map[string]any
-	if json.Unmarshal(payload, &event) != nil {
-		return line
-	}
-	changed := sanitizeResponsesEvent(event, state)
-	if !changed {
-		return line
-	}
-	encoded, err := json.Marshal(event)
-	if err != nil {
-		return line
-	}
-	newline := ""
-	if bytes.HasSuffix(line, []byte{10}) {
-		newline = string([]byte{10})
-	}
-	return []byte("data: " + string(encoded) + newline)
-}
-
 func BenchmarkRewriteReasoningDeltas(b *testing.B) {
 	line := reasoningDeltaLine()
 	b.SetBytes(int64(len(line)))
 	b.ReportAllocs()
-	b.Run("old", func(b *testing.B) {
-		state := &responsesCompatState{}
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			_ = legacyRewriteResponsesDataLine(line, state)
-		}
-	})
-	b.Run("new", func(b *testing.B) {
-		state := &responsesCompatState{}
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			_ = rewriteResponsesDataLine(line, state)
-		}
-	})
+	state := &responsesCompatState{}
+	for i := 0; i < b.N; i++ {
+		_ = rewriteResponsesDataLine(line, state)
+	}
 }
 
 func BenchmarkRewriteHugeCiphertext(b *testing.B) {
 	line := hugeCiphertextLine(2 << 20)
 	b.SetBytes(int64(len(line)))
 	b.ReportAllocs()
-	b.Run("old", func(b *testing.B) {
-		state := &responsesCompatState{}
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			_ = legacyRewriteResponsesDataLine(line, state)
-		}
-	})
-	b.Run("new", func(b *testing.B) {
-		state := &responsesCompatState{}
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			_ = rewriteResponsesDataLine(line, state)
-		}
-	})
+	state := &responsesCompatState{}
+	for i := 0; i < b.N; i++ {
+		_ = rewriteResponsesDataLine(line, state)
+	}
 }
 
 func BenchmarkGeneratedDeltaDetect(b *testing.B) {

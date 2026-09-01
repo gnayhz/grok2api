@@ -12,8 +12,8 @@ import (
 )
 
 // TestDefaultRequestRetryBudgetDefaults 锁定全局请求预算默认值（蓝图 §3.2）：
-// MaxAttempts=2（1 次初始 + 1 次换号重试）与 EvidenceTimeout=3.5s（防死锁
-// 兜底，降智流已被零延迟拦截截胡）。
+// MaxAttempts=2（1 次初始 + 1 次换号重试）、EvidenceTimeout=3.5s（防死锁
+// 兜底，降智流已被零延迟拦截截胡）、CreatedTimeout=5s（首事件截止）。
 func TestDefaultRequestRetryBudgetDefaults(t *testing.T) {
 	cfg := defaultConfig()
 	if got := cfg.RequestRetry.MaxAttempts; got != 2 {
@@ -22,11 +22,17 @@ func TestDefaultRequestRetryBudgetDefaults(t *testing.T) {
 	if got := cfg.RequestRetry.EvidenceTimeout.Value(); got != 3500*time.Millisecond {
 		t.Fatalf("EvidenceTimeout default = %v, want 3.5s", got)
 	}
+	if got := cfg.RequestRetry.CreatedTimeout.Value(); got != 5*time.Second {
+		t.Fatalf("CreatedTimeout default = %v, want 5s", got)
+	}
 	if !cfg.RequestRetry.SameAccountRetry {
 		t.Fatal("SameAccountRetry default must stay true (comment + example document it)")
 	}
 	if cfg.RequestRetry.OnExhausted != "fail_closed" {
 		t.Fatalf("OnExhausted default = %q, want fail_closed", cfg.RequestRetry.OnExhausted)
+	}
+	if len(cfg.RequestRetry.GuardedModels) != 0 {
+		t.Fatalf("GuardedModels default = %#v, want empty (all models gated)", cfg.RequestRetry.GuardedModels)
 	}
 }
 
@@ -52,7 +58,7 @@ func TestRequestRetryBudgetCap(t *testing.T) {
 func TestUnmarshalRequestRetryFields(t *testing.T) {
 	var section RequestRetryConfig
 	nl := string(rune(10))
-	yamlText := "enabled: true" + nl + "sameAccountRetry: false" + nl + "evidenceTimeout: 4s" + nl + "maxAttempts: 2" + nl + "createdTimeout: 8s" + nl + "onExhausted: fail_closed" + nl + "accountCooldown: 12h" + nl
+	yamlText := "enabled: true" + nl + "sameAccountRetry: false" + nl + "evidenceTimeout: 4s" + nl + "maxAttempts: 2" + nl + "createdTimeout: 8s" + nl + "onExhausted: fail_closed" + nl + "accountCooldown: 12h" + nl + "guardedModels: [\"grok-4.5\", \"grok-4.6\"]" + nl
 	if err := yaml.NewDecoder(bytes.NewReader([]byte(yamlText))).Decode(&section); err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +70,10 @@ func TestUnmarshalRequestRetryFields(t *testing.T) {
 	}
 	if section.CreatedTimeout.Value() != 8*time.Second {
 		t.Fatalf("createdTimeout = %s, want 8s", section.CreatedTimeout.Value())
+	}
+	wantModels := []string{"grok-4.5", "grok-4.6"}
+	if len(section.GuardedModels) != 2 || section.GuardedModels[0] != wantModels[0] || section.GuardedModels[1] != wantModels[1] {
+		t.Fatalf("guardedModels = %#v, want %#v", section.GuardedModels, wantModels)
 	}
 }
 

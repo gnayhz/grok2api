@@ -53,6 +53,147 @@ func TestConvertChatRequestToResponses(t *testing.T) {
 	}
 }
 
+func TestConvertChatRequestDropsReasoningContentHistory(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[
+			{"role":"assistant","content":"hi","reasoning_content":"prior thought"},
+			{"role":"user","content":"continue"}
+		]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	for i, raw := range input {
+		item, _ := raw.(map[string]any)
+		if item["type"] == "reasoning" {
+			t.Fatalf("chat reasoning_content leaked into input[%d]: %#v", i, item)
+		}
+		if item["type"] != "message" {
+			t.Fatalf("input[%d] = %#v, want message", i, item)
+		}
+	}
+	if _, exists := payload["reasoning"]; exists {
+		t.Fatalf("request-level reasoning = %#v", payload["reasoning"])
+	}
+}
+
+func TestConvertChatRequestKeepsReasoningEffort(t *testing.T) {
+	converted, options, err := ConvertRequestWithOptions([]byte(`{
+		"model":"public-chat",
+		"reasoning_effort":"high",
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	reasoning, _ := payload["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" {
+		t.Fatalf("reasoning_effort dropped: %#v", payload["reasoning"])
+	}
+	if options.ReasoningEffortSet || options.ReasoningEffort != "" {
+		t.Fatalf("chat options leaked Messages reasoning metadata: %#v", options)
+	}
+}
+
+func TestConvertChatDropsNestedReasoningObject(t *testing.T) {
+	converted, options, err := ConvertRequestWithOptions([]byte(`{
+		"model":"public-chat",
+		"reasoning":{"effort":"high"},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["reasoning"]; exists {
+		t.Fatalf("Chat nested reasoning 不应转发到 Responses: %#v", payload["reasoning"])
+	}
+	if options.ReasoningEffortSet || options.ReasoningEffort != "" {
+		t.Fatalf("chat options leaked Messages reasoning metadata: %#v", options)
+	}
+}
+
+func TestConvertChatWebSearchOptionsInjectsDespiteToolChoiceNone(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"web_search_options":{"search_context_size":"medium"},
+		"tool_choice":"none",
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["type"] != "web_search" {
+		t.Fatalf("tool_choice none blocked web_search_options inject: %#v", payload["tools"])
+	}
+	if payload["tool_choice"] != "none" {
+		t.Fatalf("tool_choice = %#v, want none", payload["tool_choice"])
+	}
+}
+
+func TestConvertChatJSONSchemaFlattensIntoTextFormat(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"response_format":{"type":"json_schema","json_schema":{"name":"answer","strict":true,"schema":{"type":"object"}}},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["response_format"]; exists {
+		t.Fatalf("Chat response_format 不应原样转发: %#v", payload)
+	}
+	format, _ := payload["text"].(map[string]any)["format"].(map[string]any)
+	if format["type"] != "json_schema" || format["name"] != "answer" || format["strict"] != true || format["json_schema"] != nil {
+		t.Fatalf("json_schema 未展平进 text.format: %#v", payload["text"])
+	}
+	schema, _ := format["schema"].(map[string]any)
+	if schema["type"] != "object" {
+		t.Fatalf("schema = %#v", format["schema"])
+	}
+
+	objectOnly, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"response_format":{"type":"json_object"},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(objectOnly, &payload); err != nil {
+		t.Fatal(err)
+	}
+	format, _ = payload["text"].(map[string]any)["format"].(map[string]any)
+	if format["type"] != "json_object" || payload["response_format"] != nil {
+		t.Fatalf("json_object 未写入 text.format: %#v", payload)
+	}
+}
+
 func TestConvertChatPreservesWebSearchExcludedDomains(t *testing.T) {
 	converted, err := ConvertRequest([]byte(`{
 		"model":"public-chat","messages":[{"role":"user","content":"search"}],
@@ -160,6 +301,587 @@ func TestConvertChatKeepsNonMultimodalToolJSONAsText(t *testing.T) {
 	}
 }
 
+func TestConvertChatKeepsParallelToolCalls(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","parallel_tool_calls":false,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatKeepsServiceTier(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","service_tier":"priority",
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["service_tier"] != "priority" {
+		t.Fatalf("service_tier dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatKeepsStore(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","store":true,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["store"] != true {
+		t.Fatalf("store dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatMaxTokensFallback(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","max_tokens":256,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["max_output_tokens"] != float64(256) {
+		t.Fatalf("max_tokens fallback dropped: %#v", payload)
+	}
+	if _, exists := payload["max_tokens"]; exists {
+		t.Fatalf("max_tokens 不应原样转发: %#v", payload)
+	}
+}
+
+func TestConvertChatMaxCompletionTokensWinsOverMaxTokens(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","max_completion_tokens":128,"max_tokens":256,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["max_output_tokens"] != float64(128) {
+		t.Fatalf("max_completion_tokens 未优先: %#v", payload)
+	}
+	if _, exists := payload["max_tokens"]; exists {
+		t.Fatalf("max_tokens 不应原样转发: %#v", payload)
+	}
+	if _, exists := payload["max_completion_tokens"]; exists {
+		t.Fatalf("max_completion_tokens 不应原样转发: %#v", payload)
+	}
+}
+
+func TestConvertChatKeepsTemperature(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","temperature":0.2,"top_p":0.8,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["temperature"] != 0.2 || payload["top_p"] != 0.8 {
+		t.Fatalf("Chat temperature/top_p dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatToolChoiceFunctionFlattens(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[{"type":"function","function":{"name":"lookup","description":"lookup","parameters":{"type":"object"}}}],
+		"tool_choice":{"type":"function","function":{"name":"lookup"}}
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	choice, _ := payload["tool_choice"].(map[string]any)
+	if choice["type"] != "function" || choice["name"] != "lookup" {
+		t.Fatalf("tool_choice 未展平: %#v", payload["tool_choice"])
+	}
+	if _, exists := choice["function"]; exists {
+		t.Fatalf("nested function 不应保留: %#v", choice)
+	}
+}
+
+func TestConvertChatToolChoiceAutoPassthrough(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","tool_choice":"auto",
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice auto dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatToolChoiceRequiredPassthrough(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","tool_choice":"required",
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["tool_choice"] != "required" {
+		t.Fatalf("tool_choice required dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatFunctionToolsLiftName(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[{"type":"function","function":{"name":"lookup","description":"lookup","parameters":{"type":"object"}}}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %#v", payload["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "lookup" || tool["description"] != "lookup" {
+		t.Fatalf("function tool 未展平: %#v", tool)
+	}
+	if _, exists := tool["function"]; exists {
+		t.Fatalf("nested function 不应保留: %#v", tool)
+	}
+}
+
+func TestConvertChatWebSearchPreviewNormalizesType(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[{"type":"web_search_preview"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %#v", payload["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["type"] != "web_search" {
+		t.Fatalf("web_search_preview 未归一: %#v", tool)
+	}
+}
+
+func TestConvertChatUnknownToolTypePassthrough(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[{"type":"file_search","vector_store_ids":["vs_1"]}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %#v", payload["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	ids, _ := tool["vector_store_ids"].([]any)
+	if tool["type"] != "file_search" || len(ids) != 1 || ids[0] != "vs_1" {
+		t.Fatalf("unknown tool type 未透传: %#v", tool)
+	}
+}
+
+func TestConvertChatDropsMessageName(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[
+			{"role":"user","name":"alice","content":"hello"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+			{"role":"tool","name":"lookup","tool_call_id":"call_1","content":"ok"}
+		]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	user, _ := input[0].(map[string]any)
+	if user["type"] != "message" || user["role"] != "user" || user["content"] != "hello" {
+		t.Fatalf("user = %#v", user)
+	}
+	if _, exists := user["name"]; exists {
+		t.Fatalf("user message.name 不应写入 Responses input: %#v", user)
+	}
+	call, _ := input[1].(map[string]any)
+	if call["type"] != "function_call" || call["name"] != "lookup" {
+		t.Fatalf("function_call = %#v", call)
+	}
+	output, _ := input[2].(map[string]any)
+	if output["type"] != "function_call_output" || output["call_id"] != "call_1" || output["output"] != "ok" {
+		t.Fatalf("tool output = %#v", output)
+	}
+	if _, exists := output["name"]; exists {
+		t.Fatalf("tool message.name 不应写入 function_call_output: %#v", output)
+	}
+}
+
+func TestConvertChatSkipsEmptySystemContent(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"model":"public-chat","messages":[{"role":"system","content":null},{"role":"user","content":"hello"}]}`),
+		[]byte(`{"model":"public-chat","messages":[{"role":"system"},{"role":"user","content":"hello"}]}`),
+	} {
+		converted, err := ConvertRequest(body, "grok-4.6", OperationChat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(converted, &payload); err != nil {
+			t.Fatal(err)
+		}
+		input, _ := payload["input"].([]any)
+		if len(input) != 1 {
+			t.Fatalf("input = %#v", payload["input"])
+		}
+		msg, _ := input[0].(map[string]any)
+		if msg["type"] != "message" || msg["role"] != "user" || msg["content"] != "hello" {
+			t.Fatalf("expected only user message, got %#v", msg)
+		}
+	}
+	_, err := ConvertRequest([]byte(`{"model":"public-chat","messages":[{"role":"system","content":null}]}`), "grok-4.6", OperationChat)
+	if err == nil {
+		t.Fatal("expected empty system-only messages to be rejected")
+	}
+	if !strings.Contains(err.Error(), "messages 中没有可发送内容") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConvertChatKeepsEmptyStringContent(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"system","content":""},{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("empty-string content 不应被当 empty 跳过: %#v", payload["input"])
+	}
+	system, _ := input[0].(map[string]any)
+	if system["type"] != "message" || system["role"] != "system" || system["content"] != "" {
+		t.Fatalf("system = %#v", system)
+	}
+	user, _ := input[1].(map[string]any)
+	if user["type"] != "message" || user["role"] != "user" || user["content"] != "hello" {
+		t.Fatalf("user = %#v", user)
+	}
+}
+
+func TestConvertChatEmptyToolCallArgumentsBecomeObject(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"model":"public-chat","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup"}}]}]}`),
+		[]byte(`{"model":"public-chat","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]}]}`),
+	} {
+		converted, err := ConvertRequest(body, "grok-4.6", OperationChat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(converted, &payload); err != nil {
+			t.Fatal(err)
+		}
+		input, _ := payload["input"].([]any)
+		if len(input) != 1 {
+			t.Fatalf("input = %#v", payload["input"])
+		}
+		call, _ := input[0].(map[string]any)
+		if call["type"] != "function_call" || call["call_id"] != "call_1" || call["name"] != "lookup" || call["arguments"] != "{}" {
+			t.Fatalf("empty arguments 未写成 {}: %#v", call)
+		}
+	}
+}
+
+func TestConvertChatRejectsUnknownMessageRole(t *testing.T) {
+	_, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"function","name":"lookup","content":"legacy"}]
+	}`), "grok-4.6", OperationChat)
+	if err == nil {
+		t.Fatal("expected unknown role to be rejected")
+	}
+	if !strings.Contains(err.Error(), `不支持 messages.role="function"`) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConvertChatRejectsToolMessageWithoutCallID(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"model":"public-chat","messages":[{"role":"user","content":"hello"},{"role":"tool","content":"ok"}]}`),
+		[]byte(`{"model":"public-chat","messages":[{"role":"user","content":"hello"},{"role":"tool","tool_call_id":"","content":"ok"}]}`),
+	} {
+		_, err := ConvertRequest(body, "grok-4.6", OperationChat)
+		if err == nil {
+			t.Fatal("expected missing tool_call_id to be rejected")
+		}
+		if !strings.Contains(err.Error(), "tool 消息缺少 tool_call_id") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+}
+
+func TestConvertChatRejectsInputFileContent(t *testing.T) {
+	_, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":[{"type":"input_file","file_id":"file_1"}]}]
+	}`), "grok-4.6", OperationChat)
+	if err == nil {
+		t.Fatal("expected input_file to be rejected")
+	}
+	if !strings.Contains(err.Error(), `不支持 content.type="input_file"`) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConvertChatNormalizesInputAndOutputTextParts(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":[
+			{"type":"input_text","text":"ask"},
+			{"type":"output_text","text":"prior"}
+		]}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	content, _ := input[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content = %#v", content)
+	}
+	first, _ := content[0].(map[string]any)
+	second, _ := content[1].(map[string]any)
+	if first["type"] != "input_text" || first["text"] != "ask" || second["type"] != "input_text" || second["text"] != "prior" {
+		t.Fatalf("input_text/output_text 未归一成 input_text: %#v", content)
+	}
+}
+
+func TestConvertChatKeepsDeveloperRole(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"developer","content":"dev rules"},{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["instructions"]; exists {
+		t.Fatalf("Chat developer 不应折进 instructions: %#v", payload)
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	first, _ := input[0].(map[string]any)
+	if first["type"] != "message" || first["role"] != "developer" {
+		t.Fatalf("developer 未保留: %#v", first)
+	}
+	if first["content"] != "dev rules" {
+		t.Fatalf("developer content = %#v", first)
+	}
+}
+
+func TestConvertChatInputImageURLFallback(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat",
+		"messages":[{"role":"user","content":[{"type":"input_image","url":"data:image/png;base64,AA=="}]}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	content, _ := input[0].(map[string]any)["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %#v", content)
+	}
+	image, _ := content[0].(map[string]any)
+	if image["type"] != "input_image" || image["image_url"] != "data:image/png;base64,AA==" || image["detail"] != "auto" {
+		t.Fatalf("input_image url fallback dropped: %#v", image)
+	}
+}
+
+func TestConvertChatKeepsMetadata(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","metadata":{"session":"lab"},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := payload["metadata"].(map[string]any)
+	if meta["session"] != "lab" {
+		t.Fatalf("metadata dropped: %#v", payload)
+	}
+}
+
+func TestConvertChatUserAndMetadataAreOrthogonal(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","user":"lab-user","metadata":{"session":"lab"},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["safety_identifier"] != "lab-user" {
+		t.Fatalf("user 未写入 safety_identifier: %#v", payload)
+	}
+	if _, exists := payload["user"]; exists {
+		t.Fatalf("Chat user 不应原样转发: %#v", payload)
+	}
+	meta, _ := payload["metadata"].(map[string]any)
+	if meta["session"] != "lab" {
+		t.Fatalf("metadata 被 user 覆盖: %#v", payload)
+	}
+}
+
+func TestConvertChatRejectsEmptyOrWhitespaceUser(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"model":"public-chat","user":"","messages":[{"role":"user","content":"hello"}]}`),
+		[]byte(`{"model":"public-chat","user":"   ","messages":[{"role":"user","content":"hello"}]}`),
+	} {
+		_, err := ConvertRequest(body, "grok-4.6", OperationChat)
+		if err == nil {
+			t.Fatal("expected empty user to be rejected")
+		}
+		if !strings.Contains(err.Error(), "user 必须是非空字符串") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+}
+
+func TestConvertChatDropsN(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","n":2,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["n"]; exists {
+		t.Fatalf("Chat n 不应转发到 Responses: %#v", payload)
+	}
+}
+
+func TestConvertChatDropsPreviousResponseID(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","previous_response_id":"resp_1","store":true,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["previous_response_id"]; exists {
+		t.Fatalf("Chat previous_response_id 不应转发到 Responses: %#v", payload)
+	}
+	if payload["store"] != true {
+		t.Fatalf("store 应仍保留: %#v", payload["store"])
+	}
+}
+
 func TestConvertChatIgnoresSamplingFieldsWithoutResponsesEquivalent(t *testing.T) {
 	body := []byte(`{
 		"model":"public","messages":[{"role":"user","content":"hi"}],
@@ -212,6 +934,31 @@ func TestConvertChatStopSequencesLocally(t *testing.T) {
 	message := response["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
 	if message["content"] != "ABC" {
 		t.Fatalf("chat response = %#v", response)
+	}
+}
+
+func TestConvertChatRejectsEmptyOrOverlongStop(t *testing.T) {
+	tests := []struct {
+		stop string
+		want string
+	}{
+		{stop: `""`, want: "stop 不能为空"},
+		{stop: `["A","B","C","D","E"]`, want: "stop 最多包含 4 个序列"},
+	}
+	for _, test := range tests {
+		_, options, err := ConvertRequestWithOptions([]byte(`{
+			"model":"public-chat","stop":`+test.stop+`,
+			"messages":[{"role":"user","content":"hello"}]
+		}`), "grok-4.6", OperationChat)
+		if err == nil {
+			t.Fatalf("stop=%s expected error, options=%#v", test.stop, options)
+		}
+		if !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("stop=%s err=%v want %q", test.stop, err, test.want)
+		}
+		if len(options.StopSequences) != 0 {
+			t.Fatalf("stop=%s leaked into options: %#v", test.stop, options.StopSequences)
+		}
 	}
 }
 
@@ -400,6 +1147,35 @@ func TestConvertAnthropicRedactedThinkingIncludesEmptySummary(t *testing.T) {
 	}
 }
 
+func TestConvertAnthropicEmptyThinkingKeepsSignature(t *testing.T) {
+	converted, _, err := ConvertRequestWithOptions([]byte(`{
+		"model":"public-chat","max_tokens":256,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[
+			{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"encrypted-reasoning"}]},
+			{"role":"user","content":"continue"}
+		]
+	}`), "grok-4.5", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Input []map[string]any `json:"input"`
+	}
+	if json.Unmarshal(converted, &payload) != nil || len(payload.Input) != 2 {
+		t.Fatalf("converted = %s", converted)
+	}
+	reasoning := payload.Input[0]
+	summary, ok := reasoning["summary"].([]any)
+	if !ok || len(summary) != 1 {
+		t.Fatalf("empty thinking dropped: %#v", reasoning)
+	}
+	part, _ := summary[0].(map[string]any)
+	if reasoning["type"] != "reasoning" || reasoning["encrypted_content"] != "encrypted-reasoning" || part["type"] != "summary_text" || part["text"] != "" {
+		t.Fatalf("empty thinking = %#v", reasoning)
+	}
+}
+
 func TestConvertAnthropicClaudeCodeRequestToResponses(t *testing.T) {
 	body := []byte(`{
 		"model":"public-chat","max_tokens":4096,"stream":true,
@@ -447,6 +1223,11 @@ func TestConvertAnthropicClaudeCodeRequestToResponses(t *testing.T) {
 	input := payload["input"].([]any)
 	if len(input) != 4 || input[0].(map[string]any)["type"] != "reasoning" || input[1].(map[string]any)["type"] != "function_call" || input[2].(map[string]any)["type"] != "function_call_output" {
 		t.Fatalf("input = %#v", input)
+	}
+	reasoningItem := input[0].(map[string]any)
+	summary, _ := reasoningItem["summary"].([]any)
+	if len(summary) != 1 || summary[0].(map[string]any)["type"] != "summary_text" || summary[0].(map[string]any)["text"] != "prior thought" || reasoningItem["encrypted_content"] != "encrypted-reasoning" {
+		t.Fatalf("thinking history dropped: %#v", reasoningItem)
 	}
 	output := input[2].(map[string]any)["output"].([]any)
 	if len(output) != 4 || !strings.Contains(output[0].(map[string]any)["text"].(string), "failed") ||
@@ -553,6 +1334,119 @@ func TestConvertAnthropicMessagesValidatesToolRelationships(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestConvertAnthropicMCPServersMapsAuthorization(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public","max_tokens":64,
+		"messages":[{"role":"user","content":"hello"}],
+		"mcp_servers":[{"name":"docs","url":"https://example.com/mcp","authorization_token":"opaque"}]
+	}`), "grok-4.6", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["mcp_servers"]; exists {
+		t.Fatalf("mcp_servers 不应原样转发: %#v", payload)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %#v", payload["tools"])
+	}
+	tool := tools[0].(map[string]any)
+	if tool["type"] != "mcp" || tool["server_label"] != "docs" || tool["server_url"] != "https://example.com/mcp" || tool["authorization"] != "opaque" {
+		t.Fatalf("mcp_servers authorization dropped: %#v", tool)
+	}
+}
+
+func TestConvertAnthropicMessagesJSONSchemaOutputConfig(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public","max_tokens":64,
+		"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["output_config"]; exists {
+		t.Fatalf("Messages output_config 不应原样转发: %#v", payload)
+	}
+	format, _ := payload["text"].(map[string]any)["format"].(map[string]any)
+	schema, _ := format["schema"].(map[string]any)
+	if format["type"] != "json_schema" || format["name"] != "anthropic_output" || schema["type"] != "object" {
+		t.Fatalf("output_config.format 未写入 text.format: %#v", payload["text"])
+	}
+}
+
+func TestConvertAnthropicMessagesKeepsTemperature(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public","max_tokens":64,"temperature":0.2,"top_p":0.8,
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["temperature"] != 0.2 || payload["top_p"] != 0.8 {
+		t.Fatalf("Messages temperature/top_p dropped: %#v", payload)
+	}
+}
+
+func TestConvertAnthropicMessagesKeepsStopSequencesLocally(t *testing.T) {
+	converted, options, err := ConvertRequestWithOptions([]byte(`{
+		"model":"public","max_tokens":64,"stop_sequences":["STOP","END"],
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["stop_sequences"]; exists {
+		t.Fatalf("stop_sequences 不应转发到 Responses: %#v", payload)
+	}
+	if _, exists := payload["stop"]; exists {
+		t.Fatalf("stop 不应出现在 Responses: %#v", payload)
+	}
+	if len(options.StopSequences) != 2 || options.StopSequences[0] != "STOP" || options.StopSequences[1] != "END" {
+		t.Fatalf("stop options = %#v", options.StopSequences)
+	}
+}
+
+func TestConvertAnthropicMessagesDropsNonUserMetadata(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public","max_tokens":64,
+		"metadata":{"user_id":"lab-user","session":"lab"},
+		"messages":[{"role":"user","content":"hello"}]
+	}`), "grok-4.6", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["safety_identifier"] != "lab-user" {
+		t.Fatalf("user_id 未写入 safety_identifier: %#v", payload)
+	}
+	if _, exists := payload["metadata"]; exists {
+		t.Fatalf("Messages metadata 不应原样转发: %#v", payload)
+	}
+	if _, exists := payload["session"]; exists {
+		t.Fatalf("metadata.session 不应提升到 Responses: %#v", payload)
 	}
 }
 
@@ -940,6 +1834,41 @@ func TestConvertResponsesStreamChatFlushesSummaryAtEOF(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesStreamChatFlushesManySummaryDeltasAsOneChunk(t *testing.T) {
+	chunks := make([]string, 0, 27)
+	for i := 0; i < 20; i++ {
+		chunks = append(chunks, "aaaa")
+	}
+	for i := 0; i < 7; i++ {
+		chunks = append(chunks, "aaaaa")
+	}
+	joined := strings.Join(chunks, "")
+	if len(joined) != 115 {
+		t.Fatalf("fixture bytes = %d want 115", len(joined))
+	}
+	var body strings.Builder
+	body.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.6\"}}\n\n")
+	body.WriteString("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}\n\n")
+	for _, chunk := range chunks {
+		body.WriteString("event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"")
+		body.WriteString(chunk)
+		body.WriteString("\"}\n\n")
+	}
+	body.WriteString("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}\n\n")
+	body.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(body.String())), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, `"reasoning_content"`) != 1 {
+		t.Fatalf("summary deltas must flush as one chatDelta: %s", text)
+	}
+	if !strings.Contains(text, `"reasoning_content":"`+joined+`"`) {
+		t.Fatalf("concatenated summary missing: %s", text)
+	}
+}
+
 func TestConvertResponsesStreamChatAdoptsLateReasoningItemID(t *testing.T) {
 	stream := strings.Join([]string{
 		`event: response.reasoning_summary_text.delta`,
@@ -1047,6 +1976,43 @@ func TestConvertResponsesStreamToMessagesThinkingToolsAndStop(t *testing.T) {
 	}
 	if strings.Contains(text, "XYZ") || !strings.Contains(text, `"text":"ABC"`) || !strings.Contains(text, `"stop_reason":"stop_sequence"`) || !strings.Contains(text, `"stop_sequence":"STOP"`) {
 		t.Fatalf("stream = %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMessagesFlushesManySummaryDeltasAsOneThinkingDelta(t *testing.T) {
+	chunks := make([]string, 0, 27)
+	for i := 0; i < 20; i++ {
+		chunks = append(chunks, "aaaa")
+	}
+	for i := 0; i < 7; i++ {
+		chunks = append(chunks, "aaaaa")
+	}
+	joined := strings.Join(chunks, "")
+	if len(joined) != 115 {
+		t.Fatalf("fixture bytes = %d want 115", len(joined))
+	}
+	var body strings.Builder
+	body.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.6\"}}\n\n")
+	body.WriteString("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}\n\n")
+	for _, chunk := range chunks {
+		body.WriteString("event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"")
+		body.WriteString(chunk)
+		body.WriteString("\"}\n\n")
+	}
+	body.WriteString("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}\n\n")
+	body.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
+		io.NopCloser(strings.NewReader(body.String())), OperationMessages, ResponseOptions{AnthropicThinking: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, `"type":"thinking_delta"`) != 1 {
+		t.Fatalf("summary deltas must flush as one thinking_delta: %s", text)
+	}
+	if !strings.Contains(text, `"thinking":"`+joined+`"`) {
+		t.Fatalf("concatenated summary missing: %s", text)
 	}
 }
 

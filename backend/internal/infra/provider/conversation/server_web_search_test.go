@@ -381,7 +381,7 @@ func TestResponseOptionsRetainOnlyExplicitWebSearchQuery(t *testing.T) {
 }
 
 func TestWebSearchToolChoiceNoneDisablesResponseMapping(t *testing.T) {
-	_, options, err := ConvertRequestWithOptions([]byte(`{
+	converted, options, err := ConvertRequestWithOptions([]byte(`{
 		"model":"public","max_tokens":64,
 		"messages":[{"role":"user","content":"Perform a web search for the query: private query"}],
 		"tools":[{"type":"web_search_20250305","name":"web_search"}],
@@ -392,6 +392,17 @@ func TestWebSearchToolChoiceNoneDisablesResponseMapping(t *testing.T) {
 	}
 	if options.AnthropicWebSearch || options.AnthropicWebSearchQuery != "" {
 		t.Fatalf("tool_choice none retained web search state: %#v", options)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["type"] != "web_search" {
+		t.Fatalf("tool_choice none stripped converted tools: %#v", payload["tools"])
+	}
+	if payload["tool_choice"] != "none" {
+		t.Fatalf("tool_choice = %#v, want none", payload["tool_choice"])
 	}
 }
 

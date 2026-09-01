@@ -1249,6 +1249,9 @@ func TestSanitizeResponsesKeepsItemIDStableAcrossEvents(t *testing.T) {
 	delta := rewriteResponsesDataLine([]byte(`data: {"type":"response.reasoning_text.delta","output_index":0,"delta":"plan"}`+"\n"), state)
 	added := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning"}}`+"\n"), state)
 	done := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning"}}`+"\n"), state)
+	if !bytes.Contains(delta, []byte(`"delta":"plan"`)) {
+		t.Fatalf("reasoning delta text must survive rewrite: %s", delta)
+	}
 	for name, got := range map[string][]byte{"added": added, "done": done, "delta": delta} {
 		if !bytes.Contains(got, []byte(`"id":"item_1"`)) && !bytes.Contains(got, []byte(`"item_id":"item_1"`)) {
 			t.Fatalf("%s event did not reuse item_1: %s", name, got)

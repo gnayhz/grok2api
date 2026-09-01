@@ -215,7 +215,6 @@ func TestObserveQualityChunkThinkingChat(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolChat}
 	observeQualityChunk(&state, []byte(sse(
-		": grok2api-reasoning-start",
 		`data: {"choices":[{"delta":{"thinking_content":"plan the game"}}]}`,
 		`data: {"choices":[{"delta":{"content":"here is a game"}}]}`,
 		`data: {"usage":{"completion_tokens":80,"completion_tokens_details":{"reasoning_tokens":40}}}`,
@@ -536,6 +535,11 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 	if !shouldHoldQualityStream(input, nil, route, audit.OperationChat, cfg) {
 		t.Fatal("expected hold on thinking build chat")
 	}
+	nonStreamChat := input
+	nonStreamChat.Streaming = false
+	if !shouldHoldQualityStream(nonStreamChat, nil, route, audit.OperationChat, cfg) {
+		t.Fatal("non-stream chat must hold")
+	}
 	off := cfg
 	off.Enabled = false
 	if shouldHoldQualityStream(input, nil, route, audit.OperationChat, off) {
@@ -597,6 +601,10 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		{name: "client tools schema", body: `{"tools":[{"type":"function","function":{"name":"charge"}}]}`},
 		{name: "legacy functions schema", body: `{"functions":[{"name":"charge"}]}`},
 		{name: "tui tools schema plus user input", body: `{"tools":[{"type":"function","name":"read_file"}],"input":[{"role":"user","content":"hello"}]}`},
+		// Build cache-route injection on a tool-free chat: web_search+x_search
+		// with tool_choice none. Upstream tees show those tools; hold must
+		// still gate on stream features, not treat the injection as a skip.
+		{name: "injected web_search x_search choice none", body: `{"tools":[{"type":"web_search"},{"type":"x_search"}],"tool_choice":"none"}`},
 		// 用户消息文本里引用工具标记字样：JSON 序列化转义后不含干净的字面量
 		// （\"...\" 不产生完整匹配），预检短路为"无工具结果"——必须仍然 hold。
 		{name: "escaped marker in message text", body: `{"input":[{"role":"user","content":"pass \"function_call_output\" and \"tool_result\" in a string"}]}`},
@@ -954,5 +962,13 @@ func TestNormalizeQualityRetryDefaults(t *testing.T) {
 	}
 	if got.CreatedTimeout != 5*time.Second {
 		t.Fatalf("CreatedTimeout default = %s, want 5s", got.CreatedTimeout)
+	}
+	if len(got.GuardedModels) != 0 {
+		t.Fatalf("empty GuardedModels must stay empty, got %#v", got.GuardedModels)
+	}
+	want := []string{"grok-4.5", "grok-4.6"}
+	passthrough := normalizeQualityRetry(QualityRetryRuntime{Enabled: true, GuardedModels: want})
+	if len(passthrough.GuardedModels) != 2 || passthrough.GuardedModels[0] != want[0] || passthrough.GuardedModels[1] != want[1] {
+		t.Fatalf("GuardedModels passthrough = %#v, want %#v", passthrough.GuardedModels, want)
 	}
 }

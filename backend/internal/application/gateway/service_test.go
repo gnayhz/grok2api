@@ -1073,6 +1073,89 @@ func TestCreateResponseFallsBackAcrossSameNameTargetsWithUnavailablePool(t *test
 	}
 }
 
+func TestPreviousResponseIDInheritsEmptyReasoningReplayKey(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "soft-replay-inherit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	models := relational.NewModelRepository(database)
+	audits := relational.NewAuditRepository(database)
+	responses := relational.NewResponseRepository(database)
+	keys := relational.NewClientKeyRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "soft-inherit", SourceKey: "soft-inherit",
+		EncryptedAccessToken: "token", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := models.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-test"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keys.Create(ctx, clientkey.Key{
+		Name: "soft-inherit", Prefix: "soft-inherit", SecretHash: strings.Repeat("b", 64),
+		EncryptedSecret: "encrypted", Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &failoverAdapter{}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(models, audits, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responses, 1)
+
+	first, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-soft-1", ClientKey: key, PublicModel: "grok-test",
+		Body: []byte(`{"model":"grok-test","messages":[{"role":"user","content":"hello"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(first.Body)
+	first.Finalize(Usage{}, "resp-soft-1", "")
+	_ = first.Body.Close()
+	if adapter.lastReasoningReplayKey != "" {
+		t.Fatalf("soft first turn enabled replay: %q", adapter.lastReasoningReplayKey)
+	}
+	ownership, err := responses.Get(ctx, "resp-soft-1", key.ID, time.Now().UTC())
+	if err != nil || ownership.PromptCacheKey == "" || ownership.ReasoningReplayKey != "" {
+		t.Fatalf("soft ownership = %#v, err = %v", ownership, err)
+	}
+
+	adapter.resetAttempts()
+	continued, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-soft-2", ClientKey: key, PublicModel: "grok-test", PreviousResponseID: "resp-soft-1",
+		Body: []byte(`{"model":"grok-test","previous_response_id":"resp-soft-1","messages":[{"role":"user","content":"next"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(continued.Body)
+	continued.Finalize(Usage{}, "resp-soft-2", "")
+	_ = continued.Body.Close()
+	if adapter.lastReasoningReplayKey != "" {
+		t.Fatalf("previous_response_id inherit minted replayKey: %q", adapter.lastReasoningReplayKey)
+	}
+	if adapter.lastPromptCacheKey != ownership.PromptCacheKey {
+		t.Fatalf("continued cache key = %q, want %q", adapter.lastPromptCacheKey, ownership.PromptCacheKey)
+	}
+	nextOwnership, err := responses.Get(ctx, "resp-soft-2", key.ID, time.Now().UTC())
+	if err != nil || nextOwnership.PromptCacheKey != ownership.PromptCacheKey || nextOwnership.ReasoningReplayKey != "" {
+		t.Fatalf("continued ownership = %#v, err = %v", nextOwnership, err)
+	}
+}
+
 func TestSelectMediaRouteSkipsSameNamedConversationRoute(t *testing.T) {
 	registry := provider.NewRegistry(&failoverAdapter{}, &webImageStreamAdapter{})
 	service := &Service{

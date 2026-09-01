@@ -52,6 +52,20 @@ func TestEnsureBuildComposerSessionIdentityIsRequestStable(t *testing.T) {
 	}
 }
 
+func TestEnsureBuildComposerSessionIdentityPreservesEmptyInheritedReplayKey(t *testing.T) {
+	// previous_response_id 继承 ownership：upstreamID 非空、soft=false、replayKey 可能为空。
+	// Composer 隔离不得给空键续写铸造 replayKey（否则 CaptureBody 会打开）。
+	inherited := buildSessionIdentity{upstreamID: "cache-from-ownership", replayKey: ""}
+	got := ensureBuildComposerSessionIdentity(inherited, 7, accountdomain.ProviderBuild, "grok-4.6", "request-1")
+	if got != inherited || got.replayKey != "" {
+		t.Fatalf("non-Composer inherit mutated empty replayKey: %#v", got)
+	}
+	composer := ensureBuildComposerSessionIdentity(inherited, 7, accountdomain.ProviderBuild, modeldomain.GrokComposer25Fast, "request-1")
+	if composer.upstreamID != inherited.upstreamID || composer.replayKey != "" || composer.isolated {
+		t.Fatalf("Composer inherit must keep empty replayKey: %#v", composer)
+	}
+}
+
 func TestResolveBuildSessionIdentitySeparatesAffinityFromUpstreamSession(t *testing.T) {
 	first := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.5", "", "session-1", "request-1", nil)
 	otherModel := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.3", "", "session-1", "request-1", nil)
@@ -72,6 +86,22 @@ func TestResolveBuildSoftSessionIdentityIsModelScoped(t *testing.T) {
 	}
 	if first.upstreamID == otherModel.upstreamID || first.affinityKey == otherModel.affinityKey {
 		t.Fatalf("soft identity must be model scoped: first=%#v other=%#v", first, otherModel)
+	}
+}
+
+func TestResolveBuildSessionIdentityChatUserOnlyDoesNotEnableReplay(t *testing.T) {
+	// 无 prompt_cache_key / session seed 的 chat.completions：软会话可有亲和，但 replayKey 必须空，CaptureBody 不会包装。
+	body := []byte(`{"model":"grok-4.6","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	got := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.6", "", "", "request-1", body)
+	if !got.soft || got.upstreamID == "" || got.affinityKey == "" {
+		t.Fatalf("expected soft chat identity, got %#v", got)
+	}
+	if got.replayKey != "" {
+		t.Fatalf("chat without explicit session must not enable reasoning replay: %#v", got)
+	}
+	explicit := resolveBuildSessionIdentity(7, accountdomain.ProviderBuild, "grok-4.6", "", "session-1", "request-1", body)
+	if explicit.soft || explicit.replayKey == "" || explicit.replayKey == got.replayKey {
+		t.Fatalf("explicit session must enable replay: soft=%#v explicit=%#v", got, explicit)
 	}
 }
 

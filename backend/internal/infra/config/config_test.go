@@ -199,8 +199,14 @@ func TestDefaultRequestRetryContract(t *testing.T) {
 	if got.EvidenceTimeout.Value() != 3500*time.Millisecond {
 		t.Fatalf("evidenceTimeout default = %s, want 3.5s", got.EvidenceTimeout)
 	}
+	if got.CreatedTimeout.Value() != 5*time.Second {
+		t.Fatalf("createdTimeout default = %s, want 5s", got.CreatedTimeout)
+	}
 	if !got.SameAccountRetry {
 		t.Fatal("sameAccountRetry default must stay true")
+	}
+	if len(got.GuardedModels) != 0 {
+		t.Fatalf("GuardedModels default = %#v, want empty (all models gated)", got.GuardedModels)
 	}
 }
 
