@@ -130,16 +130,45 @@ func browserProfile(userAgent string) profiles.ClientProfile {
 	return profiles.Chrome_146
 }
 
+// browserClientDefaultRequestTimeout 是无 deadline 调用方的保守上限:
+// tls-client 的连接阶段(TCP+代理 CONNECT+uTLS)没有独立超时(拨号超时
+// 直接取整请求超时 7200s),挂起的握手会把无 deadline 的调用方拖满预算。
+// 带自身 deadline 的主链路(Console/Web/WS)不受影响;变量形式仅供测试
+// 覆盖,生产行为恒定 10 分钟。
+var browserClientDefaultRequestTimeout = 10 * time.Minute
+
+// cancelOnCloseBody 把 ctx 取消绑定到响应体 Close:Do 返回后 body 仍在
+// 读取,不能在 Do 出口取消——那会截断在途下载。
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	b.cancel()
+	return b.ReadCloser.Close()
+}
+
 func (c *browserClient) Do(request *http.Request) (*http.Response, error) {
+	cancel := func() {}
+	if _, ok := request.Context().Deadline(); !ok {
+		var bounded context.Context
+		bounded, cancel = context.WithTimeout(request.Context(), browserClientDefaultRequestTimeout)
+		request = request.Clone(bounded)
+	}
 	frequest, err := toFHTTPRequest(request)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	fresponse, err := c.inner.Do(frequest)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	return fromFHTTPResponse(fresponse), nil
+	response := fromFHTTPResponse(fresponse)
+	response.Body = &cancelOnCloseBody{ReadCloser: response.Body, cancel: cancel}
+	return response, nil
 }
 
 func fromFHTTPResponse(fresponse *fhttp.Response) *http.Response {

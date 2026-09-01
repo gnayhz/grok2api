@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"math/rand/v2"
 	"sort"
+	"strconv"
 	"time"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -149,18 +150,45 @@ func (m *Manager) cachedPoolMembers(ctx context.Context, poolID uint64, now time
 	if !exists {
 		return domain.Pool{}, nil, errors.New("repository does not support pools")
 	}
-	pool, err := store.GetEgressPool(ctx, poolID)
+	// 已取消的调用方在合并前快速失败:回源用 WithoutCancel(领头断开不连坐
+	// 等待者),取消不再经 DB 读传播——没有这个前置检查,取消语义会退化为
+	// 「取消的请求也拿到完整回源结果」。
+	if err := ctx.Err(); err != nil {
+		return domain.Pool{}, nil, err
+	}
+	// singleflight 合并 TTL 过期瞬间的并发回源:严格绑定语义下池读失败=请求
+	// 直接失败,惊群(每个并发请求各打两条 SQL)会把一次 DB 抖动放大成批的
+	// 池路由失败。对齐 listNodes(manager.go nodeLoads)的既有范式:领头
+	// 调用方脱离请求生命周期,等待者共享同一次回源,5s 覆盖一次池查询。
+	loaded, err, _ := m.poolLoads.Do(strconv.FormatUint(poolID, 10), func() (any, error) {
+		checkTime := time.Now().UTC()
+		m.fallbackMu.Lock()
+		if cached, ok := m.poolFallbacks[poolID]; ok && checkTime.Before(cached.expiresAt) {
+			m.fallbackMu.Unlock()
+			return cached, nil
+		}
+		m.fallbackMu.Unlock()
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		pool, err := store.GetEgressPool(loadCtx, poolID)
+		if err != nil {
+			return nil, err
+		}
+		nodes, err := store.ListEgressNodesByPool(loadCtx, poolID)
+		if err != nil {
+			return nil, err
+		}
+		refreshed := cachedPoolFallback{pool: pool, members: nodes, expiresAt: checkTime.Add(poolCacheTTL)}
+		m.fallbackMu.Lock()
+		m.poolFallbacks[poolID] = refreshed
+		m.fallbackMu.Unlock()
+		return refreshed, nil
+	})
 	if err != nil {
 		return domain.Pool{}, nil, err
 	}
-	nodes, err := store.ListEgressNodesByPool(ctx, poolID)
-	if err != nil {
-		return domain.Pool{}, nil, err
-	}
-	m.fallbackMu.Lock()
-	m.poolFallbacks[poolID] = cachedPoolFallback{pool: pool, members: nodes, expiresAt: now.Add(poolCacheTTL)}
-	m.fallbackMu.Unlock()
-	return pool, nodes, nil
+	refreshed := loaded.(cachedPoolFallback)
+	return refreshed.pool, refreshed.members, nil
 }
 
 // PoolRouteOutcome 分类池路由的实际出口,统计口径由此决定:只有"目标池
@@ -318,22 +346,28 @@ func (m *Manager) selectRotationNode(pool domain.Pool, candidates, allMembers []
 	if len(candidates) == 0 {
 		return domain.Node{}
 	}
-	// 全成员序内聚在此处排序,规则必须与仓储 ORDER BY 完全一致:
+	// 全成员序内聚,规则必须与仓储 ORDER BY 完全一致:
 	// (priority > 0) DESC, priority ASC, id ASC —— 已设 priority 的排前,
 	// 未设(0)排后。否则同一池里 sticky(仓储序)与 rotation(内部序)
 	// 的"首"会指向不同节点。
-	ordered := append([]domain.Node(nil), allMembers...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		pi, pj := ordered[i].PoolPriority > 0, ordered[j].PoolPriority > 0
+	// 仓储按同序返回是常态:先用 O(n) 探测,已有序直接使用(旋转池热路径
+	// 每请求一次,百成员池的拷贝+排序是纯浪费);仅当顺序不符(仓储实现
+	// 变更/测试夹具)才回退到拷贝+排序,正确性不依赖仓储约定。
+	rotationLess := func(i, j int) bool {
+		pi, pj := allMembers[i].PoolPriority > 0, allMembers[j].PoolPriority > 0
 		if pi != pj {
 			return pi
 		}
-		if ordered[i].PoolPriority != ordered[j].PoolPriority {
-			return ordered[i].PoolPriority < ordered[j].PoolPriority
+		if allMembers[i].PoolPriority != allMembers[j].PoolPriority {
+			return allMembers[i].PoolPriority < allMembers[j].PoolPriority
 		}
-		return ordered[i].ID < ordered[j].ID
-	})
-	allMembers = ordered
+		return allMembers[i].ID < allMembers[j].ID
+	}
+	if !sort.SliceIsSorted(allMembers, rotationLess) {
+		ordered := append([]domain.Node(nil), allMembers...)
+		sort.SliceStable(ordered, rotationLess)
+		allMembers = ordered
+	}
 	available := func(id uint64) bool {
 		for _, node := range candidates {
 			if node.ID == id {

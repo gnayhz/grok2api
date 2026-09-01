@@ -41,6 +41,12 @@ const clientCacheCleanupInterval = time.Minute
 const clientCacheTouchInterval = time.Minute
 const maxCachedClients = 4096
 const clearanceLockGrace = 30 * time.Second
+
+// clearanceRoutineStaleGrace 是例行过期 serve-stale 的宽限:refreshedAt 超出
+// 刷新窗口但仍在宽限内时立即交付旧解并由后台合并刷新,覆盖后台例行刷新
+// 循环(默认每分钟跑一轮)的调度间隙。invalid(403 失效)与绑定指纹变化
+// 不适用:那两类过期是「已知坏了」,同步强制刷新。
+const clearanceRoutineStaleGrace = 90 * time.Second
 const clearanceCacheCleanupInterval = time.Minute
 const clearanceCacheMinIdleTTL = 30 * time.Minute
 const maxCachedClearances = 16384
@@ -175,6 +181,7 @@ type Manager struct {
 	proxyFlagMemo          map[uint64]proxyFlagMemoEntry
 	nodeVersions           map[string]uint64
 	nodeLoads              singleflight.Group
+	poolLoads              singleflight.Group
 	clientLoads            singleflight.Group
 	clientVersions         map[uint64]uint64
 	clientGeneration       uint64
@@ -184,22 +191,26 @@ type Manager struct {
 	operationsConfig       cachedOperationsConfig
 	operationsConfigLoad   singleflight.Group
 	operationsConfigVer    uint64
-	routeRuleNodeMu        sync.Mutex
+	routeRuleNodeMu        sync.RWMutex
 	routeRuleNodeCache     map[uint64]cachedRoutingTargetNode
+	routingTargetLoads     singleflight.Group
 	failureProbeMu         sync.Mutex
 	failureProber          FailureProber
 	failureProbes          map[uint64]failureProbeState
 	lastClientCleanup      time.Time
 	clearanceLoads         singleflight.Group
-	clearanceConfig        ClearanceConfig
-	clearanceVersion       uint64
-	clearances             map[string]clearanceState
-	lastClearanceCleanup   time.Time
-	solver                 clearanceSolver
-	clearanceLock          repository.DistributedLock
-	newBuildClient         func(string, time.Duration) (requestClient, error)
-	newBuildEnvClient      func(time.Duration) (requestClient, error)
-	newBrowserClient       func(string, string) (*browserClient, error)
+	// backgroundClearanceRefreshes 记录已触发后台例行刷新的 clearance 键
+	// (clearanceMu 守护),避免 serve-stale 高频命中时每请求一个刷新协程。
+	backgroundClearanceRefreshes map[string]struct{}
+	clearanceConfig              ClearanceConfig
+	clearanceVersion             uint64
+	clearances                   map[string]clearanceState
+	lastClearanceCleanup         time.Time
+	solver                       clearanceSolver
+	clearanceLock                repository.DistributedLock
+	newBuildClient               func(string, time.Duration) (requestClient, error)
+	newBuildEnvClient            func(time.Duration) (requestClient, error)
+	newBrowserClient             func(string, string) (*browserClient, error)
 	// softMu 保护 softCooldowns:降智证据的未决软冷却(进程内,分钟级)。
 	softMu          sync.RWMutex
 	softCooldowns   map[uint64]softCooldown
@@ -1591,7 +1602,11 @@ func (m *Manager) clientForWithOptions(id uint64, scope domain.Scope, proxyURL, 
 			clientKind += "\x00environment-proxy"
 		}
 	}
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent+"\x00"+cookies)))
+	// cookies 刻意不进指纹:客户端构造不接收 cookies(按请求头携带、无 jar,
+	// 见 buildCachedClient),把它纳入键只会让 clearance 例行刷新或账号 cookie
+	// 变化把同出口的整池热连接无谓作废(每次 3-4 RTT/条重握手)。指纹仍含
+	// proxyURL/userAgent——它们真实决定传输层形态(TLS profile、拨号目标)。
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent)))
 	cacheScope := scope
 	if cacheScope == domain.ScopeWebAsset {
 		cacheScope = domain.ScopeWeb
@@ -2063,7 +2078,11 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		}
 		m.clearanceMu.Unlock()
 		m.clientMu.Lock()
-		stale = m.invalidateClientLocked(nodeID)
+		// 403 是浏览器作用域的反爬拒绝,只驱逐该 scope 的客户端:Build 通道
+		// 不经反爬、不携带 clearance cookie,同节点的 Build 热连接池不该被
+		// Web 403 连坐清空(每条 3-4 RTT 重握手)。传输错误仍按节点整体
+		// 驱逐——拨号器/传输层被同节点所有 scope 共享。
+		stale = m.invalidateClientForScopeLocked(nodeID, scope)
 		m.clientMu.Unlock()
 	case transportErr != nil:
 		if m.isProxyPoolNode(value) {
@@ -2105,14 +2124,13 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 }
 
 func (m *Manager) cachedNodeIsHealthy(nodeID uint64) bool {
-	m.nodeMu.Lock()
+	// 读路径走 RLock:成功反馈在每次响应头后都会打这里,1s 窗口内的重复
+	// 命中是常态。过期条目不必在读路径删除——TTL 判定(now.Before)已兜底,
+	// replaceNodeSnapshotLocked 每次快照重建时全量重写 healthyNodes,不会泄漏。
+	m.nodeMu.RLock()
 	validUntil, ok := m.healthyNodes[nodeID]
-	healthy := ok && time.Now().UTC().Before(validUntil)
-	if ok && !healthy {
-		delete(m.healthyNodes, nodeID)
-	}
-	m.nodeMu.Unlock()
-	return healthy
+	m.nodeMu.RUnlock()
+	return ok && time.Now().UTC().Before(validUntil)
 }
 
 func nodeIsHealthy(value domain.Node) bool {
@@ -2193,6 +2211,27 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 		m.clearanceMu.Unlock()
 		return existingCookies, existingUserAgent, nil
 	}
+	// 例行过期 serve-stale:已知、未失效、UA 完整、绑定指纹匹配,且只超出
+	// 刷新窗口一个有界宽限时,立即交付旧解并触发一次后台合并刷新——例行
+	// 过期不再让首个请求同步等完整求解(最坏求解超时+锁宽限)。后台刷新
+	// 用去重标记限制每键至多一个在途协程;403 兜底闭环(invalidate→强制
+	// 同步刷新)保持不变,旧解失效时最多多付一次 403 往返。
+	routineStale := fallbackAllowed && !forceRefresh && !state.refreshedAt.IsZero() &&
+		state.version == version && state.fingerprint == fingerprint &&
+		now.Sub(state.refreshedAt) < interval+clearanceRoutineStaleGrace
+	if routineStale {
+		if _, running := m.backgroundClearanceRefreshes[key]; !running {
+			if m.backgroundClearanceRefreshes == nil {
+				m.backgroundClearanceRefreshes = make(map[string]struct{})
+			}
+			m.backgroundClearanceRefreshes[key] = struct{}{}
+			m.clearanceMu.Unlock()
+			go m.refreshClearanceInBackground(ctx, node, proxyURL, key, persist)
+			return state.cookies, state.userAgent, nil
+		}
+		m.clearanceMu.Unlock()
+		return state.cookies, state.userAgent, nil
+	}
 	m.clearanceMu.Unlock()
 
 	result, err, _ := m.clearanceLoads.Do(key, func() (any, error) {
@@ -2213,6 +2252,22 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 	}
 	solution := result.(clearanceSolution)
 	return solution.Cookies, solution.UserAgent, nil
+}
+
+// refreshClearanceInBackground 在脱离请求生命周期的预算内执行一次例行
+// 刷新(与同步路径共用 clearanceLoads 合并),完成后清除去重标记。
+func (m *Manager) refreshClearanceInBackground(ctx context.Context, node domain.Node, proxyURL, key string, persist bool) {
+	defer func() {
+		m.clearanceMu.Lock()
+		delete(m.backgroundClearanceRefreshes, key)
+		m.clearanceMu.Unlock()
+	}()
+	solveTimeout := m.currentClearanceTimeout()
+	solveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), solveTimeout+clearanceLockGrace)
+	defer cancel()
+	_, _, _ = m.clearanceLoads.Do(key, func() (any, error) {
+		return m.refreshNode(solveCtx, node, proxyURL, key, persist, false, false, time.Time{})
+	})
 }
 
 // currentClearanceTimeout 返回当前 Clearance 求解超时(零值时按默认 1m),

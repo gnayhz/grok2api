@@ -140,3 +140,28 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// BenchmarkSelectRotationNodeRepositoryOrder 量化仓储序(常态)下的旋转
+// 选择开销:有序探测路径应为 0 alloc;回归态(无条件拷贝+排序)为
+// 1 alloc + O(n log n)。百成员池、游标命中。
+func BenchmarkSelectRotationNodeRepositoryOrder(b *testing.B) {
+	manager, _ := newRotationBenchManager(b, 0)
+	const members = 100
+	all := make([]domain.Node, members)
+	candidates := make([]domain.Node, 0, members)
+	for i := 0; i < members; i++ {
+		all[i] = domain.Node{ID: uint64(i + 1), Enabled: true, Health: 1}
+		if i%4 != 3 {
+			candidates = append(candidates, all[i])
+		}
+	}
+	pool := domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRotation, RotationCursorNodeID: 1}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		selected := manager.selectRotationNode(pool, candidates, all)
+		if selected.ID != 1 {
+			b.Fatalf("selected = %d, want pinned cursor 1", selected.ID)
+		}
+	}
+}
