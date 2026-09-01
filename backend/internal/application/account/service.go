@@ -4890,12 +4890,10 @@ func (s *Service) SetAccountRiskAttribution(ctx context.Context, id uint64, flag
 	return nil
 }
 
-// ClearMissingThinkingCooldown lifts a missing-thinking cooldown when a risk
-// verdict proves the account innocent (clean RSC: the degrade was exit-IP
-// scoped, and tunnel pools rotate the IP on the next request anyway). Only
-// penalties marked as missing-thinking are lifted: a clean verdict says
-// nothing about empty-stream or rate-limit cooldowns, and clearing those
-// would let a persistently failing account never cool down.
+// ClearMissingThinkingCooldown lifts missing-thinking and quality-idle
+// cooldowns when a risk verdict proves the degrade was not account-scoped.
+// Generic 5xx/429 penalties stay: a clean verdict does not prove the account
+// is healthy.
 func (s *Service) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
 	if err := s.accounts.ClearMissingThinkingCooldown(ctx, id); err != nil {
 		return mapRepositoryError(err)

@@ -2335,9 +2335,9 @@ func (r *AccountRepository) UpdateRiskAttribution(ctx context.Context, id uint64
 	return nil
 }
 
-// ClearMissingThinkingCooldown 用 last_error 标记限定清除范围：clean 判定只
-// 证明本次降智与账号无关，空流等其他来源的冷却不应被连带清除（否则可形成
-// 永不冷却的循环）。无匹配行时是幂等 no-op。
+// ClearMissingThinkingCooldown 用 last_error 白名单限定清除：missing-thinking
+// 家族与 quality_idle_timeout（出口性空闲，clean RSC 一并解除）。泛型 5xx
+// 不在名单内。无匹配行时幂等 no-op。
 func (r *AccountRepository) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
 	if id == 0 {
 		return repository.ErrNotFound

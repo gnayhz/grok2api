@@ -167,8 +167,8 @@ type AccountRepository interface {
 	// UpdateQualityIdleCooldown 仅写 idle 冷却两列（marker+until），不动
 	// failure_count——避免快照回写覆盖并发计数。
 	UpdateQualityIdleCooldown(ctx context.Context, id uint64, provider account.Provider, until time.Time) error
-	// ClearMissingThinkingCooldown 仅解除 missing-thinking 打击产生的惩罚；
-	// 其他来源（空流/429/5xx）的冷却保持原样。
+	// ClearMissingThinkingCooldown 解除 missing-thinking 家族与 quality-idle
+	// 标记的冷却；泛型 5xx/429 冷却保持原样。
 	ClearMissingThinkingCooldown(ctx context.Context, id uint64) error
 	// TouchLastUsed persists request activity without changing routing health or
 	// invalidating candidate snapshots.
