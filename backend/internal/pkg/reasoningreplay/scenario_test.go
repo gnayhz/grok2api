@@ -136,7 +136,7 @@ func TestScenario_SSEStreamCompletedStores(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := []byte(`{"input":[{"type":"message","role":"user","content":"continue"}]}`)
+	body := []byte(`{"input":[{"type":"message","role":"user","content":"continue"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},{"type":"message","role":"user","content":"again"}]}`)
 	out := replay.Apply(ctx, model, session, body)
 	if !strings.Contains(string(out), enc) {
 		t.Fatalf("SSE completed should store; out=%s", out)
@@ -151,11 +151,11 @@ func TestScenario_TenantIsolation(t *testing.T) {
 	encA, encB := validEncrypted(8), validEncrypted(9)
 	model := "grok-4.5"
 
-	replay.StoreFromCompleted(ctx, model, "tenant-A-key", []byte(`{"output":[{"type":"reasoning","encrypted_content":"`+encA+`"}]}`))
-	replay.StoreFromCompleted(ctx, model, "tenant-B-key", []byte(`{"output":[{"type":"reasoning","encrypted_content":"`+encB+`"}]}`))
+	replay.StoreFromCompleted(ctx, model, "tenant-A-key", []byte(`{"output":[{"type":"reasoning","encrypted_content":"`+encA+`"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer-a"}]}]}`))
+	replay.StoreFromCompleted(ctx, model, "tenant-B-key", []byte(`{"output":[{"type":"reasoning","encrypted_content":"`+encB+`"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer-b"}]}]}`))
 
-	outA := replay.Apply(ctx, model, "tenant-A-key", []byte(`{"input":[{"type":"message","role":"user","content":"x"}]}`))
-	outB := replay.Apply(ctx, model, "tenant-B-key", []byte(`{"input":[{"type":"message","role":"user","content":"x"}]}`))
+	outA := replay.Apply(ctx, model, "tenant-A-key", []byte(`{"input":[{"type":"message","role":"user","content":"x"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer-a"}]},{"type":"message","role":"user","content":"next"}]}`))
+	outB := replay.Apply(ctx, model, "tenant-B-key", []byte(`{"input":[{"type":"message","role":"user","content":"x"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer-b"}]},{"type":"message","role":"user","content":"next"}]}`))
 
 	if !strings.Contains(string(outA), encA) || strings.Contains(string(outA), encB) {
 		t.Fatalf("A isolation failed: %s", outA)
@@ -241,9 +241,10 @@ func TestScenario_ToolCallInjectOnlyWithMatchingOutput(t *testing.T) {
 	if strings.Contains(string(out2), "lookup") {
 		t.Fatalf("function_call without output must not inject: %s", out2)
 	}
-	// reasoning 仍应可注入
-	if !strings.Contains(string(out2), enc) {
-		t.Fatalf("reasoning should still inject without tool output: %s", out2)
+	// 无锚点时 reasoning 也不注入:注入位置无依据时,宁可放弃这一轮回放,
+	// 也不把外轮内容插进请求头部(前缀分叉会让整段缓存失效)。
+	if strings.Contains(string(out2), enc) {
+		t.Fatalf("reasoning without anchor must not inject: %s", out2)
 	}
 	t.Log("PASS tool-call filter rules")
 }

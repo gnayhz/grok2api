@@ -16,6 +16,10 @@ const (
 	maxReplayEncryptedLen        = 8 << 20
 	maxReplayCaptureBytes        = 8 << 20
 	defaultReasoningReplayTTL    = time.Hour
+	// maxSessionReplayBytes 限制单会话累计回放的体积。累计回放让相邻两轮
+	// 上游序列保持纯前缀扩展,代价是每轮都重发历史 reasoning 密文;超预算
+	// 时从最旧的轮次开始丢弃。
+	maxSessionReplayBytes = 96 << 10
 )
 
 // Config 控制服务端推理回放缓存。
@@ -81,17 +85,12 @@ func (r *ReasoningReplay) Apply(ctx context.Context, model, sessionKey string, b
 		r.logger.Debug("reasoning_replay_miss", "reason", "not_found", "model", model)
 		return body
 	}
-	filtered := filterReplayItemsForInput(body, items)
-	if len(filtered) == 0 {
-		r.logger.Debug("reasoning_replay_miss", "reason", "filtered", "model", model)
-		return body
-	}
-	updated, ok := insertReplayItems(body, filtered)
+	updated, ok := insertReplayItems(body, items)
 	if !ok {
-		r.logger.Debug("reasoning_replay_miss", "reason", "insert_failed", "model", model)
+		r.logger.Debug("reasoning_replay_miss", "reason", "no_anchor", "model", model)
 		return body
 	}
-	r.logger.Debug("reasoning_replay_hit", "model", model, "injected", len(filtered))
+	r.logger.Debug("reasoning_replay_hit", "model", model, "injected", len(items))
 	return updated
 }
 
@@ -119,11 +118,62 @@ func (r *ReasoningReplay) StoreFromCompleted(ctx context.Context, model, session
 		return
 	}
 	expiresAt := r.now().UTC().Add(cfg.TTL)
-	if err := r.store.Set(ctx, model, sessionKey, normalized, expiresAt); err != nil {
+	if err := r.store.Set(ctx, model, sessionKey, accumulateReplayItems(ctx, r.store, model, sessionKey, cfg.TTL, normalized), expiresAt); err != nil {
 		r.logger.Warn("reasoning_replay_store_failed", "model", model, "error", err)
 		return
 	}
 	r.logger.Debug("reasoning_replay_store", "model", model, "items", len(normalized))
+}
+
+// accumulateReplayItems 合并本轮输出与会话内已累计的历史轮次。上游提示
+// 缓存只复用严格前缀扩展:若每轮只保留最新一轮的回放,上一轮注入的
+// reasoning 在本轮消失,前缀在该位置分叉,每轮损失约一轮上下文的缓存;
+// 换账号(回放键含账号作用域)后的第一轮同理。累计保留让「本轮上游序列」
+// 恒等于「上一轮上游序列 + 追加项」。已存在的项(同密文/同调用)不重复
+// 追加;超出单会话字节预算时从最旧轮次开始丢弃。
+func accumulateReplayItems(ctx context.Context, store repository.ReasoningReplayRepository, model, sessionKey string, ttl time.Duration, latest [][]byte) [][]byte {
+	existing, ok, err := store.Get(ctx, model, sessionKey, time.Now().UTC(), ttl)
+	if err != nil || !ok || len(existing) == 0 {
+		return latest
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, item := range existing {
+		seen[string(item)] = struct{}{}
+	}
+	merged := make([][]byte, 0, len(existing)+len(latest))
+	merged = append(merged, existing...)
+	for _, item := range latest {
+		if _, duplicate := seen[string(item)]; duplicate {
+			continue
+		}
+		merged = append(merged, item)
+	}
+	return trimReplayTurns(merged)
+}
+
+// trimReplayTurns 从最旧的轮次开始丢弃,直到总体积回到预算内。
+func trimReplayTurns(items [][]byte) [][]byte {
+	total := 0
+	for _, item := range items {
+		total += len(item)
+	}
+	if total <= maxSessionReplayBytes {
+		return items
+	}
+	turns := groupReplayTurns(items)
+	kept := make([][]byte, 0, len(items))
+	for index := len(turns) - 1; index >= 0; index-- {
+		candidate := append(kept, turns[index].items...)
+		size := 0
+		for _, item := range candidate {
+			size += len(item)
+		}
+		if size > maxSessionReplayBytes && len(kept) > 0 {
+			break
+		}
+		kept = candidate
+	}
+	return kept
 }
 
 // Clear 删除指定会话的回放缓存（compact 成功等）。

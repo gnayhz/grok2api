@@ -31,7 +31,10 @@ func TestNormalizeAndStoreRoundTrip(t *testing.T) {
 	payload := []byte(`{"id":"resp_1","output":[{"type":"reasoning","encrypted_content":"` + enc + `","summary":[{"type":"summary_text","text":"think"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}`)
 	replay.StoreFromCompleted(context.Background(), "grok-4.5", "session-a", payload)
 
-	body := []byte(`{"model":"grok-4.5","input":[{"type":"message","role":"user","content":"next"}]}`)
+	// 客户端重发 assistant 文本(output_text 线形态)时,reasoning 锚定在
+	// 该消息之前注入;无锚点的纯单消息输入不再注入——历史回归中该路径把
+	// 回放塞到请求最前面,上游前缀在首个缓存块后分叉,会话缓存全灭。
+	body := []byte(`{"model":"grok-4.5","input":[{"type":"message","role":"user","content":"q"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]},{"type":"message","role":"user","content":"next"}]}`)
 	updated := replay.Apply(context.Background(), "grok-4.5", "session-a", body)
 	var got struct {
 		Input []map[string]any `json:"input"`
@@ -39,11 +42,15 @@ func TestNormalizeAndStoreRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(updated, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Input) != 3 {
+	if len(got.Input) != 4 {
 		t.Fatalf("input len = %d, body=%s", len(got.Input), updated)
 	}
-	if got.Input[0]["type"] != "reasoning" || got.Input[0]["encrypted_content"] != enc || got.Input[1]["role"] != "assistant" || got.Input[2]["role"] != "user" {
+	if got.Input[1]["type"] != "reasoning" || got.Input[1]["encrypted_content"] != enc || got.Input[2]["role"] != "assistant" || got.Input[3]["role"] != "user" {
 		t.Fatalf("unexpected replay order: %s", updated)
+	}
+	anchorless := replay.Apply(context.Background(), "grok-4.5", "session-a", []byte(`{"input":[{"type":"message","role":"user","content":"fresh"}]}`))
+	if strings.Contains(string(anchorless), enc) {
+		t.Fatalf("anchorless input must not inject replay: %s", anchorless)
 	}
 }
 
@@ -138,10 +145,22 @@ func TestCaptureBodyStoresNonStream(t *testing.T) {
 	if string(data) != string(raw) {
 		t.Fatalf("body mutated: %s", data)
 	}
-	updated := replay.Apply(context.Background(), "grok-4.5", "session-e", []byte(`{"input":[{"type":"message","role":"user","content":"n"}]}`))
-	if !strings.Contains(string(updated), enc) {
-		t.Fatalf("capture did not store: %s", updated)
+	stored, ok, err := store.Get(context.Background(), "grok-4.5", "session-e", time.Now().UTC(), time.Hour)
+	if err != nil || !ok || len(stored) == 0 {
+		t.Fatalf("capture did not store: ok=%v err=%v", ok, err)
 	}
+	if !containsEncrypted(stored, enc) {
+		t.Fatalf("stored items missing encrypted: %v", stored)
+	}
+}
+
+func containsEncrypted(items [][]byte, enc string) bool {
+	for _, item := range items {
+		if strings.Contains(string(item), enc) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestIncompletePayloadRetainsPreviousReplay(t *testing.T) {
@@ -150,9 +169,9 @@ func TestIncompletePayloadRetainsPreviousReplay(t *testing.T) {
 	enc := validEncrypted(16)
 	replay.StoreFromCompleted(context.Background(), "grok-4.5", "session-partial", []byte(`{"output":[{"type":"reasoning","encrypted_content":"`+enc+`"}]}`))
 	replay.StoreFromCompleted(context.Background(), "grok-4.5", "session-partial", []byte(`{"output":[`))
-	updated := replay.Apply(context.Background(), "grok-4.5", "session-partial", []byte(`{"input":[{"type":"message","role":"user","content":"next"}]}`))
-	if !strings.Contains(string(updated), enc) {
-		t.Fatalf("incomplete payload deleted previous replay: %s", updated)
+	stored, ok, err := store.Get(context.Background(), "grok-4.5", "session-partial", time.Now().UTC(), time.Hour)
+	if err != nil || !ok || !containsEncrypted(stored, enc) {
+		t.Fatalf("incomplete payload deleted previous replay: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -169,9 +188,9 @@ func TestCaptureBodyClosedBeforeEOFRetainsPreviousReplay(t *testing.T) {
 	if err := wrapped.Close(); err != nil {
 		t.Fatal(err)
 	}
-	updated := replay.Apply(context.Background(), "grok-4.5", "session-short-read", []byte(`{"input":[{"type":"message","role":"user","content":"next"}]}`))
-	if !strings.Contains(string(updated), enc) {
-		t.Fatalf("short read deleted previous replay: %s", updated)
+	stored, ok, err := store.Get(context.Background(), "grok-4.5", "session-short-read", time.Now().UTC(), time.Hour)
+	if err != nil || !ok || !containsEncrypted(stored, enc) {
+		t.Fatalf("short read deleted previous replay: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -249,9 +268,9 @@ func TestCaptureBodyStreamingDropsDeltasButKeepsItemDone(t *testing.T) {
 	if err := wrapped.Close(); err != nil {
 		t.Fatal(err)
 	}
-	updated := replay.Apply(context.Background(), "grok-4.5", "session-deltas", []byte("{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"next\"}]}"))
-	if !strings.Contains(string(updated), enc) {
-		t.Fatalf("delta-heavy SSE did not store reasoning: %s", updated)
+	stored, ok, err := store.Get(context.Background(), "grok-4.5", "session-deltas", time.Now().UTC(), time.Hour)
+	if err != nil || !ok || !containsEncrypted(stored, enc) {
+		t.Fatalf("delta-heavy SSE did not store reasoning: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -310,9 +329,9 @@ func TestCaptureBodyStreamingStoresCompletedDespiteReadError(t *testing.T) {
 	if err := wrapped.Close(); err != nil {
 		t.Fatal(err)
 	}
-	updated := replay.Apply(context.Background(), "grok-4.5", "session-readerr", []byte(`{"input":[{"type":"message","role":"user","content":"next"}]}`))
-	if !strings.Contains(string(updated), enc) {
-		t.Fatalf("completed-then-readErr did not store replay: %s", updated)
+	stored, ok, err := store.Get(context.Background(), "grok-4.5", "session-readerr", time.Now().UTC(), time.Hour)
+	if err != nil || !ok || !containsEncrypted(stored, enc) {
+		t.Fatalf("completed-then-readErr did not store replay: ok=%v err=%v", ok, err)
 	}
 }
 

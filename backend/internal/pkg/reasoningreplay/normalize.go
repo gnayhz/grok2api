@@ -85,7 +85,7 @@ func normalizeReplayItem(item []byte) ([]byte, bool) {
 	_ = json.Unmarshal(raw["type"], &typeName)
 	switch strings.TrimSpace(typeName) {
 	case "reasoning":
-		return normalizeReasoningItem(raw)
+		return normalizeReasoningItem(item, raw)
 	case "message":
 		return normalizeAssistantMessageItem(raw)
 	case "function_call":
@@ -97,7 +97,7 @@ func normalizeReplayItem(item []byte) ([]byte, bool) {
 	}
 }
 
-func normalizeReasoningItem(raw map[string]json.RawMessage) ([]byte, bool) {
+func normalizeReasoningItem(item []byte, raw map[string]json.RawMessage) ([]byte, bool) {
 	var encrypted string
 	if json.Unmarshal(raw["encrypted_content"], &encrypted) != nil {
 		return nil, false
@@ -105,14 +105,12 @@ func normalizeReasoningItem(raw map[string]json.RawMessage) ([]byte, bool) {
 	if !validGrokReplayEncryptedContent(encrypted) {
 		return nil, false
 	}
-	out := map[string]any{
-		"type":              "reasoning",
-		"summary":           []any{},
-		"content":           nil,
-		"encrypted_content": encrypted,
-	}
-	data, err := json.Marshal(out)
-	return data, err == nil
+	// reasoning 条目必须逐字节原样回放:上游把密文与条目的其余字段
+	// (summary/id/status 等)绑定校验,任何重建都会让「回放自家上一轮
+	// 密文」在下一轮被 400 拒收(could not decrypt),恢复路径随即清空
+	// 整个会话回放——线上表现为缓存逐轮归零。这里只做合法性校验,
+	// 不改写原文;工作正常的 Codex 客户端正是不加修改地重发这些条目。
+	return append([]byte(nil), item...), true
 }
 
 func validGrokReplayEncryptedContent(value string) bool {
