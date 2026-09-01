@@ -187,20 +187,22 @@ export const settingsSchema = z.object({
   // 实时路由守卫(质量扣留/截止预算)。边界与后端 validateRequestRetry 对齐。
   requestRetry: z.object({
     enabled: z.boolean(),
-    createdTimeout: durationSchema.refine((value) => {
+    // 以下时长字段后端语义均为 0=默认:GET 可能回 "0s",必须允许 0,
+    // 否则表单加载即校验失败、保存被静默拦截(与 deniedTTL 同类)。
+    createdTimeout: nonNegativeDurationSchema.refine((value) => {
       const seconds = durationSeconds(value);
-      return seconds >= 1 && seconds <= 120;
+      return seconds === 0 || (seconds >= 1 && seconds <= 120);
     }),
-    evidenceTimeout: durationSchema.refine((value) => {
+    evidenceTimeout: nonNegativeDurationSchema.refine((value) => {
       const seconds = durationSeconds(value);
-      return seconds >= 1 && seconds <= 300;
+      return seconds === 0 || (seconds >= 1 && seconds <= 300);
     }),
     maxAttempts: z.number().int().min(1).max(3),
     sameAccountRetry: z.boolean(),
     onExhausted: z.enum(["fail_closed", "fail_open"]),
-    accountCooldown: durationSchema.refine((value) => {
+    accountCooldown: nonNegativeDurationSchema.refine((value) => {
       const seconds = durationSeconds(value);
-      return seconds >= 60 && seconds <= 168 * 3_600;
+      return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
     }),
     idleAccountCooldown: nonNegativeDurationSchema.refine((value) => {
       const seconds = durationSeconds(value);
@@ -237,7 +239,9 @@ export const settingsSchema = z.object({
       }
     }, "仅支持 http/https/socks5 代理 URL,留空表示直连"),
     deniedConfirmations: z.number().int().min(0).max(5),
-    deniedTTL: durationSchema.refine((value) => {
+    // deniedTTL 0=默认(后端 24h):0 与 1h..720h 均合法,必须用非负
+    // schema,否则 GET 返回 "0s" 时表单加载即校验失败,保存被静默拦截。
+    deniedTTL: nonNegativeDurationSchema.refine((value) => {
       const seconds = durationSeconds(value);
       return seconds === 0 || (seconds >= 3600 && seconds <= 720 * 3600);
     }),
@@ -419,10 +423,10 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       enabled: config.requestRetry.enabled,
       maxAttempts: config.requestRetry.maxAttempts,
       onExhausted: config.requestRetry.onExhausted,
-      accountCooldown: formatDuration(config.requestRetry.accountCooldown),
+      accountCooldown: formatNonNegativeDuration(config.requestRetry.accountCooldown),
       sameAccountRetry: config.requestRetry.sameAccountRetry,
-      evidenceTimeout: formatDuration(config.requestRetry.evidenceTimeout),
-      createdTimeout: formatDuration(config.requestRetry.createdTimeout),
+      evidenceTimeout: formatNonNegativeDuration(config.requestRetry.evidenceTimeout),
+      createdTimeout: formatNonNegativeDuration(config.requestRetry.createdTimeout),
       idleAccountCooldown: formatNonNegativeDuration(config.requestRetry.idleAccountCooldown),
     },
     egressRotation: {
@@ -451,7 +455,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       buildProbeEnabled: config.accountRisk.buildProbeEnabled,
       probeProxyURL: config.accountRisk.probeProxyURL,
       deniedConfirmations: config.accountRisk.deniedConfirmations,
-      deniedTTL: formatDuration(config.accountRisk.deniedTTL),
+      deniedTTL: formatNonNegativeDuration(config.accountRisk.deniedTTL),
     },
   };
 }
