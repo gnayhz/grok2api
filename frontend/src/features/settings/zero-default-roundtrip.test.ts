@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it, before } from "node:test";
+import type { SettingsConfigDTO } from "@/features/settings/settings-api";
 
 let model: typeof import("./settings-model.ts");
 
@@ -10,8 +11,14 @@ before(async () => {
   model = await import("./settings-model.ts");
 });
 
-function baseConfig(durOverrides: Record<string, string>): any {
-  const cfg: any = {
+type RetryKey = "accountCooldown" | "evidenceTimeout" | "createdTimeout" | "idleAccountCooldown";
+type TestConfig = SettingsConfigDTO & {
+  requestRetry: NonNullable<SettingsConfigDTO["requestRetry"]>;
+  accountRisk: NonNullable<SettingsConfigDTO["accountRisk"]>;
+};
+
+function baseConfig(retryOverrides: Partial<Record<RetryKey, string>>): TestConfig {
+  const cfg: TestConfig = {
     server: { maxConcurrentRequests: 1024 },
     providerBuild: {
       baseURL: "https://build.example", fallbackBaseURL: "https://api.example", clientVersion: "1.0.4", clientIdentifier: "grok-shell",
@@ -41,6 +48,7 @@ function baseConfig(durOverrides: Record<string, string>): any {
     requestRetry: {
       enabled: true, maxAttempts: 2, onExhausted: "fail_closed", accountCooldown: "12h", sameAccountRetry: true,
       evidenceTimeout: "3.5s", createdTimeout: "5s", idleAccountCooldown: "15m",
+      ...retryOverrides,
     },
     accountRisk: {
       enabled: true, method: "ssoProbe", concurrency: 2, timeout: "30s", onDenied: "flag",
@@ -48,30 +56,31 @@ function baseConfig(durOverrides: Record<string, string>): any {
       deniedConfirmations: 2, deniedTTL: "24h", probeProxyURL: "", buildProbeEnabled: true,
     },
   };
-  for (const [k, v] of Object.entries(durOverrides)) cfg.requestRetry[k] = v;
   return cfg;
 }
 
-function withAccountRisk(cfg: any, deniedTTL: string): any {
+function withDeniedTTL(cfg: TestConfig, deniedTTL: string): TestConfig {
   cfg.accountRisk.deniedTTL = deniedTTL;
   return cfg;
 }
 
 describe("0=默认 语义时长字段:载荷加载与往返", () => {
   it("后端 0=默认 字段载荷为 0s 时表单校验通过且往返不丢", () => {
-    const cases: Array<[string, any]> = [
+    const cases: Array<[string, TestConfig]> = [
       ["requestRetry.accountCooldown", baseConfig({ accountCooldown: "0s" })],
       ["requestRetry.evidenceTimeout", baseConfig({ evidenceTimeout: "0s" })],
       ["requestRetry.createdTimeout", baseConfig({ createdTimeout: "0s" })],
       ["requestRetry.idleAccountCooldown", baseConfig({ idleAccountCooldown: "0s" })],
-      ["accountRisk.deniedTTL", withAccountRisk(baseConfig({}), "0s")],
+      ["accountRisk.deniedTTL", withDeniedTTL(baseConfig({}), "0s")],
     ];
     for (const [name, cfg] of cases) {
       const form = model.toSettingsForm(cfg);
       const parsed = model.settingsSchema.safeParse(form);
       assert.equal(parsed.success, true, name + " =0s 必须通过表单校验");
-      const dto: any = model.toSettingsDTO(form);
-      const dtoValue = name.startsWith("accountRisk.") ? dto.accountRisk?.deniedTTL : dto.requestRetry?.[name.split(".")[1]];
+      const dto = model.toSettingsDTO(form);
+      const dtoValue = name.startsWith("accountRisk.")
+        ? dto.accountRisk?.deniedTTL
+        : dto.requestRetry?.[name.split(".")[1] as RetryKey];
       assert.equal(dtoValue, "0s", name + " 往返必须保持 0s(默认语义)");
     }
   });
