@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,19 +22,22 @@ func TestAccessLogRecordsPanickingRequests(t *testing.T) {
 	sink := &lockedBuilder{mu: &mu, b: &output}
 	router := gin.New()
 	router.Use(gin.Recovery(), AccessLog(slog.New(slog.NewTextHandler(sink, nil))))
-	router.GET("/boom", func(c *gin.Context) { panic("kaboom") })
+	router.GET("/panic-probe", func(c *gin.Context) { panic("kaboom") })
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/boom", nil))
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panic-probe", nil))
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("recovery status = %d", recorder.Code)
 	}
 	mu.Lock()
 	logged := output.String()
 	mu.Unlock()
-	if !strings.Contains(logged, "path=/boom") || !strings.Contains(logged, "status=500") {
+	if !strings.Contains(logged, "path=/panic-probe") || !strings.Contains(logged, "status=500") {
 		t.Fatalf("panic request missing from access log: %s", logged)
 	}
+	// panic 补记会向全局 perfmetrics 计一笔 500——排空注册表,不污染
+	// 同包后续测试(Totals 类测试断言精确计数)。
+	perfmetrics.Default.CollectAndReset()
 }
 
 type lockedBuilder struct {
