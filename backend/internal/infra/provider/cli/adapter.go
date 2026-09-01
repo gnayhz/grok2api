@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,8 +69,24 @@ type Adapter struct {
 	uploadIssuer   VideoUploadIssuer
 	replay         *reasoningreplay.ReasoningReplay
 	compaction     *gatewayCompactionCodec
+	turnsMu        sync.Mutex
+	turns          map[string]grokTurnState
 	logger         *slog.Logger
 }
+
+// grokTurnState 记录会话的官方客户端轮次计数(x-grok-turn-idx)。
+type grokTurnState struct {
+	index      uint64
+	lastUsedAt time.Time
+}
+
+// maxTrackedGrokTurns 限制轮次表的内存上界;超限时按 lastUsedAt 淘汰最旧
+// 的四分之一。会话中辍后计数自然作废(上游按会话维度使用该值),不需要
+// 精确的过期回收。
+const (
+	maxTrackedGrokTurns = 8192
+	grokTurnPruneBatch  = maxTrackedGrokTurns / 4
+)
 
 func NewAdapter(cfg Config, cipher security.Cryptor) *Adapter {
 	cfg.ResponseHeaderTimeout = normalizeBuildResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
@@ -81,7 +98,7 @@ func NewAdapter(cfg Config, cipher security.Cryptor) *Adapter {
 	agentID := uuid.NewString()
 	adapter := &Adapter{
 		cfg: cfg, http: httpClient, cipher: cipher, base: transport,
-		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
+		agentID: agentID, modelsETags: make(map[uint64]string), turns: make(map[string]grokTurnState), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
 	}
 	// 官方 CLI 的 shared_client 对包括 OAuth 在内的所有请求统一附加 grok-shell
 	// User-Agent;网关的 OAuth 平面(client_id/token/device)必须一致,否则 Go 默认
@@ -561,7 +578,45 @@ func isCompactPath(path string) bool {
 	return strings.Contains(strings.ToLower(path), "compact")
 }
 
+// nextGrokTurnIndex 返回该会话的下一个轮次号(从 1 开始单调递增)。
+// 表超上界时按 lastUsedAt 淘汰最旧的一批;会话中辍后计数自然作废,
+// 不需要精确过期回收。
+func (a *Adapter) nextGrokTurnIndex(key string) string {
+	now := time.Now()
+	a.turnsMu.Lock()
+	defer a.turnsMu.Unlock()
+	if a.turns == nil {
+		a.turns = make(map[string]grokTurnState)
+	}
+	state := a.turns[key]
+	state.index++
+	state.lastUsedAt = now
+	a.turns[key] = state
+	if len(a.turns) > maxTrackedGrokTurns {
+		type agedEntry struct {
+			key        string
+			lastUsedAt time.Time
+		}
+		candidates := make([]agedEntry, 0, len(a.turns))
+		for k, s := range a.turns {
+			candidates = append(candidates, agedEntry{key: k, lastUsedAt: s.lastUsedAt})
+		}
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].lastUsedAt.Before(candidates[j].lastUsedAt) })
+		for i := 0; i < grokTurnPruneBatch && i < len(candidates); i++ {
+			delete(a.turns, candidates[i].key)
+		}
+	}
+	return strconv.FormatUint(state.index, 10)
+}
+
 func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (*http.Response, string, error) {
+	// 官方客户端按会话维护递增的轮次号并随请求发送;无状态 API 网关此前
+	// 一律不发该头。上游以会话+轮次定位提示缓存检查点,缺失时缓存归属
+	// 退化为按后端实例路由,中途换连接即冷启动。这里按(账号,会话)维护
+	// 单调递增计数,只补齐缺失值,客户端显式提供的轮次原样优先。
+	if request.GrokTurnIndex == "" && request.PromptCacheKey != "" && request.Credential.ID != 0 {
+		request.GrokTurnIndex = a.nextGrokTurnIndex(fmt.Sprintf("%d:%s", request.Credential.ID, request.PromptCacheKey))
+	}
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
