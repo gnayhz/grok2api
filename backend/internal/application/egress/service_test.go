@@ -271,7 +271,8 @@ func TestPublicNodePoolModeMatchesDomainRule(t *testing.T) {
 		want bool
 	}{
 		{"plain node", domain.Node{ID: 1, EncryptedProxyURL: plainURL}, false},
-		{"flag node", domain.Node{ID: 2, EncryptedProxyURL: plainURL, ProxyPool: true}, true},
+		{"flag node", domain.Node{ID: 2, EncryptedProxyURL: plainURL, ProxyPool: true}, false},
+		{"flag+rotation", domain.Node{ID: 4, EncryptedProxyURL: plainURL, ProxyPool: true, RotationEnabled: true}, true},
 		{"template node", domain.Node{ID: 3, EncryptedProxyURL: templateURL}, true},
 	}
 	for _, tc := range cases {

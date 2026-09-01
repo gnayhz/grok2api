@@ -1494,7 +1494,7 @@ func TestProxyPoolTransportFailureDoesNotCreateGlobalCooldown(t *testing.T) {
 	}
 	cooldown := time.Now().UTC().Add(time.Minute)
 	repository := &mutableEgressRepository{node: domain.Node{
-		ID: 1, Name: "pool", Enabled: true, ProxyPool: true,
+		ID: 1, Name: "pool", Enabled: true, ProxyPool: true, RotationEnabled: true,
 		Health: 0.2, FailureCount: 3, CooldownUntil: &cooldown, LastError: "old failure",
 	}}
 	manager := NewManager(repository, cipher)
@@ -1503,7 +1503,7 @@ func TestProxyPoolTransportFailureDoesNotCreateGlobalCooldown(t *testing.T) {
 		t.Fatalf("pool lease blocked by stale cooldown: configured=%v lease=%#v err=%v", configured, lease, err)
 	}
 	if !lease.freshTunnel {
-		t.Fatal("explicit proxy-pool lease must request a fresh Build tunnel")
+		t.Fatal("rotating pool lease must request a fresh Build tunnel")
 	}
 	lease.Release()
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
@@ -1525,6 +1525,29 @@ func TestFixedProxyTransportFailureStillCreatesCooldown(t *testing.T) {
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
 	if repository.updates != 1 || repository.node.FailureCount != 1 || repository.node.CooldownUntil == nil || repository.node.LastError != "transport error" {
 		t.Fatalf("fixed transport failure did not create cooldown: updates=%d node=%#v", repository.updates, repository.node)
+	}
+}
+
+func TestFalsePoolFlagTransportFailureCreatesCooldown(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "false-pool", Enabled: true, ProxyPool: true, Health: 1,
+	}}
+	manager := NewManager(repository, cipher)
+	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
+	if err != nil || !configured || lease == nil {
+		t.Fatalf("acquire: configured=%v lease=%#v err=%v", configured, lease, err)
+	}
+	if lease.freshTunnel || lease.proxyPool {
+		t.Fatalf("pool flag without rotation must not look like a rotating pool: freshTunnel=%v proxyPool=%v", lease.freshTunnel, lease.proxyPool)
+	}
+	lease.Release()
+	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
+	if repository.updates != 1 || repository.node.FailureCount != 1 || repository.node.CooldownUntil == nil {
+		t.Fatalf("false-pool transport failure did not create cooldown: updates=%d node=%#v", repository.updates, repository.node)
 	}
 }
 
@@ -2951,6 +2974,7 @@ func TestIsProxyPoolNodeMatchesDomainRule(t *testing.T) {
 	}{
 		{"plain", domain.Node{ID: 1, EncryptedProxyURL: plainURL}},
 		{"flag", domain.Node{ID: 2, EncryptedProxyURL: plainURL, ProxyPool: true}},
+		{"flag+rotation", domain.Node{ID: 5, EncryptedProxyURL: plainURL, ProxyPool: true, RotationEnabled: true}},
 		{"template", domain.Node{ID: 3, EncryptedProxyURL: templateURL}},
 		{"flag+template", domain.Node{ID: 4, EncryptedProxyURL: templateURL, ProxyPool: true}},
 	} {

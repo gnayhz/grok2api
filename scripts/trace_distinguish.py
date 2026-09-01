@@ -94,6 +94,7 @@ def parse_sse(path: Path) -> dict:
         'keepalive': keepalive,
         'n_data': n_data,
         'item_types': tuple(item_types[:8]),
+        'first_item': item_types[0] if item_types else '',
         'raw_len': len(raw),
     }
 
@@ -152,10 +153,14 @@ def classify(row: dict) -> str:
         return 'clean'
     if row['has_sum'] and not row['done']:
         return 'cut-after-think'
-    if row['enc'] and not row['has_sum'] and not row['has_text']:
+    if row['enc'] and not row['has_sum']:
+        # 密文零思考即 D-a/D-b；tee 在 item.done 之后仍可能读到正文，
+        # 不得因此改判 outrun（与守卫 first_item=reasoning 一致）。
         first_ms = (row['first'].get('first_event') or (None, 9999))[1]
         return 'D-a' if first_ms is not None and first_ms <= 50 else 'D-b'
     if row['has_text'] and not row['has_sum']:
+        if row.get('first_item') == 'reasoning':
+            return 'D-a'
         return 'outrun'
     if row['has_think_delta']:
         return 'think-delta-other'

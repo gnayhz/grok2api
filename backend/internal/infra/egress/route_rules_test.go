@@ -159,7 +159,7 @@ func TestRotatingNodeServesFixedTargetDespiteCooldowns(t *testing.T) {
 		t.Fatal(err)
 	}
 	cooldown := time.Now().UTC().Add(5 * time.Minute)
-	node := domain.Node{ID: 11, Name: "rotating", Enabled: true, Health: 1, EncryptedProxyURL: rotatingProxy, ProxyPool: true, CooldownUntil: &cooldown}
+	node := domain.Node{ID: 11, Name: "rotating", Enabled: true, Health: 1, EncryptedProxyURL: rotatingProxy, ProxyPool: true, RotationEnabled: true, CooldownUntil: &cooldown}
 	config := domain.OperationsConfig{
 		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 11},
 	}

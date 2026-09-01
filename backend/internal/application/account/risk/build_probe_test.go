@@ -140,6 +140,45 @@ func TestBuildNativeVerdictCacheReuse(t *testing.T) {
 	}
 }
 
+// 管理端 check-now 走 AttributeNowWithTrigger(manual)。Build 原生探针
+// 不得把操作员点击记成请求路径 degrade（UI 会当成降智归因）。
+func TestAttributeNowWithTriggerRecordsManualOnBuildProbe(t *testing.T) {
+	accounts := newFakeAccounts()
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	prober := &fakeBuildProber{result: BuildProbeResult{Verdict: BuildProbeClean, Details: "thinking_ok", CheckedAt: time.Now().UTC()}}
+	service := New(baseBuildTestConfig(), accounts, store, &fakeChecker{}, nil)
+	service.SetBuildProber(prober)
+
+	service.AttributeNowWithTrigger(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, accountdomain.RiskTriggerManual)
+
+	stored, err := store.GetRiskVerdict(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Trigger != accountdomain.RiskTriggerManual {
+		t.Fatalf("trigger = %q, want manual", stored.Trigger)
+	}
+}
+
+// 请求路径 OnDegraded 仍记 degrade，与 check-now 的 manual 分叉。
+func TestBuildNativeProbeRecordsDegradeTrigger(t *testing.T) {
+	accounts := newFakeAccounts()
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	prober := &fakeBuildProber{result: BuildProbeResult{Verdict: BuildProbeClean, CheckedAt: time.Now().UTC()}}
+	service := New(baseBuildTestConfig(), accounts, store, &fakeChecker{}, nil)
+	service.SetBuildProber(prober)
+
+	service.attribute(context.Background(), accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild}, 0)
+
+	stored, err := store.GetRiskVerdict(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Trigger != accountdomain.RiskTriggerDegrade {
+		t.Fatalf("trigger = %q, want degrade", stored.Trigger)
+	}
+}
+
 // SSO 探针的 clean 缓存不得短路 Build 原生探测(方法归属隔离),反之亦然。
 func TestBuildNativeRejectsForeignMethodClean(t *testing.T) {
 	accounts := newFakeAccounts()

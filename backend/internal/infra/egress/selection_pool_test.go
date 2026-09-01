@@ -45,6 +45,12 @@ func TestSelectionPoolRequiresRotation(t *testing.T) {
 			if selection.Pool != tc.wantPool {
 				t.Fatalf("Pool = %v, want %v (rotating semantics: ProxyPool && RotationEnabled)", selection.Pool, tc.wantPool)
 			}
+			if lease.freshTunnel != tc.wantPool {
+				t.Fatalf("freshTunnel = %v, want %v (same rotating predicate as Selection.Pool)", lease.freshTunnel, tc.wantPool)
+			}
+			if lease.proxyPool != tc.wantPool {
+				t.Fatalf("proxyPool = %v, want %v (connection retry only on rotating exits)", lease.proxyPool, tc.wantPool)
+			}
 		})
 	}
 }

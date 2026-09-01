@@ -89,20 +89,36 @@ func (s riskRelationalStore) GetRiskVerdict(ctx context.Context, accountID uint6
 		}
 		return risk.StoredVerdict{}, err
 	}
-	return risk.StoredVerdict{
-		Verdict: verdict.Verdict, BotFlagDtl: verdict.BotFlagDtl,
-		HTTPStatus: verdict.HTTPStatus, Error: verdict.Error,
-		Source: verdict.Source, CheckedAt: verdict.CheckedAt, OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
-	}, nil
+	return storedVerdictFromRow(verdict), nil
 }
 
 func (s riskRelationalStore) SaveRiskVerdict(ctx context.Context, accountID uint64, verdict risk.StoredVerdict) error {
-	return s.Repo.SaveRiskVerdict(ctx, relational.AccountRiskVerdict{
+	return s.Repo.SaveRiskVerdict(ctx, relationalFromStoredVerdict(accountID, verdict))
+}
+
+// storedVerdictFromRow / relationalFromStoredVerdict are the only mapping
+// between the persistence row and the risk-service verdict. DeniedStreak
+// must travel both ways: dropping it on save made confirmation=2 a no-op
+// (every reload saw streak 0, nextDeniedStreak stayed at 1, identities
+// never reached the flag threshold).
+func storedVerdictFromRow(verdict relational.AccountRiskVerdict) risk.StoredVerdict {
+	return risk.StoredVerdict{
+		Verdict: verdict.Verdict, BotFlagDtl: verdict.BotFlagDtl,
+		HTTPStatus: verdict.HTTPStatus, Error: verdict.Error,
+		Source: verdict.Source, CheckedAt: verdict.CheckedAt,
+		OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
+		DeniedStreak: verdict.DeniedStreak,
+	}
+}
+
+func relationalFromStoredVerdict(accountID uint64, verdict risk.StoredVerdict) relational.AccountRiskVerdict {
+	return relational.AccountRiskVerdict{
 		AccountID: accountID, Verdict: verdict.Verdict,
 		BotFlagDtl: verdict.BotFlagDtl, HTTPStatus: verdict.HTTPStatus,
 		Error: verdict.Error, Source: verdict.Source, CheckedAt: verdict.CheckedAt,
 		OriginAccountID: verdict.OriginAccountID, Trigger: verdict.Trigger,
-	})
+		DeniedStreak: verdict.DeniedStreak,
+	}
 }
 
 func (s riskRelationalStore) DeleteRiskVerdict(ctx context.Context, accountID uint64) error {

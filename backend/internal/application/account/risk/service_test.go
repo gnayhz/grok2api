@@ -267,6 +267,23 @@ func TestAttributionDeniedFlagsDegradedChannelOnly(t *testing.T) {
 	}
 }
 
+// 管理端 check-now 对已关联 SSO 的账号必须记 manual，不得与巡检 patrol
+// 或请求路径 degrade 串味。
+func TestAttributeNowWithTriggerRecordsManualOnLinkedWeb(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	cfg := baseTestConfig()
+	cfg.OnDenied = "flag"
+	service := New(cfg, accounts, store, &fakeChecker{result: cleanResult()}, nil)
+
+	service.AttributeNowWithTrigger(context.Background(), accountdomain.Credential{ID: 90, Provider: accountdomain.ProviderWeb}, accountdomain.RiskTriggerManual)
+
+	if store.verdicts[90].Trigger != accountdomain.RiskTriggerManual {
+		t.Fatalf("trigger = %q, want manual", store.verdicts[90].Trigger)
+	}
+}
+
 // TestPatrolTickAppliesConsequences：巡检发现的 clean→denied 迁移必须立即
 // 落地为账号动作，而不是只写 verdict 表等下一次请求路径扣留。SSO 巡检
 // denied 连坐同一身份组的 Web/Build/Console。

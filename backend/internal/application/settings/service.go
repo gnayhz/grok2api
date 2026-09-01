@@ -594,13 +594,16 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 	base.Accounts.ExcludeBuildBotFlaggedFromScheduling = value.Accounts.ExcludeBuildBotFlaggedFromScheduling
 	// RequestRetry/EgressRotation/AccountRisk:指针节,nil(旧载荷/未保存过)沿用文件基线。
 	if value.RequestRetry != nil {
+		// guardedModels 是 yaml 级白名单，不在管理端 DTO。整节赋值不得用
+		// 缺省/空切片/陈旧持久化名单覆盖文件基线（空=全部介入）。
+		fileGuarded := append([]string(nil), base.RequestRetry.GuardedModels...)
 		base.RequestRetry = config.RequestRetryConfig{
 			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: config.Duration(value.RequestRetry.AccountCooldown),
 			SameAccountRetry: value.RequestRetry.SameAccountRetry,
 			EvidenceTimeout:  config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
 			IdleAccountCooldown: config.Duration(value.RequestRetry.IdleAccountCooldown),
-			GuardedModels:       value.RequestRetry.GuardedModels,
+			GuardedModels:       fileGuarded,
 		}
 	}
 	if value.AccountRisk != nil {
@@ -714,7 +717,7 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			EvidenceTimeout:     value.RequestRetry.EvidenceTimeout.Value(),
 			CreatedTimeout:      value.RequestRetry.CreatedTimeout.Value(),
 			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown.Value(),
-			GuardedModels:       value.RequestRetry.GuardedModels,
+			// guardedModels 是 yaml 级；apply 忽略 overlay，不回写以免陈旧名单进库。
 		},
 		AccountRisk: &settingsdomain.AccountRiskConfig{
 			Enabled:             value.AccountRisk.RSCCheck.Enabled,

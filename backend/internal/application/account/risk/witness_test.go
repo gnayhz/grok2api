@@ -96,3 +96,28 @@ func TestWitnessRateLimited(t *testing.T) {
 		t.Fatalf("calls after second = %d, want 3 (rate-limited: only the real check)", got)
 	}
 }
+
+// 超过活力窗口的旧 clean 不得当见证人：那是安静期留下的路径证明，
+// 不能为当前出口背书。
+func TestStaleCleanIsNotWitness(t *testing.T) {
+	accounts := newFakeAccounts()
+	accounts.token[90] = "sso-token"
+	accounts.token[95] = "witness-sso"
+	store := &fakeStore{verdicts: map[uint64]StoredVerdict{}}
+	checker := &countingChecker{results: []CheckResult{
+		{Verdict: VerdictError, Source: "sso_probe", Suppressed: true, Error: "denied suppressed"},
+	}}
+	service := New(baseTestConfig(), accounts, store, checker, nil)
+	service.UpdateChecker(checker, "sso_probe")
+	stale := time.Now().UTC().Add(-witnessMaxAge - time.Minute)
+	if err := store.SaveRiskVerdict(context.Background(), 95, StoredVerdict{Verdict: VerdictClean, Source: "sso_probe", CheckedAt: stale}); err != nil {
+		t.Fatal(err)
+	}
+	verdict := service.checkNow(context.Background(), 90, 90, "")
+	if verdict.Verdict != VerdictError {
+		t.Fatalf("verdict = %s, want error (stale clean must not witness)", verdict.Verdict)
+	}
+	if got := checker.calls.Load(); got != 1 {
+		t.Fatalf("checker calls = %d, want 1 (no witness probe)", got)
+	}
+}

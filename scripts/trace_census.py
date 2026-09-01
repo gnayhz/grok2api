@@ -11,6 +11,7 @@ def classify(p):
 		return "P0-empty (no event at all)"
 	t0 = None; ts = None; last = None
 	has_sum = False; has_text = False; enc = False; done = False; fn = False
+	first_item = ""
 	for line in raw.split(chr(10)):
 		if line.startswith("#ts "):
 			ts = int(line[4:])
@@ -22,6 +23,8 @@ def classify(p):
 		except Exception: continue
 		typ = obj.get("type", "?")
 		item = obj.get("item") or {}
+		if not first_item and item.get("type"):
+			first_item = str(item.get("type"))
 		if typ.endswith("reasoning_summary_text.delta") and obj.get("delta"): has_sum = True
 		if typ == "response.output_text.delta" and obj.get("delta"): has_text = True
 		if item.get("type") == "function_call": fn = True
@@ -30,8 +33,9 @@ def classify(p):
 	dur = (last - t0) if last is not None else 0
 	if has_sum and done: return "clean (summary deltas + completed)"
 	if has_sum and not done: return "aborted-after-deltas (guard/upstream cut)"
-	if enc and not has_sum and not has_text: return "degraded D-a/D-b (cipher, zero deltas)"
-	if has_text and not has_sum and not enc: return "outrun-or-plain (text without thinking)"
+	if enc and not has_sum: return "degraded D-a/D-b (cipher, zero thinking; tee may still show text)"
+	if has_text and not has_sum and first_item == "reasoning": return "degraded D-a/D-b (reasoning item, no summary)"
+	if has_text and not has_sum: return "outrun (message-first, no thinking)"
 	if fn and not has_sum: return "tool-only (function call, no thinking visible)"
 	if done and not has_sum and not has_text: return "empty-terminal (completed, nothing)"
 	return "other (dur=%dms)" % dur

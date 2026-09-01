@@ -100,10 +100,13 @@ func TestIsPoolModeNode(t *testing.T) {
 		want     bool
 	}{
 		{"neither", Node{}, "http://plain.example:8080", false},
-		{"flag only", Node{ProxyPool: true}, "http://plain.example:8080", true},
+		{"flag only", Node{ProxyPool: true}, "http://plain.example:8080", false},
+		{"flag+rotation", Node{ProxyPool: true, RotationEnabled: true}, "http://plain.example:8080", true},
+		{"rotation only", Node{RotationEnabled: true}, "http://plain.example:8080", false},
 		{"template only", Node{}, "http://gw.example:8080?user={account}", true},
-		{"both", Node{ProxyPool: true}, "http://gw.example:8080?user={account}", true},
-		{"no proxy url", Node{ProxyPool: true}, "", true},
+		{"both", Node{ProxyPool: true, RotationEnabled: true}, "http://gw.example:8080?user={account}", true},
+		{"flag without rotation no url", Node{ProxyPool: true}, "", false},
+		{"rotating no url", Node{ProxyPool: true, RotationEnabled: true}, "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

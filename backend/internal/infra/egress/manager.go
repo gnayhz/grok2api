@@ -1267,8 +1267,11 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 		return nil, false, err
 	}
 	sticky := domain.IsAccountTemplateProxy(proxyURL)
-	proxyPool := selected.ProxyPool || sticky
-	freshTunnel := selected.ProxyPool && !sticky
+	rotating := selected.ProxyPool && selected.RotationEnabled
+	// Connection-phase retries and fresh CONNECT are rotating-exit
+	// semantics. ProxyPool without RotationEnabled is a fixed IP.
+	proxyPool := rotating || sticky
+	freshTunnel := rotating && !sticky
 	if sticky {
 		accountKey := accountFromContext(ctx)
 		if accountKey == "" && strings.TrimSpace(affinity) != "" {
@@ -2728,18 +2731,18 @@ func (m *Manager) stickyFlagMemoized(nodeID uint64, ciphertext string) bool {
 
 // isProxyPoolNode 委托 domain 的唯一判定(Node.IsPoolModeNode 的解密版)。
 func (m *Manager) isProxyPoolNode(value domain.Node) bool {
-	return value.ProxyPool || m.isStickyProxyNode(value)
+	return (value.ProxyPool && value.RotationEnabled) || m.isStickyProxyNode(value)
 }
 
 // isProxyPoolNodeDirect 是持 nodeMu 时的版本(见 stickyFlagDirect)。
 func (m *Manager) isProxyPoolNodeDirect(value domain.Node) bool {
-	return value.ProxyPool || m.stickyFlagDirect(value)
+	return (value.ProxyPool && value.RotationEnabled) || m.stickyFlagDirect(value)
 }
 
 // snapshotProxyPoolFlag 是 isProxyPoolNode 的热路径版本:先查快照里预算
 // 好的判定表,未命中(单节点查询路径,不在快照内)才回退到解密。
 func (m *Manager) snapshotProxyPoolFlag(value domain.Node) bool {
-	if value.ProxyPool {
+	if value.ProxyPool && value.RotationEnabled {
 		return true
 	}
 	// 单次加锁依次查快照判定表与记忆表:池路由路径每个成员都会走到这里,

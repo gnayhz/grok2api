@@ -39,26 +39,40 @@ var _ Probe = (*SSOProbeChecker)(nil)
 // rolling quota. Event-driven attribution, the singleflight merge, and the
 // admission cap keep that volume bounded.
 const (
-	probeDefaultModel   = "fast" // browser short model name; pairs with the inlined response.create send style
-	probeDefaultPrompt  = "OK"
+	probeDefaultModel = "fast" // browser short model name; pairs with the inlined response.create send style
+	// probeDefaultPrompt 必须能逼出思考：此前单字 OK 在巡检上大量打出
+	// answer_without_thinking（短答 Sure/OK、零思考头），提示词形态被当成
+	// 账号级风控。与质量守卫金丝雀同一句，避免把「短答」读成「无思考」。
+	probeDefaultPrompt  = "What is 1+1? Think step by step and reply 2."
 	probeUserAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 	probeMaxFrameBytes  = 16 << 20
 	probeAnswerSnippets = 60 // runes of answer text kept in BotFlagDetails
 )
 
-// Channel-vocabulary circuit breaker. "Answer text with no thinking" is only
-// proof of risk while the thinking channel names are still what we think they
-// are: if xai renames CHANNEL_ASSISTANT_NOTETAKER_HEADER but keeps
-// CHANNEL_ASSISTANT_RESPONSE, every healthy account would read as denied and
-// the whole pool would be flagged rsc_denied (a permanent, operator-cleared
-// flag). Rule: a denied verdict is only trusted while the recent probe window
-// has seen at least one clean (thinking observed proves the channel names are
-// alive); otherwise it degrades to error (retried later, never flagged). A
-// genuinely degraded cohort simply flags a bit later, once any healthy
-// identity elsewhere in the pool is probed clean.
+// Channel-vocabulary / probe-path circuit breaker. "Answer text with no
+// thinking" is only proof of account risk while (1) the thinking channel
+// names are still what we think they are and (2) the current probe path is
+// still capable of delivering thinking. A renamed NOTETAKER header, or a
+// dirty probe IP, produces the same all-denied storm; either one would
+// flag the whole pool rsc_denied (a permanent, operator-cleared flag).
+// Rule: a denied verdict is only trusted while the *fresh* probe window
+// has seen at least one clean (thinking observed proves the channels and
+// the current exit are alive); otherwise it degrades to error (retried
+// later, never flagged). Stale cleans must not vouch for the current
+// path: a thinking_ok from an earlier clean-IP period would otherwise
+// let a later dirty-IP storm convict the pool as account-level risk.
+// A genuinely degraded cohort simply flags a bit later, once any healthy
+// identity elsewhere in the pool is probed clean on this path.
+//
+// MinDenials is 1: "answer without thinking" is indistinguishable from a
+// dirty probe IP or a non-reasoning Web model skipping thought, so the
+// first denied without a fresh clean is already untrusted. The previous
+// threshold of several denials still wrote risky verdicts into the pool
+// and let the next patrol confirm them.
 const (
-	probeVitalityWindow     = 32 // last N clean/denied classifications considered
-	probeVitalityMinDenials = 8  // >= this many denials with zero cleans trips the breaker
+	probeVitalityWindow     = 32               // last N fresh clean/denied classifications considered
+	probeVitalityMinDenials = 1                // any denied without a fresh clean is untrusted
+	probeVitalityFresh      = 15 * time.Minute // cleans older than this do not witness the current path
 )
 
 // Channel names observed on the mgw response.chunk stream.
@@ -106,7 +120,7 @@ type SSOProbeChecker struct {
 	Timeout time.Duration
 	// Model is the browser short model name (default "fast").
 	Model string
-	// Prompt is the probe message body (default "OK").
+	// Prompt is the probe message body (default probeDefaultPrompt).
 	Prompt string
 	// ProxyURL routes both the session fetch and the mgw WebSocket through
 	// the given proxy (socks5/http(s); empty = direct). Socks-family schemes
@@ -118,41 +132,82 @@ type SSOProbeChecker struct {
 	vitality probeVitality
 }
 
+// probeSample is one decidable clean/denied classification with the time it
+// was observed. Freshness is evaluated at read/record time so a clean from
+// an earlier probe-path epoch cannot witness a later dirty-IP storm.
+type probeSample struct {
+	clean bool
+	at    time.Time
+}
+
 // probeVitality is a small sliding window over clean (true) / denied (false)
 // probe verdicts. Errors do not enter the window: an unreachable upstream
-// must neither trip nor heal the breaker.
+// must neither trip nor heal the breaker. Samples older than
+// probeVitalityFresh are dropped before the suspect check.
 type probeVitality struct {
 	mu      sync.Mutex
-	recent  []bool
+	recent  []probeSample
 	cleans  int
 	denials int
 }
 
-// record stores one clean/denied classification, evicting beyond the window.
+// record stores one clean/denied classification at now, evicting stale and
+// overflow samples.
 func (v *probeVitality) record(clean bool) {
+	v.recordAt(clean, time.Now())
+}
+
+// recordAt is the testable core of record.
+func (v *probeVitality) recordAt(clean bool, at time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if len(v.recent) >= probeVitalityWindow {
-		if v.recent[0] {
-			v.cleans--
-		} else {
-			v.denials--
-		}
-		v.recent = v.recent[1:]
+	v.evictLocked(at)
+	v.recent = append(v.recent, probeSample{clean: clean, at: at})
+	if len(v.recent) > probeVitalityWindow {
+		v.recent = v.recent[len(v.recent)-probeVitalityWindow:]
 	}
-	v.recent = append(v.recent, clean)
-	if clean {
-		v.cleans++
-	} else {
-		v.denials++
+	v.recountLocked()
+}
+
+func (v *probeVitality) evictLocked(now time.Time) {
+	cutoff := now.Add(-probeVitalityFresh)
+	kept := make([]probeSample, 0, len(v.recent))
+	for _, sample := range v.recent {
+		if !sample.at.Before(cutoff) {
+			kept = append(kept, sample)
+		}
+	}
+	v.recent = kept
+}
+
+func (v *probeVitality) snapshot() (cleans, denials int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.cleans, v.denials
+}
+
+func (v *probeVitality) recountLocked() {
+	v.cleans, v.denials = 0, 0
+	for _, sample := range v.recent {
+		if sample.clean {
+			v.cleans++
+		} else {
+			v.denials++
+		}
 	}
 }
 
-// suspect reports whether the channel vocabulary looks broken: enough
-// denials accumulated without a single clean witness.
+// suspect reports whether the current probe path looks broken: enough
+// fresh denials accumulated without a single fresh clean witness.
 func (v *probeVitality) suspect() bool {
+	return v.suspectAt(time.Now())
+}
+
+func (v *probeVitality) suspectAt(now time.Time) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.evictLocked(now)
+	v.recountLocked()
 	return v.cleans == 0 && v.denials >= probeVitalityMinDenials
 }
 
@@ -192,15 +247,20 @@ func (p *SSOProbeChecker) Check(ctx context.Context, ssoToken string) Result {
 }
 
 // vitalityGate records every decidable clean/denied verdict and downgrades
-// denied to error while the thinking-channel vocabulary looks broken. Clean
-// is always trusted (a thinking chunk is direct evidence the channels are
-// alive) and heals the breaker.
+// denied to error while the thinking-channel vocabulary or the current
+// probe path looks broken. Clean is always trusted (a thinking chunk is
+// direct evidence the channels and this exit are alive) and heals the
+// breaker; only a *fresh* clean counts as a witness.
 func (p *SSOProbeChecker) vitalityGate(result Result) Result {
 	switch result.Verdict {
 	case VerdictClean:
 		p.vitality.record(true)
 	case VerdictDenied:
 		p.vitality.record(false)
+		cleans, denials := p.vitality.snapshot()
+		if result.BotFlagDetails != "" {
+			result.BotFlagDetails = fmt.Sprintf("%s vitality=%d/%d", result.BotFlagDetails, denials, cleans)
+		}
 		if p.vitality.suspect() {
 			downgraded := Result{
 				Verdict:        VerdictError,
@@ -212,7 +272,7 @@ func (p *SSOProbeChecker) vitalityGate(result Result) Result {
 				// service) instead of retrying blindly.
 				Suppressed: true,
 			}
-			downgraded.Error = fmt.Sprintf("denied suppressed: no thinking channel observed in the last %d probes (channel vocabulary suspect)", probeVitalityMinDenials)
+			downgraded.Error = "denied suppressed: no fresh clean witness on this probe path (channel vocabulary or exit suspect)"
 			return downgraded
 		}
 	}

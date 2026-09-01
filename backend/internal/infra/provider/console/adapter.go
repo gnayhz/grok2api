@@ -207,7 +207,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		cancel()
 	}
 	if traceDir, ok := upstreamtrace.Enabled(); ok {
-		upstreamtrace.DumpRequest(traceDir, request.Operation, request.Model, request.Streaming, request.Body)
+		upstreamtrace.DumpRequest(traceDir, request.Operation, request.Model, request.Streaming, body)
 		if request.Streaming && response.StatusCode >= 200 && response.StatusCode < 300 {
 			response.Body = upstreamtrace.TeeStream(traceDir, request.Operation, request.Model, response.Body)
 		}
@@ -252,14 +252,15 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			result.RateLimit = rateLimit
 			return result, nil
 		}
-		converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
-		if convertErr != nil {
-			return nil, convertErr
-		}
-		response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+		convertOp := request.Operation
+		convertOpts := conversationOptions
+		response.Header.Del("Content-Length")
 		response.Header.Set("Content-Type", "application/json")
-		result := responseResult(response, io.NopCloser(bytes.NewReader(converted)))
+		result := responseResult(response, io.NopCloser(bytes.NewReader(data)))
 		result.RateLimit = rateLimit
+		result.ConvertJSON = func(raw []byte) ([]byte, error) {
+			return conversation.ConvertResponseJSONWithOptions(raw, convertOp, convertOpts)
+		}
 		return result, nil
 	}
 	result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})

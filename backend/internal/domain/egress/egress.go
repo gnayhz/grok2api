@@ -60,11 +60,9 @@ type Node struct {
 	ID      uint64
 	Name    string
 	Enabled bool
-	// ProxyPool 是节点级"代理池模式"(旋转/共享端点):该节点代表一个自带
-	// 轮换的共享传输,豁免硬/软冷却与健康惩罚,仅保留请求内排除(L1)。
-	// 它与 Pool 资源(PoolIDs,纯分组调度)是两个正交概念:入池的普通节点
-	// 不豁免冷却,代理池模式节点不因入池改变语义。"是否代理池模式节点"
-	// 的唯一判定见 IsPoolModeNode,不得在别处复制该规则。
+	// ProxyPool 是节点级"代理池模式"标志。真正的旋转出口还要
+	// RotationEnabled：只亮标志的固定 IP 不得当池（冷却豁免、同号重试）。
+	// 与 Pool 资源(PoolIDs)正交。唯一判定见 IsPoolModeNode。
 	ProxyPool bool
 	SourceID  uint64
 	// SourceName 是产生该节点的订阅名；空表示手动创建。
@@ -574,9 +572,10 @@ func IsAccountTemplateProxy(proxyURL string) bool {
 	return strings.Contains(proxyURL, ProxyAccountPlaceholder)
 }
 
-// IsPoolModeNode 是"代理池模式节点"的唯一判定:显式开启节点级代理池
-// 模式,或代理 URL 是账号模板(粘性出口必然每请求独立,共享健康惩罚
-// 无意义,与代理池模式同等对待)。
+// IsPoolModeNode 是"代理池模式节点"的唯一判定:节点级代理池标志且已开
+// 轮换（同节点连续请求出口 IP 不同），或代理 URL 是账号模板（粘性出口
+// 每请求独立，共享健康惩罚无意义）。只亮 ProxyPool、未开轮换的固定 IP
+// 不是池。
 func (value Node) IsPoolModeNode(decryptedProxyURL string) bool {
-	return value.ProxyPool || IsAccountTemplateProxy(decryptedProxyURL)
+	return (value.ProxyPool && value.RotationEnabled) || IsAccountTemplateProxy(decryptedProxyURL)
 }

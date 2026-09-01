@@ -2,9 +2,11 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/application/account/risk"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 )
 
 // 契约:网关 Build 探针的每一个导出 outcome 都必须映射到风险侧四个合法
@@ -30,6 +32,28 @@ func TestBuildProbeOutcomeVerdictContract(t *testing.T) {
 	// degraded→denied 是本契约的核心:定罪路径必须可达。
 	if got := buildProbeOutcomeVerdict(gateway.BuildProbeOutcomeDegraded); got != risk.BuildProbeDenied {
 		t.Fatalf("double-degraded must map to denied (conviction), got %q", got)
+	}
+}
+
+func TestRiskStoreMapsDeniedStreak(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	in := risk.StoredVerdict{
+		Verdict: risk.VerdictDenied, BotFlagDtl: "dtl", HTTPStatus: 200,
+		Error: "", Source: "sso_probe", CheckedAt: now,
+		OriginAccountID: 90, Trigger: "patrol", DeniedStreak: 2,
+	}
+	row := relationalFromStoredVerdict(90, in)
+	if row.AccountID != 90 || row.DeniedStreak != 2 || row.Verdict != risk.VerdictDenied || row.Trigger != "patrol" {
+		t.Fatalf("row = %+v", row)
+	}
+	out := storedVerdictFromRow(row)
+	if out.DeniedStreak != 2 || out.OriginAccountID != 90 || out.Trigger != "patrol" || out.Source != "sso_probe" {
+		t.Fatalf("roundtrip dropped fields: %+v", out)
+	}
+	zero := storedVerdictFromRow(relational.AccountRiskVerdict{Verdict: "denied"})
+	if zero.DeniedStreak != 0 {
+		t.Fatalf("legacy row streak = %d, want 0", zero.DeniedStreak)
 	}
 }
 

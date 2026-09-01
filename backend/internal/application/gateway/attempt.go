@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -270,15 +271,49 @@ type replayReadCloser struct {
 func (r *replayReadCloser) Close() error { return r.source.Close() }
 
 // applyDeferredStreamConversion runs the provider's client-protocol converter
-// after quality peek has already classified the raw upstream SSE.
+// after quality peek has already classified the raw upstream body.
+func qualityPeekProtocol(operation audit.Operation, response *provider.Response) string {
+	if response != nil && (response.ConvertStream != nil || response.ConvertJSON != nil) {
+		return qualityProtocolResponses
+	}
+	return qualityProtocolForOperation(operation)
+}
+
 func applyDeferredStreamConversion(response *provider.Response) {
-	if response == nil || response.ConvertStream == nil {
+	if response == nil {
 		return
 	}
-	if response.Body != nil {
-		response.Body = response.ConvertStream(response.Body)
+	if response.ConvertStream != nil {
+		if response.Body != nil {
+			response.Body = response.ConvertStream(response.Body)
+		}
+		response.ConvertStream = nil
 	}
-	response.ConvertStream = nil
+	if response.ConvertJSON == nil {
+		return
+	}
+	convert := response.ConvertJSON
+	response.ConvertJSON = nil
+	if response.Body == nil {
+		return
+	}
+	data, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		response.Body = io.NopCloser(bytes.NewReader(nil))
+		return
+	}
+	converted, convErr := convert(data)
+	if convErr != nil || converted == nil {
+		response.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	response.Body = io.NopCloser(bytes.NewReader(converted))
+	if response.Header == nil {
+		response.Header = http.Header{}
+	}
+	response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+	response.Header.Set("Content-Type", "application/json")
 }
 
 // readResponseBody 只读取诊断上限，同时把已读取前缀接回原始响应供后续错误处理。

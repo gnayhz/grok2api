@@ -438,10 +438,10 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			resp.Header.Set("Content-Type", "application/json")
 		}
 	}
-	if traceDir, ok := upstreamTraceEnabled(); ok {
-		traceUpstreamRequest(traceDir, request.Operation, request.Model, request.Streaming, body)
+	if traceDir, ok := upstreamtrace.Enabled(); ok {
+		upstreamtrace.DumpRequest(traceDir, request.Operation, request.Model, request.Streaming, body)
 		if request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			resp.Body = teeUpstreamStream(traceDir, request.Operation, request.Model, resp.Body)
+			resp.Body = upstreamtrace.TeeStream(traceDir, request.Operation, request.Model, resp.Body)
 		} else if !request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 && request.Operation == conversation.OperationResponses {
 			// native responses 非流式：body 直通下游读取，用读取镜像包装捕获。
 			resp.Body = upstreamtrace.TeeBody(traceDir, request.Operation, request.Model, resp.Body)
@@ -477,20 +477,27 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				diagnostic = &provider.DiagnosticResponse{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: data, BodyTruncated: diagnosticTruncated || rateLimitDiagnostic != nil}
 			}
-			if traceDir, ok := upstreamTraceEnabled(); ok {
-				traceUpstreamBody(traceDir, request.Operation, request.Model, data)
+			if traceDir, ok := upstreamtrace.Enabled(); ok {
+				upstreamtrace.DumpBody(traceDir, request.Operation, request.Model, data)
 			}
-			converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
-			if convertErr != nil {
-				if diagnostic == nil {
-					return nil, convertErr
+			if diagnostic != nil {
+				converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
+				if convertErr != nil {
+					return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: diagnostic.Header.Clone(), Body: io.NopCloser(bytes.NewReader(data)), UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
 				}
-				return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: diagnostic.Header.Clone(), Body: io.NopCloser(bytes.NewReader(data)), UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+				resp.Body = io.NopCloser(bytes.NewReader(converted))
+				resp.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+				resp.Header.Set("Content-Type", "application/json")
+				return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
 			}
-			resp.Body = io.NopCloser(bytes.NewReader(converted))
-			resp.Header.Set("Content-Length", strconv.Itoa(len(converted)))
+			convertOp := request.Operation
+			convertOpts := conversationOptions
+			resp.Body = io.NopCloser(bytes.NewReader(data))
+			resp.Header.Del("Content-Length")
 			resp.Header.Set("Content-Type", "application/json")
-			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged, ConvertJSON: func(raw []byte) ([]byte, error) {
+				return conversation.ConvertResponseJSONWithOptions(raw, convertOp, convertOpts)
+			}}, nil
 		}
 	}
 	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged, ConvertStream: convertStream}, nil

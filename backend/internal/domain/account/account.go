@@ -139,6 +139,7 @@ const (
 	RiskTriggerDegrade = "degrade"
 	RiskTriggerPatrol  = "patrol"
 	RiskTriggerManual  = "manual"
+	RiskTriggerWitness = "witness"
 )
 
 // EgressAssignmentMode 表示账号出口节点的维护方式。手工绑定绝不会被
@@ -195,7 +196,7 @@ type Credential struct {
 	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态），直到人工
 	// 清空或 DeniedTTL 后巡检复测 clean。
 	RiskStatus string
-	// RiskTrigger 记录打标来源：degrade（请求降智）/ patrol（主动巡检）/ manual。
+	// RiskTrigger 记录打标来源：degrade / patrol / manual / witness。
 	RiskTrigger string
 	// RiskOriginAccountID 触发判定的账号（SSO 巡检时为 Web 身份，Build 降智时为该 Build）。
 	RiskOriginAccountID uint64

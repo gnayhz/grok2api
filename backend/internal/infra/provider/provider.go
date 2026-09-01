@@ -393,6 +393,10 @@ type Response struct {
 	// first: converting before peek delays thinking evidence until item.done
 	// and inflates client TTFB to the full reasoning duration.
 	ConvertStream func(io.ReadCloser) io.ReadCloser
+	// ConvertJSON is the non-stream analog: peek the raw Responses JSON,
+	// then convert. Converting first drops thinking into optional chat
+	// fields and makes usage.reasoning_tokens look like a finished answer.
+	ConvertJSON func([]byte) ([]byte, error)
 }
 
 const (

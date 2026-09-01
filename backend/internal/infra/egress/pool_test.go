@@ -14,12 +14,9 @@ import (
 // poolStubRepo 覆盖池化选路所需的仓储面。
 type poolStubRepo struct {
 	egressRepositoryTestStub
-	mu     chanMutex
 	pool   map[uint64]domain.Pool
 	member map[uint64][]domain.Node
 }
-
-type chanMutex struct{ ch chan struct{} }
 
 func newPoolStubRepo() *poolStubRepo {
 	return &poolStubRepo{pool: map[uint64]domain.Pool{}, member: map[uint64][]domain.Node{}}
@@ -53,11 +50,6 @@ func newPoolTestManager(t *testing.T) (*Manager, *poolStubRepo) {
 	}
 	repo := newPoolStubRepo()
 	return NewManager(repo, cipher), repo
-}
-
-func newPoolStubRepoWithCipher(t *testing.T) (*Manager, *poolStubRepo) {
-	t.Helper()
-	return newPoolTestManager(t)
 }
 
 // affinity(默认,rendezvous):同账号稳定落同一节点;节点移除只扰动落在它上的账号。
@@ -190,7 +182,7 @@ func TestSoftCooldownLifecycle(t *testing.T) {
 	}
 	// 代理池模式成员豁免 L2 软冷却:旋转端点的单次降智不代表端点坏,
 	// 只靠请求内排除(L1)兜底——否则小规模 resin 池会被一次证据迅速耗尽。
-	rotating := domain.Node{ID: 7, Enabled: true, Health: 1, ProxyPool: true, EncryptedProxyURL: encryptedProxy(t, manager.cipher, "http://10.0.0.7:7")}
+	rotating := domain.Node{ID: 7, Enabled: true, Health: 1, ProxyPool: true, RotationEnabled: true, EncryptedProxyURL: encryptedProxy(t, manager.cipher, "http://10.0.0.7:7")}
 	manager.MarkDegradeEvidence(7)
 	if !manager.nodeSoftCooled(7, now) {
 		t.Fatalf("precondition: rotating member expected soft-cooled")

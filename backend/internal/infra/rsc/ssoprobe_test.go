@@ -93,8 +93,8 @@ func probeServer(t *testing.T, script *probeServerScript) *fhttptest.Server {
 			}
 			item := itemEvent["item"].(map[string]any)
 			chunks := item["x_grok"].(map[string]any)["input_chunks"].([]any)
-			if prompt, _ := chunks[0].(map[string]any)["text"].(map[string]any)["text"].(string); prompt != "OK" {
-				t.Errorf("probe prompt = %q, want OK", prompt)
+			if prompt, _ := chunks[0].(map[string]any)["text"].(map[string]any)["text"].(string); prompt != probeDefaultPrompt {
+				t.Errorf("probe prompt = %q, want %q", prompt, probeDefaultPrompt)
 			}
 			var respMsg map[string]any
 			if err := connection.ReadJSON(&respMsg); err != nil {
@@ -189,18 +189,28 @@ func TestSSOProbeNotetakerChannelIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// The risk-controlled account answers directly with no thinking: denied.
+// Bare answer with no thinking is the denied signature, but Check()
+// without a fresh clean witness must suppress it.
 func TestSSOProbeAnswerWithoutThinkingIsDenied(t *testing.T) {
 	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
 		chunkEvent(channelAssistantText, "OK."),
 	}})
 	defer server.Close()
-	result := probeChecker(server).Check(context.Background(), "token-1")
-	if result.Verdict != VerdictDenied {
-		t.Fatalf("bare answer = %#v, want denied", result)
+	checker := probeChecker(server)
+	result := checker.Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError || !result.Suppressed {
+		t.Fatalf("bare answer without witness = %#v, want suppressed error", result)
 	}
 	if !strings.Contains(result.BotFlagDetails, "answer_without_thinking") || !strings.Contains(result.BotFlagDetails, "answer=\"OK.\"") {
 		t.Fatalf("details = %q", result.BotFlagDetails)
+	}
+	if !strings.Contains(result.BotFlagDetails, "vitality=1/0") {
+		t.Fatalf("details should carry the fresh vitality window, got %q", result.BotFlagDetails)
+	}
+	checker.vitality.recordAt(true, time.Now())
+	trusted := checker.Check(context.Background(), "token-1")
+	if trusted.Verdict != VerdictDenied {
+		t.Fatalf("same answer after clean witness = %#v, want denied", trusted)
 	}
 }
 
@@ -290,32 +300,23 @@ func TestNewSSOProbeCheckerDefaults(t *testing.T) {
 	if checker.Timeout != 45*time.Second {
 		t.Fatalf("default timeout = %v, want 45s", checker.Timeout)
 	}
-	if checker.Model != "fast" || checker.Prompt != "OK" {
+	if checker.Model != "fast" || checker.Prompt != probeDefaultPrompt {
 		t.Fatalf("defaults model=%q prompt=%q", checker.Model, checker.Prompt)
 	}
 }
 
-// The channel-vocabulary breaker: consecutive denials with zero clean
-// witnesses must stop trusting "answer without thinking" — that pattern is
-// exactly what a renamed thinking channel would produce, and a false denied
-// permanently flags the degraded channel (request path) or the whole SSO
-// identity group (patrol).
+// The channel-vocabulary / probe-path breaker: a denied with zero fresh
+// clean witnesses is untrusted on the first sample.
 func TestSSOProbeBreakerSuppressesDeniedAfterAllDeniedWindow(t *testing.T) {
 	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
 		chunkEvent(channelAssistantText, "OK."),
 	}})
 	defer server.Close()
-	checker := probeChecker(server)
-	for i := 0; i < probeVitalityMinDenials-1; i++ {
-		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
-			t.Fatalf("denial %d = %#v, want denied (breaker not yet tripped)", i+1, result.Verdict)
-		}
+	result := probeChecker(server).Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError || !result.Suppressed {
+		t.Fatalf("first denial = %#v, want suppressed error", result)
 	}
-	result := checker.Check(context.Background(), "token-1")
-	if result.Verdict != VerdictError {
-		t.Fatalf("denial %d = %#v, want error (breaker must trip)", probeVitalityMinDenials, result.Verdict)
-	}
-	if !strings.Contains(result.Error, "vocabulary suspect") {
+	if !strings.Contains(result.Error, "suspect") {
 		t.Fatalf("error = %q", result.Error)
 	}
 }
@@ -326,15 +327,9 @@ func TestSSOProbeBreakerHealsOnCleanWitness(t *testing.T) {
 	server := probeServer(t, script)
 	defer server.Close()
 	checker := probeChecker(server)
-	for i := 0; i < probeVitalityMinDenials-1; i++ {
-		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
-			t.Fatalf("denial %d = %#v, want denied (breaker not yet tripped)", i+1, result.Verdict)
-		}
+	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictError || !result.Suppressed {
+		t.Fatalf("first denial = %#v, want suppressed error", result)
 	}
-	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictError {
-		t.Fatalf("denial %d = %#v, want suppressed error (breaker tripped)", probeVitalityMinDenials, result.Verdict)
-	}
-	// Switch the script to a healthy reply and probe once.
 	script.chunks = []map[string]any{chunkEvent(channelNotetakerHeader, "Thinking"), chunkEvent(channelAssistantText, "OK.")}
 	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictClean {
 		t.Fatalf("healthy probe after breaker = %#v, want clean", result.Verdict)
@@ -342,6 +337,37 @@ func TestSSOProbeBreakerHealsOnCleanWitness(t *testing.T) {
 	script.chunks = []map[string]any{chunkEvent(channelAssistantText, "OK.")}
 	if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
 		t.Fatalf("denied after clean witness = %#v, want denied", result.Verdict)
+	}
+}
+
+// A clean older than probeVitalityFresh must not keep the breaker off:
+// that is the dirty-IP storm after an earlier clean-IP period.
+func TestSSOProbeBreakerIgnoresStaleCleanWitness(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelAssistantText, "OK."),
+	}})
+	defer server.Close()
+	checker := probeChecker(server)
+	checker.vitality.recordAt(true, time.Now().Add(-probeVitalityFresh-time.Minute))
+	result := checker.Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError || !result.Suppressed {
+		t.Fatalf("stale clean must not witness: %#v suppressed=%v", result.Verdict, result.Suppressed)
+	}
+}
+
+// A still-fresh clean continues to witness the current path, so denials
+// stay account-level (the mixed-pool case).
+func TestSSOProbeBreakerFreshCleanStillWitnesses(t *testing.T) {
+	server := probeServer(t, &probeServerScript{chunks: []map[string]any{
+		chunkEvent(channelAssistantText, "OK."),
+	}})
+	defer server.Close()
+	checker := probeChecker(server)
+	checker.vitality.recordAt(true, time.Now().Add(-probeVitalityFresh/2))
+	for i := 0; i < 3; i++ {
+		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
+			t.Fatalf("denial %d = %#v, want denied (fresh clean must witness)", i+1, result.Verdict)
+		}
 	}
 }
 
@@ -359,10 +385,9 @@ func TestSSOProbeBreakerIgnoresErrorVerdicts(t *testing.T) {
 	server2 := probeServer(t, &probeServerScript{chunks: []map[string]any{chunkEvent(channelAssistantText, "OK.")}})
 	defer server2.Close()
 	checker.baseURL = server2.URL
-	for i := 0; i < probeVitalityMinDenials-1; i++ {
-		if result := checker.Check(context.Background(), "token-1"); result.Verdict != VerdictDenied {
-			t.Fatalf("denial %d = %#v, want denied (errors must not have tripped the breaker)", i+1, result.Verdict)
-		}
+	result := checker.Check(context.Background(), "token-1")
+	if result.Verdict != VerdictError || !result.Suppressed {
+		t.Fatalf("denial after errors = %#v, want suppressed (errors are not a clean witness)", result)
 	}
 }
 
@@ -373,7 +398,9 @@ func TestSSOProbeVerdictJSONRoundTrip(t *testing.T) {
 		chunkEvent(channelAssistantText, "hi"),
 	}})
 	defer server.Close()
-	result := probeChecker(server).Check(context.Background(), "token-1")
+	checker := probeChecker(server)
+	checker.vitality.recordAt(true, time.Now())
+	result := checker.Check(context.Background(), "token-1")
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)

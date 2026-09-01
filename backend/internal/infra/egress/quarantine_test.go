@@ -66,7 +66,7 @@ func TestQuarantineNodeForQualityCoolsFixedNode(t *testing.T) {
 }
 
 func TestQuarantineNodeForQualitySkipsPoolNodes(t *testing.T) {
-	repo := &fakeQualityRepo{node: domain.Node{ID: 9, ProxyPool: true, EncryptedProxyURL: "enc"}}
+	repo := &fakeQualityRepo{node: domain.Node{ID: 9, ProxyPool: true, RotationEnabled: true, EncryptedProxyURL: "enc"}}
 	manager := NewManager(repo, nil)
 	if _, err := manager.QuarantineNodeForQuality(context.Background(), 9, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)

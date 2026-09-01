@@ -597,7 +597,7 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 
 func (s *Service) publicNode(value domain.Node, poolNames map[uint64]string) domain.PublicNode {
 	proxyDisplay, proxyFingerprint, accountTemplate := s.proxyMetadata(value.EncryptedProxyURL)
-	proxyPool := value.ProxyPool || accountTemplate
+	proxyPool := (value.ProxyPool && value.RotationEnabled) || accountTemplate
 	health, failureCount, cooldownUntil, lastError := value.Health, value.FailureCount, value.CooldownUntil, value.LastError
 	if proxyPool {
 		health, failureCount, cooldownUntil, lastError = 1, 0, nil, ""

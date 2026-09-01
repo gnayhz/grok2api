@@ -43,7 +43,7 @@ type StoredVerdict struct {
 	// 该账号(通道隔离),不连坐 verdict 键所在的 Web 身份。0=旧数据,重放
 	// 退回 webID 语义。
 	OriginAccountID uint64
-	// Trigger 判定入口：degrade（请求降智）/ patrol（主动巡检）/ manual。
+	// Trigger 判定入口：degrade / patrol / manual / witness。
 	Trigger string
 	// DeniedStreak 记录连续 denied 次数（0=旧数据/单次）：达到
 	// DeniedConfirmations 才处置与连坐；clean/error 覆盖时自然归零。
@@ -171,10 +171,11 @@ type Service struct {
 // 一条消息额度，熔断持续触发时也至多每 10 分钟一次。
 const witnessRetryInterval = 10 * time.Minute
 
-// witnessMaxAge 限定 SSO 通道词汇见证人的最大结论年龄，与 Build 差分
-// 见证人(buildWitnessMaxAge)一致。巡检关闭时库里可能留着数月前的
-// clean：词汇可能早已改变，用它"治愈"熔断会把本轮真实 denied 放过去。
-const witnessMaxAge = 7 * 24 * time.Hour
+// witnessMaxAge 限定 SSO 见证人结论年龄，与探针活力窗口（15m）对齐。
+// 昨日的 thinking_ok 不能为当前出口背书：见证人会当场复探，但候选
+// 必须是这条路径上刚被证明还能思考的身份。更长窗口会把安静期留下
+// 的旧 clean 拉来治愈熔断，整池 denied 被当成账号级风控。
+const witnessMaxAge = 15 * time.Minute
 
 // revalidateChannelWitness answers a Suppressed verdict by re-probing the most
 // recently proven-clean identity: a thinking stream from the witness proves the
@@ -220,6 +221,13 @@ func (s *Service) revalidateChannelWitness(ctx context.Context, checker Checker)
 		return false
 	}
 	witness := checker.Check(ctx, token)
+	saved := storedFromCheck(witness)
+	saved.OriginAccountID = witnessID
+	saved.Trigger = accountdomain.RiskTriggerWitness
+	if saved.Verdict == VerdictDenied {
+		saved.DeniedStreak = s.nextDeniedStreak(ctx, witnessID)
+	}
+	s.saveVerdictGuarded(ctx, witnessID, saved)
 	if witness.Verdict == VerdictClean {
 		s.logger.Warn("account_rsc_witness_healed", "witness_account_id", witnessID)
 		return true
@@ -542,7 +550,7 @@ func (s *Service) attributeWithTrigger(ctx context.Context, credential accountdo
 	// 大账号池误判的主因（探针出口脏、fast 跳思考、Web≠Build 风控）。
 	// SSO 仍用于 Web/Console 降智与巡检（注册风控连坐）。
 	if credential.Provider == accountdomain.ProviderBuild && s.buildProber != nil && s.config().BuildProbeEnabled {
-		s.attributeBuildNative(ctx, credential, egressNodeID)
+		s.attributeBuildNative(ctx, credential, egressNodeID, trigger)
 		return
 	}
 	webID, linked, err := s.resolveWebIdentity(ctx, credential)
@@ -566,12 +574,12 @@ func (s *Service) attributeWithTrigger(ctx context.Context, credential accountdo
 // Build-channel degrade: cached verdict reuse first, then one same-account
 // two-path probe. The verdict is keyed by the Build account itself and
 // consequences stay channel-scoped to it.
-func (s *Service) attributeBuildNative(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64) {
+func (s *Service) attributeBuildNative(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64, trigger string) {
 	if verdict, fresh := s.freshVerdictFor(ctx, credential.ID, buildProbeSourceTag); fresh {
 		s.applyConsequences(ctx, credential.ID, credential.ID, verdict, egressNodeID)
 		return
 	}
-	verdict := s.checkNowBuild(ctx, credential, egressNodeID)
+	verdict := s.checkNowBuild(ctx, credential, egressNodeID, trigger)
 	s.applyConsequences(ctx, credential.ID, credential.ID, verdict, egressNodeID)
 }
 
@@ -585,10 +593,13 @@ const buildWitnessMaxAge = 7 * 24 * time.Hour
 // A denied verdict additionally requires a recent build-probe clean witness
 // (differential "both paths degraded" can still be all-dirty-IP); without
 // one it degrades to error and is retried on the next event.
-func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Credential, degradedNodeID uint64) StoredVerdict {
+func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Credential, degradedNodeID uint64, trigger string) StoredVerdict {
 	now := time.Now().UTC()
+	if trigger == "" {
+		trigger = accountdomain.RiskTriggerDegrade
+	}
 	if s.buildProber == nil {
-		return StoredVerdict{Verdict: VerdictError, Error: "build prober unavailable", Source: buildProbeSourceTag, CheckedAt: now}
+		return StoredVerdict{Verdict: VerdictError, Error: "build prober unavailable", Source: buildProbeSourceTag, CheckedAt: now, Trigger: trigger}
 	}
 	// Capture the semaphore generation up front (hot-reload may swap it).
 	s.cfgMu.RLock()
@@ -598,10 +609,10 @@ func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Cr
 	case sem <- struct{}{}:
 		defer func() { <-sem }()
 	case <-ctx.Done():
-		return StoredVerdict{Verdict: VerdictError, Error: "concurrency gate timeout", Source: buildProbeSourceTag, CheckedAt: now}
+		return StoredVerdict{Verdict: VerdictError, Error: "concurrency gate timeout", Source: buildProbeSourceTag, CheckedAt: now, Trigger: trigger}
 	}
 	result := s.buildProber.ProbeBuildThinking(ctx, credential.ID, degradedNodeID)
-	verdict := StoredVerdict{Source: buildProbeSourceTag, CheckedAt: result.CheckedAt, OriginAccountID: credential.ID, Trigger: accountdomain.RiskTriggerDegrade}
+	verdict := StoredVerdict{Source: buildProbeSourceTag, CheckedAt: result.CheckedAt, OriginAccountID: credential.ID, Trigger: trigger}
 	switch result.Verdict {
 	case BuildProbeClean:
 		verdict.Verdict = VerdictClean
@@ -628,7 +639,7 @@ func (s *Service) checkNowBuild(ctx context.Context, credential accountdomain.Cr
 	case BuildProbeUnconfigured:
 		// 探针未配置（无可用推理 Build 模型）：不落库不重试，保持行为兜底。
 		s.logger.Info("account_rsc_build_probe_unconfigured", "account_id", credential.ID, "detail", result.Details)
-		return StoredVerdict{Verdict: VerdictError, Error: "build probe unconfigured: " + result.Details, Source: buildProbeSourceTag, CheckedAt: now}
+		return StoredVerdict{Verdict: VerdictError, Error: "build probe unconfigured: " + result.Details, Source: buildProbeSourceTag, CheckedAt: now, Trigger: trigger}
 	default:
 		verdict.Verdict = VerdictError
 		verdict.Error = result.Error

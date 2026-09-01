@@ -1698,14 +1698,9 @@ attemptLoop:
 			// 注：曾在此处记录上游响应头全量用于降智早期信号研究；
 			// 直连矩阵证实 clean/降智头部完全一致（零判别力），已移除该噪声日志。
 			if qualityHoldEnabled {
-				proto := qualityProtocolForOperation(operation)
-				if response.ConvertStream != nil {
-					// Peek the raw upstream Responses SSE. Converting first
-					// hides summary deltas until item.done and makes chat TTFB
-					// equal the full thinking duration (8003 live: 0ms upstream
-					// summary vs 9-19s client first byte).
-					proto = qualityProtocolResponses
-				}
+				// ConvertStream/ConvertJSON mean the body is still native
+				// Responses; peek that shape before client conversion.
+				proto := qualityPeekProtocol(operation, response)
 				var replay io.ReadCloser
 				var verdict QualityVerdict
 				var peekUsage Usage
@@ -1716,10 +1711,10 @@ attemptLoop:
 				// 流式/非流式共用：预算只对流式生效；完整 body 判决与流式共用
 				// 同一套证据规则。
 				peekCfg := qualityLivenessSchedule(input.Body, string(operation), holdCfg)
-			// 思考期望来自 resolved effort（含别名档位）：终态纯语义输出
-			// （裸工具调用）在期望思考时按 missing-thinking 扣留，堵住
-			// 语义放行出口的降智交付。
-			peekCfg.ReasoningExpected = reasoningExpectedForEffort(normalizedMetadata.ReasoningEffort)
+				// 思考期望来自 resolved effort（含别名档位）：终态纯语义输出
+				// （裸工具调用）在期望思考时按 missing-thinking 扣留，堵住
+				// 语义放行出口的降智交付。
+				peekCfg.ReasoningExpected = reasoningExpectedForEffort(normalizedMetadata.ReasoningEffort)
 				if input.Streaming {
 					replay, verdict, peekUsage, peekFingerprint, peekErr = peekQualityStreamReport(ctx, response.Body, proto, peekCfg)
 				} else {
@@ -1733,7 +1728,7 @@ attemptLoop:
 				// Real-time guard observability: per-attempt withhold decision.
 				// 日志中的 usage 是判决时刻快照而非终值（规则 1 早交付先于 usage
 				// 帧到达）。
-				s.logger.Info("quality_hold_verdict", "request_id", input.RequestID, "account_id", credential.ID, "protocol", proto, "streaming", input.Streaming, "verdict", string(verdict), "usage_output", peekUsage.OutputTokens, "usage_reasoning", peekUsage.ReasoningTokens, "peek_err", peekErr)
+				s.logger.Info("quality_hold_verdict", "request_id", input.RequestID, "account_id", credential.ID, "protocol", proto, "streaming", input.Streaming, "verdict", string(verdict), "rule", peekFingerprint.Rule, "first_item", peekFingerprint.FirstItem, "has_thinking", peekFingerprint.HasThinking, "encrypted", peekFingerprint.Encrypted, "usage_output", peekUsage.OutputTokens, "usage_reasoning", peekUsage.ReasoningTokens, "peek_err", peekErr)
 				if peekErr != nil {
 					if replay != nil {
 						_ = replay.Close()
@@ -1756,7 +1751,6 @@ attemptLoop:
 						noteGuardSignal(GuardSignalEmptyStream)
 					}
 
-					poolEgress := egressSelectionPooled(egressTrace, route.Provider)
 					if neterrorpkg.IsUpstreamStreamIdleTimeout(peekErr) || neterrorpkg.IsUpstreamStreamIdleTimeout(context.Cause(ctx)) || errors.Is(peekErr, errQualityEmptyStream) || errors.Is(peekErr, errQualityEvidenceTimeout) || errors.Is(peekErr, errQualityCreatedTimeout) {
 						// 守卫空闲路径的尝试进审计明细（round 41：此前多账号轮换
 						// 轨迹在 attempts 里不可见；对照 quality_hold 路径有明细）。

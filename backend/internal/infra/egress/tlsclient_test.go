@@ -24,7 +24,7 @@ func TestDialWebSocketPoolModeRetriesBoundedOnSafeFailure(t *testing.T) {
 	}
 	// 端口 1 (tcpmux) 恒拒绝连接 —— "connection refused" 是安全失败标记。
 	repository := &mutableEgressRepository{node: domain.Node{
-		ID: 1, Name: "pool-ws", Enabled: true, ProxyPool: true, Health: 1,
+		ID: 1, Name: "pool-ws", Enabled: true, ProxyPool: true, RotationEnabled: true, Health: 1,
 		EncryptedProxyURL: encryptedProxy(t, cipher, "socks5://127.0.0.1:1"),
 	}}
 	manager := NewManager(repository, cipher)
