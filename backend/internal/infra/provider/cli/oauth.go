@@ -39,10 +39,11 @@ type oauthClient struct {
 	deviceURL string
 	tokenURL  string
 	version   func() string
+	userAgent func() string
 }
 
-func newOAuthClient(httpClient *http.Client, version func() string) *oauthClient {
-	return &oauthClient{http: httpClient, clientID: defaultOAuthClientID, scope: defaultOAuthScope, deviceURL: defaultDeviceURL, tokenURL: defaultTokenURL, version: version}
+func newOAuthClient(httpClient *http.Client, version, userAgent func() string) *oauthClient {
+	return &oauthClient{http: httpClient, clientID: defaultOAuthClientID, scope: defaultOAuthScope, deviceURL: defaultDeviceURL, tokenURL: defaultTokenURL, version: version, userAgent: userAgent}
 }
 
 func (c *oauthClient) startDevice(ctx context.Context) (provider.DeviceAuthorization, error) {
@@ -104,6 +105,7 @@ func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRef
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	c.applyUserAgent(req)
 	if deviceFlow {
 		c.applyDeviceHeaders(req)
 	}
@@ -359,6 +361,7 @@ func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Va
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	c.applyUserAgent(req)
 	if deviceFlow {
 		c.applyDeviceHeaders(req)
 	}
@@ -378,6 +381,18 @@ func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Va
 		return fmt.Errorf("xAI OAuth 返回 %d: %s", resp.StatusCode, redacted)
 	}
 	return json.Unmarshal(body, output)
+}
+
+// applyUserAgent 给 OAuth 请求盖上官方 CLI 在所有请求(含 OAuth 平面)都携带的
+// grok-shell User-Agent。不设置时 Go 的 http.Transport 会自动宣告
+// Go-http-client/<version>,在 auth.x.ai 上暴露非官方客户端身份。
+func (c *oauthClient) applyUserAgent(req *http.Request) {
+	if c.userAgent == nil {
+		return
+	}
+	if userAgent := strings.TrimSpace(c.userAgent()); userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
 }
 
 func (c *oauthClient) applyDeviceHeaders(req *http.Request) {

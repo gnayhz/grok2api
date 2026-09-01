@@ -26,6 +26,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
@@ -82,7 +83,19 @@ func NewAdapter(cfg Config, cipher security.Cryptor) *Adapter {
 		cfg: cfg, http: httpClient, cipher: cipher, base: transport,
 		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
 	}
-	adapter.oauth = newOAuthClient(httpClient, func() string { return adapter.config().ClientVersion })
+	// 官方 CLI 的 shared_client 对包括 OAuth 在内的所有请求统一附加 grok-shell
+	// User-Agent;网关的 OAuth 平面(client_id/token/device)必须一致,否则 Go 默认
+	// 会宣告 Go-http-client/<version>。管理员清空 userAgent 设置时回退到推荐值,
+	// 避免退回 Go 默认标识。
+	adapter.oauth = newOAuthClient(httpClient,
+		func() string { return adapter.config().ClientVersion },
+		func() string {
+			if userAgent := strings.TrimSpace(adapter.config().UserAgent); userAgent != "" {
+				return userAgent
+			}
+			return config.RecommendedBuildUserAgent
+		},
+	)
 	return adapter
 }
 

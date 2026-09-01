@@ -6,6 +6,7 @@ import (
 	"errors"
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -38,7 +39,7 @@ func TestPrepareImportedCredentialRefreshesRTOnlySeed(t *testing.T) {
 		}
 		return oauthResponse(http.StatusOK, response), nil
 	})}
-	adapter := &Adapter{oauth: newOAuthClient(httpClient, nil), cipher: cipher}
+	adapter := &Adapter{oauth: newOAuthClient(httpClient, nil, nil), cipher: cipher}
 	prepared, err := adapter.PrepareImportedCredential(context.Background(), provider.CredentialSeed{OIDCClientID: "custom-client", RefreshToken: "original-rt"})
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +149,9 @@ func TestOAuthDeviceFlowMatchesOfficialWireContract(t *testing.T) {
 		if request.Header.Get("x-grok-client-surface") != deviceClientSurface {
 			t.Fatalf("client surface = %q", request.Header.Get("x-grok-client-surface"))
 		}
+		if got := request.Header.Get("User-Agent"); got != "grok-shell/"+version+" (linux; x86_64)" {
+			t.Fatalf("user agent = %q, want grok-shell/%s (linux; x86_64)", got, version)
+		}
 		if err := request.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
@@ -171,7 +175,7 @@ func TestOAuthDeviceFlowMatchesOfficialWireContract(t *testing.T) {
 			return nil, nil
 		}
 	})}
-	client := newOAuthClient(httpClient, func() string { return version })
+	client := newOAuthClient(httpClient, func() string { return version }, func() string { return "grok-shell/" + version + " (linux; x86_64)" })
 
 	authorization, err := client.startDevice(context.Background())
 	if err != nil {
@@ -194,6 +198,33 @@ func TestOAuthDeviceFlowMatchesOfficialWireContract(t *testing.T) {
 	}
 	if requests != 3 {
 		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestNewAdapterOAuthUserAgentFallsBackToRecommended(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 空白 UserAgent(管理员清空设置)不得退回 Go-http-client/<version> 默认标识。
+	adapter := NewAdapter(Config{ClientVersion: "1.0.4"}, cipher)
+	request, requestErr := http.NewRequest(http.MethodPost, "https://auth.x.ai/oauth2/token", nil)
+	if requestErr != nil {
+		t.Fatal(requestErr)
+	}
+	adapter.oauth.applyUserAgent(request)
+	if got := request.Header.Get("User-Agent"); got != config.RecommendedBuildUserAgent {
+		t.Fatalf("fallback user agent = %q, want %q", got, config.RecommendedBuildUserAgent)
+	}
+
+	adapter.UpdateConfig(Config{ClientVersion: "1.0.4", UserAgent: "grok-shell/0.2.200 (macos; aarch64)"})
+	request, requestErr = http.NewRequest(http.MethodPost, "https://auth.x.ai/oauth2/token", nil)
+	if requestErr != nil {
+		t.Fatal(requestErr)
+	}
+	adapter.oauth.applyUserAgent(request)
+	if got := request.Header.Get("User-Agent"); got != "grok-shell/0.2.200 (macos; aarch64)" {
+		t.Fatalf("configured user agent = %q", got)
 	}
 }
 
@@ -225,6 +256,9 @@ func TestOAuthRefreshClassifiesPermanentAndTransientFailures(t *testing.T) {
 				if request.Header.Get("x-grok-client-version") != "" || request.Header.Get("x-grok-client-surface") != "" {
 					t.Fatalf("refresh request unexpectedly included device headers: %v", request.Header)
 				}
+				if got := request.Header.Get("User-Agent"); got != "grok-shell/0.2.111 (linux; x86_64)" {
+					t.Fatalf("refresh user agent = %q", got)
+				}
 				if request.FormValue("grant_type") != "refresh_token" || request.FormValue("refresh_token") != "refresh" {
 					t.Fatalf("form = %#v", request.Form)
 				}
@@ -234,7 +268,7 @@ func TestOAuthRefreshClassifiesPermanentAndTransientFailures(t *testing.T) {
 				}
 				return &http.Response{StatusCode: test.status, Header: header, Body: io.NopCloser(strings.NewReader(test.body)), Request: request}, nil
 			})}
-			client := newOAuthClient(httpClient, func() string { return "0.2.111" })
+			client := newOAuthClient(httpClient, func() string { return "0.2.111" }, func() string { return "grok-shell/0.2.111 (linux; x86_64)" })
 			client.tokenURL = "https://auth.x.ai/oauth2/token"
 			_, err := client.refresh(context.Background(), "refresh")
 			var refreshErr *provider.CredentialRefreshError
@@ -258,7 +292,7 @@ func TestOAuthRefreshTreatsMalformedSuccessAsRetryable(t *testing.T) {
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return oauthResponse(http.StatusOK, `{"expires_in":3600}`), nil
 	})}
-	client := newOAuthClient(httpClient, nil)
+	client := newOAuthClient(httpClient, nil, nil)
 	_, err := client.refresh(context.Background(), "refresh")
 	var refreshErr *provider.CredentialRefreshError
 	if !errors.As(err, &refreshErr) || refreshErr.Code != "missing_access_token" || refreshErr.Permanent {
