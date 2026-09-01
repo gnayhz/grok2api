@@ -16,17 +16,8 @@ func StringField(data []byte, key string) string {
 	if len(data) == 0 || key == "" {
 		return ""
 	}
-	// 键长 <= 32 的热路径键（type/id/delta/model/sequence_number…）用栈上
-	// 缓冲拼 needle，免去每次探测的堆分配——这是扫描器/检查器每帧多次
-	// 调用的分配大头（500 帧流基准里约占剩余分配的一半）。
 	var stack [34]byte
-	needle := stack[:0]
-	if len(key)+2 > len(stack) {
-		needle = make([]byte, 0, len(key)+2)
-	}
-	needle = append(needle, '"')
-	needle = append(needle, key...)
-	needle = append(needle, '"')
+	needle := quotedKeyNeedle(&stack, key)
 	start := 0
 	for {
 		index := bytes.Index(data[start:], needle)
@@ -61,53 +52,106 @@ func StringField(data []byte, key string) string {
 	}
 }
 
-// RootStringField returns the string value for key on the root object only.
-// StringField searches the whole buffer and can hit nested keys first after
-// encoding/json rewrites (map keys sorted, "response" before "type").
-func RootStringField(data []byte, key string) string {
+// RootStringBytes returns the root-object string value for key as a slice of
+// data (no copy) when the value has no JSON escapes. Event "type" fields
+// never escape; callers that need a string should intern known values
+// instead of string()-converting every frame.
+func RootStringBytes(data []byte, key string) []byte {
 	if len(data) == 0 || key == "" {
-		return ""
+		return nil
 	}
 	data = skipJSONSpace(data)
 	if len(data) == 0 || data[0] != '{' {
-		return ""
+		return nil
 	}
 	data = skipJSONSpace(data[1:])
 	for len(data) > 0 {
 		data = skipJSONSpace(data)
 		if len(data) == 0 || data[0] == '}' {
-			return ""
+			return nil
 		}
 		if data[0] != '"' {
-			return ""
+			return nil
 		}
 		end := matchJSONString(data)
 		if end <= 1 {
-			return ""
+			return nil
 		}
 		field := data[1 : end-1]
 		data = skipJSONSpace(data[end:])
 		if len(data) == 0 || data[0] != ':' {
-			return ""
+			return nil
 		}
 		data = skipJSONSpace(data[1:])
 		value := extractJSONValue(data)
 		if len(value) == 0 {
-			return ""
+			return nil
 		}
 		if bytesEqualString(field, key) && value[0] == '"' {
 			inner := matchJSONString(value)
 			if inner > 1 {
-				return string(value[1 : inner-1])
+				return value[1 : inner-1]
 			}
-			return ""
+			return nil
 		}
 		data = skipJSONSpace(data[len(value):])
 		if len(data) > 0 && data[0] == ',' {
 			data = data[1:]
 		}
 	}
-	return ""
+	return nil
+}
+
+// RootStringField returns the string value for key on the root object only.
+// StringField searches the whole buffer and can hit nested keys first after
+// encoding/json rewrites (map keys sorted, "response" before "type").
+func RootStringField(data []byte, key string) string {
+	return string(RootStringBytes(data, key))
+}
+
+// internedTypes are SSE event types on the quality-scan and client-delivery
+// hot paths. InternType returns these strings without allocating.
+var internedTypes = [...]struct {
+	b []byte
+	s string
+}{
+	{[]byte("response.created"), "response.created"},
+	{[]byte("response.in_progress"), "response.in_progress"},
+	{[]byte("response.reasoning_summary_part.added"), "response.reasoning_summary_part.added"},
+	{[]byte("response.content_part.added"), "response.content_part.added"},
+	{[]byte("response.reasoning_text.delta"), "response.reasoning_text.delta"},
+	{[]byte("response.reasoning_summary_text.delta"), "response.reasoning_summary_text.delta"},
+	{[]byte("response.output_text.delta"), "response.output_text.delta"},
+	{[]byte("response.refusal.delta"), "response.refusal.delta"},
+	{[]byte("response.function_call_arguments.delta"), "response.function_call_arguments.delta"},
+	{[]byte("response.custom_tool_call_input.delta"), "response.custom_tool_call_input.delta"},
+	{[]byte("response.mcp_call_arguments.delta"), "response.mcp_call_arguments.delta"},
+	{[]byte("response.output_item.added"), "response.output_item.added"},
+	{[]byte("response.output_item.done"), "response.output_item.done"},
+	{[]byte("response.completed"), "response.completed"},
+	{[]byte("response.failed"), "response.failed"},
+	{[]byte("response.incomplete"), "response.incomplete"},
+	{[]byte("response.error"), "response.error"},
+	{[]byte("error"), "error"},
+	{[]byte("message_stop"), "message_stop"},
+	{[]byte("ping"), "ping"},
+	{[]byte("content_block_delta"), "content_block_delta"},
+	{[]byte("image_generation.completed"), "image_generation.completed"},
+	{[]byte("image_generation.failed"), "image_generation.failed"},
+}
+
+// InternType maps known SSE type bytes to interned strings. Unknown values
+// still allocate. Event types never contain JSON escapes.
+func InternType(b []byte) string {
+	for i := range internedTypes {
+		if bytes.Equal(b, internedTypes[i].b) {
+			return internedTypes[i].s
+		}
+	}
+	if len(b) == 0 {
+		return ""
+	}
+	return string(b)
 }
 
 // RootStringFieldScan returns the root-level string value for key on a
@@ -266,6 +310,23 @@ func bytesEqualString(field []byte, key string) bool {
 	return true
 }
 
+// quotedKeyNeedle builds a quoted JSON object key for bytes.Index. stack
+// holds keys up to 32 bytes so the scanner hot path does not heap-allocate
+// a needle per frame.
+func quotedKeyNeedle(stack *[34]byte, key string) []byte {
+	need := len(key) + 2
+	var needle []byte
+	if need > len(stack) {
+		needle = make([]byte, 0, need)
+	} else {
+		needle = stack[:0]
+	}
+	needle = append(needle, '"')
+	needle = append(needle, key...)
+	needle = append(needle, '"')
+	return needle
+}
+
 func Prefix(data []byte, n int) []byte {
 	if n <= 0 || len(data) <= n {
 		return data
@@ -285,14 +346,7 @@ func HasKey(data []byte, key string) bool {
 		return false
 	}
 	var stack [34]byte
-	needle := stack[:0]
-	if len(key)+2 > len(stack) {
-		needle = make([]byte, 0, len(key)+2)
-	}
-	needle = append(needle, '"')
-	needle = append(needle, key...)
-	needle = append(needle, '"')
-	return bytes.Contains(data, needle)
+	return bytes.Contains(data, quotedKeyNeedle(&stack, key))
 }
 
 // IntField returns the first JSON numeric value for key. String values for the
@@ -302,10 +356,8 @@ func IntField(data []byte, key string) (int64, bool) {
 	if len(data) == 0 || key == "" {
 		return 0, false
 	}
-	needle := make([]byte, 0, len(key)+2)
-	needle = append(needle, '"')
-	needle = append(needle, key...)
-	needle = append(needle, '"')
+	var stack [34]byte
+	needle := quotedKeyNeedle(&stack, key)
 	start := 0
 	for {
 		index := bytes.Index(data[start:], needle)
@@ -435,6 +487,33 @@ func TokenUsageFrom(data []byte) TokenUsage {
 	return usage
 }
 
+// UnquotedBytes returns the first JSON string value for key after decoding
+// JSON escapes, without allocating when the value has no backslash escapes
+// (the common SSE delta case). The returned slice aliases data in that
+// case and must not be retained across a later write to the same buffer.
+func UnquotedBytes(data []byte, key string) []byte {
+	raw := RawValue(data, key)
+	if len(raw) < 2 || raw[0] != '"' {
+		return nil
+	}
+	inner := raw[1 : len(raw)-1]
+	if bytes.IndexByte(inner, '\\') < 0 {
+		return inner
+	}
+	s, err := strconv.Unquote(string(raw))
+	if err != nil {
+		return nil
+	}
+	return []byte(s)
+}
+
+// UnquotedStringField returns the first JSON string value for key after
+// decoding JSON escapes. StringField returns the raw inner bytes, so a
+// payload of "\n" would look like two visible runes instead of a newline.
+func UnquotedStringField(data []byte, key string) string {
+	return string(UnquotedBytes(data, key))
+}
+
 // RawValue returns the raw JSON value for the first object key, including
 // truncated buffers as long as that value itself is complete. Brace matching
 // ignores braces inside strings so a cut-off encrypted_content suffix does not
@@ -443,10 +522,8 @@ func RawValue(data []byte, key string) []byte {
 	if len(data) == 0 || key == "" {
 		return nil
 	}
-	needle := make([]byte, 0, len(key)+2)
-	needle = append(needle, '"')
-	needle = append(needle, key...)
-	needle = append(needle, '"')
+	var stack [34]byte
+	needle := quotedKeyNeedle(&stack, key)
 	start := 0
 	for {
 		index := bytes.Index(data[start:], needle)

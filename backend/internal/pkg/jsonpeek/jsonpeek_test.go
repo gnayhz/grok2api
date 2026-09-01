@@ -47,6 +47,57 @@ func TestIntFieldAndTokenUsageFrom(t *testing.T) {
 	}
 }
 
+func TestQuotedKeyNeedleLongKey(t *testing.T) {
+	t.Parallel()
+	key := "this_key_is_definitely_longer_than_thirty_two"
+	payload := []byte(`{"` + key + `":"v","n":7}`)
+	if !HasKey(payload, key) {
+		t.Fatal("HasKey long key")
+	}
+	if got := StringField(payload, key); got != "v" {
+		t.Fatalf("StringField long key = %q", got)
+	}
+	if n, ok := IntField(payload, "n"); !ok || n != 7 {
+		t.Fatalf("IntField = %d ok=%v", n, ok)
+	}
+}
+
+func TestUnquotedStringFieldDecodesEscapes(t *testing.T) {
+	t.Parallel()
+	if got := UnquotedStringField([]byte("{\"delta\":\"\\n\"}"), "delta"); got != "\n" {
+		t.Fatalf("newline escape = %q", got)
+	}
+	if got := UnquotedStringField([]byte("{\"delta\":\"step\"}"), "delta"); got != "step" {
+		t.Fatalf("plain = %q", got)
+	}
+	if got := UnquotedStringField([]byte("{\"delta\":\"\"}"), "delta"); got != "" {
+		t.Fatalf("empty = %q", got)
+	}
+	if got := UnquotedStringField([]byte("{\"delta\":\"a\\\"b\"}"), "delta"); got != "a\"b" {
+		t.Fatalf("quoted = %q", got)
+	}
+	if got := UnquotedStringField([]byte("{\"n\":1}"), "delta"); got != "" {
+		t.Fatalf("missing = %q", got)
+	}
+}
+
+func TestUnquotedBytesMatchesStringField(t *testing.T) {
+	t.Parallel()
+	cases := [][]byte{
+		[]byte("{\"delta\":\"step\"}"),
+		[]byte("{\"delta\":\"\\n\"}"),
+		[]byte("{\"delta\":\"\"}"),
+		[]byte("{\"delta\":\"a\\\"b\"}"),
+		[]byte("{\"n\":1}"),
+		[]byte("{\"delta\":\"word word word word\"}"),
+	}
+	for _, payload := range cases {
+		if string(UnquotedBytes(payload, "delta")) != UnquotedStringField(payload, "delta") {
+			t.Fatalf("mismatch on %s: bytes=%q string=%q", payload, UnquotedBytes(payload, "delta"), UnquotedStringField(payload, "delta"))
+		}
+	}
+}
+
 func TestRootStringFieldIgnoresNestedType(t *testing.T) {
 	t.Parallel()
 	payload := []byte(`{"response":{"output":[{"type":"reasoning"}]},"type":"response.failed"}`)
@@ -55,6 +106,12 @@ func TestRootStringFieldIgnoresNestedType(t *testing.T) {
 	}
 	if got := RootStringField(payload, "type"); got != "response.failed" {
 		t.Fatalf("RootStringField type = %q", got)
+	}
+	if string(RootStringBytes(payload, "type")) != "response.failed" {
+		t.Fatalf("RootStringBytes type = %q", RootStringBytes(payload, "type"))
+	}
+	if InternType(RootStringBytes(payload, "type")) != "response.failed" {
+		t.Fatalf("InternType = %q", InternType(RootStringBytes(payload, "type")))
 	}
 }
 

@@ -7,10 +7,11 @@ import (
 )
 
 func responsesContainsGeneratedDelta(data []byte) bool {
-	typ := jsonpeek.RootStringField(data, "type")
+	typ := jsonpeek.InternType(jsonpeek.RootStringBytes(data, "type"))
 	switch typ {
 	case "response.output_text.delta", "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.refusal.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
-		return jsonpeek.StringField(data, "delta") != ""
+		raw := jsonpeek.RawValue(data, "delta")
+		return len(raw) > 2
 	case "response.output_item.added":
 		if jsonpeek.StringField(data, "id") == "" {
 			return false
@@ -22,14 +23,14 @@ func responsesContainsGeneratedDelta(data []byte) bool {
 }
 
 func sseEventType(data []byte) string {
-	if typ := jsonpeek.RootStringField(jsonpeek.Prefix(data, 4096), "type"); typ != "" {
+	if typ := jsonpeek.InternType(jsonpeek.RootStringBytes(jsonpeek.Prefix(data, 4096), "type")); typ != "" {
 		return typ
 	}
 	// 兼容层重写过的帧经 map[string]any 重排键序（字母序 "response" 在
 	// "type" 之前），根层 type 可被多 KB 的 response 对象推到 4KB 头窗之外。
 	// 头窗未命中时对完整帧做零分配的根层扫描（线上全部
 	// upstream_stream_incomplete 回归根因）。
-	return jsonpeek.RootStringFieldScan(data, "type")
+	return jsonpeek.InternType([]byte(jsonpeek.RootStringFieldScan(data, "type")))
 }
 
 func (i *responseInspector) inspectDataPayload(value []byte) {
