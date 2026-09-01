@@ -448,7 +448,14 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		}
 	}
 	if s.touches.shouldTouch(value.ID, now) {
-		_ = s.keys.Touch(ctx, value.ID)
+		// lastUsedAt 仅服务管理面展示;同步 UPDATE 出现在请求路径(每 key
+		// 每分钟一次)是不必要的串行点。移出请求生命周期:断开连接不打断
+		// 簿记(WithoutCancel),丢失一次 Touch 对功能无影响。
+		touchCtx, touchCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		go func(keyID uint64) {
+			defer touchCancel()
+			_ = s.keys.Touch(touchCtx, keyID)
+		}(value.ID)
 	}
 	return value, release, nil
 }

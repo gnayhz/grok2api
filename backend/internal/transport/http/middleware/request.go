@@ -109,23 +109,35 @@ func SecurityHeaders() gin.HandlerFunc {
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startedAt := time.Now()
+		// emit 在 defer 中执行并对 panic 补记:panic 展开会跳过 c.Next() 之后的
+		// 常规语句(故障期观测盲区),捕获后按 500 记账再抛回外层 gin.Recovery
+		// 统一恢复——栈处理仍归 Recovery,访问日志不再缺行。
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				emitAccessLog(c, logger, startedAt, http.StatusInternalServerError)
+				panic(recovered)
+			}
+			emitAccessLog(c, logger, startedAt, c.Writer.Status())
+		}()
 		c.Next()
-		status := c.Writer.Status()
-		requestID, _ := c.Get(RequestIDKey)
-		// c.FullPath() 只返回已注册路由模板；未匹配路由(404/405)为空。
-		// 回退到原始 URL 路径，保证 404 风暴可定位到具体入口（round 7：
-		// 实测未知路径的访问日志 path 为空，无法回答"什么在被打"）。
-		path := c.FullPath()
-		if path == "" {
-			path = c.Request.URL.Path
-		}
-		logger.Info("http_request", "request_id", requestID, "method", c.Request.Method, "path", path, "status", status, "duration_ms", time.Since(startedAt).Milliseconds())
-		if status >= http.StatusInternalServerError {
-			perfmetrics.Default.Inc("http_request_server_error_total", perfmetrics.Labels{
-				Subsystem: "http",
-				Operation: path,
-				Outcome:   strconv.Itoa(status),
-			})
-		}
+	}
+}
+
+func emitAccessLog(c *gin.Context, logger *slog.Logger, startedAt time.Time, status int) {
+	requestID, _ := c.Get(RequestIDKey)
+	// c.FullPath() 只返回已注册路由模板；未匹配路由(404/405)为空。
+	// 回退到原始 URL 路径，保证 404 风暴可定位到具体入口（round 7：
+	// 实测未知路径的访问日志 path 为空，无法回答"什么在被打"）。
+	path := c.FullPath()
+	if path == "" {
+		path = c.Request.URL.Path
+	}
+	logger.Info("http_request", "request_id", requestID, "method", c.Request.Method, "path", path, "status", status, "duration_ms", time.Since(startedAt).Milliseconds())
+	if status >= http.StatusInternalServerError {
+		perfmetrics.Default.Inc("http_request_server_error_total", perfmetrics.Labels{
+			Subsystem: "http",
+			Operation: path,
+			Outcome:   strconv.Itoa(status),
+		})
 	}
 }

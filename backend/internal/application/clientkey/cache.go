@@ -10,7 +10,11 @@ import (
 const (
 	keyTouchInterval       = time.Minute
 	touchTrackerMaxEntries = 10000
-	keyAuthCacheTTL        = time.Second
+	// 正缓存 TTL:本进程的 Key 变更经仓储事件同步清缓存(即时),跨副本经
+	// 失效总线;TTL 只是总线降级(如 Redis 不可用)时的兜底。3s 让 DB 短暂
+	// 抖动不再放大为鉴权 503 风暴(此前 1s 内缓存全过期,抖动期所有 /v1
+	// 请求直落 DB 并失败),代价是降级窗口内禁用 Key 的生效延迟同延。
+	keyAuthCacheTTL        = 3 * time.Second
 	keyAuthCacheMaxEntries = 10000
 	// 未知前缀的负缓存 TTL:伪造 key 的每个请求原本都会打一次 GetByPrefix
 	// DB 查询(正缓存只存命中), 无凭据流量可借此放大数据库压力。短 TTL 让

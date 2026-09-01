@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -28,11 +29,33 @@ type buildSessionIdentity struct {
 	isolated bool
 }
 
+// bodyAnchors 惰性解析并记忆请求体的消息锚点(system+首条 user)。同一
+// 请求内路由排序、预选候选、选中身份三处都要锚点,而解析是全量 JSON
+// 扫描(128KB body 毫秒级)——只做一次。sync.Once 从属于创建它的那次
+// 函数调用(局部变量),不跨请求共享。
+type bodyAnchors struct {
+	body      []byte
+	once      sync.Once
+	system    string
+	firstUser string
+}
+
+func newBodyAnchors(body []byte) *bodyAnchors { return &bodyAnchors{body: body} }
+
+func (a *bodyAnchors) load() (string, string) {
+	a.once.Do(func() { a.system, a.firstUser, _ = extractMessageAnchors(a.body) })
+	return a.system, a.firstUser
+}
+
 // resolveBuildSessionIdentity derives a stable Grok Build session identity:
 // 1. Prefer explicit client session signals, isolated by client key, provider, and model.
 // 2. Fall back to system/instructions and the first user message when no explicit signal exists.
 // 3. Return an empty identity when no signal exists; never generate a random session ID per request.
 func resolveBuildSessionIdentity(clientKeyID uint64, provider accountdomain.Provider, upstreamModel, explicitKey, sessionSeed, requestScope string, body []byte) buildSessionIdentity {
+	return resolveBuildSessionIdentityWithAnchors(clientKeyID, provider, upstreamModel, explicitKey, sessionSeed, requestScope, newBodyAnchors(body))
+}
+
+func resolveBuildSessionIdentityWithAnchors(clientKeyID uint64, provider accountdomain.Provider, upstreamModel, explicitKey, sessionSeed, requestScope string, anchors *bodyAnchors) buildSessionIdentity {
 	// Prefer Claude Code and Codex session signals extracted by the transport layer.
 	// body.prompt_cache_key is only a fallback when no stronger header or session signal exists.
 	seed := strings.TrimSpace(sessionSeed)
@@ -54,7 +77,7 @@ func resolveBuildSessionIdentity(clientKeyID uint64, provider accountdomain.Prov
 		}
 	}
 	// Fall back to a message-prefix hash to keep account affinity and session IDs stable without client session signals.
-	system, firstUser, _ := extractMessageAnchors(body)
+	system, firstUser := anchors.load()
 	firstUser = truncateAnchor(firstUser, 200)
 	system = truncateAnchor(system, 100)
 	if firstUser == "" {

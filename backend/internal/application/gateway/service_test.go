@@ -981,14 +981,14 @@ func TestRouteTargetSeedUsesSessionSignalsAndSoftMessageAnchor(t *testing.T) {
 	continued := base
 	continued.RequestID = "request-b"
 	continued.Body = []byte(`{"model":"pooled-model","instructions":"be concise","input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"assistant","content":"hi"}]}`)
-	if first, second := routeTargetSeed(base), routeTargetSeed(continued); first != second {
+	if first, second := routeTargetSeed(base, newBodyAnchors(base.Body)), routeTargetSeed(continued, newBodyAnchors(continued.Body)); first != second {
 		t.Fatalf("soft route seed changed across session: %q != %q", first, second)
 	}
 	explicit := base
 	explicit.PromptCacheKey = "body-fallback"
 	explicit.PromptCacheSeed = "transport-session"
 	explicit.Body = []byte(`{"input":"different"}`)
-	if got, want := routeTargetSeed(explicit), "17:transport-session"; got != want {
+	if got, want := routeTargetSeed(explicit, newBodyAnchors(explicit.Body)), "17:transport-session"; got != want {
 		t.Fatalf("explicit route seed = %q, want %q", got, want)
 	}
 }

@@ -1051,6 +1051,9 @@ func (a *Application) Run(ctx context.Context) error {
 		a.logger.Info("server_stopped",
 			"uptime_ms", time.Since(servedAt).Milliseconds(),
 			"drain_ms", time.Since(drainStart).Milliseconds())
+		// 访问日志异步缓冲冲刷(2s 超时兜底):server_stopped 自身走同步
+		// logger 已落盘,此处只补齐缓冲中的访问日志。
+		httpmiddleware.FlushAsyncAccessLogs()
 		return nil
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {

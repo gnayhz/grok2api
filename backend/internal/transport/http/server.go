@@ -126,7 +126,10 @@ func New(deps Dependencies) *gin.Engine {
 	if err := router.SetTrustedProxies(deps.TrustedProxies); err != nil {
 		panic("httpserver: trustedProxies 配置无效: " + err.Error())
 	}
-	router.Use(gin.Recovery(), middleware.RequestID(), middleware.ClientIP(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.Gzip(), middleware.AccessLog(deps.Logger))
+	// 访问日志走专用异步 logger(有界队列+批量刷写):同步 JSON stdout 写
+	// 的全局互斥锁与每请求一次 write 系统调用是高 QPS 下的入口串行点。
+	// deps.Logger 仍供业务日志使用(同步、不丢关键错误)。
+	router.Use(gin.Recovery(), middleware.RequestID(), middleware.ClientIP(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.Gzip(), middleware.AccessLog(middleware.AsyncAccessLogger()))
 	// 错误方法此前落到 gin 默认 NoRoute（404 裸文本）：API 消费方无法区分
 	// 「路径不存在」与「方法不对」。405 + 统一信封让两类错误可判别。
 	router.HandleMethodNotAllowed = true

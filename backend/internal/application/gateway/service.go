@@ -32,6 +32,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -751,7 +752,7 @@ func routeProviderPriority(providerValue accountdomain.Provider) int {
 	}
 }
 
-func routeTargetSeed(input Input) string {
+func routeTargetSeed(input Input, anchors *bodyAnchors) string {
 	// Match the Build account-affinity precedence so Codex and Claude Code keep
 	// both the route target and account stable across one logical session.
 	anchor := strings.TrimSpace(input.PromptCacheSeed)
@@ -759,7 +760,7 @@ func routeTargetSeed(input Input) string {
 		anchor = strings.TrimSpace(input.PromptCacheKey)
 	}
 	if anchor == "" {
-		system, firstUser, _ := extractMessageAnchors(input.Body)
+		system, firstUser := anchors.load()
 		system = truncateAnchor(system, 100)
 		firstUser = truncateAnchor(firstUser, 200)
 		if firstUser != "" {
@@ -935,11 +936,15 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return nil, ErrResponseStateUnsupported
 		}
 	}
+	// 消息锚点记忆器:路由排序、预选候选、选中身份三处共享一次全量解析
+	//(128KB body 的锚点提取是毫秒级;别名模型重写只改 model/effort 字段,
+	// 不触碰 instructions/system/messages,重写前后锚点等价)。
+	anchors := newBodyAnchors(input.Body)
 	eligibleRoutes, fallbackRoute, routeErr := s.eligibleConversationRoutes(routes, input.ClientKey, operation, path, ownership != nil, ownership)
 	route := fallbackRoute
 	orderedRoutes := eligibleRoutes
 	if routeErr == nil {
-		orderedRoutes = orderConversationRouteTargets(eligibleRoutes, routeTargetSeed(input))
+		orderedRoutes = orderConversationRouteTargets(eligibleRoutes, routeTargetSeed(input, anchors))
 		route = orderedRoutes[0]
 	}
 	accountScope := input.ClientKey.AccountScope()
@@ -951,14 +956,14 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		for _, candidate := range orderedRoutes {
 			affinityKey := ""
 			if candidate.Provider == accountdomain.ProviderBuild {
-				identity := resolveBuildSessionIdentity(
+				identity := resolveBuildSessionIdentityWithAnchors(
 					input.ClientKey.ID,
 					candidate.Provider,
 					candidate.UpstreamModel,
 					input.PromptCacheKey,
 					input.PromptCacheSeed,
 					input.RequestID,
-					input.Body,
+					anchors,
 				)
 				identity = ensureBuildComposerSessionIdentity(identity, input.ClientKey.ID, candidate.Provider, candidate.UpstreamModel, requestSessionScope)
 				affinityKey = identity.affinityKey
@@ -1039,14 +1044,14 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			identity.upstreamID = ownership.PromptCacheKey
 			identity.replayKey = ownership.ReasoningReplayKey
 		} else {
-			identity = resolveBuildSessionIdentity(
+			identity = resolveBuildSessionIdentityWithAnchors(
 				input.ClientKey.ID,
 				route.Provider,
 				route.UpstreamModel,
 				input.PromptCacheKey,
 				input.PromptCacheSeed,
 				input.RequestID,
-				input.Body,
+				anchors,
 			)
 		}
 		identity = ensureBuildComposerSessionIdentity(identity, input.ClientKey.ID, route.Provider, route.UpstreamModel, requestSessionScope)
@@ -1119,6 +1124,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	authRecoveryAttempted := make(map[uint64]bool)
 	holdCfg := s.qualityRetryConfig()
 	qualityHoldEnabled := shouldHoldQualityStream(input, ownership, route, operation, holdCfg)
+	// 活跃度预算制度表只依赖请求体/操作类型/守卫配置(三者跨 attempt 不变:
+	// 别名模型重写发生在进入循环之前,循环内不再改动 input.Body),提出
+	// 循环只算一次——128KB body 的 tools/effort 探测实测 1.16ms/次全量解析,
+	// 原实现在循环内每次质量尝试重复支付。循环内仅保留依赖 adapter 归一化
+	// 结果的 ReasoningExpected 位(首次尝试前归一化结果为空,语义不变)。
+	peekSchedule := qualityLivenessSchedule(input.Body, string(operation), holdCfg)
 	// Real-time guard observability. Gate lines are emitted only when the hold
 	// is engaged: a per-request INFO line while the feature is off would be pure
 	// log amplification proportional to traffic.
@@ -1250,6 +1261,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				record.ContextOutputTokens = usage.ContextOutputTokens
 				if successful && input.Streaming {
 					record.FirstTokenMS = firstToken.milliseconds()
+					// TTFT 直方图:审计表的 FirstTokenMS 是毫秒级落库值,排障要查库且
+					// 失败流被归一化丢弃;perfmetrics 直方图随指标面暴露,链路优化效果
+					// 可实时观测。打点仅请求收尾一次,开销百 ns 级。
+					if record.FirstTokenMS != nil {
+						perfmetrics.Default.ObserveDuration("first_token_us", perfmetrics.Labels{Subsystem: "gateway", Provider: string(route.Provider)}, time.Duration(*record.FirstTokenMS)*time.Millisecond)
+					}
 				}
 				if deliverySet {
 					record.DeliveredEvents = delivery.Events
@@ -1710,7 +1727,7 @@ attemptLoop:
 				// 重推理/默认）给 created/evidence 预算——证据与依据见该函数注释。
 				// 流式/非流式共用：预算只对流式生效；完整 body 判决与流式共用
 				// 同一套证据规则。
-				peekCfg := qualityLivenessSchedule(input.Body, string(operation), holdCfg)
+				peekCfg := peekSchedule
 				// 思考期望来自 resolved effort（含别名档位）：终态纯语义输出
 				// （裸工具调用）在期望思考时按 missing-thinking 扣留，堵住
 				// 语义放行出口的降智交付。

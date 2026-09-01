@@ -72,10 +72,7 @@ func TestConcurrencyGateStormExactAccounting(t *testing.T) {
 	if got := peak.Load(); got > 8 {
 		t.Fatalf("in-flight peak = %d exceeds limit 8", got)
 	}
-	gate.mu.Lock()
-	active := gate.active
-	gate.mu.Unlock()
-	if active != 0 {
+	if active := gate.active.Load(); active != 0 {
 		t.Fatalf("slot leak: active = %d after all requests completed", active)
 	}
 }

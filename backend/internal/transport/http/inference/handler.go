@@ -82,6 +82,9 @@ func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBo
 	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes, publicAPIBaseURL: baseURL}
 }
 
+// 请求体限额由入口中间件统一执行(server.go 全局 MaxBytesReader,同限额);
+// 各 handler 此前再包一层内层 MaxBytesReader 是死重——内层永远先触发且不
+// 增加保护,只多一层 Read 间接与每请求一次分配,已全部移除。
 // SetPublicAPIBaseURLResolver makes video content URLs follow hot-updated runtime settings.
 // Set it before Register; request handling only reads the resolver.
 func (h *Handler) SetPublicAPIBaseURLResolver(resolve func() string) *Handler {
@@ -304,12 +307,11 @@ func (h *Handler) compactResponse(c *gin.Context) {
 }
 
 func (h *Handler) createChatCompletion(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "Chat Completions only supports application/json")
 		return
 	}
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := readRequestBody(c, h.maxBodyBytes)
 	if err != nil {
 		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "请求体超过限制")
 		return
@@ -353,7 +355,6 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 }
 
 func (h *Handler) createMessage(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeAnthropicError(c, http.StatusUnsupportedMediaType, "invalid_request_error", "Messages only supports application/json")
 		return
@@ -362,7 +363,7 @@ func (h *Handler) createMessage(c *gin.Context) {
 		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "anthropic-version header is required")
 		return
 	}
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := readRequestBody(c, h.maxBodyBytes)
 	if err != nil {
 		writeAnthropicError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds the configured limit")
 		return
@@ -399,7 +400,6 @@ func (h *Handler) createMessage(c *gin.Context) {
 }
 
 func (h *Handler) generateImage(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "图片生成仅支持 application/json")
 		return
@@ -610,7 +610,6 @@ func writeMediaBody(c *gin.Context, source io.Reader, contentType string, status
 }
 
 func (h *Handler) editImage(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "图片编辑仅支持 application/json")
 		return
@@ -743,7 +742,6 @@ const (
 )
 
 func (h *Handler) handleVideoCreate(c *gin.Context, operation, label string) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", label+"仅支持 application/json")
 		return
@@ -1148,12 +1146,11 @@ func officialVideoErrorCode(value string) string {
 }
 
 func (h *Handler) handleCreate(c *gin.Context, compact bool) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "Responses only supports application/json")
 		return
 	}
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := readRequestBody(c, h.maxBodyBytes)
 	if err != nil {
 		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "请求体超过限制")
 		return
@@ -1201,6 +1198,26 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		return
 	}
 	h.writeResponsesResult(c, result, request.Stream && !compact, request.Model)
+}
+
+// readRequestBody 读取完整请求体。ContentLength 已知时按声明值预分配——
+// io.ReadAll 的 512B 起步倍增在 1MB 体上要 ~12 次扩容拷贝(峰值瞬态
+// ~2×);推理请求体必读完整,预分配是纯增益。声明值超过入口限额时
+// 只按限额分配(超限读取会由 MaxBytesReader 以错误终止,大预分配纯属
+// 浪费);ContentLength 未知(chunked)回退 ReadAll。
+func readRequestBody(c *gin.Context, limit int64) ([]byte, error) {
+	if c.Request == nil || c.Request.Body == nil || c.Request.ContentLength <= 0 {
+		return io.ReadAll(c.Request.Body)
+	}
+	size := c.Request.ContentLength
+	if limit > 0 && size > limit+1 {
+		size = limit + 1
+	}
+	buffer := bytes.NewBuffer(make([]byte, 0, int(size)))
+	if _, err := io.Copy(buffer, c.Request.Body); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }
 
 func isJSONRequest(c *gin.Context) bool {
