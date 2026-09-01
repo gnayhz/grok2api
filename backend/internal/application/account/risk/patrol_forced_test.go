@@ -9,7 +9,7 @@ import (
 
 // TestPatrolTickForcedRunsDespiteDisabledGuard：管理端"立即巡检"按钮的后端入口
 // PatrolTickForced 绕过 Enabled 门（归因整体停用时运维仍可手动复测身份），
-// 且 verdict 的 Trigger 记 manual 而非 patrol——此前 0% 覆盖。
+// 且 verdict 的 Trigger 仍记 patrol（manual 留给 AttributeNowWithTrigger）。
 func TestPatrolTickForcedRunsDespiteDisabledGuard(t *testing.T) {
 	accounts := newFakeAccounts()
 	accounts.token[90] = "sso-token"

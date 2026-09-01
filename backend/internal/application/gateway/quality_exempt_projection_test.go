@@ -9,10 +9,8 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 )
 
-// TestExemptReasonMatchesBooleanProjection 锁定 qualityHoldExemptReason 与
-// shouldHoldQualityStream 的一致性契约：后者是前者的布尔投影，二者必须
-// 同步演进（源注释如此约定，这里把它变成机械保证——任何只改了一侧的
-// 豁免路径都会立刻在此爆掉）。
+// TestExemptReasonMatchesBooleanProjection 锁定 shouldHoldQualityStream
+// 是 qualityHoldExemptReason 的布尔投影：hold 当且仅当 reason 为空。
 func TestExemptReasonMatchesBooleanProjection(t *testing.T) {
 	t.Parallel()
 	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 2}

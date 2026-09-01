@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// BenchmarkQualityLivenessSchedule：制度表在扣留点的每请求成本（两次 body
-// 解析：tools 与 effort 各一次）。对照请求本身的秒级时延评估是否值得合并。
+// BenchmarkQualityLivenessSchedule：制度表在扣留点的每请求成本（一次
+// Unmarshal 同时取 tools 与 effort）。对照请求本身的秒级时延。
 func BenchmarkQualityLivenessSchedule(b *testing.B) {
 	small := []byte(`{"model":"grok-4.6","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"low"}}`)
 	var bigBuilder strings.Builder

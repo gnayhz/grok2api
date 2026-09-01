@@ -101,7 +101,6 @@ func TestConvertedEncryptedThinkingNotEvidence(t *testing.T) {
 	content := strings.Repeat("word ", 40)
 	chat := qualityScanState{protocol: qualityProtocolChat}
 	observeQualityChunk(&chat, []byte(sse(
-		": grok2api-reasoning-start",
 		`data: {"choices":[{"delta":{"reasoning_content":"先想一步"}}]}`,
 	)))
 	if v := classifyQualityHold(chat.signals()); v != QualityDeliver {

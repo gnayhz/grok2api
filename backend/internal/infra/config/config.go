@@ -283,9 +283,8 @@ type RequestRetryConfig struct {
 	EvidenceTimeout Duration `yaml:"evidenceTimeout"`
 	// CreatedTimeout 是流式请求的首事件截止：连任何 SSE data 事件（实践中
 	// 即 response.created / 首 chunk / message_start）都未到达时，中止该次
-	// 上游尝试并重试（0=默认 5s）。直连复测证实排队延迟在上游时钟内：
-	// clean 首 created 0.8-2.2s（与提示词复杂度无关），降智 68-125s——
-	// 5s 截止有 2.3 倍安全边际，比证据截止更早。
+	// 上游尝试并重试（0=默认 5s）。仅当 CreatedTimeout 短于 EvidenceTimeout
+	// 时比证据截止更早；默认 5s>3.5s 时空流先走证据臂。
 	CreatedTimeout Duration `yaml:"createdTimeout"`
 	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 15m），独立于
 	// missing-thinking 的 AccountCooldown；上下限与 AccountCooldown 相同。

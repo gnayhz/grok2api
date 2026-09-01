@@ -20,10 +20,8 @@ import (
 
 type subscriptionSyncRepositoryStub struct {
 	OperationsRepository
-	mu               sync.Mutex
-	nodes            map[uint64][]domain.Node
-	syncedPool       uint64
-	syncedPoolSource uint64
+	mu    sync.Mutex
+	nodes map[uint64][]domain.Node
 }
 
 func (r *subscriptionSyncRepositoryStub) UpsertEgressNodesFromSource(_ context.Context, sourceID uint64, nodes []domain.Node) (int, error) {

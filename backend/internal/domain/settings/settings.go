@@ -80,7 +80,7 @@ type RequestRetryConfig struct {
 	CreatedTimeout      time.Duration
 	IdleAccountCooldown time.Duration
 	// GuardedModels 是守卫介入的模型白名单（空=全部推理模型）。yaml 级
-	// 配置，不在管理端设置面内；settings 往返必须保持该字段不丢。
+	// 配置，不在管理端设置面内；apply 忽略持久化 overlay，以文件基线为准。
 	GuardedModels []string
 }
 

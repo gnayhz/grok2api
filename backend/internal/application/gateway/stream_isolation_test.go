@@ -26,8 +26,7 @@ func TestConcurrentPeekStreamsKeepReplayIsolated(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			marker := fmt.Sprintf("iso-%04d-%s", idx, strings.Repeat("word ", 10))
-			body := ": grok2api-reasoning-start\n\n" +
-				"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n" +
+			body := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n" +
 				"data: {\"choices\":[{\"delta\":{\"content\":\"" + marker + "\"}}]}\n\n" +
 				"data: {\"usage\":{\"completion_tokens\":30,\"completion_tokens_details\":{\"reasoning_tokens\":12}}}\n\n" +
 				"data: [DONE]\n\n"

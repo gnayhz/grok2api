@@ -1,22 +1,9 @@
 package egress
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
-
-// pendingTimerRegistry 观测 requeueAfter 的 timer 是否仍会把节点送回队列。
-type pendingTimerProbe struct {
-	mu    sync.Mutex
-	fired []uint64
-}
-
-func (p *pendingTimerProbe) record(id uint64) {
-	p.mu.Lock()
-	p.fired = append(p.fired, id)
-	p.mu.Unlock()
-}
 
 func queueLength(s *Service) int {
 	if s == nil || s.rotation == nil {

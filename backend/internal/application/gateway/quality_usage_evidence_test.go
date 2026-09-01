@@ -13,11 +13,8 @@ import (
 // event. The usage claim must never flip the verdict to deliver: these
 // regression fixtures mirror streams observed in production.
 
-// bFormWithMarkerChat mirrors the REAL production B-form shape: the converter
-// emits the reasoning-start comment as soon as the upstream opens the reasoning
-// item (response.output_item.added), but the degraded stream never sends any
-// reasoning text — only the content burst and the usage claim follow. The
-// marker must not flip hasThinking.
+// bFormWithMarkerChat：降智流无思考增量，仅有历史私有注释 + 正文 + usage
+// 声称。注释不得把 hasThinking 置位（注入链路已删，本夹具锁伪造/残留注释）。
 func bFormWithMarkerChat() string {
 	return `
 : grok2api-reasoning-start
@@ -116,13 +113,12 @@ func TestPeekQualityStreamWithholdsDegradedBurst(t *testing.T) {
 	}
 }
 
-// A-form sanity: the SSE reasoning-start marker plus a reasoning delta still
-// delivers immediately, including when coalesced with usage.
+// A-form sanity: a reasoning delta still delivers immediately, including
+// when coalesced with usage.
 func TestThinkingMarkerStillDeliversWhenCoalesced(t *testing.T) {
 	t.Parallel()
 	state := qualityScanState{protocol: qualityProtocolChat}
 	observeQualityChunk(&state, []byte(strings.Join([]string{
-		": grok2api-reasoning-start",
 		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan the answer\"}}]}",
 		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer is 391\"}}]}",
 		"data: {\"usage\":{\"completion_tokens\":40,\"completion_tokens_details\":{\"reasoning_tokens\":20}}}",
