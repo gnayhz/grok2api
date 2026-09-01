@@ -261,6 +261,13 @@ func (m *Manager) AcquirePoolRouted(ctx context.Context, scope domain.Scope, aff
 			}
 		}
 		selected := m.selectPoolNode(pool, candidates, members, affinity)
+		// 会话钉扎同样作用于池成员选择,但旋转策略除外:旋转是显式声明
+		// 「同节点连续请求出口 IP 不同」的语义,会话保缓存与它互斥,
+		// 尊重配置意图。affinity/sticky/random 下,会话钉住首择成员,
+		// 成员集波动只影响新会话(random 的分布性按会话粒度保留)。
+		if session := buildSessionFromContext(ctx); session != "" && pool.Strategy.Normalized() != domain.PoolStrategyRotation {
+			selected = m.pinSessionNode(ctx, session, candidates, selected)
+		}
 		RecordPoolSelection(pool.ID, selected.ID)
 		lease, _, err := m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
 		if err != nil {

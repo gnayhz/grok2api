@@ -29,15 +29,33 @@ func newBuildEnvironmentClient(responseHeaderTimeout time.Duration) (*http.Clien
 	return newBuildClientWithOptions("", responseHeaderTimeout, true)
 }
 
+// newSessionBuildClient 为单个会话构造「单连接钉扎」的 Build 客户端:
+// MaxConnsPerHost=1 强制整个会话复用同一条上游连接(HTTP/2 多路复用承接
+// 并发流)。上游提示缓存按「连接→后端实例」亲和复用,共享连接池里任何
+// 并行调用多开出的第二条连接都会让后续请求在两条连接间轮换,各自的前缀
+// 缓存互相缺失,表现为会话中途连续冷启动。会话独占一条连接后,轮换维度
+// 被彻底消除,连接只会在自身死亡(上游关闭/健康探测失败)时更换。
+func newSessionBuildClient(proxyURL string, responseHeaderTimeout time.Duration, onDial func()) (*http.Client, error) {
+	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, false, true, onDial)
+}
+
 func newBuildClientWithOptions(proxyURL string, responseHeaderTimeout time.Duration, environmentProxy bool) (*http.Client, error) {
+	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, environmentProxy, false, nil)
+}
+
+func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Duration, environmentProxy, sessionPinned bool, onDial func()) (*http.Client, error) {
+	maxConnsPerHost, maxIdleConnsPerHost := 256, 128
+	if sessionPinned {
+		maxConnsPerHost, maxIdleConnsPerHost = 1, 1
+	}
 	direct := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		Proxy:                 nil,
 		DialContext:           direct.DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          256,
-		MaxIdleConnsPerHost:   128,
-		MaxConnsPerHost:       256,
+		MaxIdleConns:          maxConnsPerHost,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		MaxConnsPerHost:       maxConnsPerHost,
 		IdleConnTimeout:       buildtransport.IdleConnTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: responseHeaderTimeout,
@@ -72,6 +90,15 @@ func newBuildClientWithOptions(proxyURL string, responseHeaderTimeout time.Durat
 	}
 	if _, err := buildtransport.ConfigureHTTP2Health(transport); err != nil {
 		return nil, fmt.Errorf("配置 Grok Build HTTP/2 健康探测: %w", err)
+	}
+	// 会话客户端的拨号观测:每次向上游代理新建 TCP 连接时回调一次,
+	// 用于从日志侧核对「同一会话是否真的全程复用一条连接」。
+	if sessionPinned && onDial != nil {
+		inner := transport.DialContext
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			onDial()
+			return inner(ctx, network, address)
+		}
 	}
 	return &http.Client{
 		Transport: transport,

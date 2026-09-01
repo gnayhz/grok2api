@@ -65,22 +65,39 @@ const failureProbeWaitTimeout = 5 * time.Second
 const clientCreationRetryLimit = 3
 const maxClientVersionEntries = 4096
 
+// 会话级钉扎的容量与生命周期。会话钉扎表与会话客户端缓存是纯进程内
+// 状态(单副本部署下即全量);容量上限防御长生命周期进程的状态增长,
+// 空闲超时让停止对话的会话自然让出资源。
+const maxSessionPinnedNodes = 8192
+const maxSessionCachedClients = 2048
+const sessionPinIdleTTL = 2 * time.Hour
+const sessionPinSweepInterval = time.Minute
+
+// sessionNodePin 记录一个会话当前钉住的出口节点(sessionPinMu 保护)。
+type sessionNodePin struct {
+	nodeID   uint64
+	lastUsed time.Time
+}
+
 var errNodeSnapshotInvalidated = errors.New("egress node snapshot invalidated")
 var errClientCacheInvalidated = errors.New("egress client cache invalidated")
 var errAccountConnectionIsolationDisabled = errors.New("egress account connection isolation disabled")
 
 type Lease struct {
-	NodeID           uint64
-	NodeName         string
-	Scope            domain.Scope
-	ProxyURL         string
-	UserAgent        string
-	CFCookies        string
-	client           requestClient
-	browser          *browserClient
-	sticky           bool
-	proxyPool        bool
-	freshTunnel      bool
+	NodeID      uint64
+	NodeName    string
+	Scope       domain.Scope
+	ProxyURL    string
+	UserAgent   string
+	CFCookies   string
+	client      requestClient
+	browser     *browserClient
+	sticky      bool
+	proxyPool   bool
+	freshTunnel bool
+	// sessionKey 非空表示该租约服务一次带会话语义的 Build 调用:旋转池
+	// 语义为其让位(保连接即保缓存),见 doRequest。
+	sessionKey       string
 	clearanceKey     string
 	clearanceManager *Manager
 	release          func()
@@ -118,7 +135,7 @@ func (l *Lease) doRequest(request *http.Request, invalidateForbidden bool) (*htt
 	// otherwise independent requests to one exit and defeat proxy-pool
 	// rotation. Proxy-pool mode is explicit, so trade the extra handshake for a
 	// fresh tunnel without changing fixed-proxy, direct, Web, or Console paths.
-	if l.Scope == domain.ScopeBuild && l.freshTunnel {
+	if l.Scope == domain.ScopeBuild && l.freshTunnel && l.sessionKey == "" {
 		request.Close = true
 	}
 	response, err := l.do(request)
@@ -220,6 +237,11 @@ type Manager struct {
 	poolFallbacks   map[uint64]cachedPoolFallback
 	rotationMu      sync.Mutex
 	rotationCursors map[uint64]uint64
+	// sessionPinMu 保护 sessionPins:会话→出口节点钉扎表,以及节流后的
+	// 过期清扫时间戳。
+	sessionPinMu    sync.Mutex
+	sessionPins     map[string]sessionNodePin
+	sessionPinSweep time.Time
 	// rotationPersists 去抖游标持久化:last 记录最近成功写入 DB 的游标,
 	// writing/pending 把并发推进合并为一次异步写,避免选路热路径被
 	// 同步 DB 写阻塞。
@@ -290,6 +312,11 @@ type clientCacheKey struct {
 	scope           domain.Scope
 	fingerprint     string
 	accountIdentity string
+	// sessionKey 非空 = 会话独占客户端(单连接钉扎)。此时刻意不按
+	// accountIdentity 分桶:上游缓存跟连接走而不是跟账号走(实测同连接
+	// 跨账号依然热),会话中途换号时保住连接池就是保住整段缓存;
+	// cookies 本就按请求头携带,连接复用无串号风险。
+	sessionKey string
 }
 
 type cachedNodeSnapshot struct {
@@ -324,6 +351,7 @@ func NewManager(repository repository.EgressRepository, cipher security.Cryptor)
 		poolFallbacks:      make(map[uint64]cachedPoolFallback),
 		rotationCursors:    make(map[uint64]uint64),
 		rotationPersists:   make(map[uint64]*rotationPersistState),
+		sessionPins:        make(map[string]sessionNodePin),
 		softBase:           5 * time.Minute, softMax: time.Hour,
 		failureProbes:  make(map[uint64]failureProbeState),
 		newBuildClient: newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
@@ -493,6 +521,11 @@ func (m *Manager) UpdateAccountIsolatedConnections(enabled bool) {
 	m.accountIsolated.Store(enabled)
 	stale := make([]requestClient, 0, len(m.clients))
 	for key, cached := range m.clients {
+		// 会话客户端与账号分桶无关(单连接钉扎,缓存跟连接走),翻转
+		// 开关不需要也不应该打断进行中会话的连接。
+		if key.sessionKey != "" {
+			continue
+		}
 		stale = append(stale, m.evictClientLocked(key, cached))
 	}
 	m.invalidateAllClientVersionsLocked()
@@ -1141,6 +1174,11 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	}
 	sort.SliceStable(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	selected := m.selectNode(available, affinity)
+	// 会话钉扎优先于账号哈希:可用集的任何增减都会改变账号哈希落点,
+	// 对进行中的会话等于无声换出口。钉住后可用集波动只影响新会话。
+	if session := buildSessionFromContext(ctx); session != "" {
+		selected = m.pinSessionNode(ctx, session, available, selected)
+	}
 	return m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
 }
 
@@ -1254,6 +1292,11 @@ func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (doma
 type clientOptions struct {
 	buildEnvironmentProxy   bool
 	requireAccountIsolation bool
+	// sessionKey 由 leaseForNodeWithOptions 从请求上下文提取(Build 作用域
+	// 专属),让同一会话拿到独占的连接池。
+	sessionKey string
+	// onSessionDial 仅诊断用:会话客户端每次新建上游连接时回调。
+	onSessionDial func()
 }
 
 func (m *Manager) leaseForNode(ctx context.Context, scope domain.Scope, affinity, encryptedCredentialCookies string, managedClearance bool, selected domain.Node) (*Lease, bool, error) {
@@ -1336,9 +1379,22 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 	if scope != domain.ScopeConsoleAsset {
 		accountIdentity = isolationAccountIdentity(ctx, scope, affinity)
 	}
+	// Build 作用域且调用带会话语义时,把会话摘要并入客户端选项:clientFor
+	// 会为该会话返回独占的单连接客户端,而不是(节点,账号)级共享池。
+	if scope == domain.ScopeBuild {
+		options.sessionKey = buildSessionFromContext(ctx)
+	}
+	if options.sessionKey != "" {
+		options.onSessionDial = func() {
+			m.log().Info("egress_session_conn_dial", "session", options.sessionKey, "node", selected.ID)
+		}
+	}
 	client, err := m.clientForWithOptions(selected.ID, scope, proxyURL, userAgent, cookies, sticky, accountIdentity, options)
 	if err != nil {
 		return nil, false, err
+	}
+	if options.sessionKey != "" {
+		m.log().Info("egress_session_lease", "session", options.sessionKey, "node", selected.ID)
 	}
 	m.incrementInflight(selected.ID)
 	// Pool 的文档语义是“旋转出口”（同节点连续请求出口 IP 不同）。只看 ProxyPool
@@ -1347,7 +1403,7 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 	// 与节点级降智标记等池语义随之作用在固定脏 IP 上。旋转开启才成立。
 	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != "", Pool: selected.ProxyPool && selected.RotationEnabled})
 	var once sync.Once
-	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, proxyPool: proxyPool, freshTunnel: freshTunnel, clearanceKey: clearanceKey, clearanceManager: m, release: func() {
+	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, proxyPool: proxyPool, freshTunnel: freshTunnel, sessionKey: options.sessionKey, clearanceKey: clearanceKey, clearanceManager: m, release: func() {
 		once.Do(func() {
 			m.decrementInflight(selected.ID)
 		})
@@ -1577,6 +1633,67 @@ func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
 	return best
 }
 
+// pinSessionNode 把会话钉在既有出口节点上,返回实际应使用的节点。
+// 上游提示缓存按「连接→后端实例」亲和复用,而自动调度按账号哈希选
+// 节点,可用集的任何增减(冷却/恢复/上下线/排除)都会改变哈希取模
+// 的落点——节点一换,代理与连接池整体更换,进行中的会话缓存立即
+// 清零。会话级钉扎让可用集波动只影响新会话;钉住的节点失效时立即
+// 重钉到本次常规选择(已考虑排除与冷却),代价是该会话下一轮冷一次。
+func (m *Manager) pinSessionNode(ctx context.Context, session string, available []domain.Node, fallback domain.Node) domain.Node {
+	now := time.Now().UTC()
+	m.sessionPinMu.Lock()
+	defer m.sessionPinMu.Unlock()
+	if m.sessionPins == nil {
+		m.sessionPins = make(map[string]sessionNodePin)
+	}
+	pinned, had := m.sessionPins[session]
+	if had {
+		for _, node := range available {
+			if node.ID == pinned.nodeID {
+				m.sessionPins[session] = sessionNodePin{nodeID: pinned.nodeID, lastUsed: now}
+				m.sweepSessionPinsLocked(now)
+				return node
+			}
+		}
+	}
+	m.sessionPins[session] = sessionNodePin{nodeID: fallback.ID, lastUsed: now}
+	m.sweepSessionPinsLocked(now)
+	if had && pinned.nodeID != fallback.ID {
+		m.log().Info("egress_session_node_repinned", "session", session, "from_node", pinned.nodeID, "to_node", fallback.ID)
+	} else if !had {
+		m.log().Info("egress_session_node_pinned", "session", session, "node", fallback.ID)
+	}
+	return fallback
+}
+
+// sweepSessionPinsLocked 清理过期钉扎并限制表大小。节流执行:每次
+// pinSessionNode 都全量扫描在会话数大时会放大请求热路径成本。
+func (m *Manager) sweepSessionPinsLocked(now time.Time) {
+	if !m.sessionPinSweep.IsZero() && now.Sub(m.sessionPinSweep) < sessionPinSweepInterval {
+		return
+	}
+	m.sessionPinSweep = now
+	for key, pin := range m.sessionPins {
+		if now.Sub(pin.lastUsed) >= sessionPinIdleTTL {
+			delete(m.sessionPins, key)
+		}
+	}
+	if len(m.sessionPins) <= maxSessionPinnedNodes {
+		return
+	}
+	type pinEntry struct {
+		key      string
+		lastUsed time.Time
+	}
+	entries := make([]pinEntry, 0, len(m.sessionPins))
+	for key, pin := range m.sessionPins {
+		entries = append(entries, pinEntry{key: key, lastUsed: pin.lastUsed})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].lastUsed.Before(entries[j].lastUsed) })
+	for _, entry := range entries[:len(entries)-maxSessionPinnedNodes] {
+		delete(m.sessionPins, entry.key)
+	}
+}
 func (m *Manager) inflightCount(nodeID uint64) int64 {
 	if value, ok := m.inflight.Load(nodeID); ok {
 		return value.(*atomic.Int64).Load()
@@ -1589,6 +1706,12 @@ func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, 
 }
 
 func (m *Manager) clientForWithOptions(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool, accountIdentity string, options clientOptions) (cachedClient, error) {
+	// 会话摘要只对 Build 作用域生效;其余作用域即使误传也按无会话处理,
+	// 保持 Web/Console 的池语义完全不变。
+	sessionKey := ""
+	if scope == domain.ScopeBuild {
+		sessionKey = strings.TrimSpace(options.sessionKey)
+	}
 	clientKind := "browser"
 	buildHeaderTimeout := time.Duration(0)
 	if scope == domain.ScopeBuild {
@@ -1600,6 +1723,11 @@ func (m *Manager) clientForWithOptions(id uint64, scope domain.Scope, proxyURL, 
 		clientKind += "\x00" + strconv.FormatInt(int64(buildHeaderTimeout), 10)
 		if options.buildEnvironmentProxy {
 			clientKind += "\x00environment-proxy"
+		}
+		if sessionKey != "" {
+			// 单连接钉扎形态:传输层并发/空闲旋钮与共享池不同,必须进
+			// 指纹,否则同节点同账号下两种形态会互相命中对方的缓存条目。
+			clientKind += "\x00session-pinned"
 		}
 	}
 	// cookies 刻意不进指纹:客户端构造不接收 cookies(按请求头携带、无 jar,
@@ -1617,14 +1745,17 @@ func (m *Manager) clientForWithOptions(id uint64, scope domain.Scope, proxyURL, 
 			return cachedClient{}, errAccountConnectionIsolationDisabled
 		}
 		keyAccountIdentity := ""
-		if isolated {
+		// 会话客户端刻意不按账号分桶:换号不换连接(上游缓存跟连接走,
+		// 实测同连接跨账号依然热),会话中途换号时保住连接池就是保住
+		// 整段提示缓存;cookies 本就按请求头携带,无串号风险。
+		if isolated && sessionKey == "" {
 			keyAccountIdentity = strings.TrimSpace(accountIdentity)
 			if keyAccountIdentity == "" {
 				keyAccountIdentity = "shared"
 			}
 		}
-		key := clientCacheKey{nodeID: id, scope: cacheScope, fingerprint: fingerprint, accountIdentity: keyAccountIdentity}
-		loadKey := strconv.FormatUint(key.nodeID, 10) + "\x00" + string(key.scope) + "\x00" + key.fingerprint + "\x00" + key.accountIdentity
+		key := clientCacheKey{nodeID: id, scope: cacheScope, fingerprint: fingerprint, accountIdentity: keyAccountIdentity, sessionKey: sessionKey}
+		loadKey := strconv.FormatUint(key.nodeID, 10) + "\x00" + string(key.scope) + "\x00" + key.fingerprint + "\x00" + key.accountIdentity + "\x00" + key.sessionKey
 		now := time.Now().UTC()
 		m.clientMu.RLock()
 		cached, cachedOK := m.clients[key]
@@ -1665,7 +1796,9 @@ func (m *Manager) createAndCacheClient(key clientCacheKey, id uint64, scope doma
 	now := time.Now().UTC()
 	m.clientMu.Lock()
 	stale := m.cleanupClientCacheLocked(now)
-	if (key.accountIdentity != "") != m.accountIsolated.Load() {
+	// 会话键不参与隔离翻转校验:它的账号桶永远是空,且语义上就要跨账号
+	// 存活(连接与账号解耦),开关联动失效对它没有意义。
+	if key.sessionKey == "" && (key.accountIdentity != "") != m.accountIsolated.Load() {
 		m.clientMu.Unlock()
 		closeRequestClients(stale)
 		return cachedClient{}, errClientCacheInvalidated
@@ -1689,7 +1822,7 @@ func (m *Manager) createAndCacheClient(key clientCacheKey, id uint64, scope doma
 
 	m.clientMu.Lock()
 	stale = m.cleanupClientCacheLocked(value.lastUsed)
-	if (key.accountIdentity != "") != m.accountIsolated.Load() {
+	if key.sessionKey == "" && (key.accountIdentity != "") != m.accountIsolated.Load() {
 		m.clientMu.Unlock()
 		closeRequestClients(append(stale, value.client))
 		return cachedClient{}, errClientCacheInvalidated
@@ -1706,9 +1839,15 @@ func (m *Manager) createAndCacheClient(key clientCacheKey, id uint64, scope doma
 		closeRequestClients(append(stale, value.client))
 		return cachedClient{}, errClientCacheInvalidated
 	}
-	if id != 0 && !sticky {
+	// 会话客户端的双向豁免:既不因自己出现而逐出共享池(逐出会关掉
+	// 活跃账号池的空闲连接,账号下所有会话瞬间全体冷启动),也不被
+	// 共享池的节点切换清理逻辑回收——它只按自身的空闲 TTL/容量退场。
+	if id != 0 && !sticky && key.sessionKey == "" {
 		for previousKey, previous := range m.clients {
 			if previousKey.nodeID != id || previousKey.scope != key.scope {
+				continue
+			}
+			if previousKey.sessionKey != "" {
 				continue
 			}
 			// Keep other accounts' pools when isolation is on.
@@ -1727,6 +1866,13 @@ func (m *Manager) createAndCacheClient(key clientCacheKey, id uint64, scope doma
 
 func (m *Manager) buildCachedClient(scope domain.Scope, proxyURL, userAgent string, buildHeaderTimeout time.Duration, options clientOptions) (cachedClient, error) {
 	if scope == domain.ScopeBuild {
+		if options.sessionKey != "" {
+			client, err := newSessionBuildClient(proxyURL, buildHeaderTimeout, options.onSessionDial)
+			if err != nil {
+				return cachedClient{}, err
+			}
+			return cachedClient{client: client}, nil
+		}
 		if options.buildEnvironmentProxy {
 			factory := m.newBuildEnvClient
 			if factory == nil {
@@ -1784,13 +1930,33 @@ func (m *Manager) cleanupClientCacheLocked(now time.Time) []requestClient {
 	return stale
 }
 
+// ensureClientCacheCapacityLocked 按两类条目分账控制容量:共享池(节点/
+// 账号级)与会话客户端(每会话一条)。若混用一个总上限,高峰期的会话
+// 条目会把共享池按 LRU 挤出,关掉活跃账号池的空闲连接,让账号下所有
+// 会话同时冷启动;分开计账后各自只在自己的预算内淘汰最久未用者。
 func (m *Manager) ensureClientCacheCapacityLocked() []requestClient {
 	var stale []requestClient
-	for len(m.clients) >= maxCachedClients {
+	stale = append(stale, m.evictOldestClientsLocked(func(key clientCacheKey) bool { return key.sessionKey == "" }, maxCachedClients)...)
+	stale = append(stale, m.evictOldestClientsLocked(func(key clientCacheKey) bool { return key.sessionKey != "" }, maxSessionCachedClients)...)
+	return stale
+}
+
+func (m *Manager) evictOldestClientsLocked(match func(clientCacheKey) bool, limit int) []requestClient {
+	count := 0
+	for key := range m.clients {
+		if match(key) {
+			count++
+		}
+	}
+	var stale []requestClient
+	for count >= limit {
 		var oldestKey clientCacheKey
 		var oldest cachedClient
 		found := false
 		for key, value := range m.clients {
+			if !match(key) {
+				continue
+			}
 			if !found || value.lastUsed.Before(oldest.lastUsed) {
 				oldestKey, oldest, found = key, value, true
 			}
@@ -1799,6 +1965,7 @@ func (m *Manager) ensureClientCacheCapacityLocked() []requestClient {
 			break
 		}
 		stale = append(stale, m.evictClientLocked(oldestKey, oldest))
+		count--
 	}
 	return stale
 }

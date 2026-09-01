@@ -2,6 +2,8 @@ package egress
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,6 +11,11 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 )
+
+// buildSessionContextKey 携带会话粘性标识。与账号亲和不同,会话标识的
+// 生命周期等于一次对话:出口层用它做「会话→出口节点」与「会话→专用连接」
+// 双重钉扎,保住按「连接→后端实例」亲和复用的上游提示缓存。
+type buildSessionContextKey struct{}
 
 // Selection is the egress snapshot actually selected for an upstream request. It contains only metadata safe for audit
 // and excludes proxy URLs, credentials, User-Agent, and Cookies.
@@ -144,6 +151,31 @@ func accountFromContext(ctx context.Context) string {
 // AccountFromContext exposes the non-sensitive sticky account identity to
 // provider transports while keeping the context key private.
 func AccountFromContext(ctx context.Context) string { return accountFromContext(ctx) }
+
+// WithBuildSession 把网关侧会话标识(提示缓存键)以不可逆摘要传入出口层。
+// 原始会话键可能含用户数据,这里只保留加盐 sha256 的前 12 字节十六进制,
+// 摘要不进入上游请求头或审计,仅存在于进程内的钉扎表与日志字段。
+func WithBuildSession(ctx context.Context, sessionKey string) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	trimmed := strings.TrimSpace(sessionKey)
+	if trimmed == "" {
+		return ctx
+	}
+	digest := sha256.Sum256([]byte("build-session:" + trimmed))
+	return context.WithValue(ctx, buildSessionContextKey{}, hex.EncodeToString(digest[:12]))
+}
+
+// buildSessionFromContext 返回会话摘要;空串表示该调用不参与会话钉扎
+// (模型同步/计费/探针等无会话语义的调用保持原行为)。
+func buildSessionFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(buildSessionContextKey{}).(string)
+	return value
+}
 
 // WithTrace creates or reuses a concurrency-safe egress selection trace for one gateway request.
 func WithTrace(ctx context.Context) (context.Context, *Trace) {

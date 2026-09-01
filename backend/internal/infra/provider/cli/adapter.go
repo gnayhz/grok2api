@@ -615,13 +615,24 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 	// 退化为按后端实例路由,中途换连接即冷启动。这里按(账号,会话)维护
 	// 单调递增计数,只补齐缺失值,客户端显式提供的轮次原样优先。
 	if request.GrokTurnIndex == "" && request.PromptCacheKey != "" && request.Credential.ID != 0 {
-		request.GrokTurnIndex = a.nextGrokTurnIndex(fmt.Sprintf("%d:%s", request.Credential.ID, request.PromptCacheKey))
+		// 轮次号按会话(而非账号+会话)单调递增:上游以「会话+轮次」定位
+		// 缓存检查点,网关侧换号是调度内部行为,若随账号重置轮次号,同一
+		// 会话会回跳到小轮次、检查点失配,表现为整段缓存丢失。会话键本身
+		// 已含足够熵,且生命周期与对话一致。
+		request.GrokTurnIndex = a.nextGrokTurnIndex(request.PromptCacheKey)
 	}
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
 	}
 	requestCtx := infraegress.WithCredential(ctx, request.Credential)
+	// 会话标识进入出口层:触发「会话→出口节点」与「会话→专用连接」双重
+	// 钉扎。上游提示缓存按连接亲和复用,出口节点漂移或共享连接池里的
+	// 连接轮换都会让进行中的会话缓存清零(表现为中途突然只剩公共头部
+	// 命中、耗时陡增)。
+	if request.PromptCacheKey != "" {
+		requestCtx = infraegress.WithBuildSession(requestCtx, request.PromptCacheKey)
+	}
 	plane := "build"
 	if fallback := a.fallbackBaseURL(); fallback != "" && strings.EqualFold(strings.TrimRight(base, "/"), fallback) {
 		plane = "xai"
