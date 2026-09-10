@@ -179,6 +179,9 @@ bootstrapAdmin:
 	if cfg.Database.SQLite.Path != expectedDatabasePath {
 		t.Fatalf("database path = %q, want %q", cfg.Database.SQLite.Path, expectedDatabasePath)
 	}
+	if cfg.Audit.JournalDirectory != filepath.Join(dir, "data", "audit") || cfg.Audit.JournalMaxBytes != 512<<20 {
+		t.Fatalf("journal bootstrap paths/capacity = %+v", cfg.Audit)
+	}
 	expectedMediaPath := filepath.Join(dir, "data", "media")
 	if cfg.Media.Local.Path != expectedMediaPath {
 		t.Fatalf("media path = %q, want %q", cfg.Media.Local.Path, expectedMediaPath)
@@ -192,7 +195,7 @@ bootstrapAdmin:
 func TestDefaultRequestRetryContract(t *testing.T) {
 	t.Parallel()
 	got := defaultConfig().RequestRetry
-	if got.Enabled || got.MaxAttempts != 2 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour {
+	if got.Enabled || got.MaxAttempts != 2 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 2*time.Minute {
 		t.Fatalf("requestRetry defaults = %#v", got)
 	}
 	// 零延迟拦截后的全局请求预算契约（蓝图 §3.2/§3.1 规则 4）。
@@ -201,9 +204,6 @@ func TestDefaultRequestRetryContract(t *testing.T) {
 	}
 	if got.CreatedTimeout.Value() != 5*time.Second {
 		t.Fatalf("createdTimeout default = %s, want 5s", got.CreatedTimeout)
-	}
-	if !got.SameAccountRetry {
-		t.Fatal("sameAccountRetry default must stay true")
 	}
 	if len(got.GuardedModels) != 0 {
 		t.Fatalf("GuardedModels default = %#v, want empty (all models gated)", got.GuardedModels)
@@ -220,7 +220,8 @@ func TestRequestRetryAccountCooldownBounds(t *testing.T) {
 		{name: "default", value: 0},
 		{name: "minimum", value: time.Minute},
 		{name: "maximum", value: 168 * time.Hour},
-		{name: "below minimum", value: time.Minute - time.Millisecond, wantErr: true},
+		{name: "negative", value: -time.Nanosecond, wantErr: true},
+		{name: "subminute", value: time.Minute - time.Millisecond},
 		{name: "above maximum", value: 168*time.Hour + time.Millisecond, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

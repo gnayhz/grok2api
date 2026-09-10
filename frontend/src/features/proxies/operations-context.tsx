@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, CircleHelp } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -29,26 +29,44 @@ export function EgressOperationsProvider({ children }: { children: ReactNode }) 
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const [draft, setDraft] = useState<EgressOperationsDraft | null>(null);
-	const query = useQuery({ queryKey: ["egress-operations"], queryFn: getEgressOperationsConfig });
+	const query = useQuery({ queryKey: ["egress-operations"], queryFn: ({ signal }) => getEgressOperationsConfig(signal) });
 	const form = draft ?? operationsFormFrom(query.data);
 	const [saving, setSaving] = useState(false);
+	const saveOwner = useRef<AbortController | null>(null);
+	useEffect(() => {
+		const owner = new AbortController();
+		saveOwner.current = owner;
+		return () => owner.abort();
+	}, []);
 
-	async function save(): Promise<boolean> {
+	const save = useCallback(async (): Promise<boolean> => {
+		const owner = saveOwner.current;
+		if (!owner || owner.signal.aborted) return false;
+		const submitted = form;
 		setSaving(true);
 		try {
-			await updateEgressOperationsConfig(form);
-			setDraft(null);
+			await queryClient.cancelQueries({ queryKey: ["egress-operations"], exact: true });
+			const saved = await updateEgressOperationsConfig(submitted, owner.signal);
+			// The response acknowledges this submitted draft. A newer local edit
+			// remains dirty, and an older GET cannot replace the accepted value.
+			await queryClient.cancelQueries({ queryKey: ["egress-operations"], exact: true });
+			if (owner.signal.aborted) return false;
+			queryClient.setQueryData(["egress-operations"], saved);
+			setDraft((current) => current === submitted ? null : current);
 			void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
-			void queryClient.invalidateQueries({ queryKey: ["egress-operations"] });
 			toast.success(t("proxies.routing.saved"));
 			return true;
 		} catch (error) {
-			showError(error);
+			if (!owner.signal.aborted) showError(error);
 			return false;
 		} finally {
 			setSaving(false);
 		}
-	}
+	}, [form, queryClient, t]);
+	const update = useCallback<EgressOperationsValue["update"]>((updater) => {
+		setDraft((current) => updater(current ?? operationsFormFrom(query.data)));
+	}, [query.data]);
+	const refetch = query.refetch;
 
 	const value = useMemo<EgressOperationsValue>(() => ({
 		form,
@@ -56,13 +74,12 @@ export function EgressOperationsProvider({ children }: { children: ReactNode }) 
 		isError: query.isError,
 		errorMessage: query.error instanceof Error ? query.error.message : undefined,
 		isDirty: draft !== null,
-		update: (updater) => setDraft(updater(form)),
+		update,
 		save,
 		savePending: saving,
 		discard: () => setDraft(null),
-		retry: () => void query.refetch(),
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}), [form, draft, saving, query.isPending, query.isError, query.error]);
+		retry: () => void refetch(),
+	}), [form, draft, saving, query.isPending, query.isError, query.error, refetch, save, update]);
 
 	return <EgressOperationsContext.Provider value={value}>{children}</EgressOperationsContext.Provider>;
 }

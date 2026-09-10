@@ -45,8 +45,8 @@ func TestExemptReasonMatchesBooleanProjection(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			reason := qualityHoldExemptReason(test.input, test.ownership, test.route, test.operation, test.cfg)
-			hold := shouldHoldQualityStream(test.input, test.ownership, test.route, test.operation, test.cfg)
+			reason := qualityHoldExemptReason(test.input, test.ownership, test.route, test.operation, test.cfg, nil)
+			hold := shouldHoldQualityStream(test.input, test.ownership, test.route, test.operation, test.cfg, nil)
 			if (reason == "") != hold {
 				t.Fatalf("projection drift: reason=%q hold=%t (reason empty must equal hold)", reason, hold)
 			}

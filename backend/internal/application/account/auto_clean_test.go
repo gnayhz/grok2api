@@ -46,7 +46,8 @@ func TestAutoCleanReauthRespectsMinAgeAndIncludeDisabled(t *testing.T) {
 	})
 	disabledAged.Enabled = false
 	var err error
-	disabledAged, err = repo.Update(ctx, disabledAged)
+	edit, err := repo.UpdateAdministration(ctx, disabledAged.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &disabledAged.Enabled}})
+	disabledAged = edit.Credential
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestMarkReauthRequiredSetsAnchorAndEditDoesNotReset(t *testing.T) {
 		Provider: accountdomain.ProviderBuild, Name: "anchor", SourceKey: "anchor",
 		EncryptedAccessToken: "x", Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
-	if err := service.MarkReauthRequired(ctx, value.ID, "token rejected"); err != nil {
+	if err := service.MarkReauthRequired(ctx, value.CredentialRef(), "token rejected"); err != nil {
 		t.Fatal(err)
 	}
 	marked, err := repo.Get(ctx, value.ID)
@@ -120,7 +121,7 @@ func TestMarkReauthRequiredSetsAnchorAndEditDoesNotReset(t *testing.T) {
 
 	// Ordinary edit must not reset reauth_marked_at.
 	marked.Name = "anchor-renamed"
-	if _, err := repo.Update(ctx, marked); err != nil {
+	if _, err := repo.UpdateAdministration(ctx, marked.ID, repository.AccountAdminPatch{Name: &marked.Name}); err != nil {
 		t.Fatal(err)
 	}
 	afterEdit, err := repo.Get(ctx, value.ID)
@@ -190,7 +191,7 @@ func TestSecondMarkReauthKeepsOriginalAnchor(t *testing.T) {
 		Provider: accountdomain.ProviderBuild, Name: "second-mark", SourceKey: "second-mark",
 		EncryptedAccessToken: "x", Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
-	if err := service.MarkReauthRequired(ctx, value.ID, "first"); err != nil {
+	if err := service.MarkReauthRequired(ctx, value.CredentialRef(), "first"); err != nil {
 		t.Fatal(err)
 	}
 	first, err := repo.Get(ctx, value.ID)
@@ -199,7 +200,7 @@ func TestSecondMarkReauthKeepsOriginalAnchor(t *testing.T) {
 	}
 	anchor := *first.ReauthMarkedAt
 	time.Sleep(5 * time.Millisecond)
-	if err := service.MarkReauthRequired(ctx, value.ID, "second"); err != nil {
+	if err := service.MarkReauthRequired(ctx, value.CredentialRef(), "second"); err != nil {
 		t.Fatal(err)
 	}
 	second, err := repo.Get(ctx, value.ID)

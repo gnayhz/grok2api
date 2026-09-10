@@ -194,10 +194,12 @@ func TestRunWebAccountScriptsRejectsEmptyPlan(t *testing.T) {
 
 func TestWebAccountScriptsRejectConcurrentWorkForTheSameAccount(t *testing.T) {
 	t.Parallel()
+	service, repo, _ := newWebAccountSettingsTestService(t)
+	credential := createWebAccountForScriptTest(t, context.Background(), repo, "serialized")
+	// The operation deadline measures the concurrent scripts, not schema
+	// construction under the full race suite's parallel database fixtures.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	service, repo, _ := newWebAccountSettingsTestService(t)
-	credential := createWebAccountForScriptTest(t, ctx, repo, "serialized")
 	adapter := &blockingWebAccountSettingsAdapter{
 		entered: make(chan struct{}, 2),
 		release: make(chan struct{}),

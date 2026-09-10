@@ -21,6 +21,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
@@ -77,15 +78,11 @@ func resolveImagineModel(model string, pro bool, count int) (imagineModelConfig,
 }
 
 func invalidImageRequest(message string) (*provider.Response, error) {
-	return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{
-		"message": message, "type": "invalid_request_error",
-	}}), nil
+	return nil, &inferencedomain.RequestValidationError{Code: "invalid_request", Message: message}
 }
 
 func imageGenerationUserError(message, param, code string) (*provider.Response, error) {
-	return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{
-		"message": message, "type": "image_generation_user_error", "param": param, "code": code,
-	}}), nil
+	return nil, &inferencedomain.RequestValidationError{Code: code, Param: param, Message: message}
 }
 
 func newImagineCollector() *imagineCollector {
@@ -280,7 +277,7 @@ func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGener
 		format = "url"
 	}
 	if format != "url" && format != "b64_json" {
-		return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "response_format 必须是 url 或 b64_json", "type": "invalid_request_error"}}), nil
+		return invalidImageRequest("response_format 必须是 url 或 b64_json")
 	}
 	spec, modelKnown := Resolve(request.Model)
 	if !modelKnown || spec.Capability != "image" {
@@ -317,7 +314,9 @@ func (a *Adapter) generateLiteImage(ctx context.Context, request provider.ImageG
 	spec, _ := Resolve(request.Model)
 	urls := make([]string, 0, count)
 	for len(urls) < count {
-		value, err := a.generateLiteImageURL(ctx, request.Credential, spec, request.Prompt)
+		value, err := a.generateLiteImageURL(ctx, request.Credential, spec, request.Prompt, func() {
+			provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{Started: true, UpstreamStatus: http.StatusOK})
+		})
 		if err != nil {
 			var mediaErr *webMediaUpstreamError
 			if errors.As(err, &mediaErr) && len(urls) == 0 {
@@ -329,13 +328,14 @@ func (a *Adapter) generateLiteImage(ctx context.Context, request provider.ImageG
 			}
 			if len(urls) > 0 {
 				return jsonProviderResponse(http.StatusBadGateway, map[string]any{"error": map[string]any{
-					"message": fmt.Sprintf("Lite 图片仅完成 %d/%d 张: %v", len(urls), count, err),
+					"message": fmt.Sprintf("Lite 图片仅完成 %d/%d 张", len(urls), count),
 					"type":    "server_error", "code": "image_generation_incomplete",
 				}}), nil
 			}
 			return nil, err
 		}
 		urls = append(urls, value)
+		provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{OutputImages: len(urls), QuotaUnits: len(urls), Completed: len(urls) >= count})
 	}
 	response, err := a.imageResponse(ctx, request.Credential, urls, nil, count, format)
 	if response != nil {
@@ -358,7 +358,7 @@ func (e *liteUpstreamError) Response() *provider.Response {
 	return &provider.Response{StatusCode: e.StatusCode, Status: e.Status, Header: jsonHeaders(), Body: io.NopCloser(bytes.NewReader(e.Body))}
 }
 
-func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.Credential, spec ModelSpec, prompt string) (string, error) {
+func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.Credential, spec ModelSpec, prompt string, accepted func()) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		upstream, lease, _, statsigTarget, err := a.openChat(ctx, credential, "", spec, normalizedChatInput{Prompt: "Drawing: " + prompt}, gatewayOpenOptions{deferForbidden: true})
 		if err != nil {
@@ -388,9 +388,12 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 				lease.Release()
 				return "", upstreamErr
 			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
+			lease.Observe(upstream.StatusCode, nil)
 			lease.Release()
 			return "", &liteUpstreamError{StatusCode: upstream.StatusCode, Status: upstream.Status, Body: body}
+		}
+		if accepted != nil {
+			accepted()
 		}
 		firstImage := ""
 		capture := &boundedCapture{limit: 8 << 20}
@@ -426,7 +429,7 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 					continue
 				}
 			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, consumeErr)
+			lease.Observe(status, consumeErr)
 			lease.Release()
 			if status == http.StatusForbidden {
 				response := antiBotProviderResponse()
@@ -436,7 +439,7 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 			}
 			return "", consumeErr
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+		lease.Observe(http.StatusOK, nil)
 		lease.Release()
 		if firstImage != "" {
 			return firstImage, nil
@@ -472,6 +475,12 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 }
 
 func (a *Adapter) forwardImageChatCompletion(ctx context.Context, request provider.ResponseResourceRequest, input openAIRequest, normalized normalizedChatInput, spec ModelSpec) (*provider.Response, error) {
+	if request.Operation == conversation.OperationResponses && input.Store != nil && *input.Store {
+		return invalidImageRequest("图片生成模型不支持存储 Responses，请使用 store:false")
+	}
+	if input.PreviousResponseID != "" {
+		return invalidImageRequest("图片生成模型不支持 previous_response_id")
+	}
 	if len(normalized.Attachments) > 0 {
 		return invalidImageRequest("文生图模型只接受当前用户消息中的纯文本；图生图请使用 grok-imagine-image-edit 和 /v1/images/edits")
 	}
@@ -491,13 +500,24 @@ func (a *Adapter) forwardImageChatCompletion(ctx context.Context, request provid
 	if format != "url" && format != "b64_json" {
 		return invalidImageRequest("image_config.response_format 必须是 url 或 b64_json")
 	}
+	metadata := provider.NormalizedRequestMetadata{ImageOutputCount: count}
+	if request.NormalizedMetadata != nil {
+		*request.NormalizedMetadata = metadata
+	}
+	if request.OnNormalized != nil {
+		if err := request.OnNormalized(metadata); err != nil {
+			return nil, err
+		}
+	}
 	if spec.ProtocolModel != "imagine-lite" {
 		return a.forwardQualityImageChatCompletion(ctx, request, input, normalized, count, format)
 	}
 	responseID := newWebID("resp")
 	parsed := parsedChat{ResponseID: responseID, InputTokens: estimateTokens(normalized.Prompt)}
-	for range count {
-		rawURL, err := a.generateLiteImageURL(ctx, request.Credential, spec, normalized.Prompt)
+	for i := range count {
+		rawURL, err := a.generateLiteImageURL(ctx, request.Credential, spec, normalized.Prompt, func() {
+			provider.ObserveImageGeneration(request.ObserveImage, provider.ImageGenerationObservation{Started: true, UpstreamStatus: http.StatusOK})
+		})
 		if err != nil {
 			var mediaErr *webMediaUpstreamError
 			if errors.As(err, &mediaErr) && parsed.Text.Len() == 0 {
@@ -509,6 +529,7 @@ func (a *Adapter) forwardImageChatCompletion(ctx context.Context, request provid
 			}
 			return nil, err
 		}
+		provider.ObserveImageGeneration(request.ObserveImage, provider.ImageGenerationObservation{OutputImages: i + 1, QuotaUnits: i + 1, Completed: i+1 >= count})
 		item, err := a.imageDataItem(ctx, request.Credential, imagineImageValue{URL: rawURL}, format)
 		if err != nil {
 			return nil, err
@@ -525,7 +546,7 @@ func (a *Adapter) forwardImageChatCompletion(ctx context.Context, request provid
 		}
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: io.NopCloser(bytes.NewReader(stream)), QuotaUnits: count}, nil
 	}
-	payload := buildOpenAIResult(request.Operation, responseID, input.Model, parsed, false)
+	payload := buildImageCompatibilityResult(request.Operation, responseID, input.Model, parsed)
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -541,7 +562,7 @@ func (a *Adapter) forwardQualityImageChatCompletion(ctx context.Context, request
 		resolution = input.ImageConfig.Resolution
 	}
 	generated, err := a.GenerateImage(ctx, provider.ImageGenerationRequest{
-		Credential: request.Credential, Model: request.Model, Prompt: normalized.Prompt,
+		Observe: request.ObserveImage, Credential: request.Credential, Model: request.Model, Prompt: normalized.Prompt,
 		Count: count, AspectRatio: aspectRatio, Resolution: resolution, ResponseFormat: format,
 	})
 	if err != nil {
@@ -578,7 +599,7 @@ func (a *Adapter) forwardQualityImageChatCompletion(ctx context.Context, request
 		}
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: io.NopCloser(bytes.NewReader(stream)), QuotaUnits: generated.QuotaUnits}, nil
 	}
-	result := buildOpenAIResult(request.Operation, parsed.ResponseID, input.Model, parsed, false)
+	result := buildImageCompatibilityResult(request.Operation, parsed.ResponseID, input.Model, parsed)
 	data, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
@@ -586,9 +607,18 @@ func (a *Adapter) forwardQualityImageChatCompletion(ctx context.Context, request
 	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: jsonHeaders(), Body: io.NopCloser(bytes.NewReader(data)), QuotaUnits: generated.QuotaUnits}, nil
 }
 
+// Image response IDs describe this output only; they have no native Web state.
+func buildImageCompatibilityResult(operation, responseID, model string, parsed parsedChat) map[string]any {
+	result := buildOpenAIResult(operation, responseID, model, parsed, false)
+	if operation == conversation.OperationResponses {
+		result["store"] = false
+	}
+	return result
+}
+
 func buildImageCompatibilityStream(operation, responseID, model string, parsed *parsedChat) ([]byte, error) {
 	var stream bytes.Buffer
-	writeStreamStart(&stream, operation, responseID, model, parsed.InputTokens)
+	writeStreamStart(&stream, operation, responseID, model, parsed.InputTokens, false)
 	if operation == conversation.OperationResponses {
 		responsesStream := newWebResponsesStream(&stream, responseID)
 		if err := responsesStream.Delta("text", parsed.Text.String()); err != nil {
@@ -600,7 +630,7 @@ func buildImageCompatibilityStream(operation, responseID, model string, parsed *
 	} else if err := writeStreamDelta(&stream, operation, responseID, model, "text", parsed.Text.String()); err != nil {
 		return nil, err
 	}
-	payload := buildOpenAIResult(operation, responseID, model, *parsed, false)
+	payload := buildImageCompatibilityResult(operation, responseID, model, *parsed)
 	writeStreamDone(&stream, operation, responseID, model, *parsed, payload)
 	return stream.Bytes(), nil
 }
@@ -685,11 +715,11 @@ func (a *Adapter) generateWSImageAttempt(ctx context.Context, request provider.I
 				Header:     http.Header(response.Header).Clone(),
 			}, upstreamErr)
 			if response.StatusCode != http.StatusForbidden {
-				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, err)
+				lease.Observe(response.StatusCode, err)
 			}
 			return nil, upstreamErr
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return nil, fmt.Errorf("连接 Imagine WebSocket: %w", err)
 	}
 	connectionOwned := true
@@ -699,31 +729,31 @@ func (a *Adapter) generateWSImageAttempt(ctx context.Context, request provider.I
 		}
 	}()
 	connection.SetReadLimit(64 << 20)
-	deadline := time.Now().Add(time.Duration(cfg.ImageTimeoutSeconds) * time.Second)
+	deadline := time.Now().Add(cfg.ImageTimeout)
 	_ = connection.SetReadDeadline(deadline)
 	_ = connection.SetWriteDeadline(deadline)
 	if err := connection.WriteJSON(imagineResetMessage()); err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.ObserveWebSocketError(err)
 		return nil, err
 	}
 	if err := connection.WriteJSON(imagineRequestMessage(newWebID("img"), request.Prompt, ratio, cfg.AllowNSFW, modelConfig.Pro, modelConfig.ExpectedCount)); err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.ObserveWebSocketError(err)
 		return nil, err
 	}
+	provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{Started: true, UpstreamStatus: http.StatusSwitchingProtocols})
 	if request.Streaming {
-		reader, writer := io.Pipe()
-		streamCtx, cancel := context.WithCancel(ctx)
-		leaseOwned = false
-		connectionOwned = false
-		go a.streamImagineImages(streamCtx, writer, connection, lease, request.Credential, count, request.PartialImages, modelConfig)
-		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: &cancelBody{ReadCloser: reader, cancel: cancel}, QuotaUnits: count}, nil
+		leaseOwned, connectionOwned = false, false
+		body := produceImageStream(ctx, connection, func(streamCtx context.Context, writer io.Writer) error {
+			return a.streamImagineImages(streamCtx, writer, connection, lease, request.Credential, count, request.PartialImages, modelConfig, request.Observe)
+		})
+		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: body, QuotaUnits: count}, nil
 	}
 
 	collector := newImagineCollector()
 	for collector.UsableCount() < count && !collector.Done(modelConfig.ExpectedCount) {
 		messageType, data, readErr := connection.ReadMessage()
 		if readErr != nil {
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, readErr)
+			lease.ObserveWebSocketError(readErr)
 			return nil, fmt.Errorf("读取 Imagine WebSocket: %w", readErr)
 		}
 		if messageType != websocket.TextMessage {
@@ -734,13 +764,15 @@ func (a *Adapter) generateWSImageAttempt(ctx context.Context, request provider.I
 			continue
 		}
 		if message["type"] == "error" {
+			provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{Failed: true})
 			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
+			lease.Observe(0, upstreamErr)
 			return nil, upstreamErr
 		}
 		collector.Accept(message)
+		provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{OutputImages: collector.UsableCount(), QuotaUnits: collector.UsableCount(), Completed: collector.UsableCount() >= count})
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+	lease.Observe(http.StatusOK, nil)
 	images := collector.Images()
 	if len(images) == 0 {
 		return nil, fmt.Errorf("Imagine WebSocket 完成但没有可用图片")
@@ -790,7 +822,7 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		return invalidImageRequest("Grok Web 图片模型不支持 quality")
 	}
 	if len(request.ImageURLs) == 0 || len(request.ImageURLs) > 8 {
-		return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "image 数量必须在 1 到 8 之间", "type": "invalid_request_error"}}), nil
+		return invalidImageRequest("image 数量必须在 1 到 8 之间")
 	}
 	count := request.Count
 	if count <= 0 {
@@ -842,7 +874,10 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 	for _, rawURL := range request.ImageURLs {
 		image, loadErr := a.loadChatImage(ctx, lease, rawURL, cfg.MaxInputImageBytes)
 		if loadErr != nil {
-			return invalidImageRequest(loadErr.Error())
+			if errors.Is(loadErr, errInvalidChatImage) || errors.Is(loadErr, errInvalidChatAttachment) {
+				return invalidImageRequest("编辑图片输入无效或超过大小限制")
+			}
+			return nil, loadErr
 		}
 		images = append(images, image)
 	}
@@ -858,7 +893,7 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		assets = append(assets, uploaded.MetadataID)
 	}
 	payload := buildImageEditPayload(request.Prompt, assets, ratio)
-	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.ImageTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine")
+	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, cfg.ImageTimeout, cfg.BaseURL+"/imagine")
 	if err != nil {
 		return nil, err
 	}
@@ -873,16 +908,22 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		a.logWebMediaUpstreamRejection("image_edit_generate", response, upstreamErr)
 		return nil, upstreamErr
 	}
+	provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{Started: true, UpstreamStatus: response.StatusCode})
 	if request.Streaming {
-		reader, writer := io.Pipe()
-		streamCtx, cancel := context.WithCancel(ctx)
 		leaseOwned = false
-		go a.streamImageEdit(streamCtx, writer, response.Body, lease, request.Credential, request.PartialImages, request.Size, ratio)
-		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: &cancelBody{ReadCloser: reader, cancel: cancel}, QuotaUnits: 1}, nil
+		body := produceImageStream(ctx, response.Body, func(streamCtx context.Context, writer io.Writer) error {
+			return a.streamImageEdit(streamCtx, writer, response.Body, lease, request.Credential, request.PartialImages, request.Size, ratio, request.Observe)
+		})
+		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: body, QuotaUnits: 1}, nil
 	}
 	defer func() { _ = response.Body.Close() }()
 	capture := &boundedCapture{limit: 8 << 20}
-	parsed, consumeErr := consumeUpstream(io.TeeReader(response.Body, capture), nil)
+	parsed, consumeErr := consumeUpstream(io.TeeReader(response.Body, capture), func(kind, delta string) error {
+		if kind == "image" && strings.TrimSpace(delta) != "" {
+			provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{OutputImages: 1, QuotaUnits: 1, Completed: true})
+		}
+		return nil
+	})
 	if consumeErr != nil {
 		return nil, consumeErr
 	}
@@ -893,6 +934,7 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 			"type":    "server_error", "code": "image_edit_incomplete",
 		}}), nil
 	}
+	provider.ObserveImageGeneration(request.Observe, provider.ImageGenerationObservation{OutputImages: 1, QuotaUnits: 1, Completed: true})
 	result, err := a.imageResponse(ctx, request.Credential, urls, nil, 1, format)
 	if result != nil {
 		result.QuotaUnits = 1
@@ -956,16 +998,16 @@ func parseImageEditStreamFrame(data []byte) (imageEditStreamFrame, bool) {
 
 func (a *Adapter) streamImageEdit(
 	ctx context.Context,
-	writer *io.PipeWriter,
+	writer io.Writer,
 	source io.ReadCloser,
 	lease *egress.Lease,
 	credential account.Credential,
 	partialImages int,
 	size string,
 	aspectRatio string,
-) {
+	observe func(provider.ImageGenerationObservation),
+) error {
 	defer lease.Release()
-	defer func() { _ = source.Close() }()
 	createdAt := time.Now().Unix()
 	parsed := parsedChat{}
 	capture := &boundedCapture{limit: 8 << 20}
@@ -976,6 +1018,9 @@ func (a *Adapter) streamImageEdit(
 			return err
 		}
 		frame, ok := parseImageEditStreamFrame(data)
+		if ok && !frame.Moderated && frame.Progress >= 100 {
+			provider.ObserveImageGeneration(observe, provider.ImageGenerationObservation{OutputImages: 1, QuotaUnits: 1, Completed: true})
+		}
 		if !ok || frame.Moderated || frame.Progress >= 100 || partialIndex >= partialImages {
 			return nil
 		}
@@ -997,34 +1042,30 @@ func (a *Adapter) streamImageEdit(
 		return nil
 	})
 	if consumeErr != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
-		_ = writer.CloseWithError(consumeErr)
-		return
+		lease.Observe(0, consumeErr)
+		return consumeErr
 	}
 	urls := imageEditResultURLs(&parsed, capture.Bytes())
 	if len(urls) == 0 {
 		err := fmt.Errorf("上游未返回可用的编辑图片")
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
-		_ = writer.CloseWithError(err)
-		return
+		lease.Observe(0, err)
+		return err
 	}
+	provider.ObserveImageGeneration(observe, provider.ImageGenerationObservation{OutputImages: 1, QuotaUnits: 1, Completed: true})
 	raw, err := a.imageBytes(ctx, credential, imagineImageValue{URL: urls[0]})
 	if err != nil {
-		_ = writer.CloseWithError(provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, err))
-		return
+		return provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, err)
 	}
 	if err := a.saveStreamImage(ctx, raw); err != nil {
-		_ = writer.CloseWithError(err)
-		return
+		return err
 	}
 	if err := writeSSE(writer, "image_edit.completed", openAIImageEditStreamEvent(
 		"image_edit.completed", raw, createdAt, imageEditEventSize(size, aspectRatio), 0,
 	)); err != nil {
-		_ = writer.CloseWithError(err)
-		return
+		return err
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
-	_ = writer.Close()
+	lease.Observe(http.StatusOK, nil)
+	return nil
 }
 
 func openAIImageEditStreamEvent(eventType string, raw []byte, createdAt int64, size string, partialIndex int) map[string]any {
@@ -1521,18 +1562,8 @@ func (a *Adapter) imageBytes(ctx context.Context, credential account.Credential,
 	return a.downloadImage(ctx, credential, image.URL)
 }
 
-func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter, connection *websocket.Conn, lease *egress.Lease, credential account.Credential, count, partialImages int, modelConfig imagineModelConfig) {
+func (a *Adapter) streamImagineImages(ctx context.Context, writer io.Writer, connection *egress.WebSocket, lease *egress.Lease, credential account.Credential, count, partialImages int, modelConfig imagineModelConfig, observe func(provider.ImageGenerationObservation)) error {
 	defer lease.Release()
-	defer func() { _ = connection.Close() }()
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = connection.Close()
-		case <-done:
-		}
-	}()
 	collector := newImagineCollector()
 	emitted := 0
 	partialIndex := 0
@@ -1540,12 +1571,10 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 		messageType, data, readErr := connection.ReadMessage()
 		if readErr != nil {
 			if ctx.Err() != nil {
-				_ = writer.CloseWithError(ctx.Err())
-				return
+				return ctx.Err()
 			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, readErr)
-			_ = writer.CloseWithError(readErr)
-			return
+			lease.ObserveWebSocketError(readErr)
+			return readErr
 		}
 		if messageType != websocket.TextMessage {
 			continue
@@ -1555,12 +1584,13 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 			continue
 		}
 		if message["type"] == "error" {
+			provider.ObserveImageGeneration(observe, provider.ImageGenerationObservation{Failed: true})
 			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
-			_ = writer.CloseWithError(upstreamErr)
-			return
+			lease.Observe(0, upstreamErr)
+			return upstreamErr
 		}
 		collector.Accept(message)
+		provider.ObserveImageGeneration(observe, provider.ImageGenerationObservation{OutputImages: collector.UsableCount(), QuotaUnits: collector.UsableCount(), Completed: collector.UsableCount() >= count})
 		if partialImages > 0 {
 			for _, image := range collector.ReadyPreviews() {
 				if partialIndex >= partialImages {
@@ -1569,14 +1599,12 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 				raw, err := a.imageBytes(ctx, credential, image)
 				if err != nil {
 					if ctx.Err() != nil {
-						_ = writer.CloseWithError(ctx.Err())
-						return
+						return ctx.Err()
 					}
 					continue
 				}
 				if err := writeSSE(writer, "image_generation.partial_image", openAIImageStreamEvent("image_generation.partial_image", image, raw, partialIndex)); err != nil {
-					_ = writer.CloseWithError(err)
-					return
+					return err
 				}
 				partialIndex++
 			}
@@ -1587,27 +1615,23 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 			}
 			raw, err := a.imageBytes(ctx, credential, image)
 			if err != nil {
-				_ = writer.CloseWithError(err)
-				return
+				return provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, err)
 			}
 			if err := a.saveStreamImage(ctx, raw); err != nil {
-				_ = writer.CloseWithError(err)
-				return
+				return err
 			}
 			if err := writeSSE(writer, "image_generation.completed", openAIImageStreamEvent("image_generation.completed", image, raw, 0)); err != nil {
-				_ = writer.CloseWithError(err)
-				return
+				return err
 			}
 			emitted++
 		}
 		if collector.Done(modelConfig.ExpectedCount) && emitted < count {
 			incompleteErr := fmt.Errorf("上游仅返回 %d/%d 张可用图片", emitted, count)
-			_ = writer.CloseWithError(incompleteErr)
-			return
+			return incompleteErr
 		}
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
-	_ = writer.Close()
+	lease.Observe(http.StatusOK, nil)
+	return nil
 }
 
 func openAIImageStreamEvent(eventType string, image imagineImageValue, raw []byte, partialIndex int) map[string]any {
@@ -1692,12 +1716,12 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, credential account.C
 	request.Header.Del("Content-Type")
 	response, err := lease.Do(request)
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return nil, ctx.Err() == nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		retryable := response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
 		return nil, retryable, fmt.Errorf("下载图片返回 %d", response.StatusCode)
 	}
@@ -1707,13 +1731,13 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, credential account.C
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, (32<<20)+1))
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return nil, ctx.Err() == nil, fmt.Errorf("读取图片内容: %w", err)
 	}
 	if len(raw) > 32<<20 {
 		return nil, false, fmt.Errorf("图片下载超过 32 MiB")
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	return raw, false, nil
 }
 

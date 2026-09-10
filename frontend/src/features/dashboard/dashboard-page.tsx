@@ -10,6 +10,7 @@ import { DashboardOverview, DashboardResources } from "@/features/dashboard/dash
 import { DashboardProviderDistribution } from "@/features/dashboard/dashboard-provider-distribution";
 import { DashboardTopModels } from "@/features/dashboard/dashboard-top-models";
 import { DashboardTrend } from "@/features/dashboard/dashboard-trend";
+import { GuardStatusBanner } from "@/features/guard/guard-status-banner";
 import { VersionUpdateBanner } from "@/features/system/version-update";
 import { ErrorState } from "@/shared/components/data-state";
 import { PeriodSelector } from "@/shared/components/period-selector";
@@ -85,6 +86,7 @@ export function DashboardPage() {
         </header>
 
         <VersionUpdateBanner />
+        <GuardStatusBanner />
       </div>
 
       <DashboardOverview dashboard={dashboard} locale={i18n.language} loading={loading} />

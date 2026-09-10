@@ -6,30 +6,26 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/websocket"
 
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 // DialVoiceWebSocket opens an authenticated Console websocket for realtime or STT streaming.
 func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.VoiceWebSocketRequest) (provider.VoiceWebSocketConn, func(), error) {
-	pathValue := strings.TrimSpace(request.Path)
-	if pathValue == "" || strings.Contains(pathValue, "://") || strings.Contains(pathValue, "..") {
-		return nil, nil, invalidConsoleVoiceError("voice websocket path 无效")
+	var err error
+	request, err = a.PrepareVoiceWebSocket(request)
+	if err != nil {
+		return nil, nil, err
 	}
-	if !strings.HasPrefix(pathValue, "/") {
-		pathValue = "/" + pathValue
-	}
-	switch pathValue {
-	case "/realtime", "/stt":
-	default:
-		return nil, nil, invalidConsoleVoiceError("不支持的 voice websocket path")
-	}
+	pathValue := request.Path
 
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
@@ -47,7 +43,7 @@ func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.Voice
 		cancel()
 	}
 
-	endpoint, err := a.voiceWebSocketEndpoint(pathValue, request.Model)
+	endpoint, err := a.voiceWebSocketEndpoint(pathValue, request.Model, request.Query)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
@@ -93,7 +89,11 @@ func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.Voice
 			}
 		}
 
-		connection, response, dialErr := lease.DialWebSocket(requestCtx, endpoint, headers, 30*time.Second)
+		attemptCtx := requestCtx
+		if attempt > 0 {
+			attemptCtx = infraegress.WithPhysicalCallStage(attemptCtx, "authorization_retry")
+		}
+		connection, response, dialErr := lease.DialWebSocket(attemptCtx, endpoint, headers, 30*time.Second)
 		if dialErr == nil {
 			if response != nil && response.Body != nil {
 				_ = response.Body.Close()
@@ -102,11 +102,15 @@ func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.Voice
 				cleanup()
 				return nil, nil, errors.New("Console voice websocket 连接为空")
 			}
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, http.StatusSwitchingProtocols, nil)
-			return connection, cleanup, nil
+			lease.Observe(http.StatusSwitchingProtocols, nil)
+			channels := 1
+			if request.Query.Get("multichannel") == "true" {
+				channels, _ = strconv.Atoi(request.Query.Get("channels"))
+			}
+			return &observedVoiceWebSocket{WebSocket: connection, path: pathValue, observe: request.Observe, channels: channels}, cleanup, nil
 		}
 		if response == nil {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, dialErr)
+			lease.Observe(0, dialErr)
 			cleanup()
 			return nil, nil, fmt.Errorf("拨号 Console voice websocket 失败: %w", dialErr)
 		}
@@ -127,17 +131,17 @@ func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.Voice
 			lease.InvalidateClearance()
 		}
 		if !dpopRequired {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, status, nil)
+			lease.Observe(status, nil)
 		}
 		cleanup()
-		retryAfter := parseConsoleRetryAfterHeader(response.Header.Get("Retry-After"), time.Now().UTC())
+		retryAfter := retryafter.Header(response.Header.Get("Retry-After"), time.Now().UTC())
 		return nil, nil, newConsoleMediaUpstreamError(status, body, retryAfter)
 	}
 	cleanup()
 	return nil, nil, errors.New("Console voice websocket DPoP 重试状态无效")
 }
 
-func (a *Adapter) voiceWebSocketEndpoint(pathValue, modelName string) (string, error) {
+func (a *Adapter) voiceWebSocketEndpoint(pathValue, modelName string, query url.Values) (string, error) {
 	base := strings.TrimRight(strings.TrimSpace(a.config().BaseURL), "/")
 	if base == "" {
 		return "", errors.New("Console BaseURL 未配置")
@@ -156,6 +160,9 @@ func (a *Adapter) voiceWebSocketEndpoint(pathValue, modelName string) (string, e
 		return "", fmt.Errorf("不支持的 Console voice websocket scheme: %s", endpoint.Scheme)
 	}
 	values := endpoint.Query()
+	for key, entries := range query {
+		values[key] = append([]string(nil), entries...)
+	}
 	if modelName = strings.TrimSpace(modelName); modelName != "" {
 		values.Set("model", modelName)
 	}
@@ -180,5 +187,4 @@ func voiceWebSocketProofEndpoint(endpoint string) (string, error) {
 	return parsed.String(), nil
 }
 
-// Ensure bogdanfinn websocket.Conn satisfies the provider contract at compile time.
-var _ provider.VoiceWebSocketConn = (*websocket.Conn)(nil)
+var _ provider.VoiceWebSocketConn = (*infraegress.WebSocket)(nil)

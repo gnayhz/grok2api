@@ -13,6 +13,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestReadinessStartupReportDoesNotExposeInternalErrors(t *testing.T) {
@@ -49,13 +50,13 @@ func TestReadinessKeepsBuildReadyWhenWebIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertRoutes(ctx, []modeldomain.Route{
-		{PublicID: "build-model", Provider: accountdomain.ProviderBuild, UpstreamModel: "build-model", Capability: modeldomain.CapabilityResponses, Enabled: true},
-		{PublicID: "web-model", Provider: accountdomain.ProviderWeb, UpstreamModel: "web-model", Capability: modeldomain.CapabilityChat, Enabled: true},
+	if err := testsupport.Routes(ctx, models, []modeldomain.Route{
+		{Origin: modeldomain.OriginDiscovered, PublicID: "build-model", Provider: accountdomain.ProviderBuild, UpstreamModel: "build-model", Capability: modeldomain.CapabilityResponses, Enabled: true},
+		{Origin: modeldomain.OriginCatalog, PublicID: "web-model", Provider: accountdomain.ProviderWeb, UpstreamModel: "web-model", Capability: modeldomain.CapabilityChat, Enabled: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, build.ID, []string{"build-model"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, build.ID, []string{"build-model"}, now); err != nil {
 		t.Fatal(err)
 	}
 	state := newStartupState(0)
@@ -91,12 +92,12 @@ func TestReadinessRejectsAccountWithoutAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertRoutes(ctx, []modeldomain.Route{{
+	if err := testsupport.Routes(ctx, models, []modeldomain.Route{{Origin: modeldomain.OriginDiscovered,
 		PublicID: "build-model", Provider: accountdomain.ProviderBuild, UpstreamModel: "build-model", Capability: modeldomain.CapabilityResponses, Enabled: true,
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, build.ID, []string{"build-model"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, build.ID, []string{"build-model"}, now); err != nil {
 		t.Fatal(err)
 	}
 	state := newStartupState(0)
@@ -129,10 +130,10 @@ func TestReadinessRestoresPersistedCooldownWithoutUpstreamProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertRoutes(ctx, []modeldomain.Route{{PublicID: "build-model", Provider: accountdomain.ProviderBuild, UpstreamModel: "build-model", Capability: modeldomain.CapabilityResponses, Enabled: true}}); err != nil {
+	if err := testsupport.Routes(ctx, models, []modeldomain.Route{{Origin: modeldomain.OriginDiscovered, PublicID: "build-model", Provider: accountdomain.ProviderBuild, UpstreamModel: "build-model", Capability: modeldomain.CapabilityResponses, Enabled: true}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, build.ID, []string{"build-model"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, build.ID, []string{"build-model"}, now); err != nil {
 		t.Fatal(err)
 	}
 	state := newStartupState(0)

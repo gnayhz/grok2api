@@ -13,20 +13,13 @@ import (
 
 type providerLinkRepository interface {
 	ReconcileProviderLinks(ctx context.Context, accountID uint64) error
-	UpdateIdentityMetadata(ctx context.Context, accountID uint64, email, userID, teamID string) error
+	ApplyIdentity(ctx context.Context, observed accountdomain.CredentialRef, identity accountdomain.IdentityObservation) (accountdomain.IdentityResult, error)
 }
 
 // SyncAccountIdentity best-effort fills stable Web/Console identity metadata and reconciles trusted links.
 // Definitive unauthorized signals mark the current Provider account as reauthRequired and remove it from scheduling;
 // other synchronization failures do not affect account health.
 func (s *Service) SyncAccountIdentity(ctx context.Context, id uint64) error {
-	_, err, _ := s.identitySyncs.Do(fmt.Sprintf("%d", id), func() (any, error) {
-		return nil, s.syncAccountIdentity(ctx, id)
-	})
-	return err
-}
-
-func (s *Service) syncAccountIdentity(ctx context.Context, id uint64) error {
 	links, ok := s.accounts.(providerLinkRepository)
 	if !ok {
 		return nil
@@ -35,6 +28,14 @@ func (s *Service) syncAccountIdentity(ctx context.Context, id uint64) error {
 	if err != nil {
 		return mapRepositoryError(err)
 	}
+	_, err = s.identitySyncs.Do(ctx, value.CredentialRef(), func() (any, error) {
+		return nil, s.syncAccountIdentity(ctx, value, links)
+	})
+	return err
+}
+
+func (s *Service) syncAccountIdentity(ctx context.Context, value accountdomain.Credential, links providerLinkRepository) error {
+	id := value.ID
 	if value.Provider != accountdomain.ProviderWeb && value.Provider != accountdomain.ProviderConsole {
 		return nil
 	}
@@ -59,19 +60,14 @@ func (s *Service) syncAccountIdentity(ctx context.Context, id uint64) error {
 		}
 		return err
 	}
-	if len(identity.Email) > 255 || len(identity.UserID) > 255 || len(identity.TeamID) > 255 {
-		return fmt.Errorf("Grok Web Session 身份字段超过安全上限")
-	}
 	if value.Provider == accountdomain.ProviderWeb {
 		identityID, parseErr := uuid.Parse(strings.TrimSpace(identity.UserID))
 		if parseErr != nil || identityID == uuid.Nil {
 			return fmt.Errorf("Grok Web Session 未返回合法的 Gateway 用户 UUID")
 		}
 	}
-	if err := links.UpdateIdentityMetadata(ctx, id, identity.Email, identity.UserID, identity.TeamID); err != nil {
-		return mapRepositoryError(err)
-	}
-	return mapRepositoryError(links.ReconcileProviderLinks(ctx, id))
+	_, err = links.ApplyIdentity(ctx, value.CredentialRef(), accountdomain.IdentityObservation{Email: identity.Email, UserID: identity.UserID, TeamID: identity.TeamID})
+	return mapRepositoryError(err)
 }
 
 func accountIdentityComplete(value accountdomain.Credential) bool {

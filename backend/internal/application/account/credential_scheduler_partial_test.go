@@ -18,7 +18,7 @@ func TestRefreshDueCredentialsContinuesAfterPartialBatchFailure(t *testing.T) {
 
 	early := now.Add(-2 * time.Minute)
 	poison.RefreshDueAt = &early
-	if _, err := service.accounts.Update(ctx, poison); err != nil {
+	if _, _, err := service.accounts.UpsertByIdentity(ctx, poison); err != nil {
 		t.Fatal(err)
 	}
 

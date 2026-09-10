@@ -70,21 +70,22 @@ type batchDeleteRequest struct {
 }
 
 type modelResponse struct {
-	ID                uint64     `json:"id,string"`
-	PublicID          string     `json:"publicId"`
-	Provider          string     `json:"provider"`
-	UpstreamModel     string     `json:"upstreamModel"`
-	Capability        string     `json:"capability"`
-	Enabled           bool       `json:"enabled"`
-	Origin            string     `json:"origin"`
-	AccountIDs        []string   `json:"accountIds"`
-	BindingMode       bool       `json:"bindingMode"`
-	SupportedAccounts int        `json:"supportedAccounts"`
-	SyncedAccounts    int        `json:"syncedAccounts"`
-	TotalAccounts     int        `json:"totalAccounts"`
-	CapabilityKnown   bool       `json:"capabilityKnown"`
-	Available         bool       `json:"available"`
-	LastSyncedAt      *time.Time `json:"lastSyncedAt,omitempty"`
+	ID                  uint64     `json:"id,string"`
+	PublicID            string     `json:"publicId"`
+	Provider            string     `json:"provider"`
+	UpstreamModel       string     `json:"upstreamModel"`
+	Capability          string     `json:"capability"`
+	Enabled             bool       `json:"enabled"`
+	Origin              string     `json:"origin"`
+	AccountIDs          []string   `json:"accountIds"`
+	BindingMode         bool       `json:"bindingMode"`
+	SupportedAccounts   int        `json:"supportedAccounts"`
+	SyncedAccounts      int        `json:"syncedAccounts"`
+	TotalAccounts       int        `json:"totalAccounts"`
+	CapabilityKnown     bool       `json:"capabilityKnown"`
+	CapabilitySupported bool       `json:"capabilitySupported"`
+	Available           bool       `json:"available"`
+	LastSyncedAt        *time.Time `json:"lastSyncedAt,omitempty"`
 }
 
 type modelGroupResponse struct {
@@ -170,7 +171,8 @@ func parseOptionalBool(value string) (bool, bool) {
 }
 
 func (h *Handler) listAccounts(c *gin.Context) {
-	values, err := h.service.ListBindableAccounts(c.Request.Context(), account.Provider(c.Query("provider")))
+	page, pageSize := pagination(c)
+	values, total, err := h.service.ListBindableAccounts(c.Request.Context(), account.Provider(c.Query("provider")), page, pageSize, c.Query("search"))
 	if err != nil {
 		h.writeServiceError(c, "modelAccountListFailed", err)
 		return
@@ -179,7 +181,7 @@ func (h *Handler) listAccounts(c *gin.Context) {
 	for _, value := range values {
 		items = append(items, accountOptionResponse{ID: value.ID, Name: value.Name})
 	}
-	response.Success(c, http.StatusOK, gin.H{"items": items})
+	response.Success(c, http.StatusOK, gin.H{"items": items, "page": page, "pageSize": pageSize, "total": total})
 }
 
 func (h *Handler) create(c *gin.Context) {
@@ -416,10 +418,7 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error) {
 
 func newModelResponse(value modeldomain.Route) modelResponse {
 	manualBinding := len(value.BoundAccountIDs) > 0
-	// Console uses a provider-wide static catalog, so catalog support is known
-	// even when an account capability snapshot predates a newly shipped model.
-	capabilityKnown := manualBinding || value.SyncedAccounts > 0 || (value.Provider == account.ProviderConsole && (value.Origin == modeldomain.OriginCatalog || value.SupportedAccounts > 0))
-	available := value.TotalAccounts > 0 && (value.SupportedAccounts > 0 || (!manualBinding && value.SyncedAccounts < value.TotalAccounts))
+	availability := value.Availability()
 	accountIDs := make([]string, 0, len(value.BoundAccountIDs))
 	for _, id := range value.BoundAccountIDs {
 		accountIDs = append(accountIDs, strconv.FormatUint(id, 10))
@@ -427,8 +426,8 @@ func newModelResponse(value modeldomain.Route) modelResponse {
 	return modelResponse{
 		ID: value.ID, PublicID: modeldomain.ExternalPublicID(value.Provider, value.PublicID), Provider: string(value.Provider), UpstreamModel: modeldomain.DisplayUpstreamModel(value.Provider, value.UpstreamModel), Capability: string(value.Capability),
 		Enabled: value.Enabled, Origin: string(value.Origin), AccountIDs: accountIDs, BindingMode: manualBinding, SupportedAccounts: value.SupportedAccounts,
-		SyncedAccounts: value.SyncedAccounts, TotalAccounts: value.TotalAccounts, CapabilityKnown: capabilityKnown,
-		Available: available, LastSyncedAt: value.LastSyncedAt,
+		SyncedAccounts: value.SyncedAccounts, TotalAccounts: value.TotalAccounts, CapabilityKnown: availability.CapabilityKnown, CapabilitySupported: availability.CapabilitySupported,
+		Available: availability.Available, LastSyncedAt: value.LastSyncedAt,
 	}
 }
 

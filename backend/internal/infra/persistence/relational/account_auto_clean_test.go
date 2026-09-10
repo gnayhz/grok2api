@@ -8,7 +8,6 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 func TestDeleteAutoCleanReauthBatchSkipsActiveMediaJobs(t *testing.T) {
@@ -48,10 +47,9 @@ func TestDeleteAutoCleanReauthBatchSkipsActiveMediaJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateCredentialRefreshFailure(ctx, ambiguous.ID, repository.CredentialRefreshFailure{
-		Count: 5, UnclassifiedAuthFailureCount: 5, RetryAt: now,
-		Status: 401, Code: "oauth_http_401", Message: "Unauthorized",
-	}); err != nil {
+	if err := database.db.Model(&accountCredentialModel{}).Where("account_id = ?", ambiguous.ID).Updates(map[string]any{
+		"refresh_failures": 5, "refresh_unclassified_auth_failures": 5, "refresh_due_at": now, "last_refresh_error_status": 401, "last_refresh_error": "oauth_http_401", "last_refresh_error_message": "Unauthorized",
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,7 +192,7 @@ func TestDeleteAutoCleanRevalidatesStatusAfterListing(t *testing.T) {
 		t.Fatalf("candidates=%v err=%v", candidates, err)
 	}
 	value.AuthStatus = accountdomain.AuthStatusActive
-	if _, err := repo.Update(ctx, value); err != nil {
+	if _, _, err := repo.UpsertByIdentity(ctx, value); err != nil {
 		t.Fatal(err)
 	}
 	deleted, err := repo.DeleteAutoCleanReauthCandidates(ctx, now.Add(-time.Hour), false, candidates)

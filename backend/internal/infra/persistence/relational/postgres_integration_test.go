@@ -91,7 +91,10 @@ func configureTemporaryPostgresIntegrationDatabase() (func() error, error) {
 	return func() error {
 		defer adminSQL.Close()
 		defer os.Unsetenv("TEST_POSTGRES_DSN")
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// DROP DATABASE may wait for a checkpoint while another isolated suite
+		// is migrating schemas. Cleanup has its own bounded budget; this does
+		// not relax any application query or test assertion deadline.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()
 		if err := admin.WithContext(cleanupCtx).Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ? AND pid <> pg_backend_pid()", name).Error; err != nil {
 			return err
@@ -299,7 +302,7 @@ func TestPostgresRepositoriesIntegration(t *testing.T) {
 	}
 	loadedPoolKey.ProviderScope = clientkey.ProviderScopeBuild | clientkey.ProviderScopeWeb
 	loadedPoolKey.TierScope = clientkey.TierScopeSuper
-	loadedPoolKey, err = keyRepository.Update(ctx, loadedPoolKey)
+	loadedPoolKey, err = keyRepository.Patch(ctx, loadedPoolKey.ID, clientkey.ManagementPatch{ProviderScope: &loadedPoolKey.ProviderScope, TierScope: &loadedPoolKey.TierScope})
 	if err != nil || loadedPoolKey.ProviderScope != clientkey.ProviderScopeBuild|clientkey.ProviderScopeWeb || loadedPoolKey.TierScope != clientkey.TierScopeSuper {
 		t.Fatalf("postgres updated client key account scope = %+v, err = %v", loadedPoolKey.AccountScope(), err)
 	}
@@ -372,7 +375,7 @@ func TestPostgresRepositoriesIntegration(t *testing.T) {
 		return repository.ReconcileProviderLinks(ctx, web.ID)
 	})
 	assertPostgresAccountLinkMutationWaits(t, ctx, database, func() error {
-		return repository.LinkWebToBuild(ctx, web.ID, build.ID)
+		return repository.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef())
 	})
 	web, err = repository.Get(ctx, web.ID)
 	if err != nil || len(web.LinkedAccounts) != 2 {
@@ -534,7 +537,7 @@ func TestPostgresBillingReservationAndAuditSettlementConcurrency(t *testing.T) {
 			defer wait.Done()
 			<-start
 			eventID := fmt.Sprintf("evt_postgres_reserve_%04d", index)
-			reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, time.Now().UTC().Add(time.Hour))
+			reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, time.Now().UTC().Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"})
 			switch {
 			case reserveErr == nil && reserved:
 				successes.Add(1)
@@ -589,7 +592,7 @@ func TestPostgresBillingReservationAndAuditSettlementConcurrency(t *testing.T) {
 	for index := range 10 {
 		now := time.Now().UTC()
 		eventID := fmt.Sprintf("evt_postgres_cleanup_settle_%04d", index)
-		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, settlementKey.ID, eventID, 10, now.Add(-time.Minute)); reserveErr != nil || !reserved {
+		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, settlementKey.ID, eventID, 10, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 			t.Fatalf("settlement reservation %d: reserved=%v err=%v", index, reserved, reserveErr)
 		}
 		start := make(chan struct{})
@@ -600,7 +603,7 @@ func TestPostgresBillingReservationAndAuditSettlementConcurrency(t *testing.T) {
 		}()
 		go func() {
 			<-start
-			_, cleanupErr := keys.CleanupExpiredBillingReservations(ctx, now, 1)
+			_, cleanupErr := keys.CleanupExpiredBillingReservations(ctx, now, 1, repository.BillingReservationScope{OwnerID: "test-owner"})
 			errorsCh <- cleanupErr
 		}()
 		close(start)
@@ -637,7 +640,7 @@ func TestPostgresAuditWriterRecoversAfterTerminatedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	const eventID = "evt_postgres_terminated_writer_0001"
-	if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, time.Now().UTC().Add(time.Hour)); reserveErr != nil || !reserved {
+	if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, time.Now().UTC().Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 		t.Fatalf("reserve billing usage: reserved=%v err=%v", reserved, reserveErr)
 	}
 
@@ -649,9 +652,11 @@ func TestPostgresAuditWriterRecoversAfterTerminatedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := auditapp.NewService(NewAuditRepository(database), slog.New(slog.NewTextHandler(io.Discard, nil)), 32, 16, 100*time.Millisecond)
+	service := auditapp.NewService(NewAuditRepository(database), newTestAuditJournal(t, 32), slog.New(slog.NewTextHandler(io.Discard, nil)), 16, 100*time.Millisecond)
 	service.UpdateWriterConfig(16, 100*time.Millisecond, time.Millisecond)
-	service.Start()
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer closeCancel()
@@ -717,7 +722,7 @@ func TestPostgresAuditBatchRollsBackOnLockTimeoutAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	const eventID = "evt_postgres_lock_timeout_0001"
-	if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, time.Now().UTC().Add(time.Hour)); reserveErr != nil || !reserved {
+	if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, time.Now().UTC().Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 		t.Fatalf("reserve billing usage: reserved=%v err=%v", reserved, reserveErr)
 	}
 
@@ -798,7 +803,7 @@ func TestPostgresAuditBatchUsesStableClientKeyLockOrder(t *testing.T) {
 		postgresBillingAudit("evt_postgres_lock_order_a2", firstKey.ID, now),
 	}
 	for _, record := range append(append([]audit.Record(nil), batchOne...), batchTwo...) {
-		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, record.ClientKeyID, record.EventID, 10, now.Add(time.Hour)); reserveErr != nil || !reserved {
+		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, record.ClientKeyID, record.EventID, 10, now.Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 			t.Fatalf("reserve %s: reserved=%v err=%v", record.EventID, reserved, reserveErr)
 		}
 	}
@@ -966,14 +971,14 @@ func TestPostgresRoutingProjectionAndCredentialHydration(t *testing.T) {
 			t.Errorf("delete PostgreSQL routing projection account: %v", err)
 		}
 	})
-	if err := accounts.SaveBilling(ctx, account.Billing{
+	if err := saveBilling(database.db.WithContext(ctx), account.Billing{
 		AccountID: created.ID, PlanCode: "super", MonthlyLimit: 100, Used: 12, SyncedAt: now,
 		History: []account.BillingHistoryEntry{{Year: 2026, Month: 7, IncludedUsed: 12}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	resetAt := now.Add(time.Hour)
-	if err := accounts.SaveQuotaWindows(ctx, created.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(accounts, ctx, created.ID, account.WebTierSuper, now, []account.QuotaWindow{{
 		AccountID: created.ID, Mode: "weekly", Remaining: 10, Total: 20, UsagePercent: 50,
 		Breakdown:     []account.QuotaBreakdown{{ProductCode: account.QuotaProductChat, UsagePercent: 50}},
 		WindowSeconds: 3600, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream,

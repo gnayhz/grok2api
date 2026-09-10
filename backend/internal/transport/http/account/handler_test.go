@@ -27,6 +27,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/gin-gonic/gin"
 )
 
@@ -66,6 +67,33 @@ func (refreshTokenImportHTTPAdapter) PrepareImportedCredential(_ context.Context
 	seed.RefreshToken = "rotated-rt"
 	seed.ExpiresAt = time.Now().UTC().Add(time.Hour)
 	return seed, nil
+}
+
+// TestAttachQualityStatesBadges 锚定裁决亭可见性:缝隙注入后,账号
+// 响应对被裁决亭动过的账号携带质量徽章(状态+案件号),未动过的
+// 账号保持无徽章;缝隙未设时全量空转(剥离形态)。
+func TestAttachQualityStatesBadges(t *testing.T) {
+	handler := &Handler{}
+	handler.SetQualityStates(func() map[uint64]AccountQualityState {
+		return map[uint64]AccountQualityState{
+			4101: {State: "sentenced", CaseID: 243},
+		}
+	})
+	items := []accountResponse{{ID: 4101}, {ID: 4102}}
+	handler.attachQualityStates(items)
+	if items[0].Quality == nil || items[0].Quality.State != "sentenced" || items[0].Quality.CaseID != 243 {
+		t.Fatalf("被裁决账号必须携带质量徽章: %+v", items[0].Quality)
+	}
+	if items[1].Quality != nil {
+		t.Fatalf("未动过账号不得携带徽章: %+v", items[1].Quality)
+	}
+
+	bare := &Handler{}
+	bareItems := []accountResponse{{ID: 4101}}
+	bare.attachQualityStates(bareItems)
+	if bareItems[0].Quality != nil {
+		t.Fatalf("剥离形态不得注入: %+v", bareItems[0].Quality)
+	}
 }
 
 func TestNewAccountResponseExposesBuildBotFlagOnlyForBuild(t *testing.T) {
@@ -231,7 +259,8 @@ func TestLinkedDeleteMissingAccountReturnsNotFound(t *testing.T) {
 func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "clear-cooldown.db"))
+	databasePath := filepath.Join(t.TempDir(), "clear-cooldown.db")
+	database, err := relational.OpenSQLite(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,12 +282,12 @@ func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.SaveBilling(ctx, accountdomain.Billing{
+	if err := testsupport.Billing(ctx, repo, accountdomain.Billing{
 		AccountID: created.ID, PlanCode: "pro", PlanName: "Pro", MonthlyLimit: 100, Used: 25, SyncedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateHealth(ctx, created.ID, created.Provider, 3, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
+	if err := seedHealthFixture(databasePath, ctx, created.ID, created.Provider, 3, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
 		t.Fatal(err)
 	}
 	if lease, acquireErr := selector.Acquire(ctx, accountdomain.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, false); acquireErr == nil {
@@ -318,7 +347,8 @@ func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
 func TestUpdateCooldownWarningRequiresEnabledChange(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "update-cooldown-warning.db"))
+	databasePath := filepath.Join(t.TempDir(), "update-cooldown-warning.db")
+	database, err := relational.OpenSQLite(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +366,7 @@ func TestUpdateCooldownWarningRequiresEnabledChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	until := time.Now().UTC().Add(time.Hour)
-	if err := repo.UpdateHealth(ctx, created.ID, created.Provider, 1, &until, "upstream status 504", false); err != nil {
+	if err := seedHealthFixture(databasePath, ctx, created.ID, created.Provider, 1, &until, "upstream status 504", false); err != nil {
 		t.Fatal(err)
 	}
 	handler := NewHandler(accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, nil), nil)

@@ -11,7 +11,7 @@ import (
 // on the non-streaming path); counters stay non-negative on every verdict.
 // Covers the shape-analysis surface that FuzzObserveQualityChunk (streaming)
 // does not: aggregate output items, summary/content reasoning text, refusal
-// fallbacks, and unknown-shape fail-open.
+// fallbacks, and unknown-shape rejection.
 func FuzzPeekQualityBody(f *testing.F) {
 	f.Add([]byte(`{"id":"r1","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"think"}]},{"type":"message","content":[{"type":"output_text","text":"answer"}]}],"usage":{"output_tokens":9}}`))
 	f.Add([]byte(`{"output":[]}`))

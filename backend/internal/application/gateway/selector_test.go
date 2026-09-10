@@ -15,6 +15,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestSelectionUnavailableErrorClassification(t *testing.T) {
@@ -68,7 +69,7 @@ func TestSelectorPrioritizesDueQuotaProbeOnce(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	due := now.Add(-time.Minute)
-	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+	if err := testsupport.Recovery(ctx, accounts, account.QuotaRecovery{
 		AccountID: probe.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted,
 		ConfirmedUsed: 1_065_387, ConfirmedLimit: 1_000_000,
 		ExhaustedAt: &now, NextProbeAt: &due, LastConfirmedAt: &now, UpdatedAt: now,
@@ -84,6 +85,7 @@ func TestSelectorPrioritizesDueQuotaProbeOnce(t *testing.T) {
 	if lease.Credential.ID != probe.ID || !lease.QuotaProbe {
 		t.Fatalf("lease = %#v, want due probe account %d", lease, probe.ID)
 	}
+	probeCredential, probeRef := lease.Credential, lease.QuotaRecoveryRef
 	lease.Release()
 
 	lease, err = selector.Acquire(ctx, account.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{probe.ID: true}, false)
@@ -95,7 +97,7 @@ func TestSelectorPrioritizesDueQuotaProbeOnce(t *testing.T) {
 	}
 	lease.Release()
 
-	selector.MarkSuccess(ctx, probe)
+	selector.markSuccess(ctx, probeCredential, probeRef)
 	if _, err := accounts.GetQuotaRecovery(ctx, probe.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("quota recovery should be cleared, err = %v", err)
 	}
@@ -122,7 +124,7 @@ func TestSelectorSkipsQuotaProbeBeforeDue(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	next := now.Add(time.Hour)
-	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+	if err := testsupport.Recovery(ctx, accounts, account.QuotaRecovery{
 		AccountID: value.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted,
 		NextProbeAt: &next, UpdatedAt: now,
 	}); err != nil {
@@ -168,15 +170,21 @@ func TestSelectorQuotaRecoveryUsesFixedFreeAndUpstreamPaidReset(t *testing.T) {
 	freeStarted := time.Now().UTC()
 	selector.MarkPaymentQuotaExhausted(ctx, value, quotaRecoveryHints{})
 	recovery = requireQuotaRecovery(t, ctx, accounts, value.ID)
-	if recovery.Kind != account.QuotaRecoveryKindFree {
-		t.Fatalf("free recovery = %#v", recovery)
+	if recovery.Kind != account.QuotaRecoveryKindPaid {
+		t.Fatalf("unknown concurrent observation replaced paid recovery: %#v", recovery)
 	}
-	assertRecoveryDelay(t, recovery, freeStarted, defaultFreeQuotaRecoveryPause)
-
+	assertRecoveryDelay(t, recovery, freeStarted, account.FreeQuotaRecoveryPause)
+	if err := accounts.ResetQuotaState(ctx, value.Provider, []uint64{value.ID}); err != nil {
+		t.Fatal(err)
+	}
+	value, err = accounts.Get(ctx, value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	freeStarted = time.Now().UTC()
 	selector.MarkFreeQuotaExhausted(ctx, value, 100, 100)
 	recovery = requireQuotaRecovery(t, ctx, accounts, value.ID)
-	assertRecoveryDelay(t, recovery, freeStarted, defaultFreeQuotaRecoveryPause)
+	assertRecoveryDelay(t, recovery, freeStarted, account.FreeQuotaRecoveryPause)
 }
 
 func TestSelectorModelQuotaUsesFixedFreeAndUpstreamPaidDelay(t *testing.T) {
@@ -199,15 +207,15 @@ func TestSelectorModelQuotaUsesFixedFreeAndUpstreamPaidDelay(t *testing.T) {
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 	freeStarted := time.Now().UTC()
-	selector.MarkModelQuotaExhausted(ctx, value, &account.Billing{PlanName: "free"}, "free-model", time.Hour)
+	selector.MarkModelQuotaExhausted(ctx, value, &account.Billing{AccountID: value.ID, PlanName: "free"}, "free-model", time.Hour)
 	freeCandidates, err := accounts.ListRoutingCandidates(ctx, account.ProviderBuild, 0, "free-model", "")
 	if err != nil || len(freeCandidates) != 1 || freeCandidates[0].ModelQuotaBlock == nil {
 		t.Fatalf("free candidates = %#v, err = %v", freeCandidates, err)
 	}
-	assertTimeDelay(t, freeCandidates[0].ModelQuotaBlock.CooldownUntil, freeStarted, defaultFreeQuotaRecoveryPause)
+	assertTimeDelay(t, freeCandidates[0].ModelQuotaBlock.CooldownUntil, freeStarted, account.FreeQuotaRecoveryPause)
 
 	paidStarted := time.Now().UTC()
-	selector.MarkModelQuotaExhausted(ctx, value, &account.Billing{PlanName: "SuperGrok"}, "paid-model", 2*time.Hour)
+	selector.MarkModelQuotaExhausted(ctx, value, &account.Billing{AccountID: value.ID, PlanName: "SuperGrok"}, "paid-model", 2*time.Hour)
 	paidCandidates, err := accounts.ListRoutingCandidates(ctx, account.ProviderBuild, 0, "paid-model", "")
 	if err != nil || len(paidCandidates) != 1 || paidCandidates[0].ModelQuotaBlock == nil {
 		t.Fatalf("paid candidates = %#v, err = %v", paidCandidates, err)
@@ -318,7 +326,7 @@ func TestSelectorUsesPaidWeeklyPoolAsWebQuotaGate(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	resetAt := now.Add(7 * 24 * time.Hour)
-	if err := accounts.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{
 		{AccountID: value.ID, Mode: "weekly", Remaining: 0, Total: 10000, UsagePercent: 100, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 		{AccountID: value.ID, Mode: "fast", Remaining: 30, Total: 30, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 	}); err != nil {
@@ -328,7 +336,7 @@ func TestSelectorUsesPaidWeeklyPoolAsWebQuotaGate(t *testing.T) {
 	if _, err := selector.Acquire(ctx, account.ProviderWeb, 0, "", "fast", "", nil, false); err == nil {
 		t.Fatal("exhausted weekly pool must take precedence over a stale fast quota window")
 	}
-	if err := accounts.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{
 		{AccountID: value.ID, Mode: "weekly", Remaining: 8900, Total: 10000, UsagePercent: 11, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 		{AccountID: value.ID, Mode: "fast", Remaining: 0, Total: 30, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 	}); err != nil {
@@ -362,7 +370,7 @@ func TestSelectorClaimsPaidBillingProbeAfterPeriodEnd(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	due := now.Add(-time.Minute)
-	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{AccountID: value.ID, Kind: account.QuotaRecoveryKindPaid, Status: account.QuotaRecoveryStatusExhausted, NextProbeAt: &due, UpdatedAt: now}); err != nil {
+	if err := testsupport.Recovery(ctx, accounts, account.QuotaRecovery{AccountID: value.ID, Kind: account.QuotaRecoveryKindPaid, Status: account.QuotaRecoveryStatusExhausted, NextProbeAt: &due, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
@@ -404,16 +412,16 @@ func TestSelectorOnlyUsesAccountsSupportingRequestedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: unsupported.ID, IsUnifiedBillingUser: true, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: unsupported.ID, IsUnifiedBillingUser: true, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: supported.ID, MonthlyLimit: 100, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: supported.ID, MonthlyLimit: 100, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, unsupported.ID, []string{"grok-basic"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, unsupported.ID, []string{"grok-basic"}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, supported.ID, []string{"grok-basic", "grok-premium"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, supported.ID, []string{"grok-basic", "grok-premium"}, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -449,7 +457,7 @@ func TestSelectorKeepsWebQuotaModesIsolated(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	resetAt := now.Add(time.Hour)
-	if err := accounts.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{
 		{AccountID: value.ID, Mode: "fast", Remaining: 0, Total: 20, ResetAt: &resetAt, Source: account.QuotaSourceUpstream},
 		{AccountID: value.ID, Mode: "auto", Remaining: 5, Total: 10, ResetAt: &resetAt, Source: account.QuotaSourceUpstream},
 	}); err != nil {
@@ -496,13 +504,13 @@ func TestSelectorUsesTierSpecificWebImageEditQuotaAndPrefersBasic(t *testing.T) 
 	super := create("super-edit", account.WebTierSuper, 100)
 	now := time.Now().UTC()
 	resetAt := now.Add(time.Hour)
-	if err := accounts.SaveQuotaWindows(ctx, basic.ID, account.WebTierBasic, now, []account.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, basic.ID, account.WebTierBasic, now, []account.QuotaWindow{
 		{AccountID: basic.ID, Mode: account.QuotaModeWebImagePro, Remaining: 4, Total: 4, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 		{AccountID: basic.ID, Mode: account.QuotaModeWebImageEdit, Remaining: 0, Total: 0, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveQuotaWindows(ctx, super.ID, account.WebTierSuper, now, []account.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, super.ID, account.WebTierSuper, now, []account.QuotaWindow{
 		{AccountID: super.ID, Mode: account.QuotaModeWebImagePro, Remaining: 20, Total: 20, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 		{AccountID: super.ID, Mode: account.QuotaModeWebImageEdit, Remaining: 8, Total: 8, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 	}); err != nil {
@@ -510,10 +518,10 @@ func TestSelectorUsesTierSpecificWebImageEditQuotaAndPrefersBasic(t *testing.T) 
 	}
 	// Simulate an old Basic snapshot from before image editing was exposed to
 	// that tier. Super already reports the capability.
-	if err := models.ReplaceAccountCapabilities(ctx, basic.ID, []string{"grok-chat-fast"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, basic.ID, []string{"grok-chat-fast"}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, super.ID, []string{"grok-chat-fast", "imagine-image-edit"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, super.ID, []string{"grok-chat-fast", "imagine-image-edit"}, now); err != nil {
 		t.Fatal(err)
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), staticTierOrder{order: []account.WebTier{
@@ -553,13 +561,13 @@ func TestSelectorAllowsBasicOnlyForConfirmedWebVideoQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveQuotaWindows(ctx, basic.ID, account.WebTierBasic, now, []account.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(accounts, ctx, basic.ID, account.WebTierBasic, now, []account.QuotaWindow{{
 		AccountID: basic.ID, Mode: account.QuotaModeWebVideo720p, Remaining: 1, Total: 1,
 		SyncedAt: &now, Source: account.QuotaSourceUpstream,
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, basic.ID, []string{"grok-chat-fast"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, basic.ID, []string{"grok-chat-fast"}, now); err != nil {
 		t.Fatal(err)
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), webVideoTierOrder{}, time.Hour, time.Second, time.Minute)
@@ -657,10 +665,10 @@ func TestSelectorEnforcesClientKeyAccountScopeAcrossProvidersAndTiers(t *testing
 	buildSuper := create(account.Credential{Provider: account.ProviderBuild, Name: "build-super", SourceKey: "build-super", EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 20, MaxConcurrent: 2})
 	buildUnknown := create(account.Credential{Provider: account.ProviderBuild, Name: "build-unknown", SourceKey: "build-unknown", EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 2})
 	now := time.Now().UTC()
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: buildFree.ID, PlanName: "Free", SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: buildFree.ID, PlanName: "Free", SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: buildSuper.ID, PlanName: "SuperGrok", SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: buildSuper.ID, PlanName: "SuperGrok", SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -847,7 +855,7 @@ func TestSelectionSessionReusesCandidatePlanAcrossAccountSwitches(t *testing.T) 
 	lease.Release()
 	session.RetryAccount(first.ID)
 	first.Enabled = false
-	if _, err := accounts.Update(ctx, first); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, first.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &first.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 	// Session 快照中的 first 已过期，Acquire 应跳过它并继续使用现有计划。
@@ -902,10 +910,10 @@ func TestSelectorPreferFreeBuildHotReloadAndSaturationFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: freeAccount.ID, PlanName: "free", SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: freeAccount.ID, PlanName: "free", SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: superAccount.ID, MonthlyLimit: 140, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: superAccount.ID, MonthlyLimit: 140, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1024,31 +1032,6 @@ func TestCandidatePlanDoesNotTreatLegacyDefaultQuotaAsAuthoritative(t *testing.T
 	first, ok := plan.Next()
 	if !ok || first.Credential.ID != 2 {
 		t.Fatalf("first candidate = %#v, want upstream-confirmed account 2", first)
-	}
-}
-
-func TestSelectorConsumesOnlyMatchingQuotaSnapshot(t *testing.T) {
-	key := candidateCacheKey{provider: account.ProviderWeb, upstreamModel: "chat", quotaMode: "fast"}
-	values := []account.RoutingCandidate{{
-		Credential: account.Credential{ID: 7}, QuotaWindow: &account.QuotaWindow{AccountID: 7, Mode: "fast", Remaining: 10},
-	}}
-	selector := &Selector{candidates: map[candidateCacheKey]candidateSnapshot{key: newCandidateSnapshot(values, time.Now().UTC().Add(time.Minute))}}
-	original := selector.candidates[key].values
-	selector.ConsumeQuota(account.ProviderWeb, 7, "fast", 3)
-	if original[0].QuotaWindow == nil || original[0].QuotaWindow.Remaining != 10 {
-		t.Fatalf("published snapshot was mutated: %#v", original[0].QuotaWindow)
-	}
-	consumed := selector.quotaConsumptionSnapshot(account.ProviderWeb)
-	if quotaWindowExhausted(values[0], consumed) {
-		t.Fatal("partially consumed quota was treated as exhausted")
-	}
-	selector.ConsumeQuota(account.ProviderWeb, 7, "other", 100)
-	if quotaWindowExhausted(values[0], selector.quotaConsumptionSnapshot(account.ProviderWeb)) {
-		t.Fatal("a different quota mode affected the candidate")
-	}
-	selector.ConsumeQuota(account.ProviderWeb, 7, "fast", 7)
-	if !quotaWindowExhausted(values[0], selector.quotaConsumptionSnapshot(account.ProviderWeb)) {
-		t.Fatal("fully consumed quota remained schedulable")
 	}
 }
 
@@ -1299,10 +1282,10 @@ func TestSelectorAppliesPersistedCooldownOnlyToMatchingModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	until := time.Now().UTC().Add(time.Hour)
-	if err := accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{AccountID: credential.ID, UpstreamModel: "limited-model", Reason: "test", CooldownUntil: until}); err != nil {
+	if err := testsupport.ModelRestriction(ctx, accounts, account.ModelQuotaBlock{AccountID: credential.ID, UpstreamModel: "limited-model", Reason: "model_access_denied", CooldownUntil: until}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{AccountID: credential.ID, UpstreamModel: "limited-model", Reason: "shorter", CooldownUntil: time.Now().UTC().Add(time.Minute)}); err != nil {
+	if err := testsupport.ModelRestriction(ctx, accounts, account.ModelQuotaBlock{AccountID: credential.ID, UpstreamModel: "limited-model", Reason: "model_access_denied", CooldownUntil: time.Now().UTC().Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
@@ -1346,86 +1329,17 @@ func (s *recordingStickyStore) Expiries() []time.Time {
 	return append([]time.Time(nil), s.expiries...)
 }
 
-func TestMarkMissingThinkingCoolsThenDisables(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "missing-thinking.db"))
-	if err != nil {
-		t.Fatal(err)
+func TestLocalQualityHoldsExpireWithoutChangingManualOrHealthState(t *testing.T) {
+	selector := NewSelector(nil, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	now := time.Now()
+	selector.holdLocalQuality(7, "attempt-a", now.Add(time.Minute))
+	selector.holdLocalQuality(7, "attempt-b", now.Add(2*time.Minute))
+	selector.holdLocalQuality(7, "attempt-a", now.Add(time.Hour))
+	if selector.localQualityAllowed(7, now.Add(time.Minute)) {
+		t.Fatal("other owner lost")
 	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	accounts := relational.NewAccountRepository(database)
-	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "no-think", SourceKey: "no-think", EncryptedAccessToken: "encrypted", Enabled: true,
-		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, 30*time.Second, 30*time.Minute, 500*time.Millisecond)
-	before := time.Now().UTC()
-	if action, err := selector.markMissingThinking(ctx, credential, time.Hour); err != nil || action != missingThinkingPenaltyCooled {
-		t.Fatalf("first penalty = (%s, %v)", action, err)
-	}
-	first, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !first.Enabled || first.LastError != lastErrorMissingThinking || first.CooldownUntil == nil {
-		t.Fatalf("first strike = %#v", first)
-	}
-	if wait := first.CooldownUntil.Sub(before); wait < 50*time.Minute || wait > 70*time.Minute {
-		t.Fatalf("first cooldown = %s", wait)
-	}
-	if action, err := selector.markMissingThinking(ctx, first, time.Hour); err != nil || action != missingThinkingPenaltyUnchanged {
-		t.Fatalf("in-cooldown penalty = (%s, %v)", action, err)
-	}
-	stillCooling, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !stillCooling.Enabled {
-		t.Fatal("in-cooldown second call must not disable")
-	}
-	expired := time.Now().UTC().Add(-time.Second)
-	stillCooling.CooldownUntil = &expired
-	if action, err := selector.markMissingThinking(ctx, stillCooling, time.Hour); err != nil || action != missingThinkingPenaltyDisabled {
-		t.Fatalf("second penalty = (%s, %v)", action, err)
-	}
-	second, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.Enabled {
-		t.Fatalf("second strike after cooldown must disable, got %#v", second)
-	}
-	if second.LastError != lastErrorMissingThinkingDisabled {
-		t.Fatalf("disabled last error = %q", second.LastError)
-	}
-
-	ok, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "recovered", SourceKey: "recovered", EncryptedAccessToken: "encrypted", Enabled: true,
-		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if action, err := selector.markMissingThinking(ctx, ok, time.Hour); err != nil || action != missingThinkingPenaltyCooled {
-		t.Fatalf("recovery penalty = (%s, %v)", action, err)
-	}
-	cooled, err := accounts.Get(ctx, ok.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	selector.MarkSuccess(ctx, cooled)
-	kept, err := accounts.Get(ctx, ok.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kept.LastError != lastErrorMissingThinking || kept.CooldownUntil != nil || kept.FailureCount != 0 {
-		t.Fatalf("success must keep thinking strike and clear cooldown, got %#v", kept)
+	if !selector.localQualityAllowed(7, now.Add(2*time.Minute)) {
+		t.Fatal("duplicate owner extended expiry")
 	}
 }
 

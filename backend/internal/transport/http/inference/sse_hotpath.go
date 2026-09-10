@@ -102,9 +102,11 @@ func peekRootOrResponseString(value, head []byte, key string) string {
 	if v := jsonpeek.RootStringField(head, key); v != "" {
 		return v
 	}
-	if raw := jsonpeek.RawValue(head, "response"); len(raw) > 0 {
-		if v := jsonpeek.RootStringField(raw, key); v != "" {
-			return v
+	for _, wrapper := range []string{"response", "message"} {
+		if raw := jsonpeek.RawValue(head, wrapper); len(raw) > 0 {
+			if v := jsonpeek.RootStringField(raw, key); v != "" {
+				return v
+			}
 		}
 	}
 	switch sseEventType(value) {

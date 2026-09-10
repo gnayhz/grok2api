@@ -30,7 +30,9 @@ func (r *racingOperationsRepo) GetEgressOperationsConfig(ctx context.Context) (d
 		modified := snapshot
 		modified.ProbeIntervalSeconds = 120
 		modified.UpdatedAt = time.Now().UTC()
-		if _, err := r.EgressRepository.SaveEgressOperationsConfig(ctx, modified); err != nil {
+		if _, err := r.EgressRepository.SaveEgressOperationsConfig(ctx, modified, func(domain.Node) error {
+			return nil
+		}); err != nil {
 			return domain.OperationsConfig{}, err
 		}
 	}
@@ -42,6 +44,8 @@ func seedOperationsConfig(ctx context.Context, t *testing.T, repo *relational.Eg
 	if _, err := repo.SaveEgressOperationsConfig(ctx, domain.OperationsConfig{
 		ProbeProvider: domain.ProbeProviderCloudflare, ProbeIntervalSeconds: 900,
 		DefaultTarget: target, UpdatedAt: time.Now().UTC(),
+	}, func(domain.Node) error {
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +104,11 @@ func TestSyncHygieneDoesNotRevertConcurrentAdminConfigSave(t *testing.T) {
 		EncryptedProxyURL: encryptedProxyURL, RefreshIntervalSeconds: 900,
 	}
 
+	// The fetch snapshot must be the actual persisted source configuration.
+	source, err = repo.UpdateEgressSource(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	racing := &racingOperationsRepo{EgressRepository: repo}
 	if _, err := service.syncSource(ctx, racing, source); err != nil {
 		t.Fatalf("sync source: %v", err)

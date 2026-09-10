@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { GenerationUsagePanel } from "./generation-usage-panel";
 import { getRequestAudit, type AuditAttemptDTO, type AuditDTO } from "@/features/audits/request-audits-api";
 import { CopyButton } from "@/shared/components/copy-button";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
@@ -122,6 +123,9 @@ export function RequestAuditDetailDialog({
                   <ListTree className="size-3.5" />
                   {t("audits.requestMetadata")}
                 </TabsTrigger>
+                <TabsTrigger value="generation" className="gap-1.5 px-3 text-xs">
+                  {t("audits.generationUsage")}
+                </TabsTrigger>
                 <TabsTrigger value="attempts" className="gap-1.5 px-3 text-xs">
                   <Server className="size-3.5" />
                   {t("audits.upstreamDiagnostics")}
@@ -140,6 +144,10 @@ export function RequestAuditDetailDialog({
 
             <TabsContent value="requestMetadata" className="min-h-0 flex-1 overflow-hidden px-4 pb-4 pt-3 focus-visible:outline-none sm:px-5 sm:pb-5">
               <RequestMetadataPanel audit={activeAudit} />
+            </TabsContent>
+
+            <TabsContent value="generation" className="min-h-0 flex-1 overflow-y-auto p-4 focus-visible:outline-none sm:p-5">
+              <GenerationUsagePanel values={detailQuery.data?.generationUsages ?? []} />
             </TabsContent>
 
             <TabsContent value="attempts" className="min-h-0 flex-1 overflow-hidden focus-visible:outline-none">
@@ -222,6 +230,28 @@ function RequestOverviewPanel({ audit }: { audit: AuditDTO }) {
         label={t("audits.cost")}
         value={costDisplay}
       />
+      {audit.upstreamStatusCode ? (
+        <OverviewField label={t("audits.upstreamStatusCode")} value={String(audit.upstreamStatusCode)} />
+      ) : null}
+      {audit.responseId ? (
+        <OverviewField label={t("audits.responseIdentity")} value={audit.responseId} copy />
+      ) : null}
+      <div className="grid gap-2 rounded-lg bg-muted/15 p-3 sm:col-span-2 sm:grid-cols-3">
+        <p className="text-[11px] text-muted-foreground sm:col-span-3">{t("audits.completionFacts")}</p>
+        {([
+          "admissionOutcome", "generationOutcome", "historyCommit", "providerStateCommit",
+          "ownershipCommit", "deliveryOutcome", "physicalReceipt", "qualityReceipt", "ledgerOutcome",
+        ] as const).map((stage) => (
+          <OverviewField
+            key={stage}
+            label={t(`audits.completionStages.${stage}`)}
+            value={t(`audits.completionOutcomes.${audit[stage] || "not_recorded"}`, { defaultValue: audit[stage] })}
+          />
+        ))}
+        <p className="text-[11px] text-muted-foreground sm:col-span-3">
+          {t("audits.deliveryFacts", { bytes: formatNumber(audit.deliveredBytes, i18n.language), events: formatNumber(audit.deliveredEvents, i18n.language) })}
+        </p>
+      </div>
       {audit.errorCode ? (
         <OverviewField
           className="sm:col-span-2"
@@ -237,11 +267,31 @@ function RequestOverviewPanel({ audit }: { audit: AuditDTO }) {
           value={t("audits.qualityFailOpenValue")}
         />
       ) : null}
+      {audit.qualityExempt ? (
+        <OverviewField
+          className="sm:col-span-2"
+          label={t("audits.qualityExemptLabel")}
+          value={t(`settings.guardStats.exempts.${audit.qualityExempt}`, { defaultValue: audit.qualityExempt })}
+        />
+      ) : null}
+      {audit.qualityRule ? (
+        <OverviewField
+          className="sm:col-span-2"
+          label={t("audits.qualityRuleLabel")}
+          value={t(`audits.qualityRules.${audit.qualityRule}`, { defaultValue: audit.qualityRule })}
+        />
+      ) : null}
       {tokenSummary ? (
         <OverviewField
           className="sm:col-span-2"
           label={t("audits.tokenUsage")}
           value={tokenSummary}
+        />
+      ) : null}
+      {audit.audioDurationMs !== undefined && audit.audioDurationMs > 0 ? (
+        <OverviewField
+          label={t("audits.audioDuration")}
+          value={t("audits.secondsCount", { count: audit.audioDurationMs / 1000 })}
         />
       ) : null}
       {audit.mediaInputImages > 0 || audit.mediaOutputImages > 0 || audit.mediaOutputSeconds > 0 ? (

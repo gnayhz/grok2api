@@ -17,7 +17,7 @@ func TestScannerCountsThinkingEvidenceComment(t *testing.T) {
 	if !sig.HasThinking {
 		t.Fatalf("evidence comment must count as thinking evidence: %#v", sig)
 	}
-	if v := classifyQualityHold(sig); v != QualityDeliver {
+	if v := classifyQualityHoldShadowed(sig); v != QualityDeliver {
 		t.Fatalf("evidence comment must deliver: %s", v)
 	}
 }
@@ -33,7 +33,7 @@ func TestScannerIgnoresGenericComments(t *testing.T) {
 	if sig.HasThinking {
 		t.Fatalf("generic comment must not count as thinking evidence: %#v", sig)
 	}
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("no-think visible text must withhold: %s", v)
 	}
 }

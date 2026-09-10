@@ -45,7 +45,7 @@ func TestPublicImageSupportsGetHeadAndETag(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := gin.New()
-	NewHandler(service).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router)
 	path := "/v1/media/images/" + asset.ID
 
 	get := httptest.NewRecorder()
@@ -92,7 +92,7 @@ func TestPublicVideoAssetSupportsGetHeadAndRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := gin.New()
-	NewHandler(service).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router)
 	path := "/v1/media/videos/" + asset.ID
 
 	get := httptest.NewRecorder()
@@ -148,7 +148,7 @@ func TestAdminDeleteImagesRemovesObjectMetadataAndStats(t *testing.T) {
 	}
 
 	router := gin.New()
-	NewHandler(service).RegisterAdmin(router.Group("/api/admin/v1"))
+	NewHandler(service, nil).RegisterAdmin(router.Group("/api/admin/v1"))
 	request := httptest.NewRequest(http.MethodDelete, "/api/admin/v1/media/images", bytes.NewBufferString(`{"ids":["`+deletedAsset.ID+`"]}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -210,7 +210,7 @@ func TestPutVideoUploadReturns413WhenBodyTooLarge(t *testing.T) {
 	}
 	payload := append([]byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, bytes.Repeat([]byte{0x0a}, 64)...)
 	router := gin.New()
-	NewHandler(service).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router)
 	req := httptest.NewRequest(http.MethodPut, "/v1/media/uploads/"+token, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "video/mp4")
 	recorder := httptest.NewRecorder()
@@ -247,7 +247,7 @@ func TestPutVideoUploadReturns400ForInvalidMIME(t *testing.T) {
 	}
 	token := uploadURL[len("https://api.example/v1/media/uploads/"):]
 	router := gin.New()
-	NewHandler(service).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router)
 	payload := append([]byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'}, bytes.Repeat([]byte{1}, 16)...)
 	req := httptest.NewRequest(http.MethodPut, "/v1/media/uploads/"+token, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "video/webm")
@@ -277,7 +277,7 @@ func TestAdminVideoListRejectsInvalidFilters(t *testing.T) {
 		mediaapp.Config{},
 	)
 	router := gin.New()
-	NewHandler(service).RegisterAdmin(router.Group("/api/admin/v1"))
+	NewHandler(service, nil).RegisterAdmin(router.Group("/api/admin/v1"))
 
 	for _, path := range []string{
 		"/api/admin/v1/media/videos?status=unknown",

@@ -31,3 +31,10 @@ func (a *Adapter) Definition() provider.Definition {
 		Inference: provider.InferencePolicy{Usage: provider.UsageEstimated, RetryForbiddenAsEgress: true},
 	}
 }
+
+// Only native Web chat responses can be read or continued. Image compatibility
+// IDs identify one encoded result and do not name an upstream conversation.
+func (a *Adapter) SupportsStoredResponseModel(model string) bool {
+	spec, ok := Resolve(model)
+	return ok && spec.Capability == modeldomain.CapabilityChat
+}

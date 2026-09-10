@@ -2,7 +2,7 @@ package relational
 
 import (
 	"context"
-	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +16,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type AuditRepository struct{ db *Database }
@@ -28,28 +27,19 @@ const (
 	auditLookupBatchSize    = 500
 	attemptInsertBatchSize  = 40
 	auditRetentionBatchSize = 500
-	auditPurgeBatchSize     = 1000
 	auditSuccessPredicate   = "status_code >= 200 AND status_code < 300 AND (error_code IS NULL OR error_code = '')"
 	auditSuccessAggregate   = "COALESCE(SUM(CASE WHEN " + auditSuccessPredicate + " THEN 1 ELSE 0 END), 0)"
 )
 
-var errAuditBatchRequiresFallback = errors.New("audit batch requires idempotent fallback")
-
 type preparedAudit struct {
-	row      requestAuditModel
-	attempts []requestAuditAttemptModel
+	index       int
+	row         requestAuditModel
+	attempts    []requestAuditAttemptModel
+	generations []requestAuditGenerationModel
 }
 
 func (r *AuditRepository) Create(ctx context.Context, value audit.Record) error {
-	prepared, err := prepareAudits([]audit.Record{value})
-	if err != nil {
-		return err
-	}
-	row := prepared[0].row
-	attempts := prepared[0].attempts
-	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return createAuditAndBill(tx, &row, attempts)
-	})
+	return r.CreateBatch(ctx, []audit.Record{value})
 }
 
 func (r *AuditRepository) CreateBatch(ctx context.Context, values []audit.Record) error {
@@ -60,14 +50,15 @@ func (r *AuditRepository) CreateBatch(ctx context.Context, values []audit.Record
 	if err != nil {
 		return err
 	}
-	err = r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return createPreparedAuditBatchFast(tx, prepared)
-	})
-	if !errors.Is(err, errAuditBatchRequiresFallback) {
-		return err
-	}
 	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return createPreparedAuditBatchSafe(tx, prepared)
+		if err := lockAuditClientKeys(tx, prepared); err != nil {
+			return err
+		}
+		claimed, err := claimAuditSettlements(tx, prepared)
+		if err != nil || len(claimed) == 0 {
+			return err
+		}
+		return createPreparedAuditBatch(tx, claimed)
 	})
 }
 
@@ -78,7 +69,12 @@ func prepareAudits(values []audit.Record) ([]preparedAudit, error) {
 		if err != nil {
 			return nil, &repository.InvalidBatchRecordError{Index: index, Err: err}
 		}
-		candidate := preparedAudit{row: row, attempts: attempts}
+		row.LedgerOutcome = "committed"
+		generations, err := prepareGenerationModels(value)
+		if err != nil {
+			return nil, &repository.InvalidBatchRecordError{Index: index, Err: err}
+		}
+		candidate := preparedAudit{index: index, row: row, attempts: attempts, generations: generations}
 		if err := validatePreparedAudit(candidate); err != nil {
 			return nil, &repository.InvalidBatchRecordError{Index: index, Err: err}
 		}
@@ -187,31 +183,19 @@ func auditStringAllowed(value string, allowed ...string) bool {
 	return false
 }
 
-func createPreparedAuditBatchFast(tx *gorm.DB, prepared []preparedAudit) error {
+func createPreparedAuditBatch(tx *gorm.DB, prepared []preparedAudit) error {
 	rows := make([]requestAuditModel, len(prepared))
 	for index := range prepared {
 		rows[index] = prepared[index].row
 	}
-	result := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(&rows, auditInsertBatchSize)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil
-	}
-	// A mixed new/duplicate result cannot be mapped safely across database RETURNING implementations.
-	if result.RowsAffected != int64(len(rows)) {
-		return errAuditBatchRequiresFallback
-	}
-	idsByEvent, err := loadInsertedAuditIDs(tx, prepared)
-	if err != nil {
+	if err := tx.CreateInBatches(&rows, auditInsertBatchSize).Error; err != nil {
 		return err
 	}
 	inserted := make([]preparedAudit, len(prepared))
 	for index := range prepared {
-		auditID := idsByEvent[prepared[index].row.EventID]
+		auditID := rows[index].ID
 		if auditID == 0 {
-			return errAuditBatchRequiresFallback
+			return repository.ErrConflict
 		}
 		inserted[index] = prepared[index]
 		inserted[index].row.ID = auditID
@@ -219,48 +203,10 @@ func createPreparedAuditBatchFast(tx *gorm.DB, prepared []preparedAudit) error {
 	if err := insertPreparedAuditAttempts(tx, inserted); err != nil {
 		return err
 	}
-	return settleInsertedAudits(tx, inserted)
-}
-
-func loadInsertedAuditIDs(tx *gorm.DB, prepared []preparedAudit) (map[string]uint64, error) {
-	eventIDs := make([]string, len(prepared))
-	for index := range prepared {
-		eventIDs[index] = prepared[index].row.EventID
-	}
-	idsByEvent := make(map[string]uint64, len(eventIDs))
-	for start := 0; start < len(eventIDs); start += auditLookupBatchSize {
-		end := min(start+auditLookupBatchSize, len(eventIDs))
-		var rows []struct {
-			ID      uint64
-			EventID string
-		}
-		if err := tx.Model(&requestAuditModel{}).Select("id", "event_id").Where("event_id IN ?", eventIDs[start:end]).Find(&rows).Error; err != nil {
-			return nil, err
-		}
-		for _, row := range rows {
-			idsByEvent[row.EventID] = row.ID
-		}
-	}
-	return idsByEvent, nil
-}
-
-func createPreparedAuditBatchSafe(tx *gorm.DB, prepared []preparedAudit) error {
-	inserted := make([]preparedAudit, 0, len(prepared))
-	for index := range prepared {
-		row := prepared[index].row
-		row.ID = 0
-		wasInserted, err := insertAudit(tx, &row)
-		if err != nil {
+	for _, value := range inserted {
+		if err := insertAuditGenerations(tx, value.row.ID, value.generations); err != nil {
 			return err
 		}
-		if !wasInserted {
-			continue
-		}
-		attempts := append([]requestAuditAttemptModel(nil), prepared[index].attempts...)
-		if err := insertAuditAttempts(tx, row.ID, attempts); err != nil {
-			return err
-		}
-		inserted = append(inserted, preparedAudit{row: row})
 	}
 	return settleInsertedAudits(tx, inserted)
 }
@@ -287,26 +233,6 @@ func settleInsertedAudits(tx *gorm.DB, inserted []preparedAudit) error {
 	if len(inserted) == 0 {
 		return nil
 	}
-	keySet := make(map[uint64]struct{}, len(inserted))
-	for _, value := range inserted {
-		keySet[value.row.ClientKeyID] = struct{}{}
-	}
-	keyIDs := make([]uint64, 0, len(keySet))
-	for keyID := range keySet {
-		keyIDs = append(keyIDs, keyID)
-	}
-	sort.Slice(keyIDs, func(i, j int) bool { return keyIDs[i] < keyIDs[j] })
-	// Lock every referenced key before reading reservations so zero-cost settlements cannot race reservation creation.
-	missingKeys := make(map[uint64]struct{})
-	for _, keyID := range keyIDs {
-		if err := lockClientKey(tx, keyID); err != nil {
-			if !errors.Is(err, repository.ErrNotFound) {
-				return err
-			}
-			missingKeys[keyID] = struct{}{}
-		}
-	}
-
 	eventIDs := make([]string, 0, len(inserted))
 	for _, value := range inserted {
 		eventIDs = append(eventIDs, value.row.EventID)
@@ -317,9 +243,6 @@ func settleInsertedAudits(tx *gorm.DB, inserted []preparedAudit) error {
 	}
 	reservationByEvent := make(map[string]billingReservationModel, len(reservations))
 	for _, reservation := range reservations {
-		if _, missing := missingKeys[reservation.ClientKeyID]; missing {
-			return repository.ErrNotFound
-		}
 		reservationByEvent[reservation.EventID] = reservation
 	}
 
@@ -332,6 +255,9 @@ func settleInsertedAudits(tx *gorm.DB, inserted []preparedAudit) error {
 	settledEventIDs := make([]string, 0, len(reservations))
 	for _, value := range inserted {
 		reservation, hasReservation := reservationByEvent[value.row.EventID]
+		if hasReservation && reservation.ClientKeyID != value.row.ClientKeyID {
+			return settlementOwnerConflict(value)
+		}
 		settled, err := applyInsertedAuditBilling(tx, value.row, reservation, hasReservation)
 		if err != nil {
 			return err
@@ -356,11 +282,7 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 	if usageSource == "" {
 		usageSource = audit.UsageSourceUpstream
 	}
-	eventID := strings.TrimSpace(value.EventID)
-	if eventID == "" {
-		digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d\x00%d", value.RequestID, value.ClientKeyID, value.ModelRouteID, value.CreatedAt.UnixNano())))
-		eventID = fmt.Sprintf("evt_%x", digest[:18])
-	}
+	eventID := value.EventIdentity()
 	requestHeadersJSON := "{}"
 	if len(value.RequestHeaders) > 0 {
 		if raw, err := json.Marshal(value.RequestHeaders); err == nil {
@@ -368,20 +290,21 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 		}
 	}
 	row := requestAuditModel{
-		EventID: truncate(eventID, 64), RequestID: truncate(value.RequestID, 64), ClientKeyID: value.ClientKeyID, ClientKeyName: truncate(value.ClientKeyName, 160), ClientIP: strings.TrimSpace(value.ClientIP),
+		EventID: eventID, RequestID: truncate(value.RequestID, 64), ClientKeyID: value.ClientKeyID, ClientKeyName: truncate(value.ClientKeyName, 160), ClientIP: strings.TrimSpace(value.ClientIP),
 		ModelRouteID: value.ModelRouteID, ModelPublicID: truncate(value.ModelPublicID, 255), ModelUpstreamModel: truncate(value.ModelUpstreamModel, 255),
 		Provider: truncate(provider, 32), Operation: string(operation), UsageSource: string(usageSource),
 		ReasoningEffort: audit.NormalizeReasoningEffort(value.ReasoningEffort),
 		AccountID:       value.AccountID, AccountName: truncate(value.AccountName, 160),
 		EgressNodeID: value.EgressNodeID, EgressNodeName: truncate(value.EgressNodeName, 160), EgressScope: truncate(value.EgressScope, 32), EgressMode: string(value.EgressMode),
 		StatusCode: value.StatusCode, Streaming: value.Streaming,
-		MediaInputImages: nonNegative(value.MediaInputImages), MediaOutputImages: nonNegative(value.MediaOutputImages), MediaOutputSeconds: nonNegative(value.MediaOutputSeconds),
+		MediaInputImages: nonNegative(value.MediaInputImages), MediaOutputImages: nonNegative(value.MediaOutputImages), MediaOutputSeconds: nonNegative(value.MediaOutputSeconds), AudioDurationMS: nonNegative(value.AudioDurationMS),
 		InputTokens: nonNegative(value.InputTokens), CachedInputTokens: nonNegative(value.CachedInputTokens), OutputTokens: nonNegative(value.OutputTokens),
 		ReasoningTokens: nonNegative(value.ReasoningTokens), TotalTokens: nonNegative(value.TotalTokens), CostInUSDTicks: nonNegative(value.CostInUSDTicks),
 		EstimatedCostInUSDTicks: nonNegative(value.EstimatedCostInUSDTicks), PricingModel: truncate(value.PricingModel, 100), PricingVersion: truncate(value.PricingVersion, 20),
 		NumSourcesUsed: nonNegative(value.NumSourcesUsed), NumServerSideToolsUsed: nonNegative(value.NumServerSideToolsUsed),
-		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), FirstTokenMS: normalizedFirstToken(value), DeliveredEvents: nonNegative(value.DeliveredEvents), DeliveredBytes: nonNegative(value.DeliveredBytes), DurationMS: nonNegative(value.DurationMS),
+		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), FirstTokenMS: normalizedFirstToken(value), DeliveredEvents: nonNegative(value.DeliveredEvents), HistoryOutcome: value.HistoryOutcome, HistoryScopeHash: value.HistoryScopeHash, HistoryGeneration: value.HistoryGeneration, HistoryRestoredItems: value.HistoryRestoredItems, HistoryNormalizer: value.HistoryNormalizer, HistoryCommit: value.HistoryCommit, UpstreamStatusCode: value.UpstreamStatusCode, ResponseID: value.ResponseID, ProviderStateCommit: value.ProviderStateCommit, AdmissionOutcome: value.AdmissionOutcome, GenerationOutcome: value.GenerationOutcome, OwnershipCommit: value.OwnershipCommit, DeliveryOutcome: value.DeliveryOutcome, PhysicalReceipt: value.PhysicalReceipt, QualityReceipt: value.QualityReceipt, LedgerOutcome: value.LedgerOutcome, DeliveredBytes: nonNegative(value.DeliveredBytes), DurationMS: nonNegative(value.DurationMS),
 		ErrorCode: truncate(value.ErrorCode, 100), QualityFailOpen: value.QualityFailOpen,
+		QualityExempt: truncate(value.QualityExempt, 32), QualityRule: truncate(value.QualityRule, 32),
 		RequestMethod:      truncate(value.RequestMethod, 16),
 		RequestPath:        truncate(value.RequestPath, 2048),
 		RequestHeadersJSON: truncate(requestHeadersJSON, 65536),
@@ -426,6 +349,10 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 	return row, attempts, nil
 }
 
+func legacyAuditEventID(requestID string, keyID, modelID uint64, createdAt time.Time) string {
+	return (audit.Record{RequestID: requestID, ClientKeyID: keyID, ModelRouteID: modelID, CreatedAt: createdAt}).EventIdentity()
+}
+
 func truncateBytes(value []byte, limit int) []byte {
 	if len(value) <= limit {
 		return value
@@ -433,64 +360,12 @@ func truncateBytes(value []byte, limit int) []byte {
 	return value[:limit]
 }
 
-func createAuditAndBill(tx *gorm.DB, row *requestAuditModel, attempts []requestAuditAttemptModel) error {
-	inserted, err := insertAudit(tx, row)
-	if err != nil || !inserted {
-		return err
-	}
-	if err := insertAuditAttempts(tx, row.ID, attempts); err != nil {
-		return err
-	}
-	var reservation billingReservationModel
-	reservationErr := tx.Where("event_id = ?", row.EventID).First(&reservation).Error
-	if reservationErr != nil && !errors.Is(reservationErr, gorm.ErrRecordNotFound) {
-		return reservationErr
-	}
-	if reservationErr == nil || auditBillingAmount(*row) > 0 {
-		if err := lockClientKey(tx, row.ClientKeyID); err != nil {
-			if reservationErr == nil || !errors.Is(err, repository.ErrNotFound) {
-				return err
-			}
-			return billInsertedAudit(tx, *row, billingReservationModel{}, false)
-		}
-		reservation = billingReservationModel{}
-		reservationErr = tx.Where("event_id = ?", row.EventID).First(&reservation).Error
-		if reservationErr != nil && !errors.Is(reservationErr, gorm.ErrRecordNotFound) {
-			return reservationErr
-		}
-	}
-	return billInsertedAudit(tx, *row, reservation, reservationErr == nil)
-}
-
-func insertAudit(tx *gorm.DB, row *requestAuditModel) (bool, error) {
-	result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(row)
-	return result.RowsAffected == 1, result.Error
-}
-
-func insertAuditAttempts(tx *gorm.DB, auditID uint64, attempts []requestAuditAttemptModel) error {
-	if len(attempts) == 0 {
-		return nil
-	}
-	for index := range attempts {
-		attempts[index].AuditID = auditID
-	}
-	return tx.Create(&attempts).Error
-}
-
-func billInsertedAudit(tx *gorm.DB, row requestAuditModel, reservation billingReservationModel, hasReservation bool) error {
-	settled, err := applyInsertedAuditBilling(tx, row, reservation, hasReservation)
-	if err != nil {
-		return err
-	}
-	if !settled {
-		return nil
-	}
-	return deleteBillingReservations(tx, []string{row.EventID})
-}
-
 func applyInsertedAuditBilling(tx *gorm.DB, row requestAuditModel, reservation billingReservationModel, hasReservation bool) (bool, error) {
 	amount := auditBillingAmount(row)
 	if hasReservation {
+		if reservation.ClientKeyID != row.ClientKeyID {
+			return false, repository.ErrConflict
+		}
 		if err := settleReservedBilling(tx, reservation, amount); err != nil {
 			return false, err
 		}
@@ -566,6 +441,7 @@ func normalizedFirstToken(value audit.Record) *int64 {
 }
 
 func (r *AuditRepository) SumTokensByAccountsSince(ctx context.Context, accountIDs []uint64, since time.Time) (map[uint64]int64, error) {
+	since = since.UTC()
 	result := make(map[uint64]int64, len(accountIDs))
 	if len(accountIDs) == 0 {
 		return result, nil
@@ -574,12 +450,16 @@ func (r *AuditRepository) SumTokensByAccountsSince(ctx context.Context, accountI
 		AccountID   uint64
 		TotalTokens int64
 	}
-	err := r.db.db.WithContext(ctx).
-		Model(&requestAuditModel{}).
-		Select("account_id, COALESCE(SUM(total_tokens), 0) AS total_tokens").
-		Where("account_id IN ? AND created_at >= ? AND total_tokens > 0", accountIDs, since).
-		Group("account_id").
-		Scan(&rows).Error
+	// New records attribute every observed upstream attempt to its actual
+	// account. Legacy rows without generation detail retain their old totals.
+	err := r.db.db.WithContext(ctx).Raw(`SELECT account_id, SUM(total_tokens) AS total_tokens FROM (
+		SELECT account_id, total_tokens FROM request_audit_generations
+		WHERE account_id IN ? AND created_at >= ? AND total_tokens > 0
+		UNION ALL
+		SELECT account_id, total_tokens FROM request_audits AS a
+		WHERE account_id IN ? AND created_at >= ? AND total_tokens > 0
+		AND NOT EXISTS (SELECT 1 FROM request_audit_generations AS g WHERE g.audit_id = a.id)
+	) AS consumed GROUP BY account_id`, accountIDs, since, accountIDs, since).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -606,23 +486,40 @@ func (r *AuditRepository) List(ctx context.Context, offset, limit int) ([]audit.
 	return out, total, nil
 }
 
+// Get reads one immutable audit and both detail collections from one snapshot.
+// Retention may remove the event concurrently, but cannot tear a successful view.
 func (r *AuditRepository) Get(ctx context.Context, id uint64) (audit.Record, error) {
-	var row requestAuditModel
-	if err := r.db.db.WithContext(ctx).First(&row, id).Error; err != nil {
-		return audit.Record{}, mapError(err)
-	}
-	var attemptRows []requestAuditAttemptModel
-	if err := r.db.db.WithContext(ctx).Where("audit_id = ?", id).Order("number ASC").Find(&attemptRows).Error; err != nil {
-		return audit.Record{}, err
-	}
-	value := toAuditDomain(row)
-	value.Attempts = make([]audit.Attempt, 0, len(attemptRows))
-	for _, attemptRow := range attemptRows {
-		attempt, err := toAuditAttemptDomain(attemptRow)
-		if err != nil {
-			return audit.Record{}, err
+	var value audit.Record
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row requestAuditModel
+		if err := tx.First(&row, id).Error; err != nil {
+			return mapError(err)
 		}
-		value.Attempts = append(value.Attempts, attempt)
+		var attemptRows []requestAuditAttemptModel
+		if err := tx.Where("audit_id = ?", id).Order("number ASC").Find(&attemptRows).Error; err != nil {
+			return err
+		}
+		value = toAuditDomain(row)
+		var generations []requestAuditGenerationModel
+		if err := tx.Where("audit_id = ?", id).Order("ordinal ASC").Find(&generations).Error; err != nil {
+			return err
+		}
+		value.GenerationUsages = make([]audit.GenerationUsage, 0, len(generations))
+		for _, generation := range generations {
+			value.GenerationUsages = append(value.GenerationUsages, generation.toDomain())
+		}
+		value.Attempts = make([]audit.Attempt, 0, len(attemptRows))
+		for _, attemptRow := range attemptRows {
+			attempt, err := toAuditAttemptDomain(attemptRow)
+			if err != nil {
+				return err
+			}
+			value.Attempts = append(value.Attempts, attempt)
+		}
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return audit.Record{}, err
 	}
 	return value, nil
 }
@@ -757,10 +654,10 @@ func applyAuditQuery(query *gorm.DB, search string, start, end time.Time, filter
 }
 
 // deleteAuditBatch 是审计清理的唯一事务实现：单事务内按 id 升序圈定最多
-// limit 条早于 cutoff 的审计（与 created_at 索引序一致），先删 attempts 再
+// limit 条早于 cutoff 的审计，先删 attempts 再
 // 带 created_at 复检删除审计，保证任何中断不留下孤儿 attempts。selection
-// 与删除同事务、且多实例并行时各自锁内串行，不存在「圈定后被并行清理
-// 抢删」的窗口；RowsAffected 即真实删除数。返回 0 表示已排空。
+// 与删除同事务。并行清理可遇到锁冲突或已被另一事务删除的记录，
+// RowsAffected 只报告本事务实际删除数；下个周期继续确认排空。
 func (r *AuditRepository) deleteAuditBatch(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
 	var deleted int64
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -776,7 +673,13 @@ func (r *AuditRepository) deleteAuditBatch(ctx context.Context, cutoff time.Time
 		if len(ids) == 0 {
 			return nil
 		}
+		if err := preserveAuditSettlements(tx, tx.Model(&requestAuditModel{}).Where("id IN ?", ids)); err != nil {
+			return err
+		}
 		if err := tx.Where("audit_id IN ?", ids).Delete(&requestAuditAttemptModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("audit_id IN ?", ids).Delete(&requestAuditGenerationModel{}).Error; err != nil {
 			return err
 		}
 		res := tx.Where("id IN ? AND created_at < ?", ids, cutoff).Delete(&requestAuditModel{})
@@ -786,36 +689,19 @@ func (r *AuditRepository) deleteAuditBatch(ctx context.Context, cutoff time.Time
 		deleted = res.RowsAffected
 		return nil
 	})
-	return deleted, err
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 // DeleteOlderThan 单批删除早于 cutoff 的审计及其 attempts 明细。返回实际
 // 删除条数；调用方以 返回值 < limit 判定本批排空（与选择数在单实例下等价，
-// 并行清理竞争下更保守——少算只会让调用方多做一轮排空确认）。
+// 并行清理可能提前结束本轮，由后续周期再次确认）。
 func (r *AuditRepository) DeleteOlderThan(ctx context.Context, cutoff time.Time, limit int) (int, error) {
 	if limit < 1 {
 		limit = auditRetentionBatchSize
 	}
 	deleted, err := r.deleteAuditBatch(ctx, cutoff, limit)
 	return int(deleted), err
-}
-
-// PurgeOlderThan 循环分批清理早于 cutoff 的审计与 attempts(上游 #983
-// retention)，直到排空或 ctx 取消。与 DeleteOlderThan 共享 deleteAuditBatch，
-// 差异仅在外层排空循环（天数保留策略的后台任务用）。
-func (r *AuditRepository) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
-	var totalDeleted int64
-	for {
-		batchDeleted, err := r.deleteAuditBatch(ctx, cutoff, auditPurgeBatchSize)
-		if err != nil {
-			return totalDeleted, err
-		}
-		totalDeleted += batchDeleted
-		if batchDeleted < auditPurgeBatchSize {
-			return totalDeleted, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return totalDeleted, err
-		}
-	}
 }

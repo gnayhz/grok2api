@@ -25,8 +25,8 @@ func BenchmarkAuditServiceSQLite(b *testing.B) {
 				database.Close()
 				b.Fatal(err)
 			}
-			service := NewService(relational.NewAuditRepository(database), slog.Default(), 16_384, 256, 250*time.Millisecond)
-			service.Start()
+			service := newTestService(b, relational.NewAuditRepository(database), slog.Default(), 16_384, 256, 250*time.Millisecond)
+			startAuditService(b, service)
 
 			var sequence atomic.Uint64
 			errCh := make(chan error, 1)

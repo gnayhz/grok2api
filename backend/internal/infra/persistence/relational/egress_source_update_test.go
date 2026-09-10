@@ -35,7 +35,7 @@ func TestUpdateEgressSourcePreservesConcurrentSyncState(t *testing.T) {
 	// 维护循环并发完成一次同步。
 	syncedAt := time.Now().UTC().Add(-time.Minute)
 	nextSync := time.Now().UTC().Add(14 * time.Minute)
-	if err := repo.UpdateEgressSourceSync(ctx, created.ID, syncedAt, nextSync, 7, "fetch ok"); err != nil {
+	if err := seedLegacySourceSyncMetadata(repo, ctx, created.ID, syncedAt, nextSync, 7, "fetch ok"); err != nil {
 		// last_sync_error 传非空以证明覆盖回滚;真实成功同步为空串,错误同步非空。
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestUpdateEgressSourceConfigChangeReArmsSchedule(t *testing.T) {
 	}
 	syncedAt := time.Now().UTC().Add(-time.Minute)
 	nextSync := time.Now().UTC().Add(14 * time.Minute)
-	if err := repo.UpdateEgressSourceSync(ctx, created.ID, syncedAt, nextSync, 3, "old error"); err != nil {
+	if err := seedLegacySourceSyncMetadata(repo, ctx, created.ID, syncedAt, nextSync, 3, "old error"); err != nil {
 		t.Fatal(err)
 	}
 

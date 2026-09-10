@@ -9,52 +9,52 @@ func TestClassifyQualityHoldDecisionTable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		sig  qualityStreamSignals
+		sig  QualityStreamSignals
 		want QualityVerdict
 	}{
 		{
 			name: "initial zero-output waits for thinking delta",
-			sig:  qualityStreamSignals{},
+			sig:  QualityStreamSignals{},
 			want: QualityWait,
 		},
 		{
 			name: "thinking delta delivers immediately",
-			sig:  qualityStreamSignals{HasThinking: true, VisibleTokens: 4},
+			sig:  QualityStreamSignals{HasThinking: true, VisibleTokens: 4},
 			want: QualityDeliver,
 		},
 		{
 			name: "reasoning ended without thinking withholds immediately",
-			sig:  qualityStreamSignals{ReasoningEndedWithoutThinking: true},
+			sig:  QualityStreamSignals{ReasoningEndedWithoutThinking: true},
 			want: QualityWithhold,
 		},
 		{
 			name: "reasoning ended outranks visible output",
-			sig:  qualityStreamSignals{ReasoningEndedWithoutThinking: true, HasThinking: false, VisibleTokens: 500},
+			sig:  QualityStreamSignals{ReasoningEndedWithoutThinking: true, HasThinking: false, VisibleTokens: 500},
 			want: QualityWithhold,
 		},
 		{
 			name: "thinking outranks reasoning-ended signal",
-			sig:  qualityStreamSignals{ReasoningEndedWithoutThinking: true, HasThinking: true},
+			sig:  QualityStreamSignals{ReasoningEndedWithoutThinking: true, HasThinking: true},
 			want: QualityDeliver,
 		},
 		{
 			name: "any visible output without thinking withholds (body outrun rule)",
-			sig:  qualityStreamSignals{VisibleTokens: 1},
+			sig:  QualityStreamSignals{VisibleTokens: 1},
 			want: QualityWithhold,
 		},
 		{
 			name: "large visible output without thinking withholds",
-			sig:  qualityStreamSignals{VisibleTokens: 500},
+			sig:  QualityStreamSignals{VisibleTokens: 500},
 			want: QualityWithhold,
 		},
 		{
 			name: "terminal with output without thinking withholds",
-			sig:  qualityStreamSignals{VisibleTokens: 8, Terminal: true},
+			sig:  QualityStreamSignals{VisibleTokens: 8, Terminal: true},
 			want: QualityWithhold,
 		},
 		{
 			name: "terminal with zero output withholds (empty-stream short-circuit owns the real path)",
-			sig:  qualityStreamSignals{Terminal: true},
+			sig:  QualityStreamSignals{Terminal: true},
 			want: QualityWithhold,
 		},
 	}
@@ -62,8 +62,8 @@ func TestClassifyQualityHoldDecisionTable(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := classifyQualityHold(tc.sig); got != tc.want {
-				t.Fatalf("classifyQualityHold(%+v) = %s, want %s", tc.sig, got, tc.want)
+			if got := classifyQualityHoldShadowed(tc.sig); got != tc.want {
+				t.Fatalf("classifyQualityHoldShadowed(%+v) = %s, want %s", tc.sig, got, tc.want)
 			}
 		})
 	}

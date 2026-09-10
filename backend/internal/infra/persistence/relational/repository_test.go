@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 const (
@@ -41,7 +43,7 @@ func TestSchemaAndRepositoryConstraints(t *testing.T) {
 	if err := accountRepo.UpdateObservedModel(context.Background(), created.ID, "grok-observed", observedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := accountRepo.UpdateHealth(context.Background(), created.ID, created.Provider, 0, nil, "", true); err != nil {
+	if err := seedHealthFixture(accountRepo, context.Background(), created.ID, created.Provider, 0, nil, "", true); err != nil {
 		t.Fatal(err)
 	}
 	value.Name = "updated"
@@ -92,7 +94,7 @@ func TestAccountRepositoryUpsertsImportChunkInOneBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored.Priority = 99
-	if _, err := repo.Update(ctx, stored); err != nil {
+	if _, err := repo.UpdateAdministration(ctx, stored.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Priority: &stored.Priority}}); err != nil {
 		t.Fatal(err)
 	}
 	values[0].Name = "batch-1-updated"
@@ -147,10 +149,10 @@ func TestAccountRepositoryLinksWebAndBuildAccountsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatalf("idempotent link = %v", err)
 	}
 	linkedWeb, err := repo.Get(ctx, web.ID)
@@ -222,7 +224,7 @@ func TestAccountRepositoryLinksWebAndBuildAccountsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.LinkWebToBuild(ctx, web.ID, otherBuild.ID); !errors.Is(err, repository.ErrConflict) {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), otherBuild.CredentialRef()); !errors.Is(err, repository.ErrConflict) {
 		t.Fatalf("duplicate web link = %v", err)
 	}
 }
@@ -238,14 +240,19 @@ func TestAccountRepositoryDecrementsQuotaByAmountAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := repo.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{{AccountID: value.ID, Mode: "fast", Remaining: 10, Total: 10, UpdatedAt: now}}); err != nil {
+	if err := saveQuotaWindowsFixture(repo, ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{{AccountID: value.ID, Mode: "fast", Remaining: 10, Total: 10, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	if updated, err := repo.DecrementQuotaWindowBy(ctx, value.ID, "fast", 4, now); err != nil || !updated {
-		t.Fatalf("first decrement updated=%v err=%v", updated, err)
+	windowsBefore, err := repo.GetQuotaWindows(ctx, []uint64{value.ID})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if updated, err := repo.DecrementQuotaWindowBy(ctx, value.ID, "fast", 9, now); err != nil || !updated {
-		t.Fatalf("second decrement updated=%v err=%v", updated, err)
+	version := windowsBefore[value.ID][0].SnapshotVersion
+	for index, amount := range []int{4, 9} {
+		receipt, err := repo.ConsumeQuota(ctx, account.QuotaConsumption{EventID: fmt.Sprintf("quota-%d", index), AccountID: value.ID, Mode: "fast", SnapshotVersion: version, Units: amount}, now)
+		if err != nil || receipt.State != account.QuotaConsumptionApplied {
+			t.Fatalf("consumption = %+v %v", receipt, err)
+		}
 	}
 	windows, err := repo.GetQuotaWindows(ctx, []uint64{value.ID})
 	if err != nil {
@@ -272,11 +279,11 @@ func TestAccountRepositoryReplacesQuotaGroupWithoutTouchingOtherModes(t *testing
 		{AccountID: value.ID, Mode: account.QuotaModeWebImagePro, Remaining: 4, UpdatedAt: now},
 		{AccountID: value.ID, Mode: account.QuotaModeWebVideo720p, Remaining: 1, UpdatedAt: now},
 	}
-	if err := repo.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, initial); err != nil {
+	if err := saveQuotaWindowsFixture(repo, ctx, value.ID, account.WebTierSuper, now, initial); err != nil {
 		t.Fatal(err)
 	}
 	updatedAt := now.Add(time.Minute)
-	if err := repo.ReplaceQuotaWindowGroup(ctx, value.ID, updatedAt, account.WebImagineQuotaModes(), []account.QuotaWindow{
+	if err := replaceQuotaWindowGroupFixture(repo, ctx, value.ID, updatedAt, account.WebImagineQuotaModes(), []account.QuotaWindow{
 		{AccountID: value.ID, Mode: account.QuotaModeWebImagePro, Remaining: 3, UpdatedAt: updatedAt},
 	}); err != nil {
 		t.Fatal(err)
@@ -314,22 +321,22 @@ func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 	create(account.ProviderBuild, "build-active")
 	cooldown := create(account.ProviderBuild, "build-cooldown")
 	cooldownUntil := now.Add(time.Hour)
-	if err := repo.UpdateHealth(ctx, cooldown.ID, cooldown.Provider, 1, &cooldownUntil, "cooldown", false); err != nil {
+	if err := seedHealthFixture(repo, ctx, cooldown.ID, cooldown.Provider, 1, &cooldownUntil, "cooldown", false); err != nil {
 		t.Fatal(err)
 	}
 	disabled := create(account.ProviderBuild, "build-disabled")
 	disabled.Enabled = false
-	if _, err := repo.Update(ctx, disabled); err != nil {
+	if _, err := repo.UpdateAdministration(ctx, disabled.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &disabled.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 
 	exhausted := create(account.ProviderWeb, "web-exhausted")
-	if err := repo.SaveQuotaWindows(ctx, exhausted.ID, account.WebTierSuper, now, []account.QuotaWindow{{AccountID: exhausted.ID, Mode: "fast", Remaining: 0, Total: 30, UpdatedAt: now}}); err != nil {
+	if err := saveQuotaWindowsFixture(repo, ctx, exhausted.ID, account.WebTierSuper, now, []account.QuotaWindow{{AccountID: exhausted.ID, Mode: "fast", Remaining: 0, Total: 30, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
 	reauth := create(account.ProviderWeb, "web-reauth")
 	reauth.AuthStatus = account.AuthStatusReauthRequired
-	if _, err := repo.Update(ctx, reauth); err != nil {
+	if _, err := repo.ApplyCredential(ctx, reauth.CredentialRef(), account.CredentialEvent{Kind: account.CredentialRejected, Reason: "fixture rejected"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -379,7 +386,7 @@ func TestAccountRepositoryPersistsObservedBuildBillingFields(t *testing.T) {
 	if err := repo.UpdateObservedModel(context.Background(), credential.ID, "grok-4.5-build-free", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.SaveBilling(context.Background(), account.Billing{AccountID: credential.ID, IsUnifiedBillingUser: true, OnDemandEnabled: &onDemandEnabled, TopUpMethod: "TOP_UP_METHOD_SAVED_PAYMENT_METHOD", UsagePeriodType: "USAGE_PERIOD_TYPE_WEEKLY", UsagePeriodStart: "2026-07-12T00:00:00Z", UsagePeriodEnd: "2026-07-19T00:00:00Z", History: []account.BillingHistoryEntry{{Year: 2026, Month: 6}}, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(context.Background(), repo, account.Billing{AccountID: credential.ID, IsUnifiedBillingUser: true, OnDemandEnabled: &onDemandEnabled, TopUpMethod: "TOP_UP_METHOD_SAVED_PAYMENT_METHOD", UsagePeriodType: "USAGE_PERIOD_TYPE_WEEKLY", UsagePeriodStart: "2026-07-12T00:00:00Z", UsagePeriodEnd: "2026-07-19T00:00:00Z", History: []account.BillingHistoryEntry{{Year: 2026, Month: 6}}, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	storedCredential, err := repo.Get(context.Background(), credential.ID)
@@ -432,10 +439,10 @@ func TestForeignKeysCascadeRuntimeStateButPreserveAuditHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-cascade"}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{"grok-cascade"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, accountValue.ID, []string{"grok-cascade"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, accountValue.ID, []string{"grok-cascade"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	route, err := models.GetByPublicID(ctx, "grok-cascade")
@@ -447,10 +454,10 @@ func TestForeignKeysCascadeRuntimeStateButPreserveAuditHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: accountValue.ID, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: accountValue.ID, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{AccountID: accountValue.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted, UpdatedAt: now}); err != nil {
+	if err := testsupport.Recovery(ctx, accounts, account.QuotaRecovery{AccountID: accountValue.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := responses.Save(ctx, inferencedomain.ResponseOwnership{ResponseID: "resp-account", AccountID: accountValue.ID, ClientKeyID: key.ID, Provider: account.ProviderBuild, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now}); err != nil {
@@ -541,12 +548,12 @@ func TestInitializeSchemaAddsUnclassifiedAuthFailureCountWithoutLosingCredential
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateCredentialRefreshFailure(ctx, created.ID, repository.CredentialRefreshFailure{
-		Count: 3, UnclassifiedAuthFailureCount: 3, RetryAt: now.Add(10 * time.Minute),
-		Status: 401, Code: "oauth_http_401", Message: "Unauthorized",
-	}); err != nil {
+	if err := database.db.Model(&accountCredentialModel{}).Where("account_id = ?", created.ID).Updates(map[string]any{
+		"refresh_failures": 3, "refresh_unclassified_auth_failures": 3, "refresh_due_at": now.Add(10 * time.Minute), "last_refresh_error_status": 401, "last_refresh_error": "oauth_http_401", "last_refresh_error_message": "Unauthorized",
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
+
 	if err := database.withSQLiteForeignKeysDisabled(ctx, func() error {
 		if err := database.db.WithContext(ctx).Migrator().DropConstraint(&accountCredentialModel{}, "chk_account_credentials_refresh_unclassified_auth_failures"); err != nil {
 			return err

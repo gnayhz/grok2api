@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"reflect"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +17,7 @@ import (
 var (
 	ErrInvalidInput = errors.New("运行设置参数无效")
 	ErrConflict     = errors.New("运行设置已被其他会话更新")
+	ErrApplyPending = errors.New("运行设置已保存，本实例仍有目标待应用")
 )
 
 // ProviderBuildConfig 是管理接口使用的 Provider 可编辑输入。
@@ -121,12 +121,17 @@ type SegmentedSelectorConfig struct {
 
 // AuditConfig 是管理接口使用的审计可编辑输入。
 type AuditConfig struct {
-	BufferSize            int
-	BatchSize             int
-	FlushInterval         string
-	CommitDelayMS         int
-	RetentionDays         int
-	RetentionDaysProvided bool
+	BufferSize              int
+	BatchSize               int
+	FlushInterval           string
+	CommitDelayMS           int
+	RetentionPeriod         string
+	RetentionPeriodProvided bool
+	RetentionSource         string
+	FileRetentionPeriod     string
+	FileRetentionSource     string
+	RetentionDays           int
+	RetentionDaysProvided   bool
 }
 
 // ClientKeyDefaultsConfig 是管理接口使用的密钥默认限制输入。
@@ -159,31 +164,9 @@ type RequestRetryEditable struct {
 	MaxAttempts         int
 	OnExhausted         string
 	AccountCooldown     string
-	SameAccountRetry    bool
 	EvidenceTimeout     string
 	CreatedTimeout      string
 	IdleAccountCooldown string
-}
-
-// AccountRiskEditable 是管理接口使用的账号风险归因输入（时长为字符串）。
-type AccountRiskEditable struct {
-	Enabled             bool
-	Method              string
-	Concurrency         int
-	Timeout             string
-	OnDenied            string
-	PatrolEnabled       bool
-	PatrolBucketDays    int
-	PatrolInterval      string
-	PatrolBatchSize     int
-	ProbeProxyURL       string
-	DeniedConfirmations int
-	DeniedTTL           string
-	// BuildProbeEnabled 开关 Build 通道差分探针(有无 SSO 关联都走)。指针语义:
-	// nil = 请求未携带该字段(旧客户端),保留当前值;非 nil = 显式设置。
-	// 它默认关闭、打开会消耗账号额度,对象整体提交而漏掉这个布尔时,
-	// 零值 false 不该把已打开的探针悄悄关掉。
-	BuildProbeEnabled *bool
 }
 
 // EgressRotationEditable 是管理接口使用的出口轮换输入（时长为字符串）。
@@ -197,8 +180,6 @@ type EgressRotationEditable struct {
 	SettleDelay              string
 	ProbeTimeout             string
 	ProbeInterval            string
-	CanaryModelPublicID      string
-	CanaryCreatedTimeout     string
 }
 
 // EditableConfig 聚合管理端允许修改的运行参数。
@@ -222,9 +203,6 @@ type EditableConfig struct {
 	EgressRotation       EgressRotationEditable
 	// EgressRotationProvided 同上。
 	EgressRotationProvided bool
-	AccountRisk            AccountRiskEditable
-	// AccountRiskProvided 同上。
-	AccountRiskProvided bool
 }
 
 // Snapshot 表示当前运行设置和需要重启才能生效的字段。
@@ -233,40 +211,60 @@ type Snapshot struct {
 	RecommendedProviderBuild ProviderBuildRecommendation
 	UpdatedAt                time.Time
 	Revision                 uint64
+	AppliedRevision          uint64
+	ApplyPending             bool
+	ApplyTargets             []ApplyStatus
+	Notification             NotificationStatus
 	RestartRequired          []string
+	// FileRequestRetry 是文件配置基线的 requestRetry 节:设置页"运行时覆盖
+	// 标记+回同步文件值"的数据源。与 Config.RequestRetry 不同即处于覆盖态
+	// ——历史事故中该覆盖静默发生(守卫开机离场且无任何提示)。
+	FileRequestRetry RequestRetryEditable
 }
 
 // Service 管理允许在线修改的配置，并向后台任务广播配置变更。
 type Service struct {
-	mu        sync.RWMutex
-	updateMu  sync.Mutex
-	cfg       config.Config
-	updatedAt time.Time
-	revision  uint64
-	// lastAppliedRevision 记录 apply 回调链成功应用到进程态的最新版本。
-	// apply 链(25+ 个子调用)非原子:中途 panic 或进程被杀只应用了部分回调,
-	// 而 revision 已推进——此后 ReloadPersisted 因 revision 未变直接返回, 运行
-	// 态与持久化配置长期不一致。记录已应用版本让重载/周期同步能重放差距。
+	mu                     sync.RWMutex
+	updateMu               sync.Mutex
+	cfg                    config.Config
+	updatedAt              time.Time
+	revision               uint64
 	lastAppliedRevision    uint64
+	targets                []ApplyTarget
+	applyStates            []ApplyStatus
+	notification           NotificationStatus
 	fileCfg                config.Config
 	fileCfgSet             bool
 	activeBufferSize       int
 	activeMediaConcurrency int
 	repository             repository.RuntimeSettingsRepository
-	notify                 func(context.Context)
-	apply                  func(config.Config)
+	notify                 func(context.Context) error
+	requestRetryProjection func() config.RequestRetryConfig
 }
 
-// markStartupApplied 在构造后调用:启动配置经装配层一次性应用, 视为已应用
-// 到构造时的 revision。此后的差距才代表 apply 链中断需要重放。
-
-func NewService(cfg config.Config, updatedAt time.Time, revision uint64, repository repository.RuntimeSettingsRepository, notify func(context.Context), apply func(config.Config)) *Service {
+// NewService receives consumers already constructed from cfg. Each target must
+// support repeated installation of the complete configuration and must not mutate
+// cfg. Registration is fixed for the instance lifetime; callbacks run without mu.
+func NewService(cfg config.Config, updatedAt time.Time, revision uint64, repository repository.RuntimeSettingsRepository, notify func(context.Context) error, targets []ApplyTarget) *Service {
 	if updatedAt.IsZero() {
 		updatedAt = time.Now().UTC()
 	}
-	// 启动配置经装配层一次性应用, 构造时视为已应用到该 revision; 此后的
-	// 差距才代表 apply 链中断、需要 ReloadPersisted 重放。
-	return &Service{cfg: cfg, updatedAt: updatedAt, revision: revision, lastAppliedRevision: revision, activeBufferSize: cfg.Audit.BufferSize, activeMediaConcurrency: cfg.Provider.Web.MediaConcurrency, repository: repository, notify: notify, apply: apply}
+	states := make([]ApplyStatus, len(targets))
+	names := make(map[string]bool, len(targets))
+	for i, target := range targets {
+		if target.Name == "" || target.Apply == nil || names[target.Name] {
+			panic("invalid settings apply target")
+		}
+		names[target.Name] = true
+		states[i] = ApplyStatus{Name: target.Name, AppliedRevision: revision}
+	}
+	notification := NotificationStatus{Revision: revision, State: "observed"}
+	if notify == nil {
+		notification.State = "disabled"
+	}
+	return &Service{cfg: cfg, updatedAt: updatedAt, revision: revision, lastAppliedRevision: revision,
+		activeBufferSize: cfg.Audit.BufferSize, activeMediaConcurrency: cfg.Provider.Web.MediaConcurrency,
+		repository: repository, notify: notify, targets: append([]ApplyTarget(nil), targets...), applyStates: states, notification: notification}
 }
 
 // LoadPersisted 将数据库运行设置覆盖到代码默认配置，并执行完整边界校验。
@@ -276,17 +274,20 @@ func LoadPersisted(ctx context.Context, base config.Config, repository repositor
 		return config.Config{}, time.Time{}, 0, err
 	}
 	if !found {
-		return base, time.Time{}, 0, nil
+		return base, updatedAt, revision, nil
 	}
 	// 持久化层使用强类型时长，避免数据库格式受 HTTP DTO 字符串影响。
-	loaded := applyDomainConfig(base, value)
+	loaded, err := applyDomainConfig(base, value)
+	if err != nil {
+		return config.Config{}, time.Time{}, 0, err
+	}
 	if err := loaded.Validate(); err != nil {
 		return config.Config{}, time.Time{}, 0, fmt.Errorf("校验运行设置: %w", err)
 	}
 	return loaded, updatedAt, revision, nil
 }
 
-// Get 返回当前生效的可编辑设置快照。
+// Get returns the local saved intent and application status, without a storage read.
 func (s *Service) Get() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -298,29 +299,6 @@ func (s *Service) PublicAPIBaseURL() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.Frontend.EffectivePublicAPIBaseURL()
-}
-
-// runApply 在 recover 保护下执行 apply 回调链并记录已应用版本。apply 中途
-// panic 不会传染调用方(设置保存/重载仍成功返回), 下一次 ReloadPersisted 会
-// 因 lastAppliedRevision 落后而重放, 运行态最终收敛。
-func (s *Service) runApply(cfg config.Config, revision uint64) {
-	apply := s.apply
-	if apply == nil {
-		s.mu.Lock()
-		s.lastAppliedRevision = revision
-		s.mu.Unlock()
-		return
-	}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			// 不推进 lastAppliedRevision:下次重载重放。
-			slog.Default().Error("settings_apply_panicked", "revision", revision, "panic", recovered)
-		}
-	}()
-	apply(cfg)
-	s.mu.Lock()
-	s.lastAppliedRevision = revision
-	s.mu.Unlock()
 }
 
 // Update 校验并持久化运行设置，再原子替换进程内配置。
@@ -335,11 +313,37 @@ func (s *Service) Update(ctx context.Context, expectedRevision uint64, input Edi
 	if expectedRevision != currentRevision {
 		return Snapshot{}, ErrConflict
 	}
+	if s.requestRetryProjection != nil {
+		input.RequestRetryProvided = false
+	}
 	next, err := mergeEditable(current, input)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	updatedAt, revision, err := s.repository.Save(ctx, toDomainConfig(next), currentRevision)
+	return s.persistAndApply(ctx, next, currentRevision)
+}
+
+// ResetEgressRotation restores only the displayed network rotation policy.
+// Other gateway settings and the quality_guard document retain their owners.
+func (s *Service) ResetEgressRotation(ctx context.Context, expected uint64) (Snapshot, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	s.mu.RLock()
+	next, base, revision := s.cfg, s.cfg, s.revision
+	if s.fileCfgSet {
+		base = s.fileCfg
+	}
+	s.mu.RUnlock()
+	if expected != revision {
+		return Snapshot{}, ErrConflict
+	}
+	next.Egress.Rotation = base.Egress.Rotation
+	return s.persistAndApply(ctx, next, expected)
+}
+
+// Caller holds updateMu after validating its complete configuration intent.
+func (s *Service) persistAndApply(ctx context.Context, next config.Config, expected uint64) (Snapshot, error) {
+	updatedAt, revision, err := s.repository.Save(ctx, s.persistedConfig(next), expected)
 	if err != nil {
 		if errors.Is(err, repository.ErrConflict) {
 			return Snapshot{}, ErrConflict
@@ -347,18 +351,18 @@ func (s *Service) Update(ctx context.Context, expectedRevision uint64, input Edi
 		return Snapshot{}, err
 	}
 
+	// Every save persists the canonical retention override, including legacy clients.
+	next.Audit.RetentionSource = "runtime"
 	s.mu.Lock()
 	s.cfg = next
 	s.updatedAt = updatedAt
 	s.revision = revision
-	result := s.snapshotLocked()
+	s.markNotificationLocked(revision, true)
 	s.mu.Unlock()
 
-	s.runApply(next, revision)
-	if s.notify != nil {
-		s.notify(ctx)
-	}
-	return result, nil
+	s.runApply(ctx, next, revision)
+	s.publish(ctx)
+	return s.Get(), nil
 }
 
 // SetFileConfig 记录「文件默认」基线，供 ResetToDefaults 恢复。
@@ -370,64 +374,94 @@ func (s *Service) SetFileConfig(base config.Config) {
 	s.mu.Unlock()
 }
 
-// ResetToDefaults 删除持久化运行设置并恢复到 config.yaml 基线：
-// 解决「后台保存过设置后，config.yaml 对可编辑字段的修改被静默
-// 忽略」（round 87 文档化的陷阱）——此前唯一恢复路径是手删
-// runtime_settings 行。语义：删除行（幂等）→ 内存切换回文件基线
-// （revision 前进）→ apply 扇出 → 通知其他实例重载（它们重载后
-// 发现无行，同样回到各自进程的文件基线）。
-func (s *Service) ResetToDefaults(ctx context.Context) (Snapshot, error) {
+// ResetToDefaults advances the durable revision and restores this instance's
+// file baseline. A stale caller cannot remove another instance's newer override.
+func (s *Service) ResetToDefaults(ctx context.Context, expectedRevision uint64) (Snapshot, error) {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
-	if err := s.repository.Delete(ctx); err != nil {
+	s.mu.RLock()
+	currentRevision := s.revision
+	base := s.cfg
+	if s.fileCfgSet {
+		base = s.fileCfg
+	}
+	s.mu.RUnlock()
+	if expectedRevision != currentRevision {
+		return Snapshot{}, ErrConflict
+	}
+	updatedAt, nextRevision, err := s.repository.Reset(ctx, expectedRevision)
+	if err != nil {
+		if errors.Is(err, repository.ErrConflict) {
+			return Snapshot{}, ErrConflict
+		}
 		return Snapshot{}, err
 	}
 	s.mu.Lock()
-	base := s.fileCfg
-	if !s.fileCfgSet {
-		base = s.cfg
-	}
-	nextRevision := s.revision + 1
 	s.cfg = base
-	s.updatedAt = time.Now().UTC()
+	s.updatedAt = updatedAt
 	s.revision = nextRevision
-	result := s.snapshotLocked()
+	s.markNotificationLocked(nextRevision, true)
 	s.mu.Unlock()
-	s.runApply(base, nextRevision)
-	if s.notify != nil {
-		s.notify(ctx)
-	}
-	return result, nil
+	s.runApply(ctx, base, nextRevision)
+	s.publish(ctx)
+	return s.Get(), nil
 }
 
-// ReloadPersisted 在收到其他实例的变更通知后，从主数据库重载并应用运行设置。
-// 持久化行不存在（其他实例 ResetToDefaults 删除了覆盖）时，本实例回退到
-// 文件基线——否则远端副本会无限期保留已被删除的旧覆盖值。
+// ReloadPersisted reconciles against the durable clock. Notifications only
+// trigger this read; they never provide an alternative version authority.
 func (s *Service) ReloadPersisted(ctx context.Context) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	value, updatedAt, revision, found, err := s.repository.Get(ctx)
+	snapshot, err := s.Read(ctx)
 	if err != nil {
 		return err
 	}
-	if !found {
-		s.revertToBaseline()
-		return nil
+	if snapshot.ApplyPending {
+		return ErrApplyPending
+	}
+	return nil
+}
+
+// Read checks durable authority and retries unfinished application/publication.
+// Storage failure is an error; a saved intent with pending application is data.
+func (s *Service) Read(ctx context.Context) (Snapshot, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	if err := s.reload(ctx); err != nil {
+		return Snapshot{}, err
+	}
+	s.publish(ctx)
+	return s.Get(), nil
+}
+
+func (s *Service) reload(ctx context.Context) error {
+	value, updatedAt, revision, hasOverride, err := s.repository.Get(ctx)
+	if err != nil {
+		return err
 	}
 	s.mu.RLock()
 	current := s.cfg
+	base := s.cfg
+	if s.fileCfgSet {
+		base = s.fileCfg
+	}
 	currentRevision := s.revision
 	appliedRevision := s.lastAppliedRevision
 	s.mu.RUnlock()
-	if revision <= currentRevision {
-		// revision 未变但 apply 曾中断(panic/进程重启窗口):重放当前配置,
-		// 让运行态收敛到持久化状态。
+	if revision < currentRevision {
+		return fmt.Errorf("runtime settings revision regressed: persisted=%d observed=%d", revision, currentRevision)
+	}
+	if revision == currentRevision {
 		if appliedRevision < currentRevision {
-			s.runApply(current, currentRevision)
+			s.runApply(ctx, current, currentRevision)
 		}
 		return nil
 	}
-	next := applyDomainConfig(current, value)
+	next := base
+	if hasOverride {
+		next, err = applyDomainConfig(base, value)
+		if err != nil {
+			return err
+		}
+	}
 	if err := next.Validate(); err != nil {
 		return fmt.Errorf("校验重载运行设置: %w", err)
 	}
@@ -435,33 +469,17 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 	s.cfg = next
 	s.updatedAt = updatedAt
 	s.revision = revision
+	s.markNotificationLocked(revision, false)
 	s.mu.Unlock()
-	s.runApply(next, revision)
+	s.runApply(ctx, next, revision)
 	return nil
 }
 
-// revertToBaseline 将进程内配置回退到文件基线（调用方持 updateMu），用于
-// 收到其他实例的重置通知且持久化行已删除的场景。仅在确实偏离基线时动作，
-// 重复通知不会推进 revision（幂等）。
-func (s *Service) revertToBaseline() {
-	if !s.fileCfgSet {
-		return
+func applyDomainConfig(base config.Config, value settingsdomain.Config) (config.Config, error) {
+	resolvedAudit, err := persistedAuditRetention(base.Audit, value.Audit)
+	if err != nil {
+		return config.Config{}, err
 	}
-	base := s.fileCfg
-	s.mu.Lock()
-	if reflect.DeepEqual(s.cfg, base) {
-		s.mu.Unlock()
-		return
-	}
-	nextRevision := s.revision + 1
-	s.cfg = base
-	s.updatedAt = time.Now().UTC()
-	s.revision = nextRevision
-	s.mu.Unlock()
-	s.runApply(base, nextRevision)
-}
-
-func applyDomainConfig(base config.Config, value settingsdomain.Config) config.Config {
 	// 旧版运行设置没有 Server 字段，反序列化后为零；升级时沿用当前配置默认值。
 	if value.Server.MaxConcurrentRequests > 0 {
 		base.Server.MaxConcurrentRequests = value.Server.MaxConcurrentRequests
@@ -559,19 +577,18 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		SegmentedMinCandidates:      segmentedMinCandidates,
 		SegmentedWindowSize:         segmentedWindowSize,
 		ReasoningReplayEnabled:      base.Routing.ReasoningReplayEnabled, ReasoningReplayTTL: base.Routing.ReasoningReplayTTL,
+		ConversationHistoryRetention: base.Routing.ConversationHistoryRetention, ConversationHistoryMaxBytes: base.Routing.ConversationHistoryMaxBytes,
 		ReasoningReplayMaxEntries: base.Routing.ReasoningReplayMaxEntries,
 	}
 	commitDelay := base.Audit.CommitDelay.Value()
 	if value.Audit.CommitDelay > 0 {
 		commitDelay = value.Audit.CommitDelay
 	}
-	retentionDays := base.Audit.RetentionDays
-	if value.Audit.RetentionDays != nil {
-		retentionDays = *value.Audit.RetentionDays
-	}
+
 	base.Audit = config.AuditConfig{
+		JournalDirectory: base.Audit.JournalDirectory, JournalMaxBytes: base.Audit.JournalMaxBytes,
 		BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: config.Duration(value.Audit.FlushInterval),
-		CommitDelay: config.Duration(commitDelay), RetentionDays: retentionDays,
+		CommitDelay: config.Duration(commitDelay), RetentionPeriod: resolvedAudit.RetentionPeriod, RetentionSource: resolvedAudit.RetentionSource,
 		LedgerMode: base.Audit.LedgerMode, LedgerFailureThreshold: base.Audit.LedgerFailureThreshold,
 		LedgerUnhealthyGrace: base.Audit.LedgerUnhealthyGrace, LedgerQueueHighWatermarkPct: base.Audit.LedgerQueueHighWatermarkPct,
 	}
@@ -592,41 +609,21 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		base.Accounts.BuildForbiddenReauthCodes = append([]string(nil), value.Accounts.BuildForbiddenReauthCodes...)
 	}
 	base.Accounts.ExcludeBuildBotFlaggedFromScheduling = value.Accounts.ExcludeBuildBotFlaggedFromScheduling
-	// RequestRetry/EgressRotation/AccountRisk:指针节,nil(旧载荷/未保存过)沿用文件基线。
+	// RequestRetry/EgressRotation:指针节,nil(旧载荷/未保存过)沿用文件基线。
+	// AccountRisk 节已随旧风险归因链删除(切换手册第2步)。
 	if value.RequestRetry != nil {
 		// guardedModels 是 yaml 级白名单，不在管理端 DTO。整节赋值不得用
-		// 缺省/空切片/陈旧持久化名单覆盖文件基线（空=全部介入）。
+		// 缺省/空切片/陈旧持久化名单覆盖文件基线（空使用领域默认清单）。
 		fileGuarded := append([]string(nil), base.RequestRetry.GuardedModels...)
+		fileAdmission, fileToolAdmission := base.RequestRetry.AdmissionTimeout, base.RequestRetry.ToolAdmissionTimeout
 		base.RequestRetry = config.RequestRetryConfig{
 			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
+			AdmissionTimeout: fileAdmission, ToolAdmissionTimeout: fileToolAdmission,
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: config.Duration(value.RequestRetry.AccountCooldown),
-			SameAccountRetry: value.RequestRetry.SameAccountRetry,
-			EvidenceTimeout:  config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
+			EvidenceTimeout: config.Duration(value.RequestRetry.EvidenceTimeout), CreatedTimeout: config.Duration(value.RequestRetry.CreatedTimeout),
 			IdleAccountCooldown: config.Duration(value.RequestRetry.IdleAccountCooldown),
 			GuardedModels:       fileGuarded,
 		}
-	}
-	if value.AccountRisk != nil {
-		rsc := config.AccountRiskRSCConfig{
-			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
-			Concurrency: value.AccountRisk.Concurrency, Timeout: config.Duration(value.AccountRisk.Timeout),
-			OnDenied:            value.AccountRisk.OnDenied,
-			ProbeProxyURL:       value.AccountRisk.ProbeProxyURL,
-			DeniedConfirmations: value.AccountRisk.DeniedConfirmations,
-			DeniedTTL:           config.Duration(value.AccountRisk.DeniedTTL),
-			Patrol: config.AccountRiskPatrolConfig{
-				Enabled: value.AccountRisk.PatrolEnabled, BucketDays: value.AccountRisk.PatrolBucketDays,
-				Interval: config.Duration(value.AccountRisk.PatrolInterval), BatchSize: value.AccountRisk.PatrolBatchSize,
-			},
-		}
-		// BuildProbe 字段比节点内其余字段更晚加入:旧持久化载荷带 AccountRisk
-		// 却没有 BuildProbeEnabled 时,先继承文件基线再让显式值覆盖——
-		// 直接整节赋值会把 yaml 里的 buildProbe.enabled: true 静默清掉。
-		rsc.BuildProbe = base.AccountRisk.RSCCheck.BuildProbe
-		if value.AccountRisk.BuildProbeEnabled != nil {
-			rsc.BuildProbe = &config.AccountRiskBuildProbeConfig{Enabled: *value.AccountRisk.BuildProbeEnabled}
-		}
-		base.AccountRisk.RSCCheck = rsc
 	}
 	if value.EgressRotation != nil {
 		base.Egress.Rotation = config.EgressRotationConfig{
@@ -634,11 +631,10 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 			MinNodeInterval: config.Duration(value.EgressRotation.MinNodeInterval), MaxGlobalPerHour: value.EgressRotation.MaxGlobalPerHour,
 			WebhookTimeout: config.Duration(value.EgressRotation.WebhookTimeout), WebhookRetries: value.EgressRotation.WebhookRetries,
 			SettleDelay: config.Duration(value.EgressRotation.SettleDelay), ProbeTimeout: config.Duration(value.EgressRotation.ProbeTimeout),
-			ProbeInterval: config.Duration(value.EgressRotation.ProbeInterval), CanaryModelPublicID: value.EgressRotation.CanaryModelPublicID,
-			CanaryCreatedTimeout: config.Duration(value.EgressRotation.CanaryCreatedTimeout),
+			ProbeInterval: config.Duration(value.EgressRotation.ProbeInterval),
 		}
 	}
-	return base
+	return base, nil
 }
 
 func toDomainConfig(value config.Config) settingsdomain.Config {
@@ -694,7 +690,7 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 		},
 		Audit: settingsdomain.AuditConfig{
 			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval.Value(), CommitDelay: value.Audit.CommitDelay.Value(),
-			RetentionDays: intPointer(value.Audit.RetentionDays),
+			RetentionPeriod: durationPointer(value.Audit.RetentionPeriod.Value()),
 		},
 		ClientKeyDefaults: settingsdomain.ClientKeyDefaultsConfig{
 			RPMLimit: value.ClientKeyDefaults.RPMLimit, MaxConcurrent: value.ClientKeyDefaults.MaxConcurrent,
@@ -713,26 +709,10 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			MaxAttempts:         value.RequestRetry.MaxAttempts,
 			OnExhausted:         value.RequestRetry.OnExhausted,
 			AccountCooldown:     value.RequestRetry.AccountCooldown.Value(),
-			SameAccountRetry:    value.RequestRetry.SameAccountRetry,
 			EvidenceTimeout:     value.RequestRetry.EvidenceTimeout.Value(),
 			CreatedTimeout:      value.RequestRetry.CreatedTimeout.Value(),
 			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown.Value(),
 			// guardedModels 是 yaml 级；apply 忽略 overlay，不回写以免陈旧名单进库。
-		},
-		AccountRisk: &settingsdomain.AccountRiskConfig{
-			Enabled:             value.AccountRisk.RSCCheck.Enabled,
-			Method:              value.AccountRisk.RSCCheck.Method,
-			Concurrency:         value.AccountRisk.RSCCheck.Concurrency,
-			Timeout:             value.AccountRisk.RSCCheck.Timeout.Value(),
-			OnDenied:            value.AccountRisk.RSCCheck.OnDenied,
-			PatrolEnabled:       value.AccountRisk.RSCCheck.Patrol.Enabled,
-			PatrolBucketDays:    value.AccountRisk.RSCCheck.Patrol.BucketDays,
-			PatrolInterval:      value.AccountRisk.RSCCheck.Patrol.Interval.Value(),
-			PatrolBatchSize:     value.AccountRisk.RSCCheck.Patrol.BatchSize,
-			ProbeProxyURL:       value.AccountRisk.RSCCheck.ProbeProxyURL,
-			DeniedConfirmations: value.AccountRisk.RSCCheck.DeniedConfirmations,
-			DeniedTTL:           value.AccountRisk.RSCCheck.DeniedTTL.Value(),
-			BuildProbeEnabled:   boolPointer(value.AccountRisk.RSCCheck.BuildProbeEnabled()),
 		},
 		EgressRotation: &settingsdomain.EgressRotationConfig{
 			Enabled:                  value.Egress.Rotation.Enabled,
@@ -744,13 +724,9 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			SettleDelay:              value.Egress.Rotation.SettleDelay.Value(),
 			ProbeTimeout:             value.Egress.Rotation.ProbeTimeout.Value(),
 			ProbeInterval:            value.Egress.Rotation.ProbeInterval.Value(),
-			CanaryModelPublicID:      value.Egress.Rotation.CanaryModelPublicID,
-			CanaryCreatedTimeout:     value.Egress.Rotation.CanaryCreatedTimeout.Value(),
 		},
 	}
 }
-
-func intPointer(value int) *int { return &value }
 
 func boolPointer(value bool) *bool { return &value }
 
@@ -762,19 +738,38 @@ func (s *Service) snapshotLocked() Snapshot {
 	if s.cfg.Provider.Web.MediaConcurrency != s.activeMediaConcurrency {
 		restartRequired = append(restartRequired, "providerWeb.mediaConcurrency")
 	}
+	fileBase := s.cfg
+	if s.fileCfgSet {
+		fileBase = s.fileCfg
+	}
+	effective := s.cfg
+	if s.requestRetryProjection != nil {
+		effective.RequestRetry = s.requestRetryProjection()
+	}
+	editable := toEditable(effective)
+	editable.Audit.FileRetentionPeriod = fileBase.Audit.RetentionPeriod.String()
+	editable.Audit.FileRetentionSource = fileBase.Audit.RetentionSource
 	return Snapshot{
-		Config: toEditable(s.cfg),
+		Config: editable,
 		RecommendedProviderBuild: ProviderBuildRecommendation{
 			ClientVersion: config.RecommendedBuildClientVersion,
 			UserAgent:     config.RecommendedBuildUserAgent,
 		},
 		UpdatedAt: s.updatedAt, Revision: s.revision, RestartRequired: restartRequired,
+		AppliedRevision: s.lastAppliedRevision, ApplyPending: s.lastAppliedRevision < s.revision,
+		ApplyTargets: s.applyStatusesLocked(), Notification: s.notification,
+		FileRequestRetry: toEditable(fileBase).RequestRetry,
 	}
 }
 
 func mergeEditable(current config.Config, input EditableConfig) (config.Config, error) {
 	if input.Audit.CommitDelayMS < 0 {
 		return config.Config{}, errors.New("audit.commitDelayMS 不能为负数")
+	}
+	// Validate before converting units so an oversized input cannot wrap into
+	// the legal delay range checked by Config.Validate below.
+	if int64(input.Audit.CommitDelayMS) > math.MaxInt64/int64(time.Millisecond) {
+		return config.Config{}, errors.New("audit.commitDelayMS 超出有效时长范围")
 	}
 	next := current
 	next.Server.MaxConcurrentRequests = input.Server.MaxConcurrentRequests
@@ -830,9 +825,12 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	if input.Audit.CommitDelayMS > 0 {
 		next.Audit.CommitDelay = config.Duration(time.Duration(input.Audit.CommitDelayMS) * time.Millisecond)
 	}
-	if input.Audit.RetentionDaysProvided {
-		next.Audit.RetentionDays = input.Audit.RetentionDays
+	var retentionErr error
+	next.Audit, retentionErr = mergeAuditRetention(next.Audit, input.Audit)
+	if retentionErr != nil {
+		return config.Config{}, retentionErr
 	}
+
 	next.ClientKeyDefaults.RPMLimit = input.ClientKeyDefaults.RPMLimit
 	next.ClientKeyDefaults.MaxConcurrent = input.ClientKeyDefaults.MaxConcurrent
 	if input.AccountsProvided {
@@ -852,50 +850,12 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		next.RequestRetry.Enabled = input.RequestRetry.Enabled
 		next.RequestRetry.MaxAttempts = input.RequestRetry.MaxAttempts
 		next.RequestRetry.OnExhausted = strings.TrimSpace(input.RequestRetry.OnExhausted)
-		next.RequestRetry.SameAccountRetry = input.RequestRetry.SameAccountRetry
 	}
 	if input.EgressRotationProvided {
 		next.Egress.Rotation.Enabled = input.EgressRotation.Enabled
 		next.Egress.Rotation.MaxAttemptsPerQuarantine = input.EgressRotation.MaxAttemptsPerQuarantine
 		next.Egress.Rotation.MaxGlobalPerHour = input.EgressRotation.MaxGlobalPerHour
 		next.Egress.Rotation.WebhookRetries = input.EgressRotation.WebhookRetries
-		next.Egress.Rotation.CanaryModelPublicID = strings.TrimSpace(input.EgressRotation.CanaryModelPublicID)
-	}
-	if input.AccountRiskProvided {
-		next.AccountRisk.RSCCheck.Enabled = input.AccountRisk.Enabled
-		next.AccountRisk.RSCCheck.Method = strings.TrimSpace(input.AccountRisk.Method)
-		next.AccountRisk.RSCCheck.Concurrency = input.AccountRisk.Concurrency
-		next.AccountRisk.RSCCheck.OnDenied = strings.TrimSpace(input.AccountRisk.OnDenied)
-		next.AccountRisk.RSCCheck.ProbeProxyURL = strings.TrimSpace(input.AccountRisk.ProbeProxyURL)
-		next.AccountRisk.RSCCheck.DeniedConfirmations = input.AccountRisk.DeniedConfirmations
-		if ttl := strings.TrimSpace(input.AccountRisk.DeniedTTL); ttl != "" {
-			parsed, err := time.ParseDuration(ttl)
-			if err != nil {
-				return config.Config{}, errors.New("accountRisk.deniedTTL 必须是有效时长")
-			}
-			next.AccountRisk.RSCCheck.DeniedTTL = config.Duration(parsed)
-		} else {
-			next.AccountRisk.RSCCheck.DeniedTTL = 0
-		}
-		next.AccountRisk.RSCCheck.Patrol.Enabled = input.AccountRisk.PatrolEnabled
-		next.AccountRisk.RSCCheck.Patrol.BucketDays = input.AccountRisk.PatrolBucketDays
-		if input.AccountRisk.PatrolBatchSize != 0 {
-			next.AccountRisk.RSCCheck.Patrol.BatchSize = input.AccountRisk.PatrolBatchSize
-		}
-		// BuildProbe 是堆指针,与热配置共享:必须克隆后修改。曾直接原地改,
-		// 校验失败(如非法 timeout)的保存也会把内存里的开关翻掉,下一次
-		// 无关保存把它一并持久化。nil 输入(旧客户端漏字段)保持当前值。
-		if input.AccountRisk.BuildProbeEnabled != nil {
-			buildProbe := next.AccountRisk.RSCCheck.BuildProbe
-			if buildProbe == nil {
-				buildProbe = &config.AccountRiskBuildProbeConfig{}
-			} else {
-				cloned := *buildProbe
-				buildProbe = &cloned
-			}
-			buildProbe.Enabled = *input.AccountRisk.BuildProbeEnabled
-			next.AccountRisk.RSCCheck.BuildProbe = buildProbe
-		}
 	}
 
 	type durationInput struct {
@@ -951,14 +911,6 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 			durationInput{"requestRetry.idleAccountCooldown", input.RequestRetry.IdleAccountCooldown, func(value config.Duration) { next.RequestRetry.IdleAccountCooldown = value }},
 		)
 	}
-	if input.AccountRiskProvided {
-		durations = append(durations,
-			durationInput{"accountRisk.rscCheck.timeout", input.AccountRisk.Timeout, func(value config.Duration) { next.AccountRisk.RSCCheck.Timeout = value }},
-		)
-		if strings.TrimSpace(input.AccountRisk.PatrolInterval) != "" {
-			durations = append(durations, durationInput{"accountRisk.rscCheck.patrol.interval", input.AccountRisk.PatrolInterval, func(value config.Duration) { next.AccountRisk.RSCCheck.Patrol.Interval = value }})
-		}
-	}
 	if input.EgressRotationProvided {
 		durations = append(durations,
 			durationInput{"egressRotation.minNodeInterval", input.EgressRotation.MinNodeInterval, func(value config.Duration) { next.Egress.Rotation.MinNodeInterval = value }},
@@ -966,7 +918,6 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 			durationInput{"egressRotation.settleDelay", input.EgressRotation.SettleDelay, func(value config.Duration) { next.Egress.Rotation.SettleDelay = value }},
 			durationInput{"egressRotation.probeTimeout", input.EgressRotation.ProbeTimeout, func(value config.Duration) { next.Egress.Rotation.ProbeTimeout = value }},
 			durationInput{"egressRotation.probeInterval", input.EgressRotation.ProbeInterval, func(value config.Duration) { next.Egress.Rotation.ProbeInterval = value }},
-			durationInput{"egressRotation.canaryCreatedTimeout", input.EgressRotation.CanaryCreatedTimeout, func(value config.Duration) { next.Egress.Rotation.CanaryCreatedTimeout = value }},
 		)
 	}
 	for _, item := range durations {
@@ -1045,7 +996,8 @@ func toEditable(cfg config.Config) EditableConfig {
 		},
 		Audit: AuditConfig{
 			BufferSize: cfg.Audit.BufferSize, BatchSize: cfg.Audit.BatchSize, FlushInterval: cfg.Audit.FlushInterval.String(), CommitDelayMS: int(cfg.Audit.CommitDelay.Value() / time.Millisecond),
-			RetentionDays: cfg.Audit.RetentionDays, RetentionDaysProvided: true,
+			RetentionPeriod: cfg.Audit.RetentionPeriod.String(), RetentionPeriodProvided: true, RetentionSource: cfg.Audit.RetentionSource,
+			RetentionDays: int(cfg.Audit.RetentionPeriod.Value() / (24 * time.Hour)), RetentionDaysProvided: cfg.Audit.RetentionPeriod.Value()%(24*time.Hour) == 0,
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: cfg.ClientKeyDefaults.RPMLimit, MaxConcurrent: cfg.ClientKeyDefaults.MaxConcurrent},
 		Accounts: AccountsConfig{
@@ -1063,8 +1015,7 @@ func toEditable(cfg config.Config) EditableConfig {
 		RequestRetry: RequestRetryEditable{
 			Enabled: cfg.RequestRetry.Enabled, MaxAttempts: cfg.RequestRetry.MaxAttempts,
 			OnExhausted: cfg.RequestRetry.OnExhausted, AccountCooldown: cfg.RequestRetry.AccountCooldown.String(),
-			SameAccountRetry: cfg.RequestRetry.SameAccountRetry,
-			EvidenceTimeout:  cfg.RequestRetry.EvidenceTimeout.String(), CreatedTimeout: cfg.RequestRetry.CreatedTimeout.String(),
+			EvidenceTimeout: cfg.RequestRetry.EvidenceTimeout.String(), CreatedTimeout: cfg.RequestRetry.CreatedTimeout.String(),
 			IdleAccountCooldown: cfg.RequestRetry.IdleAccountCooldown.String(),
 		},
 		RequestRetryProvided: true,
@@ -1073,24 +1024,10 @@ func toEditable(cfg config.Config) EditableConfig {
 			MinNodeInterval: cfg.Egress.Rotation.MinNodeInterval.String(), MaxGlobalPerHour: cfg.Egress.Rotation.MaxGlobalPerHour,
 			WebhookTimeout: cfg.Egress.Rotation.WebhookTimeout.String(), WebhookRetries: cfg.Egress.Rotation.WebhookRetries,
 			SettleDelay: cfg.Egress.Rotation.SettleDelay.String(), ProbeTimeout: cfg.Egress.Rotation.ProbeTimeout.String(),
-			ProbeInterval: cfg.Egress.Rotation.ProbeInterval.String(), CanaryModelPublicID: cfg.Egress.Rotation.CanaryModelPublicID,
-			CanaryCreatedTimeout: cfg.Egress.Rotation.CanaryCreatedTimeout.String(),
+			ProbeInterval: cfg.Egress.Rotation.ProbeInterval.String(),
 		},
 		EgressRotationProvided: true,
-		AccountRisk: AccountRiskEditable{
-			Enabled: cfg.AccountRisk.RSCCheck.Enabled, Method: cfg.AccountRisk.RSCCheck.Method,
-			Concurrency: cfg.AccountRisk.RSCCheck.Concurrency, Timeout: cfg.AccountRisk.RSCCheck.Timeout.String(),
-			OnDenied: cfg.AccountRisk.RSCCheck.OnDenied, PatrolEnabled: cfg.AccountRisk.RSCCheck.Patrol.Enabled,
-			PatrolBucketDays:    cfg.AccountRisk.RSCCheck.Patrol.BucketDays,
-			PatrolInterval:      cfg.AccountRisk.RSCCheck.Patrol.Interval.String(),
-			PatrolBatchSize:     cfg.AccountRisk.RSCCheck.Patrol.BatchSize,
-			ProbeProxyURL:       cfg.AccountRisk.RSCCheck.ProbeProxyURL,
-			DeniedConfirmations: cfg.AccountRisk.RSCCheck.DeniedConfirmations,
-			DeniedTTL:           cfg.AccountRisk.RSCCheck.DeniedTTL.String(),
-			BuildProbeEnabled:   boolPointer(cfg.AccountRisk.RSCCheck.BuildProbeEnabled()),
-		},
-		AccountRiskProvided: true,
-		AccountsProvided:    true,
+		AccountsProvided:       true,
 	}
 }
 
@@ -1109,4 +1046,19 @@ func normalizeForbiddenCodes(values []string) []string {
 		result = append(result, code)
 	}
 	return result
+}
+
+// SetRequestRetryProjection makes the legacy settings surface read-only.
+// Install once during composition, before exposing this service to requests.
+func (s *Service) SetRequestRetryProjection(project func() config.RequestRetryConfig) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requestRetryProjection = project
+}
+func (s *Service) persistedConfig(cfg config.Config) settingsdomain.Config {
+	value := toDomainConfig(cfg)
+	if s.requestRetryProjection != nil {
+		value.RequestRetry = nil
+	}
+	return value
 }

@@ -54,11 +54,12 @@ func newProbeDeadTestService(t *testing.T, node domain.Node, probe domain.ProbeR
 	quarantiner := &fakeQuarantiner{}
 	service := &Service{
 		repository: repo, cipher: newRotationCipher(t), qualityQuarantiner: quarantiner,
-		qualityGuard: DefaultQualityGuardConfig(), rotationCfg: fastRotationConfig(),
+		rotationCfg: fastRotationConfig(),
 	}
+	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	service.operations = repo
 	service.SetNodeProber(prober)
-	service.SetRotationConfig(fastRotationConfig())
+	setTestRotationConfig(service, fastRotationConfig())
 	return service, repo, prober, quarantiner
 }
 
@@ -130,11 +131,11 @@ func TestProbeDeadFlakySequenceDoesNotMarkEarly(t *testing.T) {
 	quarantiner := &fakeQuarantiner{}
 	service := &Service{
 		repository: repo, cipher: newRotationCipher(t), qualityQuarantiner: quarantiner,
-		qualityGuard: DefaultQualityGuardConfig(), rotationCfg: fastRotationConfig(),
+		rotationCfg: fastRotationConfig(),
 	}
 	service.operations = repo
 	service.SetNodeProber(prober)
-	service.SetRotationConfig(fastRotationConfig())
+	setTestRotationConfig(service, fastRotationConfig())
 	ctx := context.Background()
 	_, _ = service.TestNode(ctx, 8)
 	if calls := probeCooldownCalls(quarantiner); len(calls) != 0 {

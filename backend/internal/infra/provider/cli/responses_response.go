@@ -1,13 +1,14 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
@@ -24,7 +25,7 @@ func (c *responsesToolCompatibility) normalizeResponseJSON(body []byte) ([]byte,
 		return body, nil
 	}
 	var response map[string]any
-	if err := json.Unmarshal(body, &response); err != nil {
+	if err := jsonvalue.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("解析 Grok Build Responses 响应: %w", err)
 	}
 	if err := c.rewriteResponseValue(response); err != nil {
@@ -42,54 +43,53 @@ func (c *responsesToolCompatibility) normalizeResponseJSON(body []byte) ([]byte,
 // Responses stream. Tool rewriting is optional, while BOM removal and private
 // Grok control-event filtering always apply.
 func (c *responsesToolCompatibility) normalizeResponseStream(source io.ReadCloser) io.ReadCloser {
-	reader, writer := io.Pipe()
-	go func() {
-		defer func() { _ = source.Close() }()
-		streampipe.Run(writer, func() error {
-			return consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
-				if isPrivateBuildControlEvent(event) {
-					return nil
-				}
-				if c == nil {
-					return event.writeTo(writer)
-				}
-				if !event.HasData() {
-					return event.writeTo(writer)
-				}
-				outputs, rewriteErr := c.rewriteStreamData(event.Event, event.Data())
-				if rewriteErr != nil {
-					return rewriteErr
-				}
-				for index, output := range outputs {
-					outputData := output.Data
-					if output.Payload != nil {
-						c.resequenceStreamPayload(output.Payload)
-						encoded, encodeErr := json.Marshal(output.Payload)
-						if encodeErr != nil {
-							return fmt.Errorf("编码兼容 Responses SSE: %w", encodeErr)
-						}
-						outputData = encoded
-					}
-					current := event
-					if output.Event != "" {
-						current.Event = output.Event
-					}
-					if index > 0 {
-						current.ID = ""
-						current.Retry = ""
-						current.Comments = nil
-						current.Other = nil
-					}
-					current.SetData(outputData)
-					if err := current.writeTo(writer); err != nil {
-						return err
-					}
-				}
-				return nil
-			})
+	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
+		return consumeCompatibleSSE(input, func(event compatibleSSEEvent) error {
+			return c.writeResponseEvent(writer, event)
 		})
-	}()
-	return reader
+	})
+}
+
+func (c *responsesToolCompatibility) writeResponseEvent(writer io.Writer, event compatibleSSEEvent) error {
+	if isPrivateBuildControlEvent(event) {
+		return nil
+	}
+	if c == nil {
+		return event.writeTo(writer)
+	}
+	if !event.HasData() {
+		return event.writeTo(writer)
+	}
+	outputs, rewriteErr := c.rewriteStreamData(event.Event, event.Data())
+	if rewriteErr != nil {
+		return rewriteErr
+	}
+	for index, output := range outputs {
+		outputData := output.Data
+		if output.Payload != nil {
+			c.resequenceStreamPayload(output.Payload)
+			encoded, encodeErr := json.Marshal(output.Payload)
+			if encodeErr != nil {
+				return fmt.Errorf("编码兼容 Responses SSE: %w", encodeErr)
+			}
+			outputData = encoded
+		}
+		current := event
+		if output.Event != "" {
+			current.Event = output.Event
+		}
+		if index > 0 {
+			current.ID = ""
+			current.Retry = ""
+			current.Comments = nil
+			current.Other = nil
+		}
+		current.SetData(outputData)
+		if err := current.writeTo(writer); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func isPrivateBuildControlEvent(event compatibleSSEEvent) bool {
@@ -128,7 +128,7 @@ func (c *responsesToolCompatibility) rewriteStreamData(event string, data []byte
 		return nil, nil
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := jsonvalue.Unmarshal(data, &payload); err != nil {
 		if event == "" {
 			return nil, nil
 		}
@@ -280,6 +280,11 @@ func (c *responsesToolCompatibility) resequenceStreamPayload(payload map[string]
 
 func exactJSONInt64(value any) (int64, bool) {
 	number, ok := value.(float64)
+	if raw, isNumber := value.(json.Number); isNumber {
+		var err error
+		number, err = raw.Float64()
+		ok = err == nil
+	}
 	if !ok || number < 0 || number > float64(maxExactJSONInteger) || number != float64(int64(number)) {
 		return 0, false
 	}
@@ -463,7 +468,7 @@ func decodeToolSearchArguments(value any) any {
 		return map[string]any{}
 	}
 	var decoded any
-	if json.Unmarshal([]byte(text), &decoded) == nil {
+	if jsonvalue.Unmarshal([]byte(text), &decoded) == nil {
 		return decoded
 	}
 	return map[string]any{"input": text}
@@ -477,22 +482,29 @@ func (c *responsesToolCompatibility) restoreVisibleTools(response map[string]any
 }
 
 type compatibleSSEEvent struct {
-	Event    string
-	ID       string
-	Retry    string
-	Comments []string
-	Other    []string
-	data     []string
+	Event            string
+	ID               string
+	Retry            string
+	Comments         []string
+	Other            []string
+	data             []string
+	canonicalData    []byte
+	hasCanonicalData bool
 }
 
 func (e compatibleSSEEvent) Data() []byte {
+	if e.hasCanonicalData {
+		return e.canonicalData
+	}
 	return []byte(strings.Join(e.data, "\n"))
 }
 
-func (e compatibleSSEEvent) HasData() bool { return len(e.data) > 0 }
+func (e compatibleSSEEvent) HasData() bool { return e.hasCanonicalData || len(e.data) > 0 }
 
 func (e *compatibleSSEEvent) SetData(data []byte) {
-	e.data = strings.Split(string(data), "\n")
+	e.canonicalData = data
+	e.hasCanonicalData = true
+	e.data = nil
 }
 
 func (e compatibleSSEEvent) writeTo(writer io.Writer) error {
@@ -521,7 +533,11 @@ func (e compatibleSSEEvent) writeTo(writer io.Writer) error {
 			return err
 		}
 	}
-	for _, line := range e.data {
+	dataLines := e.data
+	if e.hasCanonicalData {
+		dataLines = strings.Split(string(e.canonicalData), "\n")
+	}
+	for _, line := range dataLines {
 		if _, err := fmt.Fprintf(writer, "data: %s\n", line); err != nil {
 			return err
 		}
@@ -531,59 +547,27 @@ func (e compatibleSSEEvent) writeTo(writer io.Writer) error {
 }
 
 func consumeCompatibleSSE(source io.Reader, handle func(compatibleSSEEvent) error) error {
-	scanner := bufio.NewScanner(source)
-	scanner.Buffer(make([]byte, 64<<10), maxCompatibleSSEEventBytes)
-	event := compatibleSSEEvent{}
-	eventBytes := 0
-	firstLine := true
-	flush := func() error {
-		if len(event.data) == 0 && len(event.Comments) == 0 && len(event.Other) == 0 && event.Event == "" && event.ID == "" && event.Retry == "" {
-			return nil
-		}
-		current := event
-		event = compatibleSSEEvent{}
-		eventBytes = 0
-		return handle(current)
-	}
-	for scanner.Scan() {
-		line := strings.TrimSuffix(scanner.Text(), "\r")
-		if firstLine {
-			line = strings.TrimPrefix(line, "\uFEFF")
-			firstLine = false
-		}
-		if line == "" {
-			if err := flush(); err != nil {
-				return err
+	return responseflow.Consume(source, func(frame *responseflow.Event) error {
+		event := compatibleSSEEvent{canonicalData: frame.Data, hasCanonicalData: frame.HasData}
+		frame.Fields(func(name, value []byte) {
+			switch string(name) {
+			case "event":
+				event.Event = string(value)
+			case "id":
+				event.ID = string(value)
+			case "retry":
+				event.Retry = string(value)
+			case "data":
+			case "":
+				event.Comments = append(event.Comments, ":"+string(value))
+			default:
+				field := string(name)
+				if value != nil {
+					field += ": " + string(value)
+				}
+				event.Other = append(event.Other, field)
 			}
-			continue
-		}
-		eventBytes += len(line)
-		if eventBytes > maxCompatibleSSEEventBytes {
-			return fmt.Errorf("Grok Build Responses SSE 单事件超过 %d MiB", maxCompatibleSSEEventBytes>>20)
-		}
-		field, value, found := strings.Cut(line, ":")
-		if found && strings.HasPrefix(value, " ") {
-			value = value[1:]
-		}
-		switch {
-		case strings.HasPrefix(line, ":"):
-			event.Comments = append(event.Comments, line)
-		case !found:
-			event.Other = append(event.Other, line)
-		case field == "event":
-			event.Event = value
-		case field == "data":
-			event.data = append(event.data, value)
-		case field == "id":
-			event.ID = value
-		case field == "retry":
-			event.Retry = value
-		default:
-			event.Other = append(event.Other, line)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return flush()
+		})
+		return handle(event)
+	})
 }

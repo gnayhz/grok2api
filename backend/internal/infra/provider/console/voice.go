@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -19,7 +20,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 const (
@@ -67,12 +70,15 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 		return provider.TTSResult{}, consoleVoiceResponseError(response)
 	}
 	contentType := strings.ToLower(strings.TrimSpace(response.Header.Get("Content-Type")))
-	data, err := io.ReadAll(io.LimitReader(response.Body, consoleVoiceAudioLimit+1))
+	data, err := readConsoleVoiceBody(response.Body, consoleVoiceAudioLimit)
 	if err != nil {
 		return provider.TTSResult{}, err
 	}
-	if len(data) > consoleVoiceAudioLimit {
-		return provider.TTSResult{}, errors.New("Console TTS 响应超过安全上限")
+	if len(data) == 0 {
+		return provider.TTSResult{}, errors.New("Console TTS 返回空音频")
+	}
+	if contentType != "" && !strings.Contains(contentType, "application/json") && !strings.HasPrefix(contentType, "audio/") && contentType != "application/ogg" {
+		return provider.TTSResult{}, errors.New("Console TTS 响应不是音频")
 	}
 	if strings.Contains(contentType, "application/json") || request.WithTimestamps {
 		var envelope struct {
@@ -89,16 +95,20 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 		}
 		if err := json.Unmarshal(data, &envelope); err != nil {
 			if !strings.Contains(contentType, "application/json") {
-				return provider.TTSResult{Audio: data, ContentType: firstNonEmpty(contentType, "audio/mpeg")}, nil
+				return provider.TTSResult{InputCharacters: utf8.RuneCountInString(text), Audio: data, ContentType: firstNonEmpty(contentType, "audio/mpeg")}, nil
 			}
 			return provider.TTSResult{}, fmt.Errorf("解析 Console TTS JSON 响应失败: %w", err)
+		}
+		if strings.TrimSpace(envelope.Audio) == "" {
+			return provider.TTSResult{}, errors.New("Console TTS JSON 缺少音频")
 		}
 		audio, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.Audio))
 		if err != nil {
 			return provider.TTSResult{}, fmt.Errorf("解码 Console TTS audio 失败: %w", err)
 		}
 		result := provider.TTSResult{
-			Audio: audio, ContentType: firstNonEmpty(envelope.ContentType, contentType, "audio/mpeg"),
+			InputCharacters: utf8.RuneCountInString(text),
+			Audio:           audio, ContentType: firstNonEmpty(envelope.ContentType, contentType, "audio/mpeg"),
 			Duration: envelope.Duration, Base64Audio: envelope.Audio, JSONEnvelope: true,
 		}
 		if envelope.AudioTimestamps != nil {
@@ -113,7 +123,7 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 		}
 		return result, nil
 	}
-	return provider.TTSResult{Audio: data, ContentType: firstNonEmpty(contentType, "audio/mpeg")}, nil
+	return provider.TTSResult{InputCharacters: utf8.RuneCountInString(text), Audio: data, ContentType: firstNonEmpty(contentType, "audio/mpeg")}, nil
 }
 
 func (a *Adapter) ListTTSVoices(ctx context.Context, credential account.Credential) ([]provider.VoiceInfo, error) {
@@ -125,7 +135,7 @@ func (a *Adapter) ListTTSVoices(ctx context.Context, credential account.Credenti
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, consoleVoiceResponseError(response)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, consoleVoiceBodyLimit+1))
+	data, err := readConsoleVoiceBody(response.Body, consoleVoiceBodyLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +173,7 @@ func (a *Adapter) GetTTSVoice(ctx context.Context, credential account.Credential
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.VoiceInfo{}, consoleVoiceResponseError(response)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, consoleVoiceBodyLimit+1))
+	data, err := readConsoleVoiceBody(response.Body, consoleVoiceBodyLimit)
 	if err != nil {
 		return provider.VoiceInfo{}, err
 	}
@@ -251,7 +261,7 @@ func (a *Adapter) TranscribeSpeech(ctx context.Context, request provider.STTRequ
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.STTResult{}, consoleVoiceResponseError(response)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, consoleVoiceBodyLimit+1))
+	data, err := readConsoleVoiceBody(response.Body, consoleVoiceBodyLimit)
 	if err != nil {
 		return provider.STTResult{}, err
 	}
@@ -279,15 +289,12 @@ func (a *Adapter) forwardConsoleVoice(ctx context.Context, credential account.Cr
 }
 
 func (a *Adapter) forwardConsoleVoiceBytes(ctx context.Context, credential account.Credential, method, pathValue string, body []byte, contentType, accept string) (*http.Response, error) {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
-		return a.forwardConsoleVoiceMultipart(ctx, credential, method, pathValue, body, contentType, accept)
-	}
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, err
 	}
 	cfg := a.config()
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	lease, err := a.egress.AcquireCredential(requestCtx, egressdomain.ScopeConsole, credential)
 	if err != nil {
 		cancel()
@@ -298,43 +305,13 @@ func (a *Adapter) forwardConsoleVoiceBytes(ctx context.Context, credential accou
 	}
 	response, err := a.doDPoPRequestWithContentType(requestCtx, credential, token, lease, method, consoleV1Endpoint(cfg.BaseURL, pathValue), body, contentType, accept)
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		lease.Release()
 		cancel()
 		return nil, err
 	}
 	response.Body = &releaseBody{ReadCloser: response.Body, release: func() {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
-		lease.Release()
-		cancel()
-	}}
-	return response, nil
-}
-
-func (a *Adapter) forwardConsoleVoiceMultipart(ctx context.Context, credential account.Credential, method, pathValue string, body []byte, contentType, accept string) (*http.Response, error) {
-	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
-	if err != nil {
-		return nil, err
-	}
-	cfg := a.config()
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
-	lease, err := a.egress.AcquireCredential(requestCtx, egressdomain.ScopeConsole, credential)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	if accept == "" {
-		accept = "*/*"
-	}
-	response, err := a.doDPoPRequestWithContentType(requestCtx, credential, token, lease, method, consoleV1Endpoint(cfg.BaseURL, pathValue), body, contentType, accept)
-	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
-		lease.Release()
-		cancel()
-		return nil, err
-	}
-	response.Body = &releaseBody{ReadCloser: response.Body, release: func() {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		lease.Release()
 		cancel()
 	}}
@@ -361,9 +338,9 @@ func normalizeTTSOutputFormat(format provider.TTSOutputFormat) map[string]any {
 
 func parseSTTResult(data []byte) (provider.STTResult, error) {
 	var payload struct {
-		Text     string  `json:"text"`
-		Language string  `json:"language"`
-		Duration float64 `json:"duration"`
+		Text     *string  `json:"text"`
+		Language string   `json:"language"`
+		Duration *float64 `json:"duration"`
 		Words    []struct {
 			Text    string  `json:"text"`
 			Start   float64 `json:"start"`
@@ -384,7 +361,16 @@ func parseSTTResult(data []byte) (provider.STTResult, error) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return provider.STTResult{}, fmt.Errorf("解析 Console STT 响应失败: %w", err)
 	}
-	result := provider.STTResult{Text: payload.Text, Language: payload.Language, Duration: payload.Duration}
+	if payload.Text == nil && len(payload.Channels) == 0 {
+		return provider.STTResult{}, errors.New("Console STT 缺少转录结果")
+	}
+	result := provider.STTResult{Language: payload.Language}
+	if payload.Text != nil {
+		result.Text = *payload.Text
+	}
+	if payload.Duration != nil && *payload.Duration >= 0 && !math.IsNaN(*payload.Duration) && !math.IsInf(*payload.Duration, 0) {
+		result.Duration, result.DurationReported = *payload.Duration, true
+	}
 	for _, word := range payload.Words {
 		result.Words = append(result.Words, provider.STTWord{Text: word.Text, Start: word.Start, End: word.End, Speaker: word.Speaker})
 	}
@@ -403,10 +389,24 @@ func consoleVoiceResponseError(response *http.Response) error {
 	if err != nil {
 		return err
 	}
-	retryAfter := parseConsoleRetryAfterHeader(response.Header.Get("Retry-After"), time.Now().UTC())
+	retryAfter := retryafter.Header(response.Header.Get("Retry-After"), time.Now().UTC())
 	return newConsoleMediaUpstreamError(response.StatusCode, data, retryAfter)
 }
 
 func invalidConsoleVoiceError(message string) error {
-	return &consoleMediaUpstreamError{status: http.StatusBadRequest, summary: message}
+	return &inferencedomain.RequestValidationError{Code: "invalid_request", Message: message}
+}
+
+// A LimitReader EOF at limit+1 is not a complete upstream response. Reject the
+// extra byte before parsing: a valid JSON prefix can otherwise hide an unread
+// suffix behind whitespace and fabricate a successful transcription.
+func readConsoleVoiceBody(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("Console voice 响应超过安全上限")
+	}
+	return data, nil
 }

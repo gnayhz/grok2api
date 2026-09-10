@@ -20,10 +20,22 @@ type RateLimiter interface {
 	Allow(ctx context.Context, key string, limit int, now time.Time) (allowed bool, retryAfter time.Duration, err error)
 }
 
+// RollingRateLimiter atomically limits admitted operations across a rolling window.
+// Implementations retain accepted slots until the window expires, including failures.
+type RollingRateLimiter interface {
+	AllowRolling(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error)
+}
+
 // ConcurrencyLimiter 定义客户端和账号并发租约边界。
 type ConcurrencyLimiter interface {
 	Acquire(ctx context.Context, key string, limit int) (release func(), acquired bool, err error)
 	Current(ctx context.Context, key string) (int, error)
+}
+
+// BoundedConcurrencyLimiter shares ordinary capacity with short, bounded
+// background work. The caller must stop work before ttl; release is owner-safe.
+type BoundedConcurrencyLimiter interface {
+	AcquireBounded(ctx context.Context, key string, limit int, ttl time.Duration) (func(), bool, error)
 }
 
 // ConcurrencySnapshotReader 批量读取并发租约快照；调度器会优先使用它减少远程运行态往返。
@@ -52,6 +64,9 @@ type StickySessionBatchDeleter interface {
 // key 边界为 model + sessionKey；sessionKey 应使用已隔离的 PromptCacheKey。
 type ReasoningReplayRepository interface {
 	Get(ctx context.Context, model, sessionKey string, now time.Time, ttl time.Duration) (items [][]byte, ok bool, err error)
+	// Update atomically merges against the latest unexpired value. merge must
+	// be pure and must not call the repository; it may run again on contention.
+	Update(ctx context.Context, model, sessionKey string, expiresAt time.Time, merge func([][]byte) [][]byte) error
 	Set(ctx context.Context, model, sessionKey string, items [][]byte, expiresAt time.Time) error
 	Delete(ctx context.Context, model, sessionKey string) error
 }
@@ -73,8 +88,8 @@ type ObservedModelStateRepository interface {
 type DeviceSessionRepository interface {
 	Create(ctx context.Context, value account.DeviceSession) error
 	Get(ctx context.Context, id string, now time.Time) (account.DeviceSession, error)
-	Update(ctx context.Context, value account.DeviceSession) error
-	Delete(ctx context.Context, id string) error
+	ClaimPoll(ctx context.Context, id, token string, now, leaseUntil time.Time) (account.DeviceSession, error)
+	FinishPoll(ctx context.Context, receipt account.DevicePollReceipt, event account.DevicePollCompletion) (bool, error)
 }
 
 // DistributedLock 定义跨实例的短期互斥租约，用于避免同一账号维护任务被并发执行。
@@ -118,15 +133,17 @@ const (
 )
 
 type InvalidationEvent struct {
-	Kind          InvalidationKind `json:"kind"`
-	Provider      account.Provider `json:"provider,omitempty"`
-	AccountID     uint64           `json:"accountId,omitempty"`
-	ClientKeyID   uint64           `json:"clientKeyId,omitempty"`
-	UpstreamModel string           `json:"upstreamModel,omitempty"`
-	FailureCount  int              `json:"failureCount,omitempty"`
-	CooldownUntil *time.Time       `json:"cooldownUntil,omitempty"`
+	Kind          InvalidationKind         `json:"kind"`
+	Provider      account.Provider         `json:"provider,omitempty"`
+	AccountID     uint64                   `json:"accountId,omitempty"`
+	ClientKeyID   uint64                   `json:"clientKeyId,omitempty"`
+	UpstreamModel string                   `json:"upstreamModel,omitempty"`
+	FailureCount  int                      `json:"failureCount,omitempty"`
+	CooldownUntil *time.Time               `json:"cooldownUntil,omitempty"`
+	Quota         *account.QuotaProjection `json:"quota,omitempty"`
 	// HealthMarker carries only domain-approved, non-sensitive durable markers.
 	// Arbitrary upstream error text must never be published on the runtime bus.
+	HealthRevision uint64    `json:"healthRevision,omitempty"`
 	HealthMarker   string    `json:"healthMarker,omitempty"`
 	Revision       uint64    `json:"revision,omitempty"`
 	SourceInstance string    `json:"sourceInstance,omitempty"`
@@ -149,6 +166,9 @@ func (e InvalidationEvent) Layer() InvalidationLayer {
 }
 
 func (e InvalidationEvent) Valid() bool {
+	if e.Quota != nil && (e.Kind != InvalidationAccountQuotaChanged || e.AccountID == 0 || e.Quota.Mode == "" || len(e.Quota.Mode) > 64 || e.Quota.Remaining < 0 || e.Quota.Revision < e.Quota.SnapshotVersion || e.Quota.Revision == 0) {
+		return false
+	}
 	layer := e.Layer()
 	if layer == "" {
 		return false
@@ -186,17 +206,30 @@ type QuotaRecoveryQueue interface {
 	RescheduleQuotaRecovery(ctx context.Context, value account.QuotaRecoveryEvent) error
 }
 
-type QuotaRefreshDirty struct {
-	AccountID  uint64
-	Mode       string
+// QuotaRefreshVersion identifies a signal during its retained lifetime. The
+// expiry participates in identity because counters may restart after expiry.
+type QuotaRefreshVersion struct {
 	Generation uint64
+	ExpiresAt  time.Time
 }
 
-// QuotaRefreshCoordinator preserves successful-request refresh signals across
-// local queue pressure and coordinates trailing refreshes between instances.
+func (v QuotaRefreshVersion) Equal(other QuotaRefreshVersion) bool {
+	return v.Generation == other.Generation && v.ExpiresAt.Equal(other.ExpiresAt)
+}
+
+type QuotaRefreshDirty struct {
+	AccountID uint64
+	Mode      string
+	Version   QuotaRefreshVersion
+}
+
+// QuotaRefreshCoordinator preserves refresh signals across local queue pressure.
+// Scan returns a bounded page and a continuation cursor (zero completes a pass).
+// Concurrent changes may be revisited on the next pass; this is not a snapshot.
+// Retry, backoff and parking policy belongs to the account application.
 type QuotaRefreshCoordinator interface {
-	MarkQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, ttl time.Duration) (uint64, error)
-	QuotaRefreshGeneration(ctx context.Context, accountID uint64, mode string) (generation uint64, dirty bool, err error)
-	ClearQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, generation uint64) (bool, error)
-	ListQuotaRefreshDirty(ctx context.Context, now time.Time, limit int) ([]QuotaRefreshDirty, error)
+	MarkQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, ttl time.Duration) (QuotaRefreshVersion, error)
+	GetQuotaRefreshState(ctx context.Context, accountID uint64, mode string) (version QuotaRefreshVersion, dirty bool, err error)
+	ClearQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, version QuotaRefreshVersion) (bool, error)
+	ScanQuotaRefreshDirty(ctx context.Context, now time.Time, cursor uint64, limit int) ([]QuotaRefreshDirty, uint64, error)
 }

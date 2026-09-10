@@ -185,7 +185,7 @@ func TestAuditRepositorySettlesBillingReservationIdempotently(t *testing.T) {
 	}
 	eventID := "evt_billing_reservation_0001"
 	keys := NewClientKeyRepository(database)
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 80, time.Now().UTC().Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 80, time.Now().UTC().Add(time.Hour), repositorypkg.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatal(err)
 	}
 	audits := NewAuditRepository(database)
@@ -281,7 +281,7 @@ func TestAuditRepositoryBatchSettlesReservationsAndReleasesZeroCost(t *testing.T
 	events := []string{"evt_batch_reserved_priced_0001", "evt_batch_reserved_zero_000002"}
 	keys := NewClientKeyRepository(database)
 	for index, amount := range []int64{80, 70} {
-		reserved, err := keys.ReserveBillingUsage(ctx, key.ID, events[index], amount, time.Now().UTC().Add(time.Hour))
+		reserved, err := keys.ReserveBillingUsage(ctx, key.ID, events[index], amount, time.Now().UTC().Add(time.Hour), repositorypkg.BillingReservationScope{OwnerID: "test-owner"})
 		if err != nil || !reserved {
 			t.Fatalf("reserve %s: reserved=%v err=%v", events[index], reserved, err)
 		}
@@ -321,7 +321,7 @@ func TestAuditRepositoryBatchRollsBackAuditBillingAndReservationTogether(t *test
 	}
 	eventID := "evt_batch_rollback_record_0001"
 	keys := NewClientKeyRepository(database)
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 80, time.Now().UTC().Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 80, time.Now().UTC().Add(time.Hour), repositorypkg.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("reserve: reserved=%v err=%v", reserved, err)
 	}
 	audits := NewAuditRepository(database)
@@ -543,7 +543,7 @@ func TestAuditRepositoryRequestMetadata(t *testing.T) {
 	}
 }
 
-func TestAuditRepositoryPurgeOlderThanBatchesAuditsAndAttempts(t *testing.T) {
+func TestAuditRepositoryDeleteOlderThanBoundsAuditsAndAttempts(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-purge.db"))
 	if err != nil {
@@ -555,7 +555,7 @@ func TestAuditRepositoryPurgeOlderThanBatchesAuditsAndAttempts(t *testing.T) {
 	}
 	repository := NewAuditRepository(database)
 	cutoff := time.Now().UTC().Add(-24 * time.Hour)
-	values := make([]audit.Record, auditPurgeBatchSize+1)
+	values := make([]audit.Record, auditRetentionBatchSize+1)
 	for index := range values {
 		values[index] = audit.Record{
 			EventID:      fmt.Sprintf("evt_audit_purge_%04d", index),
@@ -580,12 +580,22 @@ func TestAuditRepositoryPurgeOlderThanBatchesAuditsAndAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleted, err := repository.PurgeOlderThan(ctx, cutoff)
+	deleted, err := repository.DeleteOlderThan(ctx, cutoff, auditRetentionBatchSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deleted != int64(len(values)) {
-		t.Fatalf("deleted = %d, want %d", deleted, len(values))
+	if deleted != auditRetentionBatchSize {
+		t.Fatalf("first batch deleted = %d", deleted)
+	}
+	if count := tableRowCount(t, database, "request_audits"); count != 2 {
+		t.Fatalf("first batch remaining = %d", count)
+	}
+	if count := tableRowCount(t, database, "request_audit_attempts"); count != 2 {
+		t.Fatalf("first batch attempts = %d", count)
+	}
+	deleted, err = repository.DeleteOlderThan(ctx, cutoff, auditRetentionBatchSize)
+	if err != nil || deleted != 1 {
+		t.Fatalf("second batch = %d, %v", deleted, err)
 	}
 	if count := tableRowCount(t, database, "request_audits"); count != 1 {
 		t.Fatalf("remaining audits = %d", count)

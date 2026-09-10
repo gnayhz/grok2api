@@ -52,10 +52,23 @@ type MediaJobStats struct {
 }
 
 type MediaJobRepository interface {
+	StartMediaJobExecutionLimits(ctx context.Context, id, claim string, limits media.ExecutionLimits) error
+	ReserveMediaJobPhysicalCall(ctx context.Context, id, claim string, now time.Time) error
+	ConfirmMediaJobPhysicalCalls(ctx context.Context, id, claim string, previous, confirmed uint32) error
 	CreateMediaJob(ctx context.Context, value media.Job) error
 	GetMediaJob(ctx context.Context, id string, clientKeyID uint64) (media.Job, error)
 	GetMediaJobsByIDs(ctx context.Context, ids []string) ([]media.Job, error)
+	// UpdateMediaJob advances active jobs under claim/revision fencing. The first
+	// terminal state freezes completion facts; same-terminal retries are no-ops.
+	// Usage acknowledgement is only written by MarkMediaJobUsageRecorded.
 	UpdateMediaJob(ctx context.Context, value media.Job) error
+	// SaveMediaJobExecution advances the checkpoint under the current claim and previous revision.
+	SaveMediaJobExecution(ctx context.Context, value media.Job, previous media.VideoExecution) error
+	// SaveMediaJobAccessPolicy adopts an explicit grant once for a legacy job.
+	// Only the current claim may replace missing policy; ordinary updates cannot.
+	SaveMediaJobAccessPolicy(ctx context.Context, id, claimToken string, policy media.JobAccessPolicy) error
+	// DeleteMediaJob enforces media.Job.CheckDeletion and atomically revokes
+	// associated upload tickets. Active/pending jobs return ErrConflict.
 	DeleteMediaJob(ctx context.Context, id string) error
 	ListMediaJobs(ctx context.Context, query MediaJobListQuery) ([]media.Job, int64, error)
 	SummarizeMediaJobs(ctx context.Context) (MediaJobStats, error)
@@ -63,21 +76,30 @@ type MediaJobRepository interface {
 	ListUnrecordedTerminalMediaJobs(ctx context.Context, limit int) ([]media.Job, error)
 	TryClaimMediaJob(ctx context.Context, id string, now, leaseUntil time.Time, claimToken string) (media.Job, bool, error)
 	MarkMediaJobUsageRecorded(ctx context.Context, id string, recordedAt time.Time) error
-	// CountActiveMediaJobsByClientKeys 计数这些 key 名下仍处非终态
-	//（queued/in_progress）的媒体作业——client key 删除前预检用：活跃作业
-	// 阻止删除（media_jobs.client_key_id 是 ON DELETE RESTRICT 外键）。
-	CountActiveMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error)
-	// DeleteTerminalMediaJobsByClientKeys 清理这些 key 名下的终态
-	//（completed/failed）作业行——终态作业只剩归档价值（审计行有
-	// client_key_name 快照），残留会让 RESTRICT 外键永久阻止 key 删除
-	//（round 51：失败视频作业使 key 不可删，落裸 500）。
-	DeleteTerminalMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error)
+	ListUnrecordedMediaJobQuotas(ctx context.Context, afterID string, limit int) ([]media.Job, error)
+	MarkMediaJobQuotaRecorded(ctx context.Context, value media.Job, recordedAt time.Time) error
 }
+
+// MaxMediaAssetLookupKeys bounds a single indexed metadata lookup.
+const MaxMediaAssetLookupKeys = 200
 
 // MediaAssetRepository 定义媒体资源元数据持久化能力。
 type MediaAssetRepository interface {
+	// CreateMediaAsset rejects private input assets; those require capacity admission.
+	// Assets with SourceJobID are registered atomically against an active source
+	// job. Final result selection and execution claims remain owned by the job.
 	CreateMediaAsset(ctx context.Context, value media.Asset) error
+	// CreateMediaInputAsset serializes input admissions and inserts only when the
+	// committed total plus this asset fits the caller-owned capacity limit.
+	CreateMediaInputAsset(ctx context.Context, value media.Asset, capacityLimit int64) error
 	GetMediaAsset(ctx context.Context, id string) (media.Asset, error)
+	// ListMediaAssetsBySourceJob returns one bounded page for terminal job
+	// deletion. Delete that page before requesting the next; no offset is needed.
+	ListMediaAssetsBySourceJob(ctx context.Context, jobID string, limit int) ([]media.Asset, error)
+	// FindMediaAssetStorageKeys returns the currently referenced subset of exact
+	// storage keys. An error never confirms absence. At most MaxMediaAssetLookupKeys
+	// keys are accepted; an empty input returns an empty set without a query.
+	FindMediaAssetStorageKeys(ctx context.Context, keys []string) (map[string]struct{}, error)
 	ListMediaAssets(ctx context.Context, query MediaAssetListQuery) ([]media.Asset, int64, error)
 	SummarizeMediaAssets(ctx context.Context) (MediaAssetStats, error)
 	TotalMediaAssetBytes(ctx context.Context) (int64, error)
@@ -107,16 +129,28 @@ type MediaUploadTicketRepository interface {
 	// DeleteUploadTicketsByJobID 撤销指定任务尚存的上传入口；行不存在时幂等成功。
 	DeleteUploadTicketsByJobID(ctx context.Context, jobID string) error
 	DeleteExpiredUploadTickets(ctx context.Context, before time.Time, limit int) (int64, error)
-	BindJobResultAsset(ctx context.Context, jobID, assetID string) error
+	// BindLegacyJobResultAsset only supports active tasks without execution checkpoints.
+	// New tasks bind outputs through SaveMediaJobExecution; late uploads cannot rewrite them.
+	BindLegacyJobResultAsset(ctx context.Context, jobID, assetID string) error
 }
 
 // MediaObjectStorage 定义媒体二进制对象的存取边界。
 type MediaObjectStorage interface {
 	SaveImage(ctx context.Context, id, mimeType string, data []byte) (string, error)
-	SaveVideo(ctx context.Context, id, mimeType string, data []byte) (string, error)
-	BeginVideoUpload(ctx context.Context, id, mimeType string) (tempPath, storageKey string, err error)
-	CommitVideoUpload(ctx context.Context, tempPath, storageKey string) error
-	AbortVideoUpload(ctx context.Context, tempPath string) error
+	BeginVideoUpload(ctx context.Context, id, mimeType string) (MediaVideoUpload, error)
 	Open(ctx context.Context, storageKey string) (io.ReadCloser, error)
 	Delete(ctx context.Context, storageKey string) error
+}
+
+// MediaVideoUpload owns a single staged object's resources. The caller writes
+// sequentially, validates the content, and either commits or aborts. Commit
+// publishes without replacing an existing object and returns its storage key.
+// Abort must always be called, including after success, to release staging
+// resources; it never deletes a committed object. No method is concurrent-safe.
+// The driver owns file paths/descriptors and observes Begin's context on writes
+// and Commit's context on publication. Commit and Abort are idempotent.
+type MediaVideoUpload interface {
+	io.Writer
+	Commit(ctx context.Context) (storageKey string, err error)
+	Abort(ctx context.Context) error
 }

@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -34,7 +35,9 @@ const dashboardUsageAggregateSelect = `
 
 const dashboardTopModelsLimit = 10
 
-// Snapshot 在同一数据库事务内读取资源计数和指定区间的审计聚合。
+// Snapshot reads every projection from one committed database view. PostgreSQL
+// READ COMMITTED would otherwise allow audit writes between aggregate queries
+// to make usage totals disagree with the buckets, providers or model ranking.
 func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.DashboardSnapshotWindow, snapshotAt time.Time) (dashboarddomain.Aggregate, error) {
 	if err := validateDashboardBoundaries(window.BucketBoundaries); err != nil {
 		return dashboarddomain.Aggregate{}, err
@@ -225,7 +228,7 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 			}
 		}
 		return nil
-	})
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	return result, err
 }
 

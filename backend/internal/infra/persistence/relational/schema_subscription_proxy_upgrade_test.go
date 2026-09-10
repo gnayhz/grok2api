@@ -114,7 +114,9 @@ func TestSchemaDropsLegacyGlobalSubscriptionProxyColumns(t *testing.T) {
 		}
 	}
 	repository := NewEgressRepository(database)
-	if _, err := repository.SaveEgressOperationsConfig(ctx, egressdomain.DefaultOperationsConfig()); err != nil {
+	if _, err := repository.SaveEgressOperationsConfig(ctx, egressdomain.DefaultOperationsConfig(), func(egressdomain.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.InitializeSchema(ctx); err != nil {

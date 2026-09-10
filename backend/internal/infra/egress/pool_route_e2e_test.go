@@ -16,8 +16,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-// e2eRepo 扮演真实持久层:健康更新会写回节点存储,后续读取可见
-// (与真实 DB 的 UpdateEgressNodeHealth 语义一致,区别仅在内存)。
+// e2eRepo commits the domain observation transition under its mutex;
+// later routing reads observe the same current binding and health revision.
 type e2eRepo struct {
 	egressRepositoryTestStub
 	mu     sync.Mutex
@@ -26,8 +26,7 @@ type e2eRepo struct {
 	health atomic.Int64
 }
 
-// nodes 经嵌入 stub 的字段存取,UpdateEgressNodeHealth 原地改写该字段,
-// 模拟真实 DB 写读一致。
+// Atomic fixture writers are defined in runtime_repository_test.go.
 
 func (r *e2eRepo) GetEgressOperationsConfig(context.Context) (domain.OperationsConfig, error) {
 	return r.config, nil
@@ -61,19 +60,6 @@ func (r *e2eRepo) ListEgressNodesByPool(context.Context, uint64) ([]domain.Node,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]domain.Node(nil), r.egressRepositoryTestStub.nodes...), nil
-}
-
-func (r *e2eRepo) UpdateEgressNodeHealth(_ context.Context, id uint64, health float64, failures int, cooldown *time.Time, lastErr string) error {
-	r.health.Add(1)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for index, node := range r.egressRepositoryTestStub.nodes {
-		if node.ID == id {
-			node.Health, node.FailureCount, node.CooldownUntil, node.LastError = health, failures, cooldown, lastErr
-			r.egressRepositoryTestStub.nodes[index] = node
-		}
-	}
-	return nil
 }
 
 // newForwardProxy 启动一个真实的 HTTP 正向代理(绝对形式请求转发),
@@ -139,6 +125,7 @@ func TestE2EPoolRouteRealProxyRoundTrip(t *testing.T) {
 		pools:                    map[uint64]domain.Pool{1: {ID: 1, Enabled: true, Strategy: domain.PoolStrategyAffinity, FallbackMode: domain.PoolFallbackNone}},
 	}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	first, err := manager.Acquire(WithTrafficClass(context.Background(), domain.TrafficClassInference), domain.ScopeBuild, "e2e-account")
 	if err != nil || first == nil {
@@ -200,6 +187,9 @@ func TestE2EPoolRouteRealProxyRoundTrip(t *testing.T) {
 			t.Fatal("request to a dead exit must fail with a real network error")
 		}
 		manager.FeedbackForScope(context.Background(), domain.ScopeBuild, lease.NodeID, 0, dialErr)
+		if err := manager.FlushFeedback(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	manager.InvalidatePoolCache()
 	if repo.health.Load() != 2 {
@@ -225,20 +215,4 @@ func newE2ERequest(target string) *http.Request {
 		panic(err)
 	}
 	return request
-}
-
-func (r *e2eRepo) UpdateEgressNodeClearance(context.Context, uint64, string, string, string, string, time.Time) error {
-	return nil
-}
-
-func (r *e2eRepo) UpdateEgressNodeLastError(_ context.Context, id uint64, lastErr string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for index, node := range r.egressRepositoryTestStub.nodes {
-		if node.ID == id {
-			node.LastError = lastErr
-			r.egressRepositoryTestStub.nodes[index] = node
-		}
-	}
-	return nil
 }

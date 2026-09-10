@@ -8,7 +8,7 @@ import (
 
 func rotationPick(t *testing.T, manager *Manager, pool domain.Pool, candidates, all []domain.Node) uint64 {
 	t.Helper()
-	return manager.selectPoolNode(pool, candidates, all, "acct").ID
+	return manager.routing.selectPoolNode(pool, candidates, all, "acct").ID
 }
 
 // rotation: 游标只进不回。A 坏 → B,A 恢复仍在 B,B 坏 → C,C 坏绕回最先可用的。

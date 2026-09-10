@@ -19,7 +19,6 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/pkg/signerurl"
 	"golang.org/x/net/html"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -42,6 +41,15 @@ type statsigSignResult struct {
 	source string
 }
 
+// A refresh executes on its owner's stack because it borrows that request's
+// egress lease. Other callers only wait for its result and cancel independently.
+type statsigRefresh struct {
+	done          chan struct{}
+	result        statsigSignResult
+	err           error
+	ownerCanceled bool
+}
+
 type statsigWarmTarget struct {
 	method string
 	target string
@@ -54,7 +62,7 @@ type statsigSigner struct {
 	now              func() time.Time
 	mu               sync.Mutex
 	entries          map[string]statsigCacheEntry
-	refreshes        singleflight.Group
+	refreshes        map[string]*statsigRefresh
 }
 
 func newStatsigSigner() *statsigSigner {
@@ -75,29 +83,71 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 	if err != nil {
 		return "", "", err
 	}
-	if value, ok := s.cached(key, s.now().UTC()); ok {
-		return value, "cache", nil
-	}
-	value, err, _ := s.refreshes.Do(key, func() (any, error) {
-		now := s.now().UTC()
-		if cached, ok := s.cached(key, now); ok {
-			return statsigSignResult{value: cached, source: "cache"}, nil
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", "", err
 		}
-		fresh, refreshErr := s.freshSignature(ctx, baseURL, signerURL, token, lease, method, path)
-		if refreshErr != nil {
-			if stale, ok := s.stale(key); ok {
-				return statsigSignResult{value: stale, source: "stale"}, nil
+		if value, ok := s.cached(key, s.now().UTC()); ok {
+			return value, "cache", nil
+		}
+		s.mu.Lock()
+		pending := s.refreshes[key]
+		if pending == nil {
+			pending = &statsigRefresh{done: make(chan struct{})}
+			if s.refreshes == nil {
+				s.refreshes = make(map[string]*statsigRefresh)
 			}
-			return statsigSignResult{}, refreshErr
+			s.refreshes[key] = pending
+			s.mu.Unlock()
+			return s.runRefresh(ctx, key, pending, baseURL, signerURL, token, lease, method, path)
 		}
-		s.store(key, fresh, now.Add(statsigCacheTTL), now)
-		return statsigSignResult{value: fresh, source: "refresh"}, nil
-	})
-	if err != nil {
-		return "", "", err
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-pending.done:
+			if err := ctx.Err(); err != nil {
+				return "", "", err
+			}
+			if pending.ownerCanceled {
+				continue
+			}
+			return pending.result.value, pending.result.source, pending.err
+		}
 	}
-	result := value.(statsigSignResult)
-	return result.value, result.source, nil
+}
+
+func (s *statsigSigner) runRefresh(ctx context.Context, key string, pending *statsigRefresh, baseURL, signerURL, token string, lease *infraegress.Lease, method, path string) (string, string, error) {
+	completed := false
+	defer func() {
+		if !completed {
+			// Preserve the owner's panic/Goexit while releasing every waiter.
+			pending.err = errors.New("Statsig refresh interrupted")
+		}
+		pending.ownerCanceled = completed && pending.err != nil && ctx.Err() != nil
+		s.mu.Lock()
+		delete(s.refreshes, key)
+		close(pending.done)
+		s.mu.Unlock()
+	}()
+	now := s.now().UTC()
+	if cached, ok := s.cached(key, now); ok {
+		pending.result = statsigSignResult{value: cached, source: "cache"}
+	} else {
+		fresh, err := s.freshSignature(ctx, baseURL, signerURL, token, lease, method, path)
+		if err != nil {
+			if stale, ok := s.stale(key); ok {
+				pending.result = statsigSignResult{value: stale, source: "stale"}
+			} else {
+				pending.err = err
+			}
+		} else {
+			s.store(key, fresh, now.Add(statsigCacheTTL), now)
+			pending.result = statsigSignResult{value: fresh, source: "refresh"}
+		}
+	}
+	completed = true
+	return pending.result.value, pending.result.source, pending.err
 }
 
 // Warm 使用一次 metaContent 请求预热多个常用签名键，避免按账号或按路径重复抓取首页。

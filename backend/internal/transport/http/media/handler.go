@@ -16,11 +16,12 @@ import (
 
 type Handler struct {
 	service     *mediaapp.Service
+	importer    *mediaapp.ImageInputImporter
 	ingestSlots chan struct{}
 }
 
-func NewHandler(service *mediaapp.Service) *Handler {
-	return &Handler{service: service, ingestSlots: make(chan struct{}, ingestConcurrency)}
+func NewHandler(service *mediaapp.Service, importer *mediaapp.ImageInputImporter) *Handler {
+	return &Handler{service: service, importer: importer, ingestSlots: make(chan struct{}, ingestConcurrency)}
 }
 
 // RegisterPublic 注册使用不可猜测资源 ID 的公开图片读取与视频上传接收端点。
@@ -228,7 +229,7 @@ func (h *Handler) deleteVideos(c *gin.Context) {
 		return
 	}
 	deleted, err := h.service.AdminDeleteVideoJobs(c.Request.Context(), request.IDs)
-	if errors.Is(err, mediaapp.ErrInvalidVideoSelection) || errors.Is(err, mediaapp.ErrActiveVideoSelection) {
+	if errors.Is(err, mediaapp.ErrInvalidVideoSelection) || errors.Is(err, mediaapp.ErrActiveVideoSelection) || errors.Is(err, mediaapp.ErrVideoCompletionPending) {
 		response.Error(c, http.StatusBadRequest, "invalidVideoSelection", err.Error())
 		return
 	}

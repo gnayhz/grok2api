@@ -21,7 +21,9 @@ func TestEgressOperationsBatchUpdatesEnabledState(t *testing.T) {
 	first := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-enable-first")
 	second := createHealthyEgressNode(t, ctx, nodes, cipher, "batch-enable-second")
 	second.Enabled = false
-	if _, err := nodes.UpdateEgressNode(ctx, second); err != nil {
+	if _, err := nodes.UpdateEgressNodeConfiguration(ctx, second, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -114,7 +116,9 @@ func TestEgressOperationsCleanupDeletesOnlyDualStackUnhealthyNodes(t *testing.T)
 	managed := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-managed")
 	managed.SourceID = source.ID
 	managed.SourceKey = "managed"
-	if managed, err = nodes.UpdateEgressNode(ctx, managed); err != nil {
+	if managed, err = nodes.UpdateEgressNodeConfiguration(ctx, managed, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	v4Healthy := createHealthyEgressNode(t, ctx, nodes, cipher, "cleanup-v4-healthy")
@@ -162,7 +166,7 @@ func TestEgressOperationsPersistsProbeResult(t *testing.T) {
 	cipher := egressOperationsCipher(t)
 	node := createHealthyEgressNode(t, ctx, nodes, cipher, "probe")
 	cooldown := time.Now().UTC().Add(time.Minute)
-	if err := nodes.UpdateEgressNodeHealth(ctx, node.ID, 0.7, 1, &cooldown, egress.LastErrorTransport); err != nil {
+	if _, err := nodes.ApplyEgressHealthObservation(ctx, egress.HealthObservation{NodeID: node.ID, EncryptedProxyURL: node.EncryptedProxyURL, BindingRevision: node.BindingRevision, Kind: egress.HealthTransportFailure, Failures: 1, CooldownUntil: &cooldown, ObservedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	probedAt := time.Now().UTC().Truncate(time.Millisecond)
@@ -194,7 +198,7 @@ func TestEgressOperationsPersistsProbeResult(t *testing.T) {
 	if stored.Health != 1 || stored.FailureCount != 0 || stored.CooldownUntil != nil || stored.LastError != "" {
 		t.Fatalf("healthy probe did not recover transport failure: %#v", stored)
 	}
-	if err := nodes.UpdateEgressNodeHealth(ctx, node.ID, 0.7, 1, &cooldown, "anti-bot rejection"); err != nil {
+	if err := database.db.Model(&egressNodeModel{}).Where("id = ?", node.ID).Updates(map[string]any{"health": 0.7, "failure_count": 1, "cooldown_until": cooldown, "last_error": "anti-bot rejection"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.TestNode(ctx, node.ID); err != nil {
@@ -404,11 +408,11 @@ func TestEgressOperationsSubscriptionImportCountsOnlyNewNodes(t *testing.T) {
 		SourceKey: "count-node", EncryptedProxyURL: proxy,
 	}}
 	firstValues := append(append([]egress.Node(nil), values...), values[0])
-	first, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, firstValues)
+	first, err := commitSourceNodesForTest(t, nodes, ctx, source.ID, firstValues)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, values)
+	second, err := commitSourceNodesForTest(t, nodes, ctx, source.ID, values)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +668,9 @@ func (stub mutatingEgressProbeStub) ProbeEgressNode(ctx context.Context, node eg
 	node.ProbeProvider = ""
 	node.IPv4Probe = egress.ProbeFamilyResult{Status: egress.ProbeStatusUnknown}
 	node.IPv6Probe = egress.ProbeFamilyResult{Status: egress.ProbeStatusUnknown}
-	if _, err := stub.repository.UpdateEgressNode(ctx, node); err != nil {
+	if _, err := stub.repository.UpdateEgressNodeConfiguration(ctx, node, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		return egress.ProbeResult{}, err
 	}
 	return stub.result, nil
@@ -703,8 +709,13 @@ func createHealthyEgressNode(t *testing.T, ctx context.Context, repository *Egre
 func setEgressProbeFamilies(t *testing.T, ctx context.Context, repository *EgressRepository, node egress.Node, ipv4, ipv6 egress.ProbeStatus) {
 	t.Helper()
 	now := time.Now().UTC()
+	revision, err := repository.BeginEgressNodeProbe(ctx, node.ID, node.EncryptedProxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := repository.UpdateEgressNodeProbe(ctx, node.ID, node.EncryptedProxyURL, egress.ProbeResult{
-		Status: egress.ProbeStatusUnhealthy, TestedAt: now, Error: "probe failed",
+		Revision: revision,
+		Status:   egress.ProbeStatusUnhealthy, TestedAt: now, Error: "probe failed",
 		IPv4: egress.ProbeFamilyResult{Status: ipv4, TestedAt: now},
 		IPv6: egress.ProbeFamilyResult{Status: ipv6, TestedAt: now},
 	}); err != nil {

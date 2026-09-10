@@ -94,6 +94,18 @@ func TestSubscriptionSyncIdempotencyUnderFaultInjection(t *testing.T) {
 		t.Fatalf("after first sync total=%d enabled=%d, want 3/3", total, enabled)
 	}
 
+	// Seed real runtime state. A no-op feed must preserve it even though
+	// encrypting the same plaintext again would generate a different nonce.
+	beforeRepeat, err := repo.ListEgressNodes(ctx, repository.SortQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := beforeRepeat[0]
+	until := time.Now().UTC().Add(time.Hour)
+	healthBefore, err := repo.ApplyEgressHealthObservation(ctx, domain.HealthObservation{NodeID: preserved.ID, EncryptedProxyURL: preserved.EncryptedProxyURL, BindingRevision: preserved.BindingRevision, Kind: domain.HealthTransportFailure, Failures: 3, CooldownUntil: &until, ObservedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// 2. 相同 feed 重复同步: 幂等。
 	result, err = service.SyncSource(ctx, source.ID)
 	if err != nil || result.Imported != 0 {
@@ -101,6 +113,13 @@ func TestSubscriptionSyncIdempotencyUnderFaultInjection(t *testing.T) {
 	}
 	if total, enabled := countNodes(); total != 3 || enabled != 3 {
 		t.Fatalf("after repeat sync total=%d enabled=%d, want 3/3 (no duplicates)", total, enabled)
+	}
+	afterRepeat, err := repo.GetEgressNode(ctx, preserved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRepeat.EncryptedProxyURL != preserved.EncryptedProxyURL || afterRepeat.Health != healthBefore.Health || afterRepeat.FailureCount != 3 || afterRepeat.CooldownUntil == nil || afterRepeat.LastError != domain.LastErrorTransport {
+		t.Fatal("unchanged subscription reset runtime health or changed proxy ciphertext")
 	}
 
 	// 3. feed 换血: 移除 :2222, 新增 :4444。
@@ -320,7 +339,11 @@ func TestRunMaintenanceOrchestratesSyncAndProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(time.Hour)
-	if err := repo.UpdateEgressSourceSync(ctx, stale.ID, time.Now().UTC(), future, 0, ""); err != nil {
+	claim, err := repo.BeginEgressSourceSync(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.FailEgressSourceSync(ctx, claim, time.Now().UTC(), future, "scheduled by fixture"); err != nil {
 		t.Fatal(err)
 	}
 	// 到期 healthy 源 + 未到期节点(刚探测过)。

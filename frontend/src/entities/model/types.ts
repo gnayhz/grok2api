@@ -12,6 +12,7 @@ export type ModelRouteDTO = {
   syncedAccounts: number;
   totalAccounts: number;
   capabilityKnown: boolean;
+  capabilitySupported?: boolean;
   available: boolean;
   lastSyncedAt?: string;
 };

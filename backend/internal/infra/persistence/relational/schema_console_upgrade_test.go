@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func TestInitializeSchemaUpgradesProviderChecksForConsole(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accountRepository.SaveQuotaWindows(ctx, created.ID, account.WebTierAuto, now, []account.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(accountRepository, ctx, created.ID, account.WebTierAuto, now, []account.QuotaWindow{{
 		AccountID: created.ID, Mode: "test", Remaining: 7, Total: 20, WindowSeconds: 3600,
 		Source: account.QuotaSourceUpstream, SyncedAt: &now,
 	}}); err != nil {
@@ -169,7 +170,7 @@ func TestManagedRoutesAllowOnePublicIDPerCapability(t *testing.T) {
 	if err := repo.ReplaceProviderRoutes(ctx, account.ProviderConsole, routes); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpsertDiscovered(ctx, account.ProviderConsole, []string{"grok-imagine-image-quality"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderConsole, []string{"grok-imagine-image-quality"}); err != nil {
 		t.Fatal(err)
 	}
 	var rows []modelRouteModel

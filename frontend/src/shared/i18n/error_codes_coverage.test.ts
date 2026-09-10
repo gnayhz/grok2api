@@ -6,7 +6,8 @@ import { test } from "node:test";
 
 // 后端 response.Error 的错误码必须在前端 apiErrors 有本地化映射——
 // 缺失时用户看到英文回退（zh 用户）或后端中文原文（en 用户）。
-// 本测试扫描后端源码提取全部 code 并断言逐个覆盖，防止两侧漂移。
+// 本测试扫描后端生产源码提取全部 code 并断言逐个覆盖，防止两侧漂移。
+// 测试夹具的占位字符串不是公开错误码。
 
 const repoRoot = resolvePath(import.meta.dirname, "../../../../");
 const i18nSource = readFileSync(resolvePath(import.meta.dirname, "index.ts"), "utf8");
@@ -53,7 +54,7 @@ function extractBackendCodes(): Set<string> {
     const grepcmd = [
       "grep", "-rhoE",
       pattern,
-      path ?? "backend/internal/transport/http/", "--include=*.go",
+      path ?? "backend/internal/transport/http/", "--include=*.go", "--exclude=*_test.go",
     ].map((part) => part.includes(" ") ? JSON.stringify(part) : part).join(" ");
     const tailcmd = ["grep", "-oE", extract].map((p) => JSON.stringify(p)).join(" ");
     let full = grepcmd + " | " + tailcmd + " | tr -d '" + String.fromCharCode(34) + "' | sort -u";

@@ -19,16 +19,20 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
+	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
 )
-
-const webResponseTTL = 30 * 24 * time.Hour
 
 const maxDeferredSearchTextBytes = 8 << 20
 
@@ -52,21 +56,26 @@ var (
 type openAIRequest struct {
 	Model              string          `json:"model"`
 	Stream             bool            `json:"stream"`
+	Stop               json.RawMessage `json:"stop"`
 	Input              json.RawMessage `json:"input"`
 	Instructions       string          `json:"instructions"`
 	PreviousResponseID string          `json:"previous_response_id"`
+	Store              *bool           `json:"store"`
 	Messages           []chatMessage   `json:"messages"`
 	// Include is the xAI/OpenAI Responses include list (inline_citations / no_inline_citations).
-	Include           []string        `json:"include"`
-	Tools             json.RawMessage `json:"tools"`
-	ToolChoice        json.RawMessage `json:"tool_choice"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls"`
-	ImageConfig       *struct {
-		Count          *int   `json:"n"`
-		ResponseFormat string `json:"response_format"`
-		AspectRatio    string `json:"aspect_ratio"`
-		Resolution     string `json:"resolution"`
-	} `json:"image_config"`
+	Include           []string         `json:"include"`
+	Tools             json.RawMessage  `json:"tools"`
+	ToolChoice        json.RawMessage  `json:"tool_choice"`
+	WebSearchOptions  json.RawMessage  `json:"web_search_options"`
+	ParallelToolCalls *bool            `json:"parallel_tool_calls"`
+	ImageConfig       *imageChatConfig `json:"image_config"`
+}
+
+type imageChatConfig struct {
+	Count          *int   `json:"n"`
+	ResponseFormat string `json:"response_format"`
+	AspectRatio    string `json:"aspect_ratio"`
+	Resolution     string `json:"resolution"`
 }
 
 type chatMessage struct {
@@ -126,15 +135,17 @@ func (b *trackedTextBuilder) Len() int { return b.builder.Len() }
 func (b *trackedTextBuilder) CharacterLen() int { return b.characters }
 
 type parsedChat struct {
-	ResponseID     string
-	ConversationID string
-	ParentID       string
-	Text           trackedTextBuilder
-	upstreamText   strings.Builder
-	Reasoning      strings.Builder
-	Images         []string
-	SearchSources  []map[string]any
-	Annotations    []map[string]any
+	GenerationOutcome string
+	resources         *webResponseResources
+	ResponseID        string
+	ConversationID    string
+	ParentID          string
+	Text              trackedTextBuilder
+	upstreamText      strings.Builder
+	Reasoning         strings.Builder
+	Images            []string
+	SearchSources     []map[string]any
+	Annotations       []map[string]any
 	// ResponseOutput is populated by the Responses streaming state machine so
 	// response.completed reuses the exact item IDs and ordering emitted in SSE.
 	ResponseOutput []any
@@ -183,7 +194,15 @@ func (p *parsedChat) resetText(value string) {
 	_, _ = p.Text.WriteString(value)
 }
 
-func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (result *provider.Response, resultErr error) {
+	ctx, finishTrace := upstreamtrace.Network(ctx, "web", request.Operation)
+	defer finishTrace()
+	var physicalAttempt attemptmeta.Identity
+	defer func() {
+		if result != nil && result.Attempt.ID == "" {
+			result.Attempt = physicalAttempt
+		}
+	}()
 	if request.Method == http.MethodGet || request.Method == http.MethodDelete {
 		return a.handleResponseResource(ctx, request)
 	}
@@ -197,10 +216,17 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		return jsonProviderResponse(http.StatusMethodNotAllowed, map[string]any{"error": map[string]any{"message": "method not allowed"}}), nil
 	}
 	var conversationOptions conversation.ResponseOptions
+	var imageOptions struct {
+		ImageConfig *imageChatConfig `json:"image_config"`
+	}
 	if request.Operation == conversation.OperationMessages {
+		// Preserve the Web image extension around the shared Messages conversion.
+		if err := json.Unmarshal(request.Body, &imageOptions); err != nil {
+			return invalidWebToolRequest(request.Operation, err), nil
+		}
 		converted, options, err := conversation.ConvertRequestWithOptions(request.Body, request.Model, request.Operation)
 		if err != nil {
-			return jsonProviderResponse(http.StatusBadRequest, map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": err.Error()}}), nil
+			return invalidWebToolRequest(request.Operation, err), nil
 		}
 		request.Body = converted
 		conversationOptions = options
@@ -209,6 +235,17 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	var input openAIRequest
 	if err := json.Unmarshal(request.Body, &input); err != nil {
 		return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "请求 JSON 无效", "type": "invalid_request_error"}}), nil
+	}
+	conversationOptions.Store = input.Store
+	if request.Operation == conversation.OperationMessages {
+		input.ImageConfig = imageOptions.ImageConfig
+	}
+	if request.Operation == conversation.OperationChat {
+		stop, err := conversation.ParseChatStopSequences(input.Stop)
+		if err != nil {
+			return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error(), "type": "invalid_request_error", "param": "stop"}}), nil
+		}
+		conversationOptions.StopSequences = stop
 	}
 	if len(input.Include) > 0 {
 		conversationOptions.Include = append([]string{}, input.Include...)
@@ -224,9 +261,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err != nil {
 		return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error(), "type": "invalid_request_error"}}), nil
 	}
-	tools, err := parseToolConfiguration(input.Tools, input.ToolChoice)
+	toolDeclarations, err := mergeWebSearchOptions(input.Tools, input.WebSearchOptions)
 	if err != nil {
-		return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error(), "type": "invalid_request_error", "code": "invalid_tools"}}), nil
+		return invalidWebToolRequest(request.Operation, err), nil
+	}
+	tools, err := parseToolConfiguration(toolDeclarations, input.ToolChoice)
+	if err != nil {
+		return invalidWebToolRequest(request.Operation, err), nil
 	}
 	parallelTools := true
 	if input.ParallelToolCalls != nil {
@@ -250,6 +291,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	streaming := input.Stream || request.Streaming
 	var parsed parsedChat
 	var previous *inferencedomain.WebResponseState
+	resources := newWebResponseResources(ctx)
+	defer resources.Close()
 	for attempt := 0; attempt < 2; attempt++ {
 		attemptCtx := ctx
 		if attempt > 0 {
@@ -269,6 +312,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return nil, openErr
 		}
 		previous = currentPrevious
+		physicalAttempt = attemptmeta.FromResponse(upstream)
 		if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
 			if upstream.StatusCode == http.StatusForbidden {
 				// Preserve definitive account-block signals before a Statsig retry can discard the first response.
@@ -296,7 +340,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 					StatusCode: upstream.StatusCode, Status: upstream.Status, Header: http.Header(upstream.Header),
 					UpstreamURL: responseUpstreamURL(upstream),
 					Body: &releaseBody{ReadCloser: io.NopCloser(bytes.NewReader(body)), release: func() {
-						a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
+						lease.Observe(upstream.StatusCode, nil)
 						lease.Release()
 					}},
 				}, nil
@@ -305,17 +349,23 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				StatusCode: upstream.StatusCode, Status: upstream.Status, Header: http.Header(upstream.Header),
 				UpstreamURL: responseUpstreamURL(upstream),
 				Body: &releaseBody{ReadCloser: upstream.Body, release: func() {
-					a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
+					lease.Observe(upstream.StatusCode, nil)
 					lease.Release()
 				}},
 			}, nil
 		}
 
+		if traceDir, enabled := upstreamtrace.Enabled(); enabled {
+			traceBody, _ := json.Marshal(map[string]any{"model": request.Model, "prompt": normalized.Prompt})
+			upstreamtrace.DumpRequest(traceDir, "web_"+request.Operation, request.Model, streaming, traceBody)
+			upstream.Body = upstreamtrace.TeeStream(traceDir, "web_"+request.Operation, request.Model, upstream.Body)
+		}
 		if streaming {
 			prepared, preflightErr := preflightUpstream(upstream.Body)
 			if preflightErr == nil {
-				body := a.streamOpenAIResponse(ctx, prepared, lease, request.Credential, responseID, input.Model, request.Operation, normalized.Prompt, previous, tools, parallelTools, conversationOptions)
-				return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: body}, nil
+				pending := a.pendingResponseState(ctx, request.Operation, input.Store)
+				body := a.streamOpenAIResponse(ctx, prepared, lease, request.Credential, responseID, input.Model, request.Operation, normalized.Prompt, previous, tools, parallelTools, conversationOptions, pending, physicalAttempt.ID)
+				return pending.attach(&provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: body}), nil
 			}
 			if statsigTarget != "" && errors.Is(preflightErr, errWebAntiBot) && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
 				a.releaseStatsigRetry(upstream, lease)
@@ -330,9 +380,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return nil, preflightErr
 		}
 
-		currentParsed, consumeErr := consumeUpstreamWithCitations(upstream.Body, nil, conversationOptions.InlineCitationsEnabled())
+		currentParsed := parsedChat{DisableInlineCitations: !conversationOptions.InlineCitationsEnabled(), resources: resources}
+		consumeErr := consumeUpstreamInto(upstream.Body, &currentParsed, nil)
+		currentParsed.InputTokens = estimateTokens(normalized.Prompt)
+		observeWebGeneration(ctx, physicalAttempt.ID, &currentParsed)
 		_ = upstream.Body.Close()
 		if statsigTarget != "" && errors.Is(consumeErr, errWebAntiBot) && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
+			resources.Close()
 			lease.Release()
 			continue
 		}
@@ -347,13 +401,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				// 返回, 让网关走限流处理(账号冷却/换号)而不是当作网络故障重试。
 				// 与 lite-image 路径(image.go)对齐; 此前哨兵在 chat 主链路从不被
 				// 检查, 流内 usage limit 以裸错误终止。
-				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusTooManyRequests, nil)
+				lease.Observe(http.StatusTooManyRequests, nil)
 				return usageLimitProviderResponse(), nil
 			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
+			lease.Observe(0, consumeErr)
 			return nil, consumeErr
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+		lease.Observe(http.StatusOK, nil)
 		parsed = currentParsed
 		break
 	}
@@ -362,6 +416,12 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	parsed.ToolChoice = tools.ResponseChoice
 	parsed.ParallelTools = parallelTools
 	applyParsedToolCalls(&parsed, tools)
+	if err := checkToolChoice(&parsed, tools); err != nil {
+		return nil, err
+	}
+	if err := checkChatOutput(&parsed); err != nil {
+		return nil, err
+	}
 	if err := a.archiveChatImages(ctx, request.Credential, &parsed); err != nil {
 		return nil, err
 	}
@@ -370,10 +430,18 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err != nil {
 		return nil, err
 	}
-	if request.Operation == conversation.OperationResponses {
-		a.saveResponseState(context.WithoutCancel(ctx), request.Credential.ID, responseID, parsed, data)
+	buffered := responsebuffer.New(resources.budget, responsebuffer.JSONLimit)
+	if _, err := buffered.Write(data); err != nil {
+		_ = buffered.Close()
+		return nil, err
 	}
-	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: jsonHeaders(), Body: io.NopCloser(bytes.NewReader(data))}, nil
+	pending := a.pendingResponseState(ctx, request.Operation, input.Store)
+	if err := pending.prepare(request.Credential.ID, responseID, parsed, data); err != nil {
+		_ = buffered.Close()
+		pending.discard()
+		return nil, err
+	}
+	return pending.attach(&provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: jsonHeaders(), Body: buffered.Body()}), nil
 }
 
 func (a *Adapter) releaseStatsigRetry(upstream *http.Response, lease *infraegress.Lease) {
@@ -385,7 +453,7 @@ func (a *Adapter) feedbackAntiBot(ctx context.Context, lease *infraegress.Lease,
 	if statsigTarget != "" {
 		a.invalidateSignedStatsig(http.MethodPost, statsigTarget)
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, nil)
+	lease.Observe(http.StatusForbidden, nil)
 }
 
 func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
@@ -437,232 +505,263 @@ func (a *Adapter) handleResponseResource(ctx context.Context, request provider.R
 		id = before
 	}
 	id, _ = url.PathUnescape(id)
+	resources := a.states
 	if request.Method == http.MethodDelete {
-		if err := a.states.DeleteWebState(ctx, id); err != nil {
+		if err := resources.DeleteWeb(ctx, id); err != nil {
+			if !errors.Is(err, historydomain.ErrResponseNotFound) {
+				return nil, err
+			}
 			return jsonProviderResponse(http.StatusNotFound, map[string]any{"error": map[string]any{"message": "Response 不存在", "type": "invalid_request_error"}}), nil
 		}
 		return jsonProviderResponse(http.StatusOK, map[string]any{"id": id, "object": "response.deleted", "deleted": true}), nil
 	}
-	state, err := a.states.GetWebState(ctx, id, time.Now().UTC())
+	state, err := resources.LookupWeb(ctx, id, time.Now().UTC())
 	if err != nil {
+		if !errors.Is(err, historydomain.ErrResponseNotFound) {
+			return nil, err
+		}
 		return jsonProviderResponse(http.StatusNotFound, map[string]any{"error": map[string]any{"message": "Response 不存在或已过期", "type": "invalid_request_error"}}), nil
 	}
 	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: jsonHeaders(), Body: io.NopCloser(strings.NewReader(state.ResponseJSON))}, nil
 }
 
-func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser, lease *infraegress.Lease, credential account.Credential, responseID, model, operation, prompt string, previous *inferencedomain.WebResponseState, tools toolConfiguration, parallelTools bool, options conversation.ResponseOptions) io.ReadCloser {
-	reader, writer := io.Pipe()
-	go func() {
-		defer func() { _ = source.Close() }()
+func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser, lease *infraegress.Lease, credential account.Credential, responseID, model, operation, prompt string, previous *inferencedomain.WebResponseState, tools toolConfiguration, parallelTools bool, options conversation.ResponseOptions, pending *responseStateCommit, physicalID string) io.ReadCloser {
+	return streampipe.Transform(source, func(source io.Reader, writer io.Writer) error {
 		defer lease.Release()
-		// 直接解析上游字节流的转换主体, panic 不得击穿进程。
-		streampipe.Run(writer, func() error {
-			parsed := &parsedChat{
-				ResponseID: responseID, InputTokens: estimateTokens(prompt), Tools: tools.ResponseTools,
-				ToolChoice: tools.ResponseChoice, ParallelTools: parallelTools,
-				DisableInlineCitations: !options.InlineCitationsEnabled(),
-			}
-			if previous != nil {
-				parsed.ConversationID = previous.ConversationID
-			}
-			var clientText strings.Builder
-			archivedImages := make(map[string]struct{})
-			var sieve *toolStreamSieve
-			if len(tools.Functions) > 0 && tools.Choice != "none" {
-				sieve = newToolStreamSieve(tools.available)
-			}
-			messagesStream := newWebMessagesStream(writer, responseID, model, parsed.InputTokens, options)
-			visiblePhase := webVisibleStreamPhase{}
-			annotationCursor := 0
-			hostedSearchEmitted := make(map[string]struct{})
-			var responsesStream *webResponsesStream
-			if operation == conversation.OperationResponses {
-				responsesStream = newWebResponsesStream(writer, responseID)
-			}
-			writeDelta := func(kind, delta string) error {
-				if !visiblePhase.Allow(kind, delta) {
+		resources := newWebResponseResources(ctx)
+		defer resources.Close()
+		parsed := &parsedChat{
+			resources:  resources,
+			ResponseID: responseID, InputTokens: estimateTokens(prompt), Tools: tools.ResponseTools,
+			ToolChoice: tools.ResponseChoice, ParallelTools: parallelTools,
+			DisableInlineCitations: !options.InlineCitationsEnabled(),
+		}
+		if previous != nil {
+			parsed.ConversationID = previous.ConversationID
+		}
+		var clientText strings.Builder
+		archivedImages := make(map[string]struct{})
+		var sieve *toolStreamSieve
+		if len(tools.Functions) > 0 && tools.Choice != "none" {
+			sieve = newToolStreamSieve(tools.available)
+		}
+		messagesStream := newWebMessagesStream(writer, responseID, model, parsed.InputTokens, options)
+		visiblePhase := webVisibleStreamPhase{}
+		annotationCursor := 0
+		hostedSearchEmitted := make(map[string]struct{})
+		var responsesStream *webResponsesStream
+		if operation == conversation.OperationResponses {
+			responsesStream = newWebResponsesStream(writer, responseID)
+		}
+		var chatStop *webStopFilter
+		if operation == conversation.OperationChat {
+			chatStop = newWebStopFilter(options.StopSequences)
+		}
+		writeDelta := func(kind, delta string) error {
+			if chatStop != nil {
+				if chatStop.matched != "" {
 					return nil
-				}
-				if responsesStream != nil {
-					return responsesStream.Delta(kind, delta)
-				}
-				return writeWebStreamDelta(writer, messagesStream, operation, responseID, model, kind, delta)
-			}
-			writeToolCalls := func(calls []parsedToolCall) error {
-				if responsesStream != nil {
-					return responsesStream.ToolCalls(calls)
-				}
-				return writeWebStreamToolCalls(writer, messagesStream, operation, responseID, model, calls)
-			}
-			flushAnnotations := func() error {
-				if annotationCursor >= len(parsed.Annotations) {
-					return nil
-				}
-				newOnes := parsed.Annotations[annotationCursor:]
-				annotationCursor = len(parsed.Annotations)
-				if responsesStream != nil {
-					return responsesStream.Annotations(newOnes, annotationCursor-len(newOnes))
-				}
-				return writeStreamAnnotations(writer, operation, responseID, model, newOnes, annotationCursor-len(newOnes))
-			}
-			flushHostedSearch := func() error {
-				if operation != conversation.OperationResponses {
-					return nil
-				}
-				for _, call := range parsed.HostedSearchCalls {
-					// Wait until the tool_result arrives (completed / has sources).
-					if call.Status != "completed" && len(call.Sources) == 0 {
-						continue
-					}
-					if _, emitted := hostedSearchEmitted[call.ID]; emitted {
-						continue
-					}
-					if err := responsesStream.HostedSearch(call); err != nil {
-						return err
-					}
-					hostedSearchEmitted[call.ID] = struct{}{}
-				}
-				return nil
-			}
-			flushSideChannel := func() error {
-				if err := flushHostedSearch(); err != nil {
-					return err
-				}
-				return flushAnnotations()
-			}
-			if operation != conversation.OperationMessages {
-				writeStreamStart(writer, operation, responseID, model, parsed.InputTokens)
-			}
-			err := consumeUpstreamInto(source, parsed, func(kind, delta string) error {
-				if len(parsed.ToolCalls) > 0 && kind != "reasoning" && kind != "image" {
-					// 工具调用被识别后, 剩余纯文本增量是工具语法的原文(不下发, 这是
-					// 过滤器的本意); 但 image 增量仍是有效生成内容——同一请求的非流式
-					// 路径(archiveChatImages)能返回它们, 流式丢图会让客户端拿到缺失图片
-					// 的不完整回答且 URL 不归档。图片落到下方正常分支处理。
-					return flushSideChannel()
-				}
-				if kind == "image" {
-					rawURL := delta
-					item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: delta}, "url")
-					if imageErr != nil {
-						return imageErr
-					}
-					delta = liteImageMarkdown(item)
-					if parsed.Text.Len() > 0 {
-						delta = "\n\n" + delta
-					}
-					parsed.appendText(delta)
-					archivedImages[rawURL] = struct{}{}
-					kind = "text"
-				}
-				if kind == "text" && sieve != nil {
-					result := sieve.Feed(delta)
-					if result.SafeText != "" {
-						clientText.WriteString(result.SafeText)
-						if err := writeDelta(kind, result.SafeText); err != nil {
-							return err
-						}
-					}
-					if result.Complete {
-						if len(result.Calls) == 0 {
-							clientText.WriteString(result.Raw)
-							if err := writeDelta(kind, result.Raw); err != nil {
-								return err
-							}
-							return flushSideChannel()
-						}
-						parsed.ToolCalls = result.Calls
-						return writeToolCalls(result.Calls)
-					}
-					return flushSideChannel()
 				}
 				if kind == "text" {
-					if delta != "" {
-						clientText.WriteString(delta)
-					}
-				}
-				if delta != "" {
-					if err := writeDelta(kind, delta); err != nil {
-						return err
-					}
-				}
-				return flushSideChannel()
-			})
-			if err != nil {
-				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
-				return err
-			}
-			if sieve != nil && len(parsed.ToolCalls) == 0 {
-				result := sieve.Flush()
-				if result.SafeText != "" {
-					clientText.WriteString(result.SafeText)
-					if err := writeDelta("text", result.SafeText); err != nil {
-						return err
-					}
-				}
-				if len(result.Calls) > 0 {
-					parsed.ToolCalls = result.Calls
-					if err := writeToolCalls(result.Calls); err != nil {
-						return err
-					}
+					delta, _ = chatStop.Push(delta)
 				}
 			}
-			// 图片补归档不再被工具调用门控:parsed.Images 中的 URL 未必都有对应的
-			// image 增量(如工具调用前已被解析), 与非流式路径 archiveChatImages 行为
-			// 对齐——流式不应因工具调用而少内容。
-			for _, rawURL := range parsed.Images {
-				if _, exists := archivedImages[rawURL]; exists {
+			if !visiblePhase.Allow(kind, delta) {
+				return nil
+			}
+			if responsesStream != nil {
+				return responsesStream.Delta(kind, delta)
+			}
+			return writeWebStreamDelta(writer, messagesStream, operation, responseID, model, kind, delta)
+		}
+		writeToolCalls := func(calls []parsedToolCall) error {
+			if responsesStream != nil {
+				return responsesStream.ToolCalls(calls)
+			}
+			return writeWebStreamToolCalls(writer, messagesStream, operation, responseID, model, calls)
+		}
+		flushAnnotations := func() error {
+			if annotationCursor >= len(parsed.Annotations) {
+				return nil
+			}
+			newOnes := parsed.Annotations[annotationCursor:]
+			annotationCursor = len(parsed.Annotations)
+			if responsesStream != nil {
+				return responsesStream.Annotations(newOnes, annotationCursor-len(newOnes))
+			}
+			return writeStreamAnnotations(writer, operation, responseID, model, newOnes, annotationCursor-len(newOnes))
+		}
+		flushHostedSearch := func() error {
+			if operation != conversation.OperationResponses {
+				return nil
+			}
+			for _, call := range parsed.HostedSearchCalls {
+				// Wait until the tool_result arrives (completed / has sources).
+				if call.Status != "completed" && len(call.Sources) == 0 {
 					continue
 				}
-				item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: rawURL}, "url")
+				if _, emitted := hostedSearchEmitted[call.ID]; emitted {
+					continue
+				}
+				if err := responsesStream.HostedSearch(call); err != nil {
+					return err
+				}
+				hostedSearchEmitted[call.ID] = struct{}{}
+			}
+			return nil
+		}
+		flushSideChannel := func() error {
+			if err := flushHostedSearch(); err != nil {
+				return err
+			}
+			return flushAnnotations()
+		}
+		if operation != conversation.OperationMessages {
+			writeStreamStart(writer, operation, responseID, model, parsed.InputTokens, historydomain.ResponseStorageRequested(options.Store))
+		}
+		err := consumeUpstreamInto(source, parsed, func(kind, delta string) error {
+			if len(parsed.ToolCalls) > 0 && kind != "reasoning" && kind != "image" {
+				// 工具调用被识别后, 剩余纯文本增量是工具语法的原文(不下发, 这是
+				// 过滤器的本意); 但 image 增量仍是有效生成内容——同一请求的非流式
+				// 路径(archiveChatImages)能返回它们, 流式丢图会让客户端拿到缺失图片
+				// 的不完整回答且 URL 不归档。图片落到下方正常分支处理。
+				return flushSideChannel()
+			}
+			if kind == "image" {
+				rawURL := delta
+				item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: delta}, "url")
 				if imageErr != nil {
 					return imageErr
 				}
-				delta := liteImageMarkdown(item)
-				if clientText.Len() > 0 {
+				delta = liteImageMarkdown(item)
+				if parsed.Text.Len() > 0 {
 					delta = "\n\n" + delta
 				}
-				clientText.WriteString(delta)
-				if err := writeDelta("text", delta); err != nil {
+				parsed.appendText(delta)
+				archivedImages[rawURL] = struct{}{}
+				kind = "text"
+			}
+			if kind == "text" && sieve != nil {
+				result := sieve.Feed(delta)
+				if result.Err != nil {
+					return result.Err
+				}
+				if result.SafeText != "" {
+					clientText.WriteString(result.SafeText)
+					if err := writeDelta(kind, result.SafeText); err != nil {
+						return err
+					}
+				}
+				if result.Complete {
+					if len(result.Calls) == 0 {
+						clientText.WriteString(result.Raw)
+						if err := writeDelta(kind, result.Raw); err != nil {
+							return err
+						}
+						return flushSideChannel()
+					}
+					parsed.ToolCalls = result.Calls
+					return writeToolCalls(result.Calls)
+				}
+				return flushSideChannel()
+			}
+			if kind == "text" {
+				if delta != "" {
+					clientText.WriteString(delta)
+				}
+			}
+			if delta != "" {
+				if err := writeDelta(kind, delta); err != nil {
 					return err
 				}
 			}
-			parsed.resetText(clientText.String())
-			if operation == conversation.OperationResponses {
-				finalizeXAIAnnotations(parsed)
-				if finishErr := responsesStream.Finish(parsed); finishErr != nil {
-					return finishErr
-				}
-			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
-			payload := buildOpenAIResult(operation, responseID, model, *parsed, false, options)
-			data, _ := json.Marshal(payload)
-			if operation == conversation.OperationResponses {
-				a.saveResponseState(context.WithoutCancel(ctx), credential.ID, responseID, *parsed, data)
-			}
-			if operation == conversation.OperationMessages {
-				if finishErr := messagesStream.Finish(*parsed, payload); finishErr != nil {
-					return finishErr
-				}
-			} else {
-				writeStreamDone(writer, operation, responseID, model, *parsed, payload)
-			}
-			return nil
+			return flushSideChannel()
 		})
-	}()
-	return reader
+		observeWebGeneration(ctx, physicalID, parsed)
+		if err != nil {
+			lease.Observe(0, err)
+			return err
+		}
+		if sieve != nil && len(parsed.ToolCalls) == 0 {
+			result := sieve.Flush()
+			if result.Err != nil {
+				return result.Err
+			}
+			if result.SafeText != "" {
+				clientText.WriteString(result.SafeText)
+				if err := writeDelta("text", result.SafeText); err != nil {
+					return err
+				}
+			}
+			if len(result.Calls) > 0 {
+				parsed.ToolCalls = result.Calls
+				if err := writeToolCalls(result.Calls); err != nil {
+					return err
+				}
+			}
+		}
+		// 图片补归档不再被工具调用门控:parsed.Images 中的 URL 未必都有对应的
+		// image 增量(如工具调用前已被解析), 与非流式路径 archiveChatImages 行为
+		// 对齐——流式不应因工具调用而少内容。
+		for _, rawURL := range parsed.Images {
+			if _, exists := archivedImages[rawURL]; exists {
+				continue
+			}
+			item, imageErr := a.imageDataItem(ctx, credential, imagineImageValue{URL: rawURL}, "url")
+			if imageErr != nil {
+				return imageErr
+			}
+			delta := liteImageMarkdown(item)
+			if clientText.Len() > 0 {
+				delta = "\n\n" + delta
+			}
+			clientText.WriteString(delta)
+			if err := writeDelta("text", delta); err != nil {
+				return err
+			}
+		}
+		if chatStop != nil {
+			if pending := chatStop.Flush(); pending != "" {
+				if err := writeWebStreamDelta(writer, messagesStream, operation, responseID, model, "text", pending); err != nil {
+					return err
+				}
+			}
+		}
+		parsed.resetText(clientText.String())
+		if err := checkToolChoice(parsed, tools); err != nil {
+			return err
+		}
+		if err := checkChatOutput(parsed); err != nil {
+			return err
+		}
+		if operation == conversation.OperationResponses {
+			finalizeXAIAnnotations(parsed)
+			if finishErr := responsesStream.Finish(parsed); finishErr != nil {
+				return finishErr
+			}
+		}
+		lease.Observe(http.StatusOK, nil)
+		payload := buildOpenAIResult(operation, responseID, model, *parsed, false, options)
+		data, _ := json.Marshal(payload)
+		if err := pending.prepare(credential.ID, responseID, *parsed, data); err != nil {
+			return err
+		}
+		if operation == conversation.OperationMessages {
+			if finishErr := messagesStream.Finish(*parsed, payload); finishErr != nil {
+				return finishErr
+			}
+		} else {
+			return writeStreamDone(writer, operation, responseID, model, *parsed, payload)
+		}
+		return nil
+	})
 }
 
-func (a *Adapter) saveResponseState(ctx context.Context, accountID uint64, responseID string, parsed parsedChat, data []byte) {
-	if parsed.ConversationID == "" || parsed.ParentID == "" || a.states == nil {
-		return
+func checkChatOutput(parsed *parsedChat) error {
+	if strings.TrimSpace(parsed.Text.String()) == "" && len(parsed.ToolCalls) == 0 && len(parsed.Images) == 0 && len(parsed.HostedSearchCalls) == 0 {
+		return responsecheck.ErrEmptyOutput
 	}
-	now := time.Now().UTC()
-	_ = a.states.SaveWebState(ctx, inferencedomain.WebResponseState{
-		ResponseID: responseID, AccountID: accountID, ConversationID: parsed.ConversationID,
-		UpstreamParentResponseID: parsed.ParentID, ResponseJSON: string(data), Status: "completed",
-		ExpiresAt: now.Add(webResponseTTL), CreatedAt: now, UpdatedAt: now,
-	})
+	return nil
 }
 
 func normalizeOpenAIInput(input openAIRequest, operation string) (normalizedChatInput, error) {
@@ -685,8 +784,12 @@ func normalizeOpenAIInput(input openAIRequest, operation string) (normalizedChat
 			}
 			content, _ := json.Marshal(text)
 			messages = append(messages, chatMessage{Role: "user", Content: content})
-		} else if err := json.Unmarshal(trimmed, &messages); err != nil {
-			return normalizedChatInput{}, errors.New("input 必须是字符串或消息数组")
+		} else {
+			var history []chatMessage
+			if err := json.Unmarshal(trimmed, &history); err != nil {
+				return normalizedChatInput{}, errors.New("input 必须是字符串或消息数组")
+			}
+			messages = append(messages, history...)
 		}
 	}
 	if len(messages) == 0 {
@@ -925,9 +1028,23 @@ func consumeUpstreamWithCitations(source io.Reader, emit func(string, string) er
 }
 
 func consumeUpstreamInto(source io.Reader, parsed *parsedChat, emit func(string, string) error) error {
-	return consumeJSONObjects(source, 8<<20, func(data []byte) error {
+	var budget *responsebuffer.Budget
+	if parsed.resources != nil {
+		budget = parsed.resources.budget
+	}
+	return consumeJSONObjectsWithBudget(source, 8<<20, budget, func(data []byte) error {
+		if budget != nil {
+			workspace, err := responsebuffer.JSONWorkspace(budget, data)
+			if err != nil {
+				return err
+			}
+			defer workspace.Release()
+		}
 		kind, delta, err := parseUpstreamFrame(data, parsed)
 		if err != nil {
+			return err
+		}
+		if err := parsed.resources.retainFrame(data, kind, delta); err != nil {
 			return err
 		}
 		if emit == nil {
@@ -939,60 +1056,110 @@ func consumeUpstreamInto(source io.Reader, parsed *parsedChat, emit func(string,
 	})
 }
 
+// consumeJSONObjects borrows complete frames from each read buffer. Only a
+// frame split across reads is copied; consumers must not retain the slice.
 func consumeJSONObjects(source io.Reader, maxObjectBytes int, consume func([]byte) error) error {
-	reader := bufio.NewReaderSize(source, 64<<10)
-	frame := make([]byte, 0, 64<<10)
+	return consumeJSONObjectsWithBudget(source, maxObjectBytes, nil, consume)
+}
+
+func consumeJSONObjectsWithBudget(source io.Reader, maxObjectBytes int, budget *responsebuffer.Budget, consume func([]byte) error) error {
+	var readState *responsebuffer.State
+	if budget != nil {
+		readState = responsebuffer.NewState(budget, maxObjectBytes*2+64<<10)
+		defer readState.Close()
+		if err := readState.Grow(0, 64<<10); err != nil {
+			return err
+		}
+	}
+	reserveFrame := func(n int) error {
+		if readState == nil {
+			return nil
+		}
+		return readState.Grow(0, (64<<10)+n*2)
+	}
+	buffer := make([]byte, 64<<10)
+	var frame []byte
 	depth := 0
-	inString := false
-	escaped := false
+	inString, escaped := false, false
+	emptyReads := 0
+	tooLarge := func() error {
+		return fmt.Errorf("Grok Web 单个响应帧超过 %d MiB", maxObjectBytes>>20)
+	}
 	for {
-		value, err := reader.ReadByte()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+		n, readErr := source.Read(buffer)
+		if n == 0 && readErr == nil {
+			emptyReads++
+			if emptyReads >= 100 {
+				return io.ErrNoProgress
+			}
+			continue
+		}
+		emptyReads = 0
+		start := 0
+		for index := 0; index < n; index++ {
+			value := buffer[index]
+			if depth == 0 {
+				if value != '{' {
+					continue
+				}
+				start = index
+				depth = 1
+				inString, escaped = false, false
+				continue
+			}
+			if inString {
+				if escaped {
+					escaped = false
+				} else if value == '\\' {
+					escaped = true
+				} else if value == '"' {
+					inString = false
+				}
+				continue
+			}
+			switch value {
+			case '"':
+				inString = true
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					part := buffer[start : index+1]
+					if len(frame)+len(part) > maxObjectBytes {
+						return tooLarge()
+					}
+					if len(frame) > 0 {
+						if err := reserveFrame(len(frame) + len(part)); err != nil {
+							return err
+						}
+						frame = append(frame, part...)
+						part = frame
+					}
+					if err := consume(part); err != nil {
+						return err
+					}
+					frame = frame[:0]
+				}
+			}
+		}
+		if depth != 0 {
+			if len(frame)+n-start > maxObjectBytes {
+				return tooLarge()
+			}
+			if err := reserveFrame(len(frame) + n - start); err != nil {
+				return err
+			}
+			frame = append(frame, buffer[start:n]...)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
 				if depth != 0 {
 					return io.ErrUnexpectedEOF
 				}
 				return nil
 			}
-			return err
-		}
-		if depth == 0 {
-			if value != '{' {
-				continue
-			}
-			frame = frame[:0]
-			depth = 1
-			inString = false
-			escaped = false
-			frame = append(frame, value)
-			continue
-		}
-		frame = append(frame, value)
-		if len(frame) > maxObjectBytes {
-			return fmt.Errorf("Grok Web 单个响应帧超过 %d MiB", maxObjectBytes>>20)
-		}
-		if inString {
-			if escaped {
-				escaped = false
-			} else if value == '\\' {
-				escaped = true
-			} else if value == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch value {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				if err := consume(frame); err != nil {
-					return err
-				}
-			}
+			return readErr
 		}
 	}
 }
@@ -1803,11 +1970,12 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 	if len(responseOptions) > 0 {
 		options = responseOptions[0]
 	}
-	inputTokens := parsed.InputTokens
-	outputTokens := estimateTokens(parsed.Text.String()) + estimateTokens(parsed.Reasoning.String()) + estimateToolCallTokens(parsed.ToolCalls)
+	usage := webGenerationUsage(&parsed)
+	inputTokens, outputTokens := usage.Input, usage.Output
 	if operation == "chat" {
 		finalizeXAIAnnotations(&parsed)
-		message := map[string]any{"role": "assistant", "content": parsed.Text.String(), "reasoning_content": parsed.Reasoning.String()}
+		visibleText, _ := applyWebStopSequences(parsed.Text.String(), options.StopSequences)
+		message := map[string]any{"role": "assistant", "content": visibleText, "reasoning_content": parsed.Reasoning.String()}
 		if len(parsed.Annotations) > 0 {
 			message["annotations"] = chatAnnotations(parsed.Annotations)
 		}
@@ -1849,7 +2017,7 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		}
 		for _, call := range parsed.ToolCalls {
 			var input any = map[string]any{}
-			if json.Unmarshal([]byte(call.Arguments), &input) != nil {
+			if jsonvalue.Unmarshal([]byte(call.Arguments), &input) != nil {
 				input = map[string]any{}
 			}
 			content = append(content, map[string]any{"type": "tool_use", "id": webAnthropicToolID(call.ID), "name": call.Name, "input": input})
@@ -1904,7 +2072,7 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 	}
 	value := map[string]any{
 		"id": responseID, "object": "response", "created_at": created, "completed_at": created, "status": "completed", "model": model,
-		"output": output, "parallel_tool_calls": parsed.ParallelTools, "tools": tools, "tool_choice": toolChoice, "store": true,
+		"output": output, "parallel_tool_calls": parsed.ParallelTools, "tools": tools, "tool_choice": toolChoice, "store": historydomain.ResponseStorageRequested(options.Store),
 		"usage": map[string]any{
 			"input_tokens": inputTokens, "output_tokens": outputTokens, "total_tokens": inputTokens + outputTokens,
 			"input_tokens_details":  map[string]any{"cached_tokens": 0},
@@ -2500,7 +2668,7 @@ func (f *webStopFilter) Flush() string {
 	return value
 }
 
-func writeStreamStart(writer io.Writer, operation, responseID, model string, inputTokens int64) {
+func writeStreamStart(writer io.Writer, operation, responseID, model string, inputTokens int64, store bool) {
 	if operation == "chat" {
 		chunk := map[string]any{"id": strings.Replace(responseID, "resp_", "chatcmpl_", 1), "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}}}
 		_ = writeSSE(writer, "", chunk)
@@ -2517,7 +2685,7 @@ func writeStreamStart(writer io.Writer, operation, responseID, model string, inp
 		_ = writeSSE(writer, "content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
 		return
 	}
-	_ = writeSSE(writer, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": responseID, "object": "response", "status": "in_progress", "model": model, "output": []any{}}})
+	_ = writeSSE(writer, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": responseID, "object": "response", "status": "in_progress", "model": model, "output": []any{}, "store": store}})
 }
 
 type webVisibleStreamPhase struct {
@@ -2601,7 +2769,7 @@ func writeStreamToolCalls(writer io.Writer, operation, responseID, model string,
 	return errors.New("Responses 流式 tool call 必须通过统一 output 状态机发送")
 }
 
-func writeStreamDone(writer io.Writer, operation, responseID, model string, parsed parsedChat, payload map[string]any) {
+func writeStreamDone(writer io.Writer, operation, responseID, model string, parsed parsedChat, payload map[string]any) error {
 	if operation == "chat" {
 		finishReason := "stop"
 		if len(parsed.ToolCalls) > 0 {
@@ -2617,25 +2785,30 @@ func writeStreamDone(writer io.Writer, operation, responseID, model string, pars
 		if toolUsage := payload["server_side_tool_usage"]; toolUsage != nil {
 			chunk["server_side_tool_usage"] = toolUsage
 		}
-		_ = writeSSE(writer, "", chunk)
-		_, _ = io.WriteString(writer, "data: [DONE]\n\n")
-		return
+		if err := writeSSE(writer, "", chunk); err != nil {
+			return err
+		}
+		_, err := io.WriteString(writer, "data: [DONE]\n\n")
+		return err
 	}
 	if operation == conversation.OperationMessages {
-		_ = writeSSE(writer, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		if err := writeSSE(writer, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}); err != nil {
+			return err
+		}
 		stopReason := "end_turn"
 		if len(parsed.ToolCalls) > 0 {
 			stopReason = "tool_use"
 		}
 		usage, _ := payload["usage"].(map[string]any)
-		_ = writeSSE(writer, "message_delta", map[string]any{
+		if err := writeSSE(writer, "message_delta", map[string]any{
 			"type": "message_delta", "delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
 			"usage": map[string]any{"output_tokens": usage["output_tokens"]},
-		})
-		_ = writeSSE(writer, "message_stop", map[string]any{"type": "message_stop"})
-		return
+		}); err != nil {
+			return err
+		}
+		return writeSSE(writer, "message_stop", map[string]any{"type": "message_stop"})
 	}
-	_ = writeSSE(writer, "response.completed", map[string]any{"type": "response.completed", "response": payload})
+	return writeSSE(writer, "response.completed", map[string]any{"type": "response.completed", "response": payload})
 }
 
 // writeStreamAnnotations emits Chat Completions delta.annotations. Responses

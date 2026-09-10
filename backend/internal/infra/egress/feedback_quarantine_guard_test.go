@@ -28,8 +28,13 @@ func TestSuccessFeedbackDoesNotClearQualityQuarantine(t *testing.T) {
 		FailureCount: 3, CooldownUntil: &until, LastError: domain.LastErrorExitIPQuality,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	manager.Feedback(context.Background(), 1, http.StatusOK, nil)
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	node := repository.node
 	if node.LastError != domain.LastErrorExitIPQuality || node.CooldownUntil == nil || !node.CooldownUntil.Equal(until) {
@@ -37,7 +42,7 @@ func TestSuccessFeedbackDoesNotClearQualityQuarantine(t *testing.T) {
 	}
 }
 
-// 正向护栏:同情形下传输失败反馈仍要正常升级冷却(修复不得误伤失败路径)。
+// 传输失败仍记数，但不能把质量隔离替换成较短的传输冷却。
 func TestFailureFeedbackStillEscalatesOnQuarantinedNode(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -49,10 +54,15 @@ func TestFailureFeedbackStillEscalatesOnQuarantinedNode(t *testing.T) {
 		FailureCount: 3, CooldownUntil: &until, LastError: domain.LastErrorExitIPQuality,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	manager.Feedback(context.Background(), 1, 0, context.DeadlineExceeded)
 
-	if repository.node.LastError != domain.LastErrorTransport {
-		t.Fatalf("failure feedback must still record transport error, got %q", repository.node.LastError)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if repository.node.FailureCount != 4 || repository.node.LastError != domain.LastErrorExitIPQuality || repository.node.CooldownUntil == nil || !repository.node.CooldownUntil.Equal(until) {
+		t.Fatalf("failure must be counted while preserving quarantine: %+v", repository.node.HealthState())
 	}
 }

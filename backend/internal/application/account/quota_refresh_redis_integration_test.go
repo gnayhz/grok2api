@@ -30,16 +30,28 @@ func TestRedisQuotaRefreshCrossInstanceTrailing(t *testing.T) {
 		Addr: address, Username: os.Getenv("TEST_REDIS_USERNAME"), Password: os.Getenv("TEST_REDIS_PASSWORD"), DB: databaseNumber,
 	})
 	defer cleanup.Close()
-	if err := cleanup.FlushDB(ctx).Err(); err != nil {
-		t.Fatal(err)
-	}
+	prefix := "grok2api:quota-refresh-integration:" + time.Now().UTC().Format("20060102150405.000000000") + ":"
 	defer func() {
-		if err := cleanup.FlushDB(ctx).Err(); err != nil {
-			t.Errorf("flush Redis test database: %v", err)
+		var cursor uint64
+		for {
+			keys, next, err := cleanup.Scan(ctx, cursor, prefix+"*", 100).Result()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if len(keys) > 0 {
+				if err := cleanup.Del(ctx, keys...).Err(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			cursor = next
+			if cursor == 0 {
+				return
+			}
 		}
 	}()
 
-	prefix := "grok2api:quota-refresh-integration:" + time.Now().UTC().Format("20060102150405.000000000") + ":"
 	config := redisruntime.Config{
 		Address: address, Username: os.Getenv("TEST_REDIS_USERNAME"), Password: os.Getenv("TEST_REDIS_PASSWORD"), Database: databaseNumber,
 		KeyPrefix: prefix, ConcurrencyLease: time.Minute,
@@ -83,14 +95,14 @@ func TestRedisQuotaRefreshCrossInstanceTrailing(t *testing.T) {
 	done := make(chan struct{}, 2)
 	go func() { first.RunQuotaRefresh(runCtx); done <- struct{}{} }()
 	go func() { second.RunQuotaRefresh(runCtx); done <- struct{}{} }()
-	t.Cleanup(func() {
+	defer func() {
 		for range 4 {
 			adapter.modeRelease <- struct{}{}
 		}
 		cancel()
 		<-done
 		<-done
-	})
+	}()
 
 	first.QueueQuotaRefresh(credential.ID, "weekly")
 	select {
@@ -101,15 +113,15 @@ func TestRedisQuotaRefreshCrossInstanceTrailing(t *testing.T) {
 	second.QueueQuotaRefresh(credential.ID, "weekly")
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		generation, dirty, generationErr := secondRuntime.QuotaRefreshGeneration(ctx, credential.ID, "weekly")
+		generation, dirty, generationErr := secondRuntime.GetQuotaRefreshState(ctx, credential.ID, "weekly")
 		if generationErr != nil {
 			t.Fatal(generationErr)
 		}
-		if generation >= 2 && dirty {
+		if generation.Generation >= 2 && dirty {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("shared Redis generation = %d, dirty = %v", generation, dirty)
+			t.Fatalf("shared Redis generation = %+v, dirty = %v", generation, dirty)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

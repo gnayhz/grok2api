@@ -24,7 +24,15 @@ func TestSetPoolMembersPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
-	if err := repo.SetEgressPoolMembers(ctx, pool.ID, []uint64{57, 58}); err != nil {
+	var ids []uint64
+	for _, name := range []string{"one", "two"} {
+		node, err := repo.CreateEgressNode(ctx, egress.Node{Name: name, Enabled: true, EncryptedProxyURL: "opaque-proxy", Health: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, node.ID)
+	}
+	if err := repo.SetEgressPoolMembers(ctx, pool.ID, ids); err != nil {
 		t.Fatalf("set members: %v", err)
 	}
 	members, err := repo.EgressPoolMembers(ctx)
@@ -38,7 +46,7 @@ func TestSetPoolMembersPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list by pool: %v", err)
 	}
-	if len(nodes) != 0 {
-		t.Fatalf("nodes = %d, want 0 (node ids need not exist)", len(nodes))
+	if len(nodes) != 2 {
+		t.Fatalf("nodes = %d, want both member nodes", len(nodes))
 	}
 }

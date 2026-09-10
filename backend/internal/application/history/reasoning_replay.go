@@ -1,0 +1,231 @@
+package history
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/repository"
+)
+
+const (
+	minReplayEncryptedDecodedLen = 50
+	minReplayEncryptedEntropy    = 0.85
+	maxReplayEncryptedLen        = 8 << 20
+	maxReplayCaptureBytes        = 8 << 20
+	defaultReasoningReplayTTL    = time.Hour
+	// maxSessionReplayBytes 限制单会话累计回放的体积。累计回放让相邻两轮
+	// 上游序列保持纯前缀扩展,代价是每轮都重发历史 reasoning 密文;超预算
+	// 时保留已建立的历史前缀,停止追加超预算的新轮次。
+	maxSessionReplayBytes = 96 << 10
+)
+
+// Config 控制服务端推理回放缓存。
+type Config struct {
+	Enabled bool
+	TTL     time.Duration
+}
+
+// ReasoningReplay 封装存储与 body 注入/抽取。
+type ReasoningReplay struct {
+	store                   repository.ReasoningReplayRepository
+	cfg                     atomic.Pointer[Config]
+	logger                  *slog.Logger
+	now                     func() time.Time
+	journal                 repository.ConversationJournal
+	retention, requestLease time.Duration
+}
+
+func New(store repository.ReasoningReplayRepository, cfg Config, logger *slog.Logger) *ReasoningReplay {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	replay := &ReasoningReplay{store: store, logger: logger, now: time.Now}
+	replay.UpdateConfig(cfg)
+	return replay
+}
+
+func (r *ReasoningReplay) UpdateConfig(cfg Config) {
+	if r == nil {
+		return
+	}
+	if cfg.TTL <= 0 {
+		cfg.TTL = defaultReasoningReplayTTL
+	}
+	r.cfg.Store(&cfg)
+}
+
+func (r *ReasoningReplay) Enabled() bool {
+	if r == nil || r.store == nil {
+		return false
+	}
+	cfg := r.cfg.Load()
+	return cfg != nil && cfg.Enabled
+}
+
+// Apply 将缓存的上一轮 output items 注入 Responses body.input。
+func (r *ReasoningReplay) Apply(ctx context.Context, model, sessionKey string, body []byte) []byte {
+	if r == nil || r.store == nil || strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(model) == "" || len(body) == 0 {
+		return body
+	}
+	cfg := r.cfg.Load()
+	if cfg == nil || !cfg.Enabled {
+		return body
+	}
+	if previousResponseIDPresent(body) {
+		r.logger.Debug("reasoning_replay_miss", "reason", "previous_response_id", "model", model)
+		return body
+	}
+	items, ok, err := r.store.Get(ctx, model, sessionKey, r.now().UTC(), cfg.TTL)
+	if err != nil {
+		r.logger.Warn("reasoning_replay_get_failed", "model", model, "error", err)
+		return body
+	}
+	if !ok || len(items) == 0 {
+		r.logger.Debug("reasoning_replay_miss", "reason", "not_found", "model", model)
+		return body
+	}
+	// Existing persistent stores can still contain output-only reasoning fields
+	// written by older versions. Apply the same input contract on reads.
+	items, ok = normalizeReplayItems(items)
+	if !ok {
+		return body
+	}
+	updated, ok := insertReplayItems(body, items)
+	if !ok {
+		r.logger.Debug("reasoning_replay_miss", "reason", "no_anchor", "model", model)
+		return body
+	}
+	r.logger.Debug("reasoning_replay_hit", "model", model, "injected", len(items))
+	return updated
+}
+
+// StoreFromCompleted 从完整 Responses JSON 写入回放缓存。
+func (r *ReasoningReplay) StoreFromCompleted(ctx context.Context, model, sessionKey string, payload []byte) {
+	if r == nil || r.store == nil || strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	cfg := r.cfg.Load()
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+	items, complete := extractReplayItemsFromPayload(payload)
+	if !complete {
+		r.logger.Debug("reasoning_replay_store_skipped", "model", model, "reason", "incomplete_payload")
+		return
+	}
+	normalized, ok := normalizeReplayItems(items)
+	if !ok {
+		// A completed auxiliary/text-only response is not a conversation reset.
+		// Existing turns remain useful when their anchors reappear in main history.
+		// Compaction and invalid reasoning recovery clear the store explicitly.
+		r.logger.Debug("reasoning_replay_store_skipped", "model", model, "reason", "no_anchor")
+		return
+	}
+	expiresAt := r.now().UTC().Add(cfg.TTL)
+	if err := r.store.Update(ctx, model, sessionKey, expiresAt, func(existing [][]byte) [][]byte {
+		return accumulateReplayItems(existing, normalized)
+	}); err != nil {
+		r.logger.Warn("reasoning_replay_store_failed", "model", model, "error", err)
+		return
+	}
+	r.logger.Debug("reasoning_replay_store", "model", model, "items", len(normalized))
+}
+
+// accumulateReplayItems 合并本轮输出与会话内已累计的历史轮次。上游提示
+// 缓存只复用严格前缀扩展:若每轮只保留最新一轮的回放,上一轮注入的
+// reasoning 在本轮消失,前缀在该位置分叉,每轮损失约一轮上下文的缓存;
+// 换账号(回放键含账号作用域)后的第一轮同理。累计保留让「本轮上游序列」
+// 在预算内保留「上一轮上游序列 + 追加项」。以 reasoning 密文识别重复
+// 捕获并跳过整轮;不同 reasoning 即使对应相同 assistant 文本也保留,
+// 避免拆散 [reasoning, message] 轮次结构。
+func accumulateReplayItems(existing, latest [][]byte) [][]byte {
+	if len(existing) == 0 {
+		return trimReplayTurns(latest)
+	}
+	seenCiphers := make(map[string]struct{}, len(existing))
+	for _, item := range existing {
+		var typed struct {
+			Type             string "json:\"type\""
+			EncryptedContent string "json:\"encrypted_content\""
+		}
+		if json.Unmarshal(item, &typed) == nil && strings.TrimSpace(typed.Type) == "reasoning" && typed.EncryptedContent != "" {
+			seenCiphers[typed.EncryptedContent] = struct{}{}
+		}
+	}
+	merged := make([][]byte, 0, len(existing)+len(latest))
+	merged = append(merged, existing...)
+	for _, turn := range groupReplayTurns(latest) {
+		duplicate := false
+		for _, item := range turn.items {
+			var typed struct {
+				Type             string `json:"type"`
+				EncryptedContent string `json:"encrypted_content"`
+			}
+			if json.Unmarshal(item, &typed) == nil && strings.TrimSpace(typed.Type) == "reasoning" && typed.EncryptedContent != "" {
+				if _, exists := seenCiphers[typed.EncryptedContent]; exists {
+					duplicate = true
+					break
+				}
+				seenCiphers[typed.EncryptedContent] = struct{}{}
+			}
+		}
+		// Deduplicate the entire captured turn, not only its reasoning. Otherwise
+		// repeated captures leave orphan messages that consume the prefix budget.
+		// Equal assistant text with different reasoning remains a distinct turn.
+		if !duplicate {
+			merged = append(merged, turn.items...)
+		}
+	}
+	return trimReplayTurns(merged)
+}
+
+// trimReplayTurns retains the oldest complete turns within a fixed byte bound.
+// Once the budget fills, declining new replay is preferable to removing an
+// already replayed early turn: that would rewrite the next request's prefix.
+// Client-supplied reasoning is always preserved independently of this store.
+func trimReplayTurns(items [][]byte) [][]byte {
+	total := 0
+	for _, item := range items {
+		total += len(item)
+	}
+	if total <= maxSessionReplayBytes {
+		return items
+	}
+	turns := groupReplayTurns(items)
+	kept := make([][]byte, 0, len(items))
+	total = 0
+	for _, turn := range turns {
+		size := 0
+		for _, item := range turn.items {
+			size += len(item)
+		}
+		if total+size > maxSessionReplayBytes {
+			break
+		}
+		kept = append(kept, turn.items...)
+		total += size
+	}
+	return kept
+}
+
+// Clear 删除指定会话的回放缓存（compact 成功等）。
+func (r *ReasoningReplay) clearLegacy(ctx context.Context, model, sessionKey string) {
+	if !r.Enabled() || strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	if err := r.store.Delete(ctx, model, sessionKey); err != nil {
+		r.logger.Warn("reasoning_replay_delete_failed", "model", model, "error", err)
+		return
+	}
+	r.logger.Debug("reasoning_replay_delete", "model", model, "reason", "explicit")
+}
+
+func (r *ReasoningReplay) Clear(ctx context.Context, model, key string) {
+	if err := r.Reset(ctx, model, key); err != nil {
+		r.logger.Warn("conversation_history_reset_failed", "error", err)
+	}
+}

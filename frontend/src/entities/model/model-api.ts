@@ -31,6 +31,7 @@ const modelRouteValidator = hasShape({
   syncedAccounts: isNumber,
   totalAccounts: isNumber,
   capabilityKnown: isBoolean,
+  capabilitySupported: isOptional(isBoolean),
   available: isBoolean,
   lastSyncedAt: isOptional(isString),
 });
@@ -38,7 +39,7 @@ const decodeModelRoute = createObjectDecoder<ModelRouteDTO>("model route", {
   id: isString, publicId: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), upstreamModel: isString,
   capability: isOneOf("responses", "chat", "image", "image_edit", "video", "tts", "stt", "realtime"), origin: isOneOf("catalog", "discovered", "manual"),
   enabled: isBoolean, accountIds: isArrayOf(isString), bindingMode: isBoolean, supportedAccounts: isNumber,
-  syncedAccounts: isNumber, totalAccounts: isNumber, capabilityKnown: isBoolean, available: isBoolean, lastSyncedAt: isOptional(isString),
+  syncedAccounts: isNumber, totalAccounts: isNumber, capabilityKnown: isBoolean, capabilitySupported: isOptional(isBoolean), available: isBoolean, lastSyncedAt: isOptional(isString),
 });
 const decodeModelPage = createPaginatedDecoder<ModelRouteDTO>(modelRouteValidator);
 const modelRouteGroupValidator = hasShape({
@@ -48,9 +49,9 @@ const modelRouteGroupValidator = hasShape({
 });
 const decodeModelGroupPage = createPaginatedDecoder<ModelRouteGroupDTO>(modelRouteGroupValidator);
 const modelAccountValidator = hasShape({ id: isString, name: isString });
-const decodeModelAccounts = createObjectDecoder<{ items: ModelAccountOptionDTO[] }>("model accounts", { items: isArrayOf(modelAccountValidator) });
+const decodeModelAccounts = createPaginatedDecoder<ModelAccountOptionDTO>(modelAccountValidator);
 
-export function listModels(input: ListModelsInput): Promise<PaginatedDTO<ModelRouteDTO>> {
+export function listModels(input: ListModelsInput, signal?: AbortSignal): Promise<PaginatedDTO<ModelRouteDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
   if (input.search) query.set("search", input.search);
   if (input.status) query.set("status", input.status);
@@ -62,7 +63,7 @@ export function listModels(input: ListModelsInput): Promise<PaginatedDTO<ModelRo
     query.set("sortBy", input.sortBy);
     query.set("sortOrder", input.sortOrder);
   }
-  return apiRequest(`/api/admin/v1/models?${query}`, {}, decodeModelPage);
+  return apiRequest(`/api/admin/v1/models?${query}`, { signal }, decodeModelPage);
 }
 
 export function listModelGroups(input: ListModelsInput): Promise<PaginatedDTO<ModelRouteGroupDTO>> {
@@ -146,15 +147,17 @@ export type CreateModelInput = {
   accountIds: string[];
 };
 
-export function listModelAccountOptions(provider: ModelRouteDTO["provider"]): Promise<{ items: ModelAccountOptionDTO[] }> {
-  return apiRequest(`/api/admin/v1/models/accounts?provider=${provider}`, {}, decodeModelAccounts);
+export function listModelAccountOptions(input: { provider: ModelRouteDTO["provider"]; page: number; pageSize: number; search?: string }, signal?: AbortSignal): Promise<PaginatedDTO<ModelAccountOptionDTO>> {
+  const query = new URLSearchParams({ provider: input.provider, page: String(input.page), pageSize: String(input.pageSize) });
+  if (input.search) query.set("search", input.search);
+  return apiRequest(`/api/admin/v1/models/accounts?${query}`, { signal }, decodeModelAccounts);
 }
 
 export function createModel(input: CreateModelInput): Promise<ModelRouteDTO> {
   return apiRequest("/api/admin/v1/models", { method: "POST", body: input }, decodeModelRoute);
 }
 
-export function updateModel(id: string, input: { publicId: string; enabled: boolean; accountIds: string[] }): Promise<ModelRouteDTO> {
+export function updateModel(id: string, input: { publicId?: string; enabled?: boolean; accountIds?: string[] }): Promise<ModelRouteDTO> {
   return apiRequest(`/api/admin/v1/models/${id}`, { method: "PATCH", body: input }, decodeModelRoute);
 }
 

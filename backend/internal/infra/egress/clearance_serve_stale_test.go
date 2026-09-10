@@ -35,11 +35,11 @@ func (s *gatedSolver) Solve(ctx context.Context, _ ClearanceConfig, _ string) (c
 
 func primeRoutineExpiredState(t *testing.T, manager *Manager, key, proxyURL string, mutate func(*clearanceState)) {
 	t.Helper()
-	manager.clearanceMu.Lock()
-	cfg := manager.clearanceConfig
-	version := manager.clearanceVersion
+	manager.clearance.clearanceMu.Lock()
+	cfg := manager.clearance.clearanceConfig
+	version := manager.clearance.clearanceVersion
 	interval := clearanceRefreshInterval(cfg)
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Unlock()
 	now := time.Now().UTC()
 	state := clearanceState{
 		cookies: "cf_clearance=stale", userAgent: "UA-stale",
@@ -52,18 +52,18 @@ func primeRoutineExpiredState(t *testing.T, manager *Manager, key, proxyURL stri
 	if mutate != nil {
 		mutate(&state)
 	}
-	manager.clearanceMu.Lock()
-	manager.clearances[key] = state
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	manager.clearance.clearances[key] = state
+	manager.clearance.clearanceMu.Unlock()
 }
 
 func newClearanceTestManager(t *testing.T, solver *gatedSolver) *Manager {
 	t.Helper()
 	manager, _ := newPoolTestManager(t)
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr"})
-	manager.clearanceMu.Lock()
-	manager.solver = solver
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	manager.clearance.solver = solver
+	manager.clearance.clearanceMu.Unlock()
 	return manager
 }
 
@@ -85,7 +85,7 @@ func TestClearanceRoutineExpiryServesStaleWithBackgroundRefresh(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		cookies, ua, err := manager.ensureClearance(context.Background(), node, proxyURL, "", "", key, false)
+		cookies, ua, _, err := manager.clearance.ensureClearance(context.Background(), node, proxyURL, "", "", key, false)
 		done <- result{cookies, ua, err}
 	}()
 
@@ -103,9 +103,9 @@ func TestClearanceRoutineExpiryServesStaleWithBackgroundRefresh(t *testing.T) {
 	solver.openGate()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		manager.clearanceMu.Lock()
-		state, ok := manager.clearances[key]
-		manager.clearanceMu.Unlock()
+		manager.clearance.clearanceMu.Lock()
+		state, ok := manager.clearance.clearances[key]
+		manager.clearance.clearanceMu.Unlock()
 		if ok && state.cookies == "cf_clearance=fresh" {
 			return
 		}
@@ -126,7 +126,7 @@ func TestClearanceInvalidStillForcesSynchronousRefresh(t *testing.T) {
 		state.invalid = true
 	})
 
-	cookies, ua, err := manager.ensureClearance(context.Background(), node, proxyURL, "", "", key, false)
+	cookies, ua, _, err := manager.clearance.ensureClearance(context.Background(), node, proxyURL, "", "", key, false)
 	if err != nil {
 		t.Fatalf("forced refresh: %v", err)
 	}

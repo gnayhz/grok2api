@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/bdandy/go-socks4"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/pkg/proxydial"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
-	xproxy "golang.org/x/net/proxy"
 )
 
 // newBuildClient keeps Grok Build on the standard Go HTTP/TLS stack used by
@@ -29,30 +29,38 @@ func newBuildEnvironmentClient(responseHeaderTimeout time.Duration) (*http.Clien
 	return newBuildClientWithOptions("", responseHeaderTimeout, true)
 }
 
-// newSessionBuildClient 为单个会话构造「单连接钉扎」的 Build 客户端:
-// MaxConnsPerHost=1 强制整个会话复用同一条上游连接(HTTP/2 多路复用承接
-// 并发流)。上游提示缓存按「连接→后端实例」亲和复用,共享连接池里任何
-// 并行调用多开出的第二条连接都会让后续请求在两条连接间轮换,各自的前缀
-// 缓存互相缺失,表现为会话中途连续冷启动。会话独占一条连接后,轮换维度
-// 被彻底消除,连接只会在自身死亡(上游关闭/健康探测失败)时更换。
-func newSessionBuildClient(proxyURL string, responseHeaderTimeout time.Duration, onDial func()) (*http.Client, error) {
-	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, false, true, onDial)
+// newSessionBuildClient limits an allowed session pool to one connection per
+// host, with HTTP/2 multiplexing when supported. The registry owns account
+// partitioning and policy retirement; fresh policy cannot use this pool.
+// Reuse helps upstream affinity but cannot guarantee a cache hit.
+func newSessionBuildClient(proxyURL string, responseHeaderTimeout time.Duration, onDial func(), budget ...*netbudget.Runtime) (*http.Client, error) {
+	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, buildConnectionOptions{sessionPinned: true, onDial: onDial}, budget...)
 }
 
 func newBuildClientWithOptions(proxyURL string, responseHeaderTimeout time.Duration, environmentProxy bool) (*http.Client, error) {
-	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, environmentProxy, false, nil)
+	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, buildConnectionOptions{environmentProxy: environmentProxy})
 }
 
-func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Duration, environmentProxy, sessionPinned bool, onDial func()) (*http.Client, error) {
+type buildConnectionOptions struct {
+	environmentProxy bool
+	sessionPinned    bool
+	freshConnection  bool
+	onDial           func()
+}
+
+func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Duration, options buildConnectionOptions, budget ...*netbudget.Runtime) (*http.Client, error) {
 	maxConnsPerHost, maxIdleConnsPerHost := 256, 128
-	if sessionPinned {
+	if options.sessionPinned && !options.freshConnection {
 		maxConnsPerHost, maxIdleConnsPerHost = 1, 1
 	}
 	direct := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:                 nil,
-		DialContext:           direct.DialContext,
-		ForceAttemptHTTP2:     true,
+		Proxy:             nil,
+		DialContext:       direct.DialContext,
+		ForceAttemptHTTP2: true,
+		// A separate transport identity with keepalive disabled prevents both
+		// idle reuse and HTTP/2 multiplexing of concurrent fresh calls.
+		DisableKeepAlives:     options.freshConnection,
 		MaxIdleConns:          maxConnsPerHost,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		MaxConnsPerHost:       maxConnsPerHost,
@@ -61,10 +69,13 @@ func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Durati
 		ResponseHeaderTimeout: responseHeaderTimeout,
 		ExpectContinueTimeout: time.Second,
 	}
-	if environmentProxy {
+	if options.environmentProxy {
 		transport.Proxy = http.ProxyFromEnvironment
 	}
 	if strings.TrimSpace(proxyURL) != "" {
+		// An explicit exit replaces the environment policy for every protocol,
+		// including dial-based SOCKS/tunnels which do not use Transport.Proxy.
+		transport.Proxy = nil
 		parsed, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("解析 Grok Build 出口代理: %w", err)
@@ -73,11 +84,11 @@ func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Durati
 		case "http", "https":
 			transport.Proxy = http.ProxyURL(parsed)
 		case "socks4", "socks4a", "socks5", "socks5h":
-			dialer, err := xproxy.FromURL(parsed, direct)
+			dialer, err := proxydial.New(proxyURL)
 			if err != nil {
 				return nil, fmt.Errorf("创建 Grok Build SOCKS 代理: %w", err)
 			}
-			transport.DialContext = dialContext(dialer)
+			transport.DialContext = dialer.DialContext
 		case "trojan", "vless", "ss", "vmess":
 			dialer, err := tunnelproxy.NewDialer(proxyURL)
 			if err != nil {
@@ -92,10 +103,16 @@ func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Durati
 	// 用于从日志侧核对「同一会话是否真的全程复用一条连接」。必须在
 	// ConfigureHTTP2Health 之前安装——HTTP/2 层在配置时会固化拨号路径,
 	// 事后替换 http1 字段对 h2 连接不生效。
-	if sessionPinned && onDial != nil {
+	if len(budget) > 0 && budget[0] != nil {
 		inner := transport.DialContext
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			onDial()
+			return budget[0].Dial(ctx, inner, network, address)
+		}
+	}
+	if options.sessionPinned && options.onDial != nil {
+		inner := transport.DialContext
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			options.onDial()
 			return inner(ctx, network, address)
 		}
 	}
@@ -108,33 +125,4 @@ func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Durati
 			return http.ErrUseLastResponse
 		},
 	}, nil
-}
-
-func dialContext(dialer xproxy.Dialer) func(context.Context, string, string) (net.Conn, error) {
-	if contextual, ok := dialer.(xproxy.ContextDialer); ok {
-		return contextual.DialContext
-	}
-	type result struct {
-		connection net.Conn
-		err        error
-	}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		completed := make(chan result, 1)
-		go func() {
-			connection, err := dialer.Dial(network, address)
-			completed <- result{connection: connection, err: err}
-		}()
-		select {
-		case value := <-completed:
-			return value.connection, value.err
-		case <-ctx.Done():
-			go func() {
-				value := <-completed
-				if value.connection != nil {
-					_ = value.connection.Close()
-				}
-			}()
-			return nil, ctx.Err()
-		}
-	}
 }

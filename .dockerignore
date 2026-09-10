@@ -3,6 +3,7 @@
 !VERSION
 
 !backend/
+backend/*
 !backend/go.mod
 !backend/go.sum
 !backend/cmd/
@@ -11,9 +12,11 @@
 !backend/internal/**
 backend/**/*_test.go
 !backend/docs/
+backend/docs/*
 !backend/docs/docs.go
 
 !frontend/
+frontend/*
 !frontend/package.json
 !frontend/pnpm-workspace.yaml
 !frontend/pnpm-lock.yaml
@@ -28,4 +31,34 @@ backend/**/*_test.go
 !frontend/src/**
 
 !docker/
+docker/*
 !docker/entrypoint.sh
+
+# Source checkout may contain maintained tests; image builders need runtime inputs.
+backend/internal/architecture/
+backend/internal/testsupport/
+backend/**/testdata/
+backend/**/verification/
+frontend/src/**/*.test.*
+frontend/src/**/*.spec.*
+frontend/src/**/__tests__/
+frontend/src/**/__fixtures__/
+**/*.md
+**/*.log
+**/*.jsonl
+**/*.jsonl.gz
+**/*.sse
+**/*.har
+**/*.pcap
+**/*.pcapng
+**/.env
+**/.env.*
+**/test-results/
+**/playwright-report/
+**/node_modules/
+**/.cache/
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/*.dump
+**/*.prof

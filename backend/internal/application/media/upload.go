@@ -46,12 +46,11 @@ func errVideoTooLarge() error {
 }
 
 type stagedVideo struct {
-	ID         string
-	TempPath   string
-	StorageKey string
-	MIMEType   string
-	SizeBytes  int64
-	SHA256     string
+	ID        string
+	Upload    repository.MediaVideoUpload
+	MIMEType  string
+	SizeBytes int64
+	SHA256    string
 }
 
 // IssueVideoUpload 签发一次性高熵 PUT 地址，供 XAI ZDR 视频写入。
@@ -89,10 +88,11 @@ func (s *Service) IssueVideoUpload(ctx context.Context, jobID string) (uploadURL
 	if err := s.tickets.CreateUploadTicket(ctx, ticket); err != nil {
 		return "", "", err
 	}
-	// 提前绑定任务结果资产，便于轮询/清理感知进行中的本地目标。
-	// 生产中 job 已存在：真实数据库错误必须中止签发，不得返回未绑定目标的 upload URL。
-	// ErrNotFound 仅保留给隔离/测试占位 job 的既有行为，且不删除已创建票据。
-	if err := s.tickets.BindJobResultAsset(ctx, jobID, assetID); err != nil && !errors.Is(err, repository.ErrNotFound) {
+	// Legacy active jobs retain their earlier binding path. Checkpoint-aware jobs
+	// bind the upload target under the worker claim before submitting to XAI;
+	// the ticket protects it in the interval between issuance and that checkpoint.
+	// ErrNotFound means no legacy binding is applicable. Other errors stop issuance.
+	if err := s.tickets.BindLegacyJobResultAsset(ctx, jobID, assetID); err != nil && !errors.Is(err, repository.ErrNotFound) {
 		// 补偿删除刚创建的票据，避免 bind 失败后留下不可达行直至 TTL。
 		if delErr := s.tickets.DeleteUploadTicketByHash(ctx, ticket.TokenHash); delErr != nil {
 			return "", "", fmt.Errorf("绑定视频任务结果资产失败: %w", errors.Join(err, fmt.Errorf("回滚上传票据失败: %w", delErr)))
@@ -180,12 +180,20 @@ func (s *Service) ReceiveVideoUpload(ctx context.Context, rawToken string, conte
 	if err != nil {
 		return mediadomain.Asset{}, err
 	}
-	defer func() { _ = s.objects.AbortVideoUpload(context.WithoutCancel(ctx), staged.TempPath) }()
+	defer func() { _ = staged.Upload.Abort(context.WithoutCancel(ctx)) }()
 
+	// Preflight does not extend a ticket through a slow body. Both atomic
+	// consumption and publication share its remaining lifetime.
+	now = time.Now().UTC()
+	if !existing.ExpiresAt.After(now) {
+		return mediadomain.Asset{}, ErrUploadTicketExpired
+	}
+	commitCtx, cancel := context.WithDeadline(ctx, existing.ExpiresAt)
+	defer cancel()
 	// 原子消费票据：并发 PUT 仅一个能消费成功。
-	ticket, consumed, err := s.tickets.ConsumeUploadTicket(ctx, tokenHash, now)
+	ticket, consumed, err := s.tickets.ConsumeUploadTicket(commitCtx, tokenHash, now)
 	if err != nil {
-		return mediadomain.Asset{}, err
+		return mediadomain.Asset{}, uploadCommitError(ctx, commitCtx, err)
 	}
 	if !consumed {
 		return mediadomain.Asset{}, ErrUploadTicketConsumed
@@ -198,13 +206,22 @@ func (s *Service) ReceiveVideoUpload(ctx context.Context, rawToken string, conte
 		}
 	}()
 
-	asset, err := s.commitStagedVideo(ctx, staged, now, nil)
+	asset, err := s.commitStagedVideo(commitCtx, staged, now, nil, "", 0)
 	if err != nil {
-		return mediadomain.Asset{}, err
+		return mediadomain.Asset{}, uploadCommitError(ctx, commitCtx, err)
 	}
 	releaseTicket = false
-	_ = s.tickets.BindJobResultAsset(ctx, ticket.JobID, ticket.AssetID)
+	_ = s.tickets.BindLegacyJobResultAsset(ctx, ticket.JobID, ticket.AssetID)
 	return asset, nil
+}
+
+// Expiry owns only its own deadline; cancellation of the request remains the
+// caller's outcome. Cleanup still uses the original context without cancellation.
+func uploadCommitError(parent, commit context.Context, err error) error {
+	if parent.Err() == nil && errors.Is(commit.Err(), context.DeadlineExceeded) {
+		return errors.Join(ErrUploadTicketExpired, err)
+	}
+	return err
 }
 
 // SaveVideo 将 Provider 已生成的远程视频流式归档为本地媒体资产。
@@ -223,7 +240,7 @@ func (s *Service) SaveVideo(ctx context.Context, jobID, contentType string, body
 	jobID = strings.TrimSpace(jobID)
 	bound := false
 	if s.tickets != nil && jobID != "" {
-		bindErr := s.tickets.BindJobResultAsset(ctx, jobID, id)
+		bindErr := s.tickets.BindLegacyJobResultAsset(ctx, jobID, id)
 		if bindErr != nil && !errors.Is(bindErr, repository.ErrNotFound) {
 			return mediadomain.Asset{}, fmt.Errorf("绑定视频任务结果资产失败: %w", bindErr)
 		}
@@ -232,15 +249,15 @@ func (s *Service) SaveVideo(ctx context.Context, jobID, contentType string, body
 	saved := false
 	defer func() {
 		if bound && !saved {
-			_ = s.tickets.BindJobResultAsset(context.WithoutCancel(ctx), jobID, "")
+			_ = s.tickets.BindLegacyJobResultAsset(context.WithoutCancel(ctx), jobID, "")
 		}
 	}()
 	staged, err := s.stageVideo(ctx, id, mimeType, body, DefaultMaxVideoBytes)
 	if err != nil {
 		return mediadomain.Asset{}, err
 	}
-	defer func() { _ = s.objects.AbortVideoUpload(context.WithoutCancel(ctx), staged.TempPath) }()
-	asset, err := s.commitStagedVideo(ctx, staged, time.Now().UTC(), nil)
+	defer func() { _ = staged.Upload.Abort(context.WithoutCancel(ctx)) }()
+	asset, err := s.commitStagedVideo(ctx, staged, time.Now().UTC(), nil, jobID, 0)
 	if err == nil {
 		saved = true
 	}
@@ -251,31 +268,24 @@ func (s *Service) stageVideo(ctx context.Context, id, mimeType string, body io.R
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxVideoBytes
 	}
-	tempPath, storageKey, err := s.objects.BeginVideoUpload(ctx, id, mimeType)
+	upload, err := s.objects.BeginVideoUpload(ctx, id, mimeType)
 	if err != nil {
 		return stagedVideo{}, err
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = s.objects.AbortVideoUpload(context.WithoutCancel(ctx), tempPath)
+			_ = upload.Abort(context.WithoutCancel(ctx))
 		}
 	}()
-	file, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return stagedVideo{}, err
-	}
+	header := videoUploadHeader{data: make([]byte, 0, 512)}
 	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(body, maxBytes+1))
-	closeErr := file.Close()
+	written, copyErr := io.Copy(io.MultiWriter(upload, hasher, &header), io.LimitReader(body, maxBytes+1))
 	if copyErr != nil {
 		if isBodyTooLargeError(copyErr) {
 			return stagedVideo{}, errVideoTooLarge()
 		}
 		return stagedVideo{}, copyErr
-	}
-	if closeErr != nil {
-		return stagedVideo{}, closeErr
 	}
 	if written == 0 {
 		return stagedVideo{}, fmt.Errorf("%w: 空内容", ErrInvalidVideoUpload)
@@ -283,7 +293,7 @@ func (s *Service) stageVideo(ctx context.Context, id, mimeType string, body io.R
 	if written > maxBytes {
 		return stagedVideo{}, errVideoTooLarge()
 	}
-	sniffed, err := sniffVideoFile(tempPath)
+	sniffed, err := sniffVideoHeader(header.data)
 	if err != nil {
 		return stagedVideo{}, err
 	}
@@ -291,7 +301,7 @@ func (s *Service) stageVideo(ctx context.Context, id, mimeType string, body io.R
 		return stagedVideo{}, fmt.Errorf("%w: 内容类型与声明类型不一致", ErrInvalidVideoUpload)
 	}
 	cleanup = false
-	return stagedVideo{ID: id, TempPath: tempPath, StorageKey: storageKey, MIMEType: mimeType, SizeBytes: written, SHA256: hex.EncodeToString(hasher.Sum(nil))}, nil
+	return stagedVideo{ID: id, Upload: upload, MIMEType: mimeType, SizeBytes: written, SHA256: hex.EncodeToString(hasher.Sum(nil))}, nil
 }
 
 // SaveInputVideo stores a private, expiring video input for edit/extension jobs.
@@ -311,40 +321,28 @@ func (s *Service) SaveInputVideo(ctx context.Context, contentType string, body i
 	if err != nil {
 		return mediadomain.Asset{}, err
 	}
-	defer func() { _ = s.objects.AbortVideoUpload(context.WithoutCancel(ctx), staged.TempPath) }()
+	defer func() { _ = staged.Upload.Abort(context.WithoutCancel(ctx)) }()
 
-	s.inputSaveMu.Lock()
-	defer s.inputSaveMu.Unlock()
 	cfg := s.runtimeConfig()
-	total, err := s.assets.TotalMediaAssetBytes(ctx)
+	capacityLimit, err := s.checkInputCapacity(ctx, staged.SizeBytes, cfg)
 	if err != nil {
 		return mediadomain.Asset{}, err
 	}
-	capacityLimit := cleanupThresholdBytes(cfg)
-	if capacityLimit <= 0 || capacityLimit > cfg.MaxTotalBytes {
-		capacityLimit = cfg.MaxTotalBytes
-	}
-	if staged.SizeBytes > capacityLimit || total > capacityLimit-staged.SizeBytes {
-		select {
-		case s.cleanupSignal <- struct{}{}:
-		default:
-		}
-		return mediadomain.Asset{}, ErrMediaCapacity
-	}
 	expiresAt := time.Now().UTC().Add(InputAssetTTL)
-	return s.commitStagedVideo(ctx, staged, time.Now().UTC(), &expiresAt)
+	return s.commitStagedVideo(ctx, staged, time.Now().UTC(), &expiresAt, "", capacityLimit)
 }
 
-func (s *Service) commitStagedVideo(ctx context.Context, staged stagedVideo, createdAt time.Time, expiresAt *time.Time) (mediadomain.Asset, error) {
-	if err := s.objects.CommitVideoUpload(ctx, staged.TempPath, staged.StorageKey); err != nil {
+func (s *Service) commitStagedVideo(ctx context.Context, staged stagedVideo, createdAt time.Time, expiresAt *time.Time, sourceJobID string, capacityLimit int64) (mediadomain.Asset, error) {
+	storageKey, err := staged.Upload.Commit(ctx)
+	if err != nil {
 		return mediadomain.Asset{}, err
 	}
 	asset := mediadomain.Asset{
-		ID: staged.ID, Kind: "video", StorageKey: staged.StorageKey, MIMEType: staged.MIMEType,
-		SizeBytes: staged.SizeBytes, SHA256: staged.SHA256, ExpiresAt: expiresAt, CreatedAt: createdAt,
+		ID: staged.ID, Kind: "video", StorageKey: storageKey, MIMEType: staged.MIMEType,
+		SizeBytes: staged.SizeBytes, SHA256: staged.SHA256, ExpiresAt: expiresAt, CreatedAt: createdAt, SourceJobID: sourceJobID,
 	}
-	if err := s.assets.CreateMediaAsset(ctx, asset); err != nil {
-		_ = s.objects.Delete(context.WithoutCancel(ctx), staged.StorageKey)
+	if err := s.registerAsset(ctx, asset, capacityLimit); err != nil {
+		_ = s.objects.Delete(context.WithoutCancel(ctx), storageKey)
 		return mediadomain.Asset{}, err
 	}
 	if s.totalBytes.Add(asset.SizeBytes) > cleanupThresholdBytes(s.runtimeConfig()) {
@@ -369,12 +367,20 @@ func (s *Service) OpenVideo(ctx context.Context, id string) (mediadomain.Asset, 
 		return mediadomain.Asset{}, nil, ErrAssetNotFound
 	}
 	body, err := s.objects.Open(ctx, asset.StorageKey)
+	if err != nil && body != nil {
+		return mediadomain.Asset{}, nil, videoResourceReadError(errors.Join(err, body.Close()))
+	}
+
 	if errors.Is(err, os.ErrNotExist) {
 		return mediadomain.Asset{}, nil, ErrAssetNotFound
 	}
 	if err != nil {
 		return mediadomain.Asset{}, nil, err
 	}
+	if body == nil {
+		return mediadomain.Asset{}, nil, videoResourceReadError(errors.New("video object reader missing"))
+	}
+
 	return asset, body, nil
 }
 
@@ -441,29 +447,28 @@ func normalizeVideoMIME(value string) string {
 	return value
 }
 
-func sniffVideoFile(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = file.Close() }()
-	header := make([]byte, 512)
-	n, err := io.ReadFull(file, header)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	if n == 0 {
+// videoUploadHeader retains only the bytes needed for MIME detection while the
+// body streams once through the storage writer and digest.
+type videoUploadHeader struct{ data []byte }
+
+func (h *videoUploadHeader) Write(p []byte) (int, error) {
+	h.data = append(h.data, p[:min(len(p), cap(h.data)-len(h.data))]...)
+	return len(p), nil
+}
+
+func sniffVideoHeader(header []byte) (string, error) {
+	if len(header) == 0 {
 		return "", fmt.Errorf("%w: 空内容", ErrInvalidVideoUpload)
 	}
-	detected := http.DetectContentType(header[:n])
+	detected := http.DetectContentType(header)
 	// DetectContentType 对 mp4 通常返回 video/mp4；部分样本可能是 application/octet-stream。
 	if supportedVideoMIME(detected) {
 		return detected, nil
 	}
-	if looksLikeMP4(header[:n]) {
+	if looksLikeMP4(header) {
 		return "video/mp4", nil
 	}
-	if looksLikeWebM(header[:n]) {
+	if looksLikeWebM(header) {
 		return "video/webm", nil
 	}
 	return "", fmt.Errorf("%w: 非视频内容", ErrInvalidVideoUpload)

@@ -55,10 +55,10 @@ func BenchmarkRotationCursorAdvance(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		manager.rotationMu.Lock()
-		delete(manager.rotationCursors, 1)
-		manager.rotationMu.Unlock()
-		manager.selectRotationNode(pool, candidates, all)
+		manager.routing.rotationMu.Lock()
+		delete(manager.routing.rotationCursors, 1)
+		manager.routing.rotationMu.Unlock()
+		manager.routing.selectRotationNode(pool, candidates, all)
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(repo.writes.Load())/float64(b.N), "db-writes/op")
@@ -90,21 +90,22 @@ func TestRotationCursorPersistAsyncDedupAndRetry(t *testing.T) {
 	repo.pool = map[uint64]domain.Pool{}
 	repo.member = map[uint64][]domain.Node{}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	all := []domain.Node{{ID: 10, Enabled: true, Health: 1}, {ID: 20, Enabled: true, Health: 1}, {ID: 30, Enabled: true, Health: 1}}
 	pool := domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRotation, RotationCursorNodeID: 10}
 
 	// 1) 失败时不得记为已持久化:写失败后再次推进必须重试。
 	repo.failWrites.Store(true)
-	manager.persistRotationCursor(1, 10, 20)
+	manager.routing.persistRotationCursor(1, 10, 20)
 	waitFor(t, time.Second, func() bool { return repo.writes.Load() == 0 || true }) // 失败写不计入成功
-	manager.persistRotationCursor(1, 10, 20)
+	manager.routing.persistRotationCursor(1, 10, 20)
 	repo.failWrites.Store(false)
 	waitFor(t, time.Second, func() bool { return repo.persisted.Load() == 20 })
 
 	// 2) 相同目标的重复推进必须去重为一次成功写。
 	before := repo.writes.Load()
 	for i := 0; i < 10; i++ {
-		manager.persistRotationCursor(1, 20, 20)
+		manager.routing.persistRotationCursor(1, 20, 20)
 	}
 	waitFor(t, time.Second, func() bool { return true })
 	if got := repo.writes.Load() - before; got > 1 {
@@ -112,19 +113,19 @@ func TestRotationCursorPersistAsyncDedupAndRetry(t *testing.T) {
 	}
 
 	// 3) 热游标立即生效:并发请求读到 hot 值,不等 DB。
-	manager.rotationMu.Lock()
-	hot := manager.rotationCursors[1]
-	manager.rotationMu.Unlock()
+	manager.routing.rotationMu.Lock()
+	hot := manager.routing.rotationCursors[1]
+	manager.routing.rotationMu.Unlock()
 	if hot != 20 {
 		t.Fatalf("hot cursor = %d, want 20", hot)
 	}
 
 	// 4) 新目标的推进最终落盘。
-	manager.persistRotationCursor(1, 20, 30)
+	manager.routing.persistRotationCursor(1, 20, 30)
 	waitFor(t, time.Second, func() bool { return repo.persisted.Load() == 30 })
 
 	// 5) 选路推进语义不变:游标可用时钉住,不可用时推进到下一可用成员。
-	pinned := manager.selectRotationNode(pool, []domain.Node{all[2]}, all)
+	pinned := manager.routing.selectRotationNode(pool, []domain.Node{all[2]}, all)
 	if pinned.ID != 30 {
 		t.Fatalf("pinned = %d, want 30", pinned.ID)
 	}
@@ -159,7 +160,7 @@ func BenchmarkSelectRotationNodeRepositoryOrder(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		selected := manager.selectRotationNode(pool, candidates, all)
+		selected := manager.routing.selectRotationNode(pool, candidates, all)
 		if selected.ID != 1 {
 			b.Fatalf("selected = %d, want pinned cursor 1", selected.ID)
 		}

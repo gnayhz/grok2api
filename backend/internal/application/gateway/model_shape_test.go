@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestResolvePublicModelRoutesDistinguishesNoAccount(t *testing.T) {
 	}
 	modelRepo := relational.NewModelRepository(database)
 	// 建路由但不建任何 console 账号：路由存在、启用、零账号。
-	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderConsole, []string{"grok-4.20-0309-reasoning"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, account.ProviderConsole, []string{"grok-4.20-0309-reasoning"}); err != nil {
 		t.Fatal(err)
 	}
 	// 真实关系仓储作为 resolver（HasEnabledRouteByPublicID 走真实 SQL）。

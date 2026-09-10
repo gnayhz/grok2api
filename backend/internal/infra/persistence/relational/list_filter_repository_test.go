@@ -199,7 +199,7 @@ func TestListFilters(t *testing.T) {
 	}
 
 	keys := NewClientKeyRepository(database)
-	activeKey, err := keys.Create(ctx, clientkeydomain.Key{Name: "production", Prefix: "abc123", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 120, MaxConcurrent: 8})
+	activeKey, err := keys.Create(ctx, clientkeydomain.Key{Name: "production", Prefix: "abc123", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 120, MaxConcurrent: 8, AllowedModels: []uint64{1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,9 +208,6 @@ func TestListFilters(t *testing.T) {
 	}
 	expiredAt := now.Add(-time.Hour)
 	if _, err := keys.Create(ctx, clientkeydomain.Key{Name: "expired", Prefix: "expired", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, ExpiresAt: &expiredAt, RPMLimit: 120, MaxConcurrent: 8}); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.db.WithContext(ctx).Create(&clientKeyModelPermission{ClientKeyID: activeKey.ID, ModelRouteID: 1}).Error; err != nil {
 		t.Fatal(err)
 	}
 	_, total, err = keys.List(ctx, repository.ClientKeyListQuery{Page: repository.PageQuery{Limit: 20}, Filter: repository.ClientKeyListFilter{Status: "expired", Now: now}})

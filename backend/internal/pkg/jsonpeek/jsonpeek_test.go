@@ -186,3 +186,34 @@ func TestRawValueExtractsErrorFromTruncatedDocument(t *testing.T) {
 		t.Fatal("incomplete error object must not parse")
 	}
 }
+
+func TestCompleteRootScansRespectWhitespaceEscapesAndLastValue(t *testing.T) {
+	for _, raw := range []string{
+		`{"nested": {"n": 7, "type": "wrong"}, "n": 2, "type": "right"}`,
+		`{"n": 1, "n": 2, "type": "wrong", "type": "right"}`,
+		`{"\u006e": 2, "\u0074ype": "r\u0069ght"}`,
+	} {
+		if n, ok := RootIntFieldScan([]byte(raw), "n"); !ok || n != 2 {
+			t.Fatalf("n=%d ok=%v raw=%s", n, ok, raw)
+		}
+		if kind := RootStringFieldScan([]byte(raw), "type"); kind != "right" {
+			t.Fatalf("type=%q raw=%s", kind, raw)
+		}
+	}
+	if _, ok := RootIntFieldScan([]byte(`{"n":2,"n":"invalid"}`), "n"); ok {
+		t.Fatal("earlier integer survived final non-integer")
+	}
+}
+
+func TestUsageNestedContextNeverShadowsBillableTokens(t *testing.T) {
+	for _, raw := range []string{
+		`{"usage":{"context_details":{"input_tokens":0,"output_tokens":0},"prompt_tokens":20,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2},"total_tokens":25}}`,
+		`{"usage":{"context_details":{"input_tokens":100,"output_tokens":200},"input_tokens":20,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":25}}`,
+		`{"response":{"usage":{"completion_tokens":5,"context_details":{"input_tokens":100,"output_tokens":200},"prompt_tokens":20,"completion_tokens_details":{"reasoning_tokens":2},"total_tokens":25}}}`,
+	} {
+		got := TokenUsageFrom([]byte(raw))
+		if !got.Found || got.Input != 20 || got.Output != 5 || got.Total != 25 || got.Reasoning != 2 {
+			t.Fatalf("nested context corrupted billing: %s %+v", raw, got)
+		}
+	}
+}

@@ -18,7 +18,7 @@ func TestRequestRetryAndEgressRotationRuntimeOverride(t *testing.T) {
 	cfg.RequestRetry.Enabled = true
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 
 	input := service.Get().Config
 	if !input.RequestRetry.Enabled {
@@ -59,12 +59,12 @@ func TestRequestRetryAndEgressRotationRuntimeOverride(t *testing.T) {
 	if persisted.Enabled {
 		t.Fatal("persist overlay must write enabled=false")
 	}
-	if applyDomainConfig(cfg, repository.value).RequestRetry.Enabled {
+	if mustApplyDomainConfig(t, cfg, repository.value).RequestRetry.Enabled {
 		t.Fatal("apply of persisted overlay must keep enabled=false")
 	}
 
 	// 旧持久化载荷(整节缺失)沿用文件基线。
-	legacy := applyDomainConfig(cfg, settingsdomain.Config{})
+	legacy := mustApplyDomainConfig(t, cfg, settingsdomain.Config{})
 	if legacy.RequestRetry.CreatedTimeout.Value() != cfg.RequestRetry.CreatedTimeout.Value() {
 		t.Fatalf("legacy payload must inherit file requestRetry: %v vs %v", legacy.RequestRetry.CreatedTimeout, cfg.RequestRetry.CreatedTimeout)
 	}
@@ -112,10 +112,12 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RequestRetry.Enabled = true
 	cfg.RequestRetry.GuardedModels = append([]string(nil), want...)
+	cfg.RequestRetry.AdmissionTimeout = config.Duration(40 * time.Second)
+	cfg.RequestRetry.ToolAdmissionTimeout = config.Duration(4 * time.Minute)
 
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 
 	input := service.Get().Config
 	if !input.RequestRetryProvided {
@@ -144,7 +146,10 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 	if len(persisted.GuardedModels) != 0 {
 		t.Fatalf("persist must not write yaml-only guardedModels, got %#v", persisted.GuardedModels)
 	}
-	merged := applyDomainConfig(cfg, repository.value)
+	merged := mustApplyDomainConfig(t, cfg, repository.value)
+	if merged.RequestRetry.AdmissionTimeout != cfg.RequestRetry.AdmissionTimeout || merged.RequestRetry.ToolAdmissionTimeout != cfg.RequestRetry.ToolAdmissionTimeout {
+		t.Fatal("legacy overlay lost file admission budgets")
+	}
 	if !sameStrings(merged.RequestRetry.GuardedModels, want) {
 		t.Fatalf("apply of persisted overlay must still keep yaml, got %#v", merged.RequestRetry.GuardedModels)
 	}
@@ -174,7 +179,7 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 	if len(persistedOff.GuardedModels) != 0 {
 		t.Fatalf("persist must not write yaml-only guardedModels, got %#v", persistedOff.GuardedModels)
 	}
-	mergedOff := applyDomainConfig(cfg, repository.value)
+	mergedOff := mustApplyDomainConfig(t, cfg, repository.value)
 	if !sameStrings(mergedOff.RequestRetry.GuardedModels, want) {
 		t.Fatalf("apply after PUT enabled=false must still keep yaml, got %#v", mergedOff.RequestRetry.GuardedModels)
 	}
@@ -247,7 +252,7 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 	omitted := settingsdomain.Config{RequestRetry: &settingsdomain.RequestRetryConfig{
 		Enabled: false, MaxAttempts: 2, OnExhausted: "fail_closed",
 	}}
-	mergedOmitted := applyDomainConfig(cfg, omitted)
+	mergedOmitted := mustApplyDomainConfig(t, cfg, omitted)
 	if got := mergedOmitted.RequestRetry.GuardedModels; !sameStrings(got, want) {
 		t.Fatalf("nil overlay guardedModels must keep yaml, got %#v", got)
 	}
@@ -259,7 +264,7 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 	empty.RequestRetry = &settingsdomain.RequestRetryConfig{
 		Enabled: false, MaxAttempts: 2, OnExhausted: "fail_closed", GuardedModels: []string{},
 	}
-	mergedEmpty := applyDomainConfig(cfg, empty)
+	mergedEmpty := mustApplyDomainConfig(t, cfg, empty)
 	if got := mergedEmpty.RequestRetry.GuardedModels; !sameStrings(got, want) {
 		t.Fatalf("empty overlay guardedModels must keep yaml, got %#v", got)
 	}
@@ -271,7 +276,7 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 	stale.RequestRetry = &settingsdomain.RequestRetryConfig{
 		Enabled: false, MaxAttempts: 2, OnExhausted: "fail_closed", GuardedModels: []string{"grok-4.3"},
 	}
-	mergedStale := applyDomainConfig(cfg, stale)
+	mergedStale := mustApplyDomainConfig(t, cfg, stale)
 	if got := mergedStale.RequestRetry.GuardedModels; !sameStrings(got, want) {
 		t.Fatalf("stale persist must not override yaml guardedModels, got %#v", got)
 	}

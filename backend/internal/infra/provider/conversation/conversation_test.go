@@ -3,6 +3,7 @@ package conversation
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -454,7 +455,7 @@ func TestConvertChatToolChoiceAutoPassthrough(t *testing.T) {
 
 func TestConvertChatToolChoiceRequiredPassthrough(t *testing.T) {
 	converted, err := ConvertRequest([]byte(`{
-		"model":"public-chat","tool_choice":"required",
+		"model":"public-chat","tool_choice":"required","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
 		"messages":[{"role":"user","content":"hello"}]
 	}`), "grok-4.6", OperationChat)
 	if err != nil {
@@ -1470,7 +1471,7 @@ func TestConvertAnthropicMessagesIgnoresUnrepresentableTopK(t *testing.T) {
 func TestConvertAnthropicWebSearchControls(t *testing.T) {
 	converted, _, err := ConvertRequestWithOptions([]byte(`{
 		"model":"public","max_tokens":64,"messages":[{"role":"user","content":"search"}],
-		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":3,"allowed_domains":["example.com"],"user_location":{"type":"approximate","country":"US"}}]
+		"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["example.com"],"user_location":{"type":"approximate","country":"US"}}]
 	}`), "grok-4.5", OperationMessages)
 	if err != nil {
 		t.Fatal(err)
@@ -1825,12 +1826,12 @@ func TestConvertResponsesStreamChatFlushesSummaryAtEOF(t *testing.T) {
 		`data: {"type":"response.reasoning_summary_text.delta","delta":"summary only"}`, "", "",
 	}, "\n")
 	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated stream error = %v", err)
 	}
 	text := string(converted)
-	if strings.Count(text, `"reasoning_content":"summary only"`) != 1 || !strings.Contains(text, "data: [DONE]") {
-		t.Fatalf("summary fallback was not finalized at EOF: %s", text)
+	if strings.Count(text, `"reasoning_content":"summary only"`) != 1 || strings.Contains(text, "data: [DONE]") {
+		t.Fatalf("summary must survive EOF without manufacturing completion: %s", text)
 	}
 }
 

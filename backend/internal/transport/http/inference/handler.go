@@ -19,14 +19,19 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
@@ -61,6 +66,7 @@ var (
 	errUpstreamStreamIncomplete = errors.New("上游流在终止事件前结束")
 	errUpstreamStreamFailed     = errors.New("上游流返回失败终止事件")
 	errUpstreamStreamRead       = errors.New("读取上游流失败")
+	errClientStreamWrite        = errors.New("写入客户端流失败")
 )
 
 type streamProtocol uint8
@@ -124,6 +130,7 @@ type responsesRequest struct {
 	Stream             bool   `json:"stream"`
 	PromptCacheKey     string `json:"prompt_cache_key"`
 	PreviousResponseID string `json:"previous_response_id"`
+	Store              *bool  `json:"store"`
 }
 
 type chatCompletionRequest struct {
@@ -201,101 +208,37 @@ type videoGenerationRequest struct {
 }
 
 type modelListItem struct {
-	ID         string                 `json:"id"`
-	Object     string                 `json:"object"`
-	Created    int64                  `json:"created"`
-	OwnedBy    string                 `json:"owned_by"`
-	Provider   account.Provider       `json:"-"`
-	Capability modeldomain.Capability `json:"-"`
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
 }
 
 func (h *Handler) listModels(c *gin.Context) {
-	allowAliases := false
-	var clientKey clientkeydomain.Key
-	hasClientKey := false
-	if clientValue, exists := c.Get(middleware.ClientKey); exists {
-		if value, ok := clientValue.(clientkeydomain.Key); ok {
-			clientKey = value
-			hasClientKey = true
-			allowAliases = clientKey.AllowModelAliases
+	var key *clientkeydomain.Key
+	if value, exists := c.Get(middleware.ClientKey); exists {
+		if subject, ok := value.(clientkeydomain.Key); ok {
+			key = &subject
 		}
 	}
-	var values []modeldomain.Route
-	var err error
-	if hasClientKey {
-		values, err = h.models.ListEnabledForClientKey(c.Request.Context(), clientKey)
-	} else {
-		values, err = h.models.ListEnabled(c.Request.Context())
-	}
+	products, err := h.models.ListPublic(c.Request.Context(), key)
 	if err != nil {
 		writeOpenAIError(c, http.StatusInternalServerError, "model_list_failed", "读取模型列表失败")
 		return
 	}
-	if hasClientKey {
-		values = filterModelRoutesForClientKey(values, clientKey)
-	}
-	items := newModelListItems(values)
-	if allowAliases {
-		items = appendReasoningModelAliases(items)
-	}
-	if clientVersion := strings.TrimSpace(c.Query("client_version")); clientVersion != "" {
-		writeCodexModelCatalog(c, newCodexModelCatalog(items))
+	if strings.TrimSpace(c.Query("client_version")) != "" {
+		writeCodexModelCatalog(c, newCodexModelCatalog(products))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"object": "list", "data": items})
+	c.JSON(http.StatusOK, gin.H{"object": "list", "data": newModelListItems(products)})
 }
 
-func filterModelRoutesForClientKey(values []modeldomain.Route, key clientkeydomain.Key) []modeldomain.Route {
-	filtered := make([]modeldomain.Route, 0, len(values))
-	scope := key.AccountScope()
-	for _, value := range values {
-		if scope.AllowsProvider(value.Provider) && key.AllowsModel(value.ID) {
-			filtered = append(filtered, value)
-		}
+func newModelListItems(products []modeldomain.PublicModel) []modelListItem {
+	items := make([]modelListItem, 0, len(products))
+	for _, product := range products {
+		items = append(items, modelListItem{ID: product.ID, Object: "model", Created: product.CreatedAt.Unix(), OwnedBy: "grok2api"})
 	}
-	return filtered
-}
-
-// newModelListItems deduplicates by downstream public name and hides Provider prefixes used only for internal routing.
-func newModelListItems(values []modeldomain.Route) []modelListItem {
-	data := make([]modelListItem, 0, len(values))
-	seen := make(map[string]bool, len(values))
-	for _, value := range values {
-		publicID := modeldomain.ExternalPublicID(value.Provider, value.PublicID)
-		if seen[publicID] {
-			continue
-		}
-		seen[publicID] = true
-		data = append(data, modelListItem{ID: publicID, Object: "model", Created: value.CreatedAt.Unix(), OwnedBy: "grok2api", Provider: value.Provider, Capability: value.Capability})
-	}
-	return data
-}
-
-// appendReasoningModelAliases expands base models into effort-suffixed aliases using only
-// levels each model actually supports (never a blanket none/low/medium/high/xhigh/max template).
-func appendReasoningModelAliases(items []modelListItem) []modelListItem {
-	if len(items) == 0 {
-		return items
-	}
-	seen := make(map[string]bool, len(items)*2)
-	result := make([]modelListItem, 0, len(items)*2)
-	for _, item := range items {
-		seen[item.ID] = true
-		result = append(result, item)
-	}
-	for _, item := range items {
-		for _, aliasID := range modeldomain.ReasoningAliasPublicIDsForProvider(item.Provider, item.ID) {
-			if seen[aliasID] {
-				continue
-			}
-			seen[aliasID] = true
-			result = append(result, modelListItem{
-				ID: aliasID, Object: "model", Created: item.Created, OwnedBy: item.OwnedBy,
-				Provider: item.Provider, Capability: item.Capability,
-			})
-		}
-	}
-	return result
+	return items
 }
 
 func (h *Handler) createResponse(c *gin.Context) {
@@ -343,9 +286,8 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
-		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
-		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
-		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		SessionSignals: extractClientSignals(c.Request.Header, body),
+		GrokTurnIndex:  c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -388,9 +330,8 @@ func (h *Handler) createMessage(c *gin.Context) {
 	result, err := h.gateway.CreateMessage(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
-		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
-		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
-		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		SessionSignals: extractClientSignals(c.Request.Header, body),
+		GrokTurnIndex:  c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
@@ -463,6 +404,29 @@ func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
 	errorCode := ""
 	defer func() { _ = result.Body.Close() }()
 	defer func() { result.Finalize(gateway.Usage{}, "", errorCode) }()
+	delivery := gateway.DeliveryStats{}
+	initialSize := max(0, c.Writer.Size())
+	defer func() {
+		if err := middleware.FinishResponseEncoding(c.Writer); err != nil && errorCode == "" {
+			errorCode = copyCancellationCode(c, fmt.Errorf("%w: %w", errClientStreamWrite, err))
+			if c.Writer.Header().Get("Trailer") == mediaTransferErrorTrailer {
+				c.Header(mediaTransferErrorTrailer, errorCode)
+			}
+		}
+		if result.RecordDelivery != nil {
+			if c.Writer.Size() >= 0 {
+				delivery.Bytes = int64(max(0, c.Writer.Size()-initialSize))
+				delivery.StatusCode = c.Writer.Status()
+			}
+			result.RecordDelivery(delivery)
+		}
+	}()
+	if result.BeginDelivery != nil {
+		if err := result.BeginDelivery(); err != nil {
+			errorCode = "request_canceled"
+			return
+		}
+	}
 	if isUpstreamCredentialStatus(result.StatusCode) {
 		errorCode = "upstream_unavailable"
 		clientCode := readCredentialErrorCode(result.StatusCode, result.Body)
@@ -486,6 +450,12 @@ func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
 		writeOpenAIError(c, http.StatusBadGateway, "media_too_large", "上游媒体超过 2 GiB 安全上限")
 		return
 	}
+	if result.CommitDelivery != nil {
+		if err := result.CommitDelivery(); err != nil {
+			errorCode = "request_canceled"
+			return
+		}
+	}
 	setSafeMediaResponseHeaders(c, result.Header)
 	if contentLengthErr == nil && contentLength >= 0 {
 		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
@@ -498,9 +468,14 @@ func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
 		} else {
 			errorCode = "stream_interrupted"
 		}
+		if canceled := copyCancellationCode(c, err); canceled != "" {
+			errorCode = canceled
+		}
 		if contentLengthErr != nil {
 			c.Header(mediaTransferErrorTrailer, errorCode)
 		}
+	} else {
+		delivery.Events = 1
 	}
 }
 
@@ -547,24 +522,21 @@ func setResponseWriteDeadline(writer http.ResponseWriter) error {
 	return err
 }
 
-// isClientDisconnectDuringCopy reports whether the client connection is gone
-// while the upstream body is being forwarded. Server request contexts are
-// canceled by net/http when the client connection closes, so a non-nil
-// request-context error during the copy phase means the failure originated on
-// the client side (agent stream timeout, cancellation, or network drop), not
-// upstream. The upstream idle sentinel is attached to the upstream request
-// context (never this one) and is checked defensively so an idle abort can
-// never be misread as a client disconnect. Mirrors the gateway-side
-// isClientRequestCancel semantics used in the peek phase.
-func isClientDisconnectDuringCopy(c *gin.Context, err error) bool {
-	if c == nil || c.Request == nil || c.Request.Context() == nil {
-		return false
+// copyCancellationCode distinguishes a canceled request lifetime from an
+// independent downstream write failure. A request context also ends on server
+// shutdown or its deadline, so cancellation alone cannot identify the client
+// as its cause. Upstream-only cancellation keeps its upstream failure path.
+func copyCancellationCode(c *gin.Context, err error) string {
+	if c != nil && c.Request != nil {
+		ctx := c.Request.Context()
+		if ctx.Err() != nil && !neterror.IsUpstreamStreamIdleTimeout(context.Cause(ctx)) {
+			return "request_canceled"
+		}
 	}
-	reqCtx := c.Request.Context()
-	if neterror.IsUpstreamStreamIdleTimeout(context.Cause(reqCtx)) {
-		return false
+	if errors.Is(err, errClientStreamWrite) {
+		return "client_disconnected"
 	}
-	return reqCtx.Err() != nil
+	return ""
 }
 
 // writeMediaBody binds the validated non-HTML content type before emitting the
@@ -586,15 +558,15 @@ func writeMediaBody(c *gin.Context, source io.Reader, contentType string, status
 				writeSize = int(remaining)
 			}
 			if err := setResponseWriteDeadline(c.Writer); err != nil {
-				return err
+				return fmt.Errorf("%w: %w", errClientStreamWrite, err)
 			}
 			written, writeErr := c.Writer.Write(buffer[:writeSize])
 			transferred += int64(written)
 			if writeErr != nil {
-				return writeErr
+				return fmt.Errorf("%w: %w", errClientStreamWrite, writeErr)
 			}
 			if written != writeSize {
-				return io.ErrShortWrite
+				return fmt.Errorf("%w: %w", errClientStreamWrite, io.ErrShortWrite)
 			}
 			if writeSize != n {
 				return errResponseTransferLimit
@@ -1183,9 +1155,9 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	input := gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
-		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
-		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
-		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		SessionSignals: extractClientSignals(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
+		StoreResponse: request.Store,
+		GrokTurnIndex: c.GetHeader("x-grok-turn-idx"),
 	}
 	var result *gateway.Result
 	if compact {
@@ -1298,6 +1270,26 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	errorCode := ""
 	defer func() { _ = result.Body.Close() }()
 	defer func() { result.Finalize(usage, responseID, errorCode) }()
+	delivery := gateway.DeliveryStats{}
+	initialSize := max(0, c.Writer.Size())
+	defer func() {
+		if err := middleware.FinishResponseEncoding(c.Writer); err != nil && errorCode == "" {
+			errorCode = copyCancellationCode(c, fmt.Errorf("%w: %w", errClientStreamWrite, err))
+		}
+		if result.RecordDelivery != nil {
+			if c.Writer.Size() >= 0 {
+				delivery.Bytes = int64(max(0, c.Writer.Size()-initialSize))
+				delivery.StatusCode = c.Writer.Status()
+			}
+			result.RecordDelivery(delivery)
+		}
+	}()
+	if result.BeginDelivery != nil {
+		if err := result.BeginDelivery(); err != nil {
+			errorCode = "request_canceled"
+			return
+		}
+	}
 	if isUpstreamCredentialStatus(result.StatusCode) {
 		errorCode = "upstream_unavailable"
 		clientCode := readCredentialErrorCode(result.StatusCode, result.Body)
@@ -1317,6 +1309,21 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 		writeOpenAIError(c, http.StatusBadGateway, "response_too_large", "上游响应超过代理安全上限")
 		return
 	}
+	if result.CommitDelivery != nil {
+		if err := result.CommitDelivery(); err != nil {
+			errorCode = "request_canceled"
+			var failure *gateway.UpstreamFailure
+			if errors.As(err, &failure) {
+				errorCode = failure.AuditCode()
+			}
+			if anthropic {
+				writeGatewayAnthropicError(c, err)
+			} else {
+				writeGatewayError(c, err)
+			}
+			return
+		}
+	}
 	copyHeaders(c.Writer.Header(), result.Header)
 	if stream {
 		// SSE 不得被反向代理缓冲：Web 通道上游自带该头，Build/Console 通道
@@ -1330,34 +1337,57 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 		errorCode = "upstream_error"
 	}
 	var err error
+	var commitOutput func(responseMetadata) error
+	if result.CommitCompletion != nil {
+		commitOutput = func(meta responseMetadata) error {
+			return result.CommitCompletion(gateway.Completion{Usage: meta.Usage, ResponseID: meta.ResponseID, NativeResponseID: meta.NativeResponseID})
+		}
+	}
 	if stream {
-		metadata, copyErr := copyStreamWithFallbackModel(c.Writer, result.Body, protocol, result.MarkFirstToken, fallbackModel)
+		metadata, copyErr := copyStreamWithCompletion(c.Writer, result.Body, protocol, result.MarkFirstToken, fallbackModel, commitOutput)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
 		if metadata.StreamFailure != nil && result.RecordStreamFailure != nil {
 			result.RecordStreamFailure(*metadata.StreamFailure)
 		}
-		if result.RecordDelivery != nil {
-			result.RecordDelivery(gateway.DeliveryStats{Events: metadata.DeliveredEvents, Bytes: metadata.DeliveredBytes})
-		}
+		delivery.Events, delivery.Bytes = metadata.DeliveredEvents, metadata.DeliveredBytes
 	} else {
-		metadata, copyErr := copyJSON(c.Writer, result.Body, protocol)
+		metadata, copyErr := copyJSONWithCompletion(c.Writer, result.Body, protocol, commitOutput)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
-		if result.RecordDelivery != nil {
-			result.RecordDelivery(gateway.DeliveryStats{Events: metadata.DeliveredEvents, Bytes: metadata.DeliveredBytes})
-		}
+		delivery.Events, delivery.Bytes = metadata.DeliveredEvents, metadata.DeliveredBytes
 	}
 	if err != nil {
-		if isClientDisconnectDuringCopy(c, err) {
-			// 客户端已断开（agent 流超时/取消/网络中断）：与上游故障分开记账。
-			// 差分复现：此前该形态与上游 RST 同被记为
-			// upstream_stream_interrupted，污染真实上游中断率观测。
-			errorCode = "client_disconnected"
+		if canceled := copyCancellationCode(c, err); canceled != "" {
+			errorCode = canceled
 		} else {
 			switch {
+			case errors.Is(err, inferencedomain.ErrProviderStateCommit):
+				errorCode = "provider_state_commit_failed"
+			case errors.Is(err, inferencedomain.ErrResponseOwnershipCommit):
+				errorCode = "response_ownership_commit_failed"
+			case errors.Is(err, historydomain.ErrHistoryCommit):
+				errorCode = "history_commit_failed"
+				if !stream && !c.Writer.Written() {
+					c.Writer.Header().Del("Content-Length")
+					if anthropic {
+						writeAnthropicError(c, http.StatusBadGateway, "api_error", "会话历史提交失败", "history_commit_failed")
+					} else {
+						writeOpenAIError(c, http.StatusBadGateway, "history_commit_failed", "会话历史提交失败")
+					}
+				}
+			case errors.Is(err, inferencedomain.ErrCompletionCommit):
+				errorCode = "completion_commit_failed"
+			case errors.Is(err, responsebuffer.ErrExhausted):
+				errorCode = "response_resource_exhausted"
+			case errors.Is(err, responsebuffer.ErrLimit):
+				errorCode = "response_too_large"
 			case errors.Is(err, errResponseTransferLimit):
 				errorCode = "response_too_large"
 			case errors.Is(err, errUpstreamStreamFailed):
 				errorCode = "upstream_stream_error"
+			case errors.Is(err, responsecheck.ErrToolChoice):
+				errorCode = "upstream_tool_choice_mismatch"
+			case errors.Is(err, responsecheck.ErrEmptyOutput):
+				errorCode = "upstream_empty_output"
 			case errors.Is(err, errUpstreamStreamIncomplete):
 				errorCode = "upstream_stream_incomplete"
 			case errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout):
@@ -1370,12 +1400,21 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 				errorCode = "stream_interrupted"
 			}
 		}
+		if !stream && result.CommitCompletion != nil && !c.Writer.Written() && copyCancellationCode(c, err) == "" {
+			c.Writer.Header().Del("Content-Length")
+			if anthropic {
+				writeAnthropicError(c, http.StatusBadGateway, "api_error", "响应未能完整提交", errorCode)
+			} else {
+				writeOpenAIError(c, http.StatusBadGateway, errorCode, "响应未能完整提交")
+			}
+		}
 	}
 }
 
 type responseMetadata struct {
 	Usage                    gateway.Usage
 	cacheCreationInputTokens int64
+	NativeResponseID         string
 	ResponseID               string
 	Model                    string
 	SequenceNumber           int64
@@ -1389,6 +1428,44 @@ type responseMetadata struct {
 
 func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func()) (responseMetadata, error) {
 	return copyStreamWithFallbackModel(writer, source, protocol, onFirstToken, "")
+}
+
+// writeStreamChunk detects errors that Gin's void Flush method cannot return.
+// Count bytes accepted by Write, but mark first-token delivery only after a
+// successful flush. Real network writers expose FlushError via the controller.
+func writeStreamChunk(writer gin.ResponseWriter, chunk []byte) (n int, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w: %w", errClientStreamWrite, err)
+		}
+	}()
+	if err = setResponseWriteDeadline(writer); err != nil {
+		return 0, err
+	}
+	n, err = writer.Write(chunk)
+	if err != nil {
+		return n, err
+	}
+	if n != len(chunk) {
+		return n, io.ErrShortWrite
+	}
+	return n, flushStreamResponse(writer)
+}
+
+func flushStreamResponse(writer gin.ResponseWriter) error {
+	writer.WriteHeaderNow()
+	if flusher, ok := writer.(interface{ FlushError() error }); ok {
+		return flusher.FlushError()
+	}
+	var target http.ResponseWriter = writer
+	if wrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter }); ok {
+		target = wrapper.Unwrap()
+	}
+	err := http.NewResponseController(target).Flush()
+	if errors.Is(err, http.ErrNotSupported) {
+		err = nil // preserve Gin's behavior for non-network test/custom writers
+	}
+	return err
 }
 
 // internalSSEMarkerFilter 在转发前剥除转换器写入流的内部 SSE 注释
@@ -1446,6 +1523,12 @@ func nextInternalSSEMarker(value []byte) (int, int) {
 // copyStreamWithFallbackModel 把请求模型注入 compat 状态作为 model 兜底：
 // 流在首个 response 事件前中止时，trailer 的 model 键仍能带上真实值。
 func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func(), fallbackModel string) (metadata responseMetadata, returnErr error) {
+	budget := responseReaderBudget(source)
+	retention := responsebuffer.NewState(budget, 16<<20)
+	defer retention.Close()
+	if err := retention.Grow(0, responseCopyBufferBytes); err != nil {
+		return responseMetadata{}, err
+	}
 	inspector := &responseInspector{protocol: protocol, onFirstToken: onFirstToken}
 	// 仅 Anthropic Messages 下行会携带内部思考证据注释（chat/responses
 	// 的思考增量本身可见，无需注释通道）。
@@ -1463,10 +1546,23 @@ func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, pr
 	defer func() {
 		metadata.DeliveredBytes = int64(transferred)
 		metadata.DeliveredEvents = inspector.metadata.DeliveredEvents
+		if protocol == streamProtocolResponses {
+			metadata.NativeResponseID = compat.nativeResponseID
+		}
 	}()
 	for {
 		n, readErr := source.Read(buffer)
 		if n > 0 {
+			// Reserve pending-line growth and its transient rewrite/inspection
+			// copies before either byte consumer appends this chunk.
+			pendingBytes := len(inspector.pending) + len(compat.pending) + n
+			needed := responseCopyBufferBytes + 4*pendingBytes + 32*min(pendingBytes, maxParsedSSEJSONBytes) + 1024*(len(compat.itemIDs)+len(compat.usedItemIDs))
+			if err := retention.Grow(0, needed); err != nil {
+				return inspector.Metadata(), err
+			}
+			if len(compat.itemIDs) > 4096 || len(compat.usedItemIDs) > 4096 {
+				return inspector.Metadata(), responsebuffer.ErrLimit
+			}
 			if received+n > maxStreamResponseTransferBytes {
 				inspector.Finish()
 				return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
@@ -1486,18 +1582,12 @@ func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, pr
 				return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 			}
 			if len(chunk) > 0 {
-				if err := setResponseWriteDeadline(writer); err != nil {
+				written, err := writeStreamChunk(writer, chunk)
+				transferred += written
+				if err != nil {
 					inspector.Finish()
 					return inspector.Metadata(), err
 				}
-				if _, err := writer.Write(chunk); err != nil {
-					// 客户端已断开也要冲刷 pending：其中的 usage 帧供计费/审计
-					// 结算，丢失会少计已真实消耗的 token。
-					inspector.Finish()
-					return inspector.Metadata(), err
-				}
-				writer.Flush()
-				transferred += len(chunk)
 			}
 			inspector.markFirstTokenForwarded()
 		}
@@ -1506,9 +1596,10 @@ func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, pr
 				if transferred+len(markerTail) > maxStreamResponseTransferBytes {
 					return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 				}
-				if _, err := writer.Write(markerTail); err == nil {
-					writer.Flush()
-					transferred += len(markerTail)
+				written, err := writeStreamChunk(writer, markerTail)
+				transferred += written
+				if err != nil {
+					return inspector.Metadata(), err
 				}
 			}
 			if protocol == streamProtocolResponses {
@@ -1517,14 +1608,11 @@ func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, pr
 					if transferred+len(tail) > maxStreamResponseTransferBytes {
 						return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 					}
-					if err := setResponseWriteDeadline(writer); err != nil {
+					written, err := writeStreamChunk(writer, tail)
+					transferred += written
+					if err != nil {
 						return inspector.Metadata(), err
 					}
-					if _, err := writer.Write(tail); err != nil {
-						return inspector.Metadata(), err
-					}
-					writer.Flush()
-					transferred += len(tail)
 				}
 			}
 			inspector.Finish()
@@ -1548,23 +1636,32 @@ func writeStreamAbortTrailer(writer gin.ResponseWriter, protocol streamProtocol,
 	if len(trailer) == 0 || transferred+len(trailer) > maxStreamResponseTransferBytes {
 		return
 	}
-	if err := setResponseWriteDeadline(writer); err != nil {
-		return
-	}
-	if _, err := writer.Write(trailer); err == nil {
-		writer.Flush()
-	}
+	_, _ = writeStreamChunk(writer, trailer)
 }
 
 func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetadata, compat *responsesCompatState) []byte {
 	code, message := "upstream_stream_interrupted", "上游流式响应中断"
 	switch {
+	case errors.Is(cause, inferencedomain.ErrProviderStateCommit):
+		code, message = "provider_state_commit_failed", "上游会话状态保存失败"
+	case errors.Is(cause, inferencedomain.ErrResponseOwnershipCommit):
+		code, message = "response_ownership_commit_failed", "响应归属保存失败"
+	case errors.Is(cause, historydomain.ErrHistoryCommit):
+		code, message = "history_commit_failed", "会话历史提交失败"
+	case errors.Is(cause, inferencedomain.ErrCompletionCommit):
+		code, message = "completion_commit_failed", "响应完成提交失败"
+	case errors.Is(cause, errUpstreamStreamFailed):
+		code, message = "upstream_stream_error", "上游流式响应返回错误"
 	case errors.Is(cause, neterror.ErrUpstreamStreamIdleTimeout):
 		code, message = "upstream_stream_idle_timeout", "上游流式响应长时间无数据"
 	case errors.Is(cause, neterror.ErrUpstreamOutputLoop):
 		code, message = "upstream_output_loop", "上游输出陷入循环"
 	case errors.Is(cause, errUpstreamStreamIncomplete):
 		code, message = "upstream_stream_incomplete", "上游流式响应未完整结束"
+	case errors.Is(cause, responsecheck.ErrToolChoice):
+		code, message = "upstream_tool_choice_mismatch", "上游未返回请求要求的工具调用"
+	case errors.Is(cause, responsecheck.ErrEmptyOutput):
+		code, message = "upstream_empty_output", "上游已结束但未返回答案或工具输出"
 	}
 	switch protocol {
 	case streamProtocolChat:
@@ -1578,6 +1675,9 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 		})
 		if err != nil {
 			return []byte("data: [DONE]\n\n")
+		}
+		if errors.Is(cause, inferencedomain.ErrCompletionCommit) || errors.Is(cause, historydomain.ErrHistoryCommit) {
+			return []byte("data: " + string(payload) + "\n\n")
 		}
 		return []byte("data: " + string(payload) + "\n\ndata: [DONE]\n\n")
 	case streamProtocolResponses:
@@ -1642,8 +1742,15 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 }
 
 func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (metadata responseMetadata, returnErr error) {
+	budget := responseReaderBudget(source)
+	scratch, err := budget.Reserve(responseCopyBufferBytes)
+	if err != nil {
+		return responseMetadata{}, err
+	}
+	defer scratch.Release()
 	buffer := make([]byte, responseCopyBufferBytes)
-	metadataBody := make([]byte, 0, responseCopyBufferBytes)
+	metadataBody := responsebuffer.New(budget, maxJSONMetadataInspectionBytes)
+	defer metadataBody.Close()
 	metadataComplete := true
 	transferred := 0
 	// 错误出口也回填已交付字节:非流式传输中途失败(超限/写错误)时,
@@ -1663,15 +1770,21 @@ func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtoc
 			if err := setResponseWriteDeadline(writer); err != nil {
 				return responseMetadata{}, err
 			}
-			if _, err := writer.Write(chunk); err != nil {
-				return responseMetadata{}, err
+			written, err := writer.Write(chunk)
+			transferred += written
+			if err != nil {
+				return responseMetadata{}, fmt.Errorf("%w: %w", errClientStreamWrite, err)
 			}
-			transferred += n
+			if written != len(chunk) {
+				return responseMetadata{}, fmt.Errorf("%w: %w", errClientStreamWrite, io.ErrShortWrite)
+			}
 			if metadataComplete {
-				if len(metadataBody)+len(chunk) <= maxJSONMetadataInspectionBytes {
-					metadataBody = append(metadataBody, chunk...)
+				if metadataBody.Len()+len(chunk) <= maxJSONMetadataInspectionBytes {
+					if _, err := metadataBody.Write(chunk); err != nil {
+						return responseMetadata{}, err
+					}
 				} else {
-					metadataBody = nil
+					_ = metadataBody.Close()
 					metadataComplete = false
 				}
 			}
@@ -1679,7 +1792,12 @@ func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtoc
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				if metadataComplete {
-					metadata := normalizeMetadataUsage(extractMetadata(metadataBody), protocol)
+					workspace, err := responsebuffer.JSONWorkspace(budget, metadataBody.Bytes())
+					if err != nil {
+						return responseMetadata{}, err
+					}
+					metadata := normalizeMetadataUsage(extractMetadata(metadataBody.Bytes()), protocol)
+					workspace.Release()
 					metadata.DeliveredBytes = int64(transferred)
 					metadata.DeliveredEvents = 1 // 非流式：单 JSON 响应体
 					return metadata, nil
@@ -1689,6 +1807,13 @@ func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtoc
 			return responseMetadata{}, readErr
 		}
 	}
+}
+
+func responseReaderBudget(source io.Reader) *responsebuffer.Budget {
+	if body, ok := source.(io.ReadCloser); ok {
+		return responsebuffer.BudgetOf(body)
+	}
+	return responsebuffer.NewRequest()
 }
 
 type responseInspector struct {
@@ -1861,7 +1986,21 @@ func (i *responseInspector) observeTerminal(data []byte) {
 		}
 		return
 	}
+	if bytes.Contains(data, []byte(`"error"`)) && json.Valid(data) {
+		if raw := bytes.TrimSpace(jsonpeek.RootRawValue(data, "error")); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+			i.markTerminalFailure(data)
+			return
+		}
+	}
 	typ := sseEventType(data)
+	if typ == "response.completed" {
+		response := jsonpeek.RootRawValue(data, "response")
+		status := jsonpeek.RootStringFieldScan(response, "status")
+		if status != "" && status != "completed" {
+			i.markTerminalFailure(data)
+			return
+		}
+	}
 	switch i.protocol {
 	case streamProtocolResponses:
 		switch typ {
@@ -1883,9 +2022,9 @@ func (i *responseInspector) observeTerminal(data []byte) {
 		}
 	case streamProtocolImage:
 		switch typ {
-		case "image_generation.completed":
+		case "image_generation.completed", "image_edit.completed":
 			i.terminalSuccess = true
-		case "image_generation.failed", "error":
+		case "image_generation.failed", "image_edit.failed", "error":
 			i.markTerminalFailure(data)
 		}
 	}
@@ -2024,6 +2163,7 @@ func extractMetadata(data []byte) responseMetadata {
 			usage = root.Response.Usage
 		}
 	}
+	metadata.NativeResponseID = metadata.ResponseID
 	if usage == nil {
 		return metadata
 	}
@@ -2184,6 +2324,15 @@ func clientFailureCode(code string) string {
 }
 
 func writeGatewayError(c *gin.Context, err error) {
+	var validation *inferencedomain.RequestValidationError
+	if errors.As(err, &validation) {
+		var param any
+		if validation.Param != "" {
+			param = validation.Param
+		}
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": validation.Message, "type": "invalid_request_error", "code": validation.Code, "param": param}})
+		return
+	}
 	status, code := http.StatusBadGateway, "upstream_unavailable"
 	message := "上游服务暂不可用"
 	var upstreamFailure *gateway.UpstreamFailure
@@ -2201,9 +2350,18 @@ func writeGatewayError(c *gin.Context, err error) {
 	case errors.Is(err, gateway.ErrModelNotFound):
 		status, code = http.StatusNotFound, "model_not_found"
 		message = "模型不存在"
-	case errors.Is(err, gateway.ErrResponseNotFound):
+	case errors.Is(err, historydomain.ErrResponseRead), errors.Is(err, historydomain.ErrResponseDelete):
+		status, code = http.StatusServiceUnavailable, "response_state_unavailable"
+		message = "Response 状态暂不可用，请重试"
+	case errors.Is(err, mediadomain.ErrVideoResourceRead):
+		status, code = http.StatusServiceUnavailable, "video_state_unavailable"
+		message = "视频资源状态暂不可用，请重试"
+	case errors.Is(err, gateway.ErrResponseNotFound), errors.Is(err, mediadomain.ErrVideoNotFound):
 		status, code = http.StatusNotFound, "response_not_found"
 		message = "Response 不存在或已过期"
+	case errors.Is(err, modeldomain.ErrUnsupportedCapability):
+		status, code = http.StatusServiceUnavailable, "model_unavailable"
+		message = err.Error()
 	case errors.Is(err, gateway.ErrResponseStateUnsupported), errors.Is(err, gateway.ErrConversationUnsupported):
 		status, code = http.StatusBadRequest, "unsupported_parameter"
 		message = err.Error()
@@ -2214,6 +2372,7 @@ func writeGatewayError(c *gin.Context, err error) {
 		status, code = http.StatusBadRequest, "unsupported_model"
 		message = err.Error()
 	case errors.As(err, &upstreamFailure):
+		provider.ApplyHistoryRecoveryWarnings(c.Writer.Header(), upstreamFailure.HistoryRecovery)
 		if isSanitizedUpstreamAvailabilityFailure(upstreamFailure) {
 			// Gateway mid-tier behavior: never expose upstream upgrade/billing prompts to clients.
 			code = upstreamFailure.ClientCredentialErrorCode()
@@ -2237,6 +2396,11 @@ func writeGatewayError(c *gin.Context, err error) {
 }
 
 func writeGatewayAnthropicError(c *gin.Context, err error) {
+	var validation *inferencedomain.RequestValidationError
+	if errors.As(err, &validation) {
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", validation.Message)
+		return
+	}
 	status, errorType := http.StatusBadGateway, "api_error"
 	message := "上游服务暂不可用"
 	clientCode := ""
@@ -2255,10 +2419,14 @@ func writeGatewayAnthropicError(c *gin.Context, err error) {
 	case errors.Is(err, gateway.ErrModelNotFound):
 		status, errorType = http.StatusNotFound, "not_found_error"
 		message = "模型不存在"
+	case errors.Is(err, modeldomain.ErrUnsupportedCapability):
+		status, errorType, clientCode = http.StatusServiceUnavailable, "overloaded_error", "model_unavailable"
+		message = err.Error()
 	case errors.Is(err, gateway.ErrResponseStateUnsupported), errors.Is(err, gateway.ErrConversationUnsupported):
 		status, errorType = http.StatusBadRequest, "invalid_request_error"
 		message = err.Error()
 	case errors.As(err, &upstreamFailure):
+		provider.ApplyHistoryRecoveryWarnings(c.Writer.Header(), upstreamFailure.HistoryRecovery)
 		if isSanitizedUpstreamAvailabilityFailure(upstreamFailure) {
 			clientCode = upstreamFailure.ClientCredentialErrorCode()
 			if upstreamFailure.QuotaExhausted || upstreamFailure.FreeQuotaExhausted || upstreamFailure.HTTPStatus == http.StatusPaymentRequired {
@@ -2323,7 +2491,7 @@ func selectionErrorResponse(c *gin.Context, failure *gateway.SelectionUnavailabl
 		}
 	}
 	if failure.RetryAfter > 0 {
-		seconds := max(int64(1), int64((failure.RetryAfter+time.Second-1)/time.Second))
+		seconds := retryafter.SecondsCeil(failure.RetryAfter)
 		c.Header("Retry-After", strconv.FormatInt(seconds, 10))
 	}
 	return status, code, message

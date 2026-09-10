@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
 	"strconv"
@@ -32,6 +33,21 @@ func (r *ClientKeyRepository) notifyInvalidation(ctx context.Context, clientKeyI
 }
 
 func (r *ClientKeyRepository) List(ctx context.Context, input repository.ClientKeyListQuery) ([]clientkey.Key, int64, error) {
+	var values []clientkey.Key
+	var total int64
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		snapshot := &ClientKeyRepository{db: &Database{db: tx, dialect: r.db.dialect}}
+		var err error
+		values, total, err = snapshot.list(ctx, input)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, total, nil
+}
+
+func (r *ClientKeyRepository) list(ctx context.Context, input repository.ClientKeyListQuery) ([]clientkey.Key, int64, error) {
 	var total int64
 	query := r.db.db.WithContext(ctx).Model(&clientKeyModel{}).Where("internal_kind IS NULL")
 	if search := strings.TrimSpace(input.Page.Search); search != "" {
@@ -53,9 +69,9 @@ func (r *ClientKeyRepository) List(ctx context.Context, input repository.ClientK
 	}
 	switch input.Filter.ModelScope {
 	case "all":
-		query = query.Where("NOT EXISTS (SELECT 1 FROM client_key_models permission WHERE permission.client_key_id = client_keys.id)")
+		query = query.Where("model_scope = ?", clientkey.ModelScopeAll)
 	case "restricted":
-		query = query.Where("EXISTS (SELECT 1 FROM client_key_models permission WHERE permission.client_key_id = client_keys.id)")
+		query = query.Where("model_scope = ?", clientkey.ModelScopeRestricted)
 	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -72,7 +88,7 @@ func (r *ClientKeyRepository) List(ctx context.Context, input repository.ClientK
 		"expiresAt":     {expression: "client_keys.expires_at", nullsLast: true, defaultDirection: repository.SortDescending},
 		"lastUsedAt":    {expression: "client_keys.last_used_at", nullsLast: true, defaultDirection: repository.SortDescending},
 	}, sortSpec{expression: "client_keys.created_at", defaultDirection: repository.SortDescending}, "client_keys.id")
-	if err := query.Select("id", "name", "prefix", "enabled", "expires_at", "rpm_limit", "max_concurrent", "billing_limit_usd_ticks", "billed_usage_usd_ticks", "reserved_usage_usd_ticks", "allow_model_aliases", "provider_scope_mask", "tier_scope_mask", "last_used_at", "created_at", "updated_at").Offset(input.Page.Offset).Limit(input.Page.Limit).Find(&rows).Error; err != nil {
+	if err := query.Select("id", "name", "prefix", "enabled", "expires_at", "rpm_limit", "max_concurrent", "billing_limit_usd_ticks", "billed_usage_usd_ticks", "reserved_usage_usd_ticks", "allow_model_aliases", "model_scope", "provider_scope_mask", "tier_scope_mask", "last_used_at", "created_at", "updated_at").Offset(input.Page.Offset).Limit(input.Page.Limit).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	ids := make([]uint64, 0, len(rows))
@@ -106,13 +122,17 @@ func (r *ClientKeyRepository) Create(ctx context.Context, value clientkey.Key) (
 	if !valid {
 		return clientkey.Key{}, repository.ErrConflict
 	}
+	modelScope, modelIDs, err := clientkey.NormalizeModelAccess(value.ModelScope, value.AllowedModels)
+	if err != nil {
+		return clientkey.Key{}, repository.ErrInvalidRecord
+	}
 	var internalKind *string
 	if value.InternalKind != "" {
 		kind := value.InternalKind
 		internalKind = &kind
 	}
-	row := clientKeyModel{Name: value.Name, Prefix: value.Prefix, SecretHash: value.SecretHash, EncryptedSecret: value.EncryptedSecret, InternalKind: internalKind, Enabled: value.Enabled, ExpiresAt: value.ExpiresAt, RPMLimit: value.RPMLimit, MaxConcurrent: value.MaxConcurrent, BillingLimitUSDTicks: value.BillingLimitUSDTicks, BilledUsageUSDTicks: value.BilledUsageUSDTicks, ReservedUsageUSDTicks: value.ReservedUsageUSDTicks, AllowModelAliases: value.AllowModelAliases, ProviderScopeMask: uint8(scope.Providers), TierScopeMask: uint8(scope.Tiers)}
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	row := clientKeyModel{Name: value.Name, Prefix: value.Prefix, SecretHash: value.SecretHash, EncryptedSecret: value.EncryptedSecret, InternalKind: internalKind, Enabled: value.Enabled, ExpiresAt: value.ExpiresAt, RPMLimit: value.RPMLimit, MaxConcurrent: value.MaxConcurrent, BillingLimitUSDTicks: value.BillingLimitUSDTicks, BilledUsageUSDTicks: value.BilledUsageUSDTicks, ReservedUsageUSDTicks: value.ReservedUsageUSDTicks, AllowModelAliases: value.AllowModelAliases, ModelScope: string(modelScope), ProviderScopeMask: uint8(scope.Providers), TierScopeMask: uint8(scope.Tiers)}
+	err = r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return err
 		}
@@ -132,87 +152,54 @@ func (r *ClientKeyRepository) Create(ctx context.Context, value clientkey.Key) (
 				return err
 			}
 		}
-		return replacePermissions(tx, row.ID, value.AllowedModels)
+		return replacePermissions(tx, row.ID, modelIDs)
 	})
 	if err != nil {
 		return clientkey.Key{}, mapError(err)
 	}
-	return toClientKeyDomain(row, value.AllowedModels), nil
+	r.notifyInvalidation(ctx, row.ID)
+	return toClientKeyDomain(row, modelIDs), nil
 }
 
 func (r *ClientKeyRepository) Get(ctx context.Context, id uint64) (clientkey.Key, error) {
-	var row clientKeyModel
-	if err := r.db.db.WithContext(ctx).First(&row, id).Error; err != nil {
-		return clientkey.Key{}, mapError(err)
-	}
-	models, err := r.allowedModels(ctx, id)
-	if err != nil {
-		return clientkey.Key{}, err
-	}
-	return toClientKeyDomain(row, models), nil
+	return r.readSnapshot(ctx, "id = ?", id)
 }
 
 func (r *ClientKeyRepository) GetByPrefix(ctx context.Context, prefix string) (clientkey.Key, error) {
-	var row clientKeyModel
-	if err := r.db.db.WithContext(ctx).Where("prefix = ?", prefix).First(&row).Error; err != nil {
+	return r.readSnapshot(ctx, "prefix = ?", prefix)
+}
+
+func (r *ClientKeyRepository) readSnapshot(ctx context.Context, predicate string, argument any) (clientkey.Key, error) {
+	var value clientkey.Key
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		value, err = readClientKey(tx.Where(predicate, argument))
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return clientkey.Key{}, mapError(err)
 	}
-	models, err := r.allowedModels(ctx, row.ID)
-	if err != nil {
+	return value, nil
+}
+
+func readClientKey(query *gorm.DB) (clientkey.Key, error) {
+	var row clientKeyModel
+	// Explicit columns also avoid stale SELECT * metadata on a connection that
+	// read the previous SQLite schema before a peer applied the migration.
+	const columns = "id, name, prefix, secret_hash, encrypted_secret, internal_kind, enabled, expires_at, rpm_limit, max_concurrent, billing_limit_usd_ticks, billed_usage_usd_ticks, reserved_usage_usd_ticks, allow_model_aliases, model_scope, provider_scope_mask, tier_scope_mask, last_used_at, created_at, updated_at"
+	if err := query.Select(columns).First(&row).Error; err != nil {
 		return clientkey.Key{}, err
 	}
-	return toClientKeyDomain(row, models), nil
-}
-
-func (r *ClientKeyRepository) Update(ctx context.Context, value clientkey.Key) (clientkey.Key, error) {
-	scope, valid := clientkey.NormalizeAccountScope(clientkey.AccountScope{Providers: value.ProviderScope, Tiers: value.TierScope})
-	if !valid {
-		return clientkey.Key{}, repository.ErrConflict
+	// NewDB clears the key predicate while retaining the transaction/connection.
+	var permissions []clientKeyModelPermission
+	if err := query.Session(&gorm.Session{NewDB: true}).Select("model_route_id").Where("client_key_id = ?", row.ID).Order("model_route_id").Find(&permissions).Error; err != nil {
+		return clientkey.Key{}, err
 	}
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&clientKeyModel{}).Where("id = ?", value.ID).Updates(map[string]any{
-			"name": value.Name, "enabled": value.Enabled, "expires_at": value.ExpiresAt,
-			"rpm_limit": value.RPMLimit, "max_concurrent": value.MaxConcurrent,
-			"billing_limit_usd_ticks": value.BillingLimitUSDTicks, "allow_model_aliases": value.AllowModelAliases,
-			"provider_scope_mask": uint8(scope.Providers), "tier_scope_mask": uint8(scope.Tiers),
-			"updated_at": time.Now().UTC(),
-		})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return repository.ErrNotFound
-		}
-		return replacePermissions(tx, value.ID, value.AllowedModels)
-	})
-	if err != nil {
-		return clientkey.Key{}, mapError(err)
+	ids := make([]uint64, 0, len(permissions))
+	for _, permission := range permissions {
+		ids = append(ids, permission.ModelRouteID)
 	}
-	r.notifyInvalidation(ctx, value.ID)
-	return r.Get(ctx, value.ID)
-}
-
-func (r *ClientKeyRepository) Delete(ctx context.Context, id uint64) error {
-	result := r.db.db.WithContext(ctx).Delete(&clientKeyModel{}, id)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	r.notifyInvalidation(ctx, id)
-	return nil
-}
-
-func (r *ClientKeyRepository) DeleteMany(ctx context.Context, ids []uint64) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	result := r.db.db.WithContext(ctx).Where("id IN ? AND internal_kind IS NULL", ids).Delete(&clientKeyModel{})
-	if result.Error == nil && result.RowsAffected > 0 {
-		r.notifyInvalidation(ctx, 0)
-	}
-	return result.RowsAffected, result.Error
+	return toClientKeyDomain(row, ids), nil
 }
 
 func (r *ClientKeyRepository) CountInternalKeys(ctx context.Context, ids []uint64) (int64, error) {
@@ -230,26 +217,50 @@ func (r *ClientKeyRepository) Touch(ctx context.Context, id uint64) error {
 }
 
 // ReserveBillingUsage 在数据库中原子占用本次请求的最大预计费用。
-func (r *ClientKeyRepository) ReserveBillingUsage(ctx context.Context, id uint64, eventID string, amount int64, expiresAt time.Time) (bool, error) {
-	if id == 0 || eventID == "" || amount <= 0 {
+func (r *ClientKeyRepository) ReserveBillingUsage(ctx context.Context, id uint64, eventID string, amount int64, expiresAt time.Time, scope repository.BillingReservationScope) (bool, error) {
+	if id == 0 || eventID == "" || amount <= 0 || scope.OwnerID == "" || len(scope.OwnerID) > 64 {
 		return false, repository.ErrConflict
 	}
+	protected := protectedBillingReservations(scope.ProtectedEventIDs)
 	reserved := false
 	now := time.Now().UTC()
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockClientKey(tx, id); err != nil {
+			return err
+		}
+		var settled billingSettlementModel
+		if err := tx.Select("client_key_id").Where("event_id = ?", eventID).First(&settled).Error; err == nil {
+			if settled.ClientKeyID != id {
+				return repository.ErrConflict
+			}
+			return nil // Already committed: no reservation and no counter change.
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 		var existing billingReservationModel
 		err := tx.Where("event_id = ?", eventID).First(&existing).Error
 		switch {
 		case err == nil && existing.ClientKeyID != id:
 			return repository.ErrConflict
-		case err == nil && existing.ExpiresAt.After(now):
+		case err == nil && (existing.ExpiresAt.After(now) || existing.OwnerID != scope.OwnerID || existing.OwnerID == ""):
 			if existing.Amount == amount {
 				reserved = true
 				return nil
 			}
 			return repository.ErrConflict
 		case err == nil:
-			if err := cleanupExpiredBillingReservations(tx, existing.ClientKeyID, now); err != nil {
+			if err := cleanupExpiredBillingReservations(tx, existing.ClientKeyID, now, scope.OwnerID, protected); err != nil {
+				return err
+			}
+			// An expired but protected request retains its original reservation.
+			var retained billingReservationModel
+			if err := tx.Where("event_id = ?", eventID).First(&retained).Error; err == nil {
+				if retained.Amount != amount {
+					return repository.ErrConflict
+				}
+				reserved = true
+				return nil
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
@@ -265,7 +276,7 @@ func (r *ClientKeyRepository) ReserveBillingUsage(ctx context.Context, id uint64
 			if err != nil || !limited {
 				return err
 			}
-			if err := cleanupExpiredBillingReservations(tx, id, now); err != nil {
+			if err := cleanupExpiredBillingReservations(tx, id, now, scope.OwnerID, protected); err != nil {
 				return err
 			}
 			acquired, err = reserveBillingCapacity(tx, id, amount)
@@ -280,7 +291,7 @@ func (r *ClientKeyRepository) ReserveBillingUsage(ctx context.Context, id uint64
 				return repository.ErrLimitExceeded
 			}
 		}
-		reservation := billingReservationModel{EventID: eventID, ClientKeyID: id, Amount: amount, ExpiresAt: expiresAt, CreatedAt: now}
+		reservation := billingReservationModel{OwnerID: scope.OwnerID, EventID: eventID, ClientKeyID: id, Amount: amount, ExpiresAt: expiresAt, CreatedAt: now}
 		if err := tx.Create(&reservation).Error; err != nil {
 			return err
 		}
@@ -350,24 +361,16 @@ func (r *ClientKeyRepository) CancelBillingReservation(ctx context.Context, even
 }
 
 // CleanupExpiredBillingReservations 分批释放进程异常遗留的过期预留。
-func (r *ClientKeyRepository) CleanupExpiredBillingReservations(ctx context.Context, now time.Time, limit int, protectedEventIDSets ...[]string) (int, error) {
+func (r *ClientKeyRepository) CleanupExpiredBillingReservations(ctx context.Context, now time.Time, limit int, scope repository.BillingReservationScope) (int, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	protected := make(map[string]struct{})
-	for _, values := range protectedEventIDSets {
-		for _, eventID := range values {
-			if eventID != "" {
-				protected[eventID] = struct{}{}
-			}
-		}
-	}
+	protected := protectedBillingReservations(scope.ProtectedEventIDs)
 	scanLimit := min(200000, limit+len(protected))
-	const noPendingMediaUsage = "NOT EXISTS (SELECT 1 FROM media_jobs WHERE billing_reservations.event_id = 'video_usage_' || media_jobs.id AND media_jobs.usage_recorded_at IS NULL)"
 	var candidates []billingReservationModel
 	if err := r.db.db.WithContext(ctx).Model(&billingReservationModel{}).
 		Select("event_id", "client_key_id", "amount", "expires_at").
-		Where("expires_at <= ?", now).
+		Where("expires_at <= ? AND owner_id = ? AND owner_id <> ''", now, scope.OwnerID).
 		Where(noPendingMediaUsage).
 		Order("expires_at ASC, event_id ASC").Limit(scanLimit).Find(&candidates).Error; err != nil {
 		return 0, err
@@ -398,7 +401,7 @@ func (r *ClientKeyRepository) CleanupExpiredBillingReservations(ctx context.Cont
 			}
 			var rows []billingReservationModel
 			if err := tx.Model(&billingReservationModel{}).Select("event_id", "amount").
-				Where("client_key_id = ? AND event_id IN ? AND expires_at <= ?", keyID, eventIDs, now).
+				Where("client_key_id = ? AND event_id IN ? AND expires_at <= ? AND owner_id = ? AND owner_id <> ''", keyID, eventIDs, now, scope.OwnerID).
 				Where(noPendingMediaUsage).Find(&rows).Error; err != nil {
 				return err
 			}
@@ -411,7 +414,7 @@ func (r *ClientKeyRepository) CleanupExpiredBillingReservations(ctx context.Cont
 				amount += row.Amount
 				rowIDs = append(rowIDs, row.EventID)
 			}
-			result := tx.Where("client_key_id = ? AND event_id IN ? AND expires_at <= ?", keyID, rowIDs, now).
+			result := tx.Where("client_key_id = ? AND event_id IN ? AND expires_at <= ? AND owner_id = ? AND owner_id <> ''", keyID, rowIDs, now, scope.OwnerID).
 				Where(noPendingMediaUsage).Delete(&billingReservationModel{})
 			if result.Error != nil {
 				return result.Error
@@ -432,19 +435,60 @@ func (r *ClientKeyRepository) CleanupExpiredBillingReservations(ctx context.Cont
 	return cleaned, nil
 }
 
-func cleanupExpiredBillingReservations(tx *gorm.DB, keyID uint64, now time.Time) error {
+const noPendingMediaUsage = "NOT EXISTS (SELECT 1 FROM media_jobs WHERE billing_reservations.event_id = 'video_usage_' || media_jobs.id AND media_jobs.usage_recorded_at IS NULL)"
+
+func protectedBillingReservations(ids []string) map[string]struct{} {
+	protected := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			protected[id] = struct{}{}
+		}
+	}
+	return protected
+}
+
+// Capacity pressure uses the same activity/media exclusions as periodic cleanup.
+// Scan/delete in bounded chunks so a large protected set never becomes a SQL
+// parameter list (or an unbounded allocation on the reservation hot path).
+func cleanupExpiredBillingReservations(tx *gorm.DB, keyID uint64, now time.Time, ownerID string, protected map[string]struct{}) error {
 	if err := lockClientKey(tx, keyID); err != nil {
 		return err
 	}
-	var amount int64
-	if err := tx.Model(&billingReservationModel{}).Where("client_key_id = ? AND expires_at <= ?", keyID, now).Select("COALESCE(SUM(amount), 0)").Scan(&amount).Error; err != nil || amount <= 0 {
-		return err
+	after := ""
+	for {
+		var rows []billingReservationModel
+		if err := tx.Model(&billingReservationModel{}).Select("event_id", "amount").Where("client_key_id = ? AND expires_at <= ? AND event_id > ? AND owner_id = ? AND owner_id <> ''", keyID, now, after, ownerID).Where(noPendingMediaUsage).Order("event_id").Limit(500).Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		ids := make([]string, 0, len(rows))
+		var amount int64
+		for _, row := range rows {
+			if _, skip := protected[row.EventID]; skip {
+				continue
+			}
+			ids = append(ids, row.EventID)
+			amount += row.Amount
+		}
+		if len(ids) > 0 {
+			result := tx.Where("client_key_id = ? AND event_id IN ? AND expires_at <= ? AND owner_id = ? AND owner_id <> ''", keyID, ids, now, ownerID).Where(noPendingMediaUsage).Delete(&billingReservationModel{})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != int64(len(ids)) {
+				return repository.ErrConflict
+			}
+			if err := decrementReservedUsage(tx, keyID, amount); err != nil {
+				return err
+			}
+		}
+		if len(rows) < 500 {
+			return nil
+		}
+		after = rows[len(rows)-1].EventID
 	}
-	result := tx.Where("client_key_id = ? AND expires_at <= ?", keyID, now).Delete(&billingReservationModel{})
-	if result.Error != nil || result.RowsAffected == 0 {
-		return result.Error
-	}
-	return decrementReservedUsage(tx, keyID, amount)
 }
 
 func lockClientKey(tx *gorm.DB, keyID uint64) error {
@@ -460,18 +504,6 @@ func decrementReservedUsage(tx *gorm.DB, keyID uint64, amount int64) error {
 		"reserved_usage_usd_ticks",
 		gorm.Expr("CASE WHEN reserved_usage_usd_ticks <= ? THEN 0 ELSE reserved_usage_usd_ticks - ? END", amount, amount),
 	).Error
-}
-
-func (r *ClientKeyRepository) allowedModels(ctx context.Context, keyID uint64) ([]uint64, error) {
-	var rows []clientKeyModelPermission
-	if err := r.db.db.WithContext(ctx).Where("client_key_id = ?", keyID).Order("model_route_id ASC").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make([]uint64, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, row.ModelRouteID)
-	}
-	return out, nil
 }
 
 func (r *ClientKeyRepository) allowedModelsForKeys(ctx context.Context, keyIDs []uint64) (map[uint64][]uint64, error) {
@@ -490,6 +522,15 @@ func (r *ClientKeyRepository) allowedModelsForKeys(ctx context.Context, keyIDs [
 }
 
 func replacePermissions(tx *gorm.DB, keyID uint64, modelIDs []uint64) error {
+	if len(modelIDs) > 0 {
+		var count int64
+		if err := tx.Model(&modelRouteModel{}).Where("id IN ?", modelIDs).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != int64(len(modelIDs)) {
+			return repository.ErrInvalidRecord
+		}
+	}
 	if err := tx.Where("client_key_id = ?", keyID).Delete(&clientKeyModelPermission{}).Error; err != nil {
 		return err
 	}
@@ -498,7 +539,11 @@ func replacePermissions(tx *gorm.DB, keyID uint64, modelIDs []uint64) error {
 		rows = append(rows, clientKeyModelPermission{ClientKeyID: keyID, ModelRouteID: modelID})
 	}
 	if len(rows) > 0 {
-		return tx.CreateInBatches(rows, 200).Error
+		err := tx.CreateInBatches(rows, 200).Error
+		if errors.Is(err, gorm.ErrForeignKeyViolated) {
+			return repository.ErrInvalidRecord
+		}
+		return err
 	}
 	return nil
 }

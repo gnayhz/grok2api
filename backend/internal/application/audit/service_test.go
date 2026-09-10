@@ -29,8 +29,8 @@ func TestServiceCloseFlushesQueuedAudits(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := relational.NewAuditRepository(database)
-	service := NewService(repository, slog.Default(), 16, 8, time.Hour)
-	service.Start()
+	service := newTestService(t, repository, slog.Default(), 16, 8, time.Hour)
+	startAuditService(t, service)
 	for index := range 5 {
 		if err := service.Create(ctx, auditdomain.Record{RequestID: "queued-" + string(rune('a'+index)), ClientKeyID: 1, ModelRouteID: 1, StatusCode: 200, CreatedAt: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
@@ -53,8 +53,8 @@ func TestServiceCloseFlushesQueuedAudits(t *testing.T) {
 func TestCreateCapturesClientIPFromRequestContext(t *testing.T) {
 	repo := newGatedAuditRepository()
 	close(repo.release)
-	service := NewService(repo, slog.Default(), 8, 4, time.Hour)
-	service.Start()
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Hour)
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 
 	ctx := requestmeta.WithClientIP(context.Background(), "2001:db8::10")
@@ -74,8 +74,8 @@ func TestCreateCapturesClientIPFromRequestContext(t *testing.T) {
 func TestCreateKeepsOnlySanitizedRequestMetadata(t *testing.T) {
 	repo := newGatedAuditRepository()
 	close(repo.release)
-	service := NewService(repo, slog.Default(), 8, 1, time.Hour)
-	service.Start()
+	service := newTestService(t, repo, slog.Default(), 8, 1, time.Hour)
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 
 	record := auditdomain.Record{
@@ -107,10 +107,10 @@ func TestCreateKeepsOnlySanitizedRequestMetadata(t *testing.T) {
 
 func TestAuditBatchRetriesTransientDatabaseFailure(t *testing.T) {
 	repo := &flakyAuditRepository{failures: 5}
-	service := NewService(repo, slog.Default(), 8, 4, time.Hour)
-	service.Start()
-	if !service.Record(auditdomain.Record{RequestID: "retry", StatusCode: 200}) {
-		t.Fatal("record was not queued")
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Hour)
+	startAuditService(t, service)
+	if err := service.Create(context.Background(), auditdomain.Record{RequestID: "retry", StatusCode: 200}); err != nil {
+		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -124,10 +124,10 @@ func TestAuditBatchRetriesTransientDatabaseFailure(t *testing.T) {
 
 func TestAuditBatchRecoversRepositoryPanicAndRetries(t *testing.T) {
 	repo := &panicAuditRepository{}
-	service := NewService(repo, slog.Default(), 8, 1, time.Hour)
-	service.Start()
-	if !service.Record(auditdomain.Record{RequestID: "panic-retry", StatusCode: 200}) {
-		t.Fatal("record was not queued")
+	service := newTestService(t, repo, slog.Default(), 8, 1, time.Hour)
+	startAuditService(t, service)
+	if err := service.Create(context.Background(), auditdomain.Record{RequestID: "panic-retry", StatusCode: 200}); err != nil {
+		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -162,7 +162,7 @@ func (r *summaryAuditRepository) Summarize(context.Context, repository.AuditSumm
 
 func TestSummaryCachesRepeatedAggregate(t *testing.T) {
 	repo := &summaryAuditRepository{}
-	service := NewService(repo, slog.Default(), 8, 4, time.Second)
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Second)
 	service.now = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
 
 	if _, err := service.Summary(context.Background(), "", "24h", ListFilter{}); err != nil {
@@ -182,7 +182,7 @@ func TestSummaryCachesRepeatedAggregate(t *testing.T) {
 // filtered list could sit next to stale unfiltered metric cards).
 func TestSummaryCacheKeyIncludesErrorCode(t *testing.T) {
 	repo := &summaryAuditRepository{}
-	service := NewService(repo, slog.Default(), 8, 4, time.Second)
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Second)
 	service.now = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
 
 	if _, err := service.Summary(context.Background(), "", "24h", ListFilter{ErrorCode: "quality_degraded"}); err != nil {
@@ -197,7 +197,7 @@ func TestSummaryCacheKeyIncludesErrorCode(t *testing.T) {
 }
 func TestSummaryFreshBypassesAggregateCache(t *testing.T) {
 	repo := &summaryAuditRepository{}
-	service := NewService(repo, slog.Default(), 8, 4, time.Second)
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Second)
 	service.now = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
 
 	if _, err := service.Summary(context.Background(), "", "24h", ListFilter{}); err != nil {
@@ -211,16 +211,16 @@ func TestSummaryFreshBypassesAggregateCache(t *testing.T) {
 	}
 }
 
-func TestCreateDurableHonorsCallerDeadline(t *testing.T) {
+func TestCreateHonorsCallerDeadline(t *testing.T) {
 	release := make(chan struct{})
 	repo := &blockingAuditRepository{release: release}
-	service := NewService(repo, slog.Default(), 8, 4, time.Second)
-	service.Start()
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Second)
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	err := service.CreateDurable(ctx, auditdomain.Record{EventID: "deadline"})
+	err := service.Create(ctx, auditdomain.Record{EventID: "deadline"})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v", err)
 	}
@@ -231,36 +231,33 @@ func TestCreateDurableHonorsCallerDeadline(t *testing.T) {
 }
 
 func TestCreateRequiresStartedWriter(t *testing.T) {
-	service := NewService(&toggleAuditRepository{}, slog.Default(), 8, 4, time.Second)
+	service := newTestService(t, &toggleAuditRepository{}, slog.Default(), 8, 4, time.Second)
 	err := service.Create(context.Background(), auditdomain.Record{EventID: "not-started"})
 	if !errors.Is(err, ErrWriterUnavailable) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestCloseStartsWriterAndFlushesPrestartRecords(t *testing.T) {
+func TestCloseUnstartedWriterDoesNotStartSQLWork(t *testing.T) {
 	repo := newGatedAuditRepository()
-	close(repo.release)
-	service := NewService(repo, slog.Default(), 8, 8, time.Hour)
-	if !service.Record(auditdomain.Record{EventID: "prestart-record"}) {
-		t.Fatal("record was not queued")
-	}
+	service := newTestService(t, repo, slog.Default(), 8, 8, time.Hour)
 	closeAuditService(t, service)
-	if calls := repo.calls.Load(); calls != 1 {
-		t.Fatalf("CreateBatch calls = %d", calls)
+	if err := service.Start(context.Background()); !errors.Is(err, ErrWriterUnavailable) {
+		t.Fatalf("start after close: %v", err)
 	}
-	select {
-	case <-repo.committed:
-	default:
-		t.Fatal("prestart record was not committed")
+	if err := service.Create(context.Background(), auditdomain.Record{EventID: "closed"}); !errors.Is(err, ErrWriterUnavailable) {
+		t.Fatalf("create after close: %v", err)
+	}
+	if calls := repo.calls.Load(); calls != 0 {
+		t.Fatalf("SQL started during close: %d", calls)
 	}
 }
 
 func TestAcknowledgedWritesWaitForCommitAndCoalesce(t *testing.T) {
 	repo := newGatedAuditRepository()
-	service := NewService(repo, slog.Default(), 32, 32, time.Second)
+	service := newTestService(t, repo, slog.Default(), 32, 32, time.Second)
 	service.UpdateWriterConfig(32, time.Second, 100*time.Millisecond)
-	service.Start()
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 
 	const writeCount = 8
@@ -302,9 +299,9 @@ func TestAcknowledgedWritesWaitForCommitAndCoalesce(t *testing.T) {
 
 func TestAcknowledgedWriteUsesCallerBudgetWhenQueueIsFull(t *testing.T) {
 	repo := newGatedAuditRepository()
-	service := NewService(repo, slog.Default(), 1, 1, time.Second)
+	service := newTestService(t, repo, slog.Default(), 1, 1, time.Second)
 	service.UpdateWriterConfig(1, time.Second, time.Millisecond)
-	service.Start()
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 
 	firstResult := make(chan error, 1)
@@ -316,9 +313,6 @@ func TestAcknowledgedWriteUsesCallerBudgetWhenQueueIsFull(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first batch did not start")
 	}
-	if !service.Record(auditdomain.Record{EventID: "evt_queue_budget_buffered_02", RequestID: "buffered", ClientKeyID: 1, ModelRouteID: 1, StatusCode: 200, CreatedAt: time.Now().UTC()}) {
-		t.Fatal("failed to fill the audit queue")
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -329,7 +323,7 @@ func TestAcknowledgedWriteUsesCallerBudgetWhenQueueIsFull(t *testing.T) {
 	select {
 	case err := <-ackResult:
 		t.Fatalf("acknowledged write returned before queue capacity recovered: %v", err)
-	case <-time.After(2 * auditEnqueueWait):
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(repo.release)
@@ -353,16 +347,12 @@ func TestWriterIsolatesInvalidAuditRecordFromValidBatch(t *testing.T) {
 	}
 	baseRepo := relational.NewAuditRepository(database)
 	repo := &observedBatchAuditRepository{AuditRepository: baseRepo, sizes: make(chan int, 4)}
-	service := NewService(repo, slog.Default(), 8, 8, time.Second)
+	service := newTestService(t, repo, slog.Default(), 8, 8, time.Second)
 	service.UpdateWriterConfig(8, time.Second, 100*time.Millisecond)
 	service.UpdateLedgerConfig(LedgerConfig{Mode: LedgerModeObserve, FailureThreshold: 1, UnhealthyGrace: time.Hour, QueueHighWatermarkPercent: 90})
-	droppedEvents := make(chan string, 1)
-	service.SetDropObserver(func(eventIDs []string) {
-		if len(eventIDs) > 0 {
-			droppedEvents <- eventIDs[0]
-		}
-	})
-	service.Start()
+	observer := newBillingObserver()
+	service.SetBillingObserver(observer)
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 
 	start := make(chan struct{})
@@ -411,27 +401,22 @@ func TestWriterIsolatesInvalidAuditRecordFromValidBatch(t *testing.T) {
 	if total != 1 {
 		t.Fatalf("persisted audits = %d, want 1", total)
 	}
-	select {
-	case eventID := <-droppedEvents:
-		if eventID != "evt_isolated_invalid_record_02" {
-			t.Fatalf("dropped event = %q", eventID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("drop observer was not notified")
+	if snapshot := service.LedgerSnapshot(); snapshot.Ready || snapshot.Irrecoverable || snapshot.Dropped != 0 || snapshot.Rejected != 1 || snapshot.QueueDepth != 1 {
+		t.Fatalf("ledger snapshot after retained invalid record = %#v", snapshot)
 	}
-	if snapshot := service.LedgerSnapshot(); snapshot.Ready || !snapshot.Irrecoverable || snapshot.Dropped != 1 {
-		t.Fatalf("ledger snapshot after rejected record = %#v", snapshot)
+	if !observer.isProtected("evt_isolated_invalid_record_02") || observer.isProtected("evt_isolated_valid_record_001") {
+		t.Fatal("invalid fact lost protection or settled fact retained it")
 	}
 	if err := service.CheckLedgerReady(); !errors.Is(err, ErrLedgerUnavailable) {
-		t.Fatalf("irrecoverable drop did not block observe mode: %v", err)
+		t.Fatalf("retained invalid record did not block observe mode: %v", err)
 	}
 }
 
 func TestCallerTimeoutDoesNotCancelQueuedSettlement(t *testing.T) {
 	repo := newGatedAuditRepository()
-	service := NewService(repo, slog.Default(), 8, 8, time.Second)
+	service := newTestService(t, repo, slog.Default(), 8, 8, time.Second)
 	service.UpdateWriterConfig(8, time.Second, time.Millisecond)
-	service.Start()
+	startAuditService(t, service)
 	t.Cleanup(func() { closeAuditService(t, service) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
@@ -464,8 +449,8 @@ func TestLedgerReadinessObserveAndEnforceModes(t *testing.T) {
 	var nowNanos atomic.Int64
 	nowNanos.Store(initialNow.UnixNano())
 	repo := &toggleAuditRepository{err: errors.New("database unavailable")}
-	service := NewService(repo, slog.Default(), 8, 4, time.Second)
-	service.Start()
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Second)
+	startAuditService(t, service)
 	t.Cleanup(func() {
 		repo.setError(nil)
 		closeAuditService(t, service)
@@ -474,7 +459,7 @@ func TestLedgerReadinessObserveAndEnforceModes(t *testing.T) {
 	service.UpdateLedgerConfig(LedgerConfig{Mode: LedgerModeObserve, FailureThreshold: 1, UnhealthyGrace: time.Second, QueueHighWatermarkPercent: 90})
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer writeCancel()
-	if err := service.CreateDurable(writeCtx, auditdomain.Record{EventID: "observe"}); !errors.Is(err, context.DeadlineExceeded) {
+	if err := service.Create(writeCtx, auditdomain.Record{EventID: "observe"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("write error = %v", err)
 	}
 	nowNanos.Add(int64(2 * time.Second))
@@ -492,7 +477,7 @@ func TestLedgerReadinessObserveAndEnforceModes(t *testing.T) {
 	repo.setError(nil)
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer recoveryCancel()
-	if err := service.CreateDurable(recoveryCtx, auditdomain.Record{EventID: "recovered"}); err != nil {
+	if err := service.Create(recoveryCtx, auditdomain.Record{EventID: "recovered"}); err != nil {
 		t.Fatal(err)
 	}
 	if snapshot := service.LedgerSnapshot(); !snapshot.Ready || snapshot.ConsecutiveFailures != 0 {
@@ -502,11 +487,12 @@ func TestLedgerReadinessObserveAndEnforceModes(t *testing.T) {
 
 func TestLedgerReadinessDetectsSustainedQueuePressure(t *testing.T) {
 	now := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
-	service := NewService(&toggleAuditRepository{}, slog.Default(), 2, 2, time.Hour)
+	service := newTestService(t, &toggleAuditRepository{}, slog.Default(), 2, 2, time.Hour)
 	service.now = func() time.Time { return now }
 	service.UpdateLedgerConfig(LedgerConfig{Mode: LedgerModeEnforce, FailureThreshold: 3, UnhealthyGrace: time.Second, QueueHighWatermarkPercent: 50})
-	if !service.Record(auditdomain.Record{EventID: "queued"}) {
-		t.Fatal("record was not queued")
+	entry, err := service.pending.Append(context.Background(), auditdomain.Record{EventID: "queued"})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if snapshot := service.LedgerSnapshot(); !snapshot.Ready {
 		t.Fatalf("queue pressure should honor grace: %#v", snapshot)
@@ -515,40 +501,64 @@ func TestLedgerReadinessDetectsSustainedQueuePressure(t *testing.T) {
 	if err := service.CheckLedgerReady(); !errors.Is(err, ErrLedgerUnavailable) {
 		t.Fatalf("queue pressure readiness error = %v", err)
 	}
-	<-service.queue
+	if err := service.pending.Acknowledge(context.Background(), []uint64{entry.ID}); err != nil {
+		t.Fatal(err)
+	}
 	service.recordLedgerSuccess()
 	if snapshot := service.LedgerSnapshot(); !snapshot.Ready {
 		t.Fatalf("drained queue did not restore readiness: %#v", snapshot)
 	}
 }
 
-func TestCommitObserverRunsOnlyAfterDurableCommit(t *testing.T) {
-	repo := &toggleAuditRepository{}
-	service := NewService(repo, slog.Default(), 8, 4, time.Hour)
-	service.Start()
-	var mu sync.Mutex
-	var committed []string
-	service.SetCommitObserver(func(values []string) {
-		mu.Lock()
-		committed = append(committed, values...)
-		mu.Unlock()
-	})
-	if err := service.CreateDurable(context.Background(), auditdomain.Record{EventID: "sync"}); err != nil {
+func TestBillingProtectionTransfersOnlyAfterSQLCommit(t *testing.T) {
+	repo := newGatedAuditRepository()
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Hour)
+	observer := newBillingObserver()
+	service.SetBillingObserver(observer)
+	startAuditService(t, service)
+	result := make(chan error, 1)
+	go func() { result <- service.Create(context.Background(), auditdomain.Record{EventID: "protected"}) }()
+	select {
+	case <-repo.started:
+	case <-time.After(time.Second):
+		t.Fatal("SQL did not start")
+	}
+	if !observer.isProtected("protected") {
+		t.Fatal("durable fact not protected before commit")
+	}
+	close(repo.release)
+	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
-	if !service.Record(auditdomain.Record{EventID: "batch"}) {
-		t.Fatal("record was not queued")
+	if observer.isProtected("protected") {
+		t.Fatal("settled fact still protected")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := service.Close(ctx); err != nil {
-		t.Fatal(err)
+}
+
+type billingObserver struct {
+	mu        sync.Mutex
+	protected map[string]bool
+}
+
+func newBillingObserver() *billingObserver { return &billingObserver{protected: make(map[string]bool)} }
+func (o *billingObserver) ProtectBillingBatch(ids []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, id := range ids {
+		o.protected[id] = true
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(committed) != 2 || committed[0] != "sync" || committed[1] != "batch" {
-		t.Fatalf("committed = %#v", committed)
+}
+func (o *billingObserver) CompleteBillingBatch(ids []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, id := range ids {
+		delete(o.protected, id)
 	}
+}
+func (o *billingObserver) isProtected(id string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.protected[id]
 }
 
 type toggleAuditRepository struct {
@@ -688,7 +698,7 @@ func TestSummaryUsesOfficialPricesAndExcludesUnknownModels(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(repository, slog.Default(), 16, 8, time.Hour)
+	service := newTestService(t, repository, slog.Default(), 16, 8, time.Hour)
 	service.now = func() time.Time { return now }
 	result, err := service.Summary(ctx, "", "24h", ListFilter{})
 	if err != nil {
@@ -724,7 +734,7 @@ func TestListCursorKeepsStableOrderAcrossEqualSortValues(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(repo, slog.Default(), 8, 4, time.Hour)
+	service := newTestService(t, repo, slog.Default(), 8, 4, time.Hour)
 	service.now = func() time.Time { return now }
 	filter := ListFilter{Sort: repository.SortQuery{Field: "tokens", Direction: repository.SortDescending}}
 	first, err := service.ListCursor(ctx, "", 2, "", "24h", filter)

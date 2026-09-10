@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 func messagesResponse(value parsedResponse, options ResponseOptions) map[string]any {
@@ -33,7 +35,7 @@ func messagesResponse(value parsedResponse, options ResponseOptions) map[string]
 	}
 	for _, call := range value.Calls {
 		var input any = map[string]any{}
-		if json.Unmarshal([]byte(call.Arguments), &input) != nil {
+		if jsonvalue.Unmarshal([]byte(call.Arguments), &input) != nil {
 			input = map[string]any{}
 		}
 		content = append(content, map[string]any{"type": "tool_use", "id": anthropicToolUseID(call.CallID), "name": call.Name, "input": input})

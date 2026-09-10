@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"testing"
 	"time"
 )
@@ -10,12 +11,12 @@ func TestQuotaRefreshCoordinatorCompareAndClear(t *testing.T) {
 	coordinator := NewQuotaRefreshCoordinator()
 	ctx := context.Background()
 	first, err := coordinator.MarkQuotaRefreshDirty(ctx, 42, "fast", time.Hour)
-	if err != nil || first != 1 {
-		t.Fatalf("first generation = %d, err = %v", first, err)
+	if err != nil || first.Generation != 1 {
+		t.Fatalf("first generation = %+v, err = %v", first, err)
 	}
 	second, err := coordinator.MarkQuotaRefreshDirty(ctx, 42, "fast", time.Hour)
-	if err != nil || second != 2 {
-		t.Fatalf("second generation = %d, err = %v", second, err)
+	if err != nil || second.Generation != 2 {
+		t.Fatalf("second generation = %+v, err = %v", second, err)
 	}
 	if cleared, err := coordinator.ClearQuotaRefreshDirty(ctx, 42, "fast", first); err != nil || cleared {
 		t.Fatalf("stale clear = %v, err = %v", cleared, err)
@@ -39,10 +40,10 @@ func TestQuotaRefreshCoordinatorExpiredLookupRemovesDirtyMembership(t *testing.T
 		coordinator.values[key] = state
 	}
 
-	if generation, dirty, err := coordinator.QuotaRefreshGeneration(ctx, 41, "fast"); err != nil || generation != 0 || dirty {
-		t.Fatalf("expired generation = %d, dirty = %v, err = %v", generation, dirty, err)
+	if generation, dirty, err := coordinator.GetQuotaRefreshState(ctx, 41, "fast"); err != nil || generation.Generation != 0 || dirty {
+		t.Fatalf("expired generation = %+v, dirty = %v, err = %v", generation, dirty, err)
 	}
-	if cleared, err := coordinator.ClearQuotaRefreshDirty(ctx, 42, "fast", 1); err != nil || cleared {
+	if cleared, err := coordinator.ClearQuotaRefreshDirty(ctx, 42, "fast", repository.QuotaRefreshVersion{Generation: 1}); err != nil || cleared {
 		t.Fatalf("expired clear = %v, err = %v", cleared, err)
 	}
 	if len(coordinator.dirty) != 0 {
@@ -69,7 +70,7 @@ func TestQuotaRefreshCoordinatorListExcludesClearedAndExpiredState(t *testing.T)
 	expired.expiresAt = time.Now().Add(-time.Second)
 	coordinator.values[expiredKey] = expired
 
-	states, err := coordinator.ListQuotaRefreshDirty(ctx, time.Now(), 10)
+	states, _, err := coordinator.ScanQuotaRefreshDirty(ctx, time.Now(), 0, 10)
 	if err != nil {
 		t.Fatalf("list dirty states: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestQuotaRefreshCoordinatorCompactsStaleExpiryGenerations(t *testing.T) {
 	if got, maxExpected := len(coordinator.expires), quotaRefreshExpiryCompactionMinStale+2; got > maxExpected {
 		t.Fatalf("expiry heap retained %d stale generations, want at most %d", got, maxExpected)
 	}
-	if generation, dirty, err := coordinator.QuotaRefreshGeneration(ctx, 42, "fast"); err != nil || !dirty || generation != updates {
-		t.Fatalf("generation = %d, dirty = %v, err = %v", generation, dirty, err)
+	if generation, dirty, err := coordinator.GetQuotaRefreshState(ctx, 42, "fast"); err != nil || !dirty || generation.Generation != updates {
+		t.Fatalf("generation = %+v, dirty = %v, err = %v", generation, dirty, err)
 	}
 }

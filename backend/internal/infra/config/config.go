@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	guardpolicy "github.com/chenyme/grok2api/backend/internal/domain/guard"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/pkg/signerurl"
 	"gopkg.in/yaml.v3"
@@ -69,7 +71,6 @@ type Config struct {
 	Routing           RoutingConfig           `yaml:"routing"`
 	Audit             AuditConfig             `yaml:"audit"`
 	RequestRetry      RequestRetryConfig      `yaml:"requestRetry"`
-	AccountRisk       AccountRiskConfig       `yaml:"accountRisk"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
 	Egress            EgressConfig            `yaml:"egress"`
 	Accounts          AccountsConfig          `yaml:"-"`
@@ -227,30 +228,33 @@ type RoutingConfig struct {
 	VideoMaxAttempts int      `yaml:"videoMaxAttempts"`
 	PreferFreeBuild  bool     `yaml:"preferFreeBuild"`
 	// MarkBuildChatDeniedAsReauth 为 true 时，Build chat 权限拒绝标 reauthRequired，默认 false。
-	MarkBuildChatDeniedAsReauth bool     `yaml:"markBuildChatDeniedAsReauth"`
-	AccountIsolatedConnections  bool     `yaml:"accountIsolatedConnections"`
-	SegmentedSelectorEnabled    bool     `yaml:"segmentedSelectorEnabled"`
-	SegmentedMinCandidates      int      `yaml:"segmentedSelectorMinCandidates"`
-	SegmentedWindowSize         int      `yaml:"segmentedSelectorWindowSize"`
-	ReasoningReplayEnabled      bool     `yaml:"reasoningReplayEnabled"`
-	ReasoningReplayTTL          Duration `yaml:"reasoningReplayTTL"`
-	ReasoningReplayMaxEntries   int      `yaml:"reasoningReplayMaxEntries"`
+	MarkBuildChatDeniedAsReauth  bool     `yaml:"markBuildChatDeniedAsReauth"`
+	AccountIsolatedConnections   bool     `yaml:"accountIsolatedConnections"`
+	SegmentedSelectorEnabled     bool     `yaml:"segmentedSelectorEnabled"`
+	SegmentedMinCandidates       int      `yaml:"segmentedSelectorMinCandidates"`
+	SegmentedWindowSize          int      `yaml:"segmentedSelectorWindowSize"`
+	ReasoningReplayEnabled       bool     `yaml:"reasoningReplayEnabled"`
+	ReasoningReplayTTL           Duration `yaml:"reasoningReplayTTL"`
+	ReasoningReplayMaxEntries    int      `yaml:"reasoningReplayMaxEntries"`
+	ConversationHistoryRetention Duration `yaml:"conversationHistoryRetention"`
+	ConversationHistoryMaxBytes  int64    `yaml:"conversationHistoryMaxBytes"`
 }
 
 type AuditConfig struct {
-	BufferSize                  int      `yaml:"bufferSize"`
-	BatchSize                   int      `yaml:"batchSize"`
-	FlushInterval               Duration `yaml:"flushInterval"`
-	CommitDelay                 Duration `yaml:"commitDelay"`
-	RetentionDays               int      `yaml:"retentionDays"`
-	LedgerMode                  string   `yaml:"ledgerMode"`
-	LedgerFailureThreshold      int      `yaml:"ledgerFailureThreshold"`
-	LedgerUnhealthyGrace        Duration `yaml:"ledgerUnhealthyGrace"`
-	LedgerQueueHighWatermarkPct int      `yaml:"ledgerQueueHighWatermarkPercent"`
-	// Retention 是审计记录保留时长：超过该时长的 request_audits 及其
-	// attempts 明细会被后台任务分批删除（0 = 永久保留，默认）。修改需
-	// 重启进程（审计不在运行时设置面内）。非零须在 24h-8760h 之间。
-	Retention Duration `yaml:"retention"`
+	JournalDirectory            string    `yaml:"journalDirectory"`
+	JournalMaxBytes             int64     `yaml:"journalMaxBytes"`
+	BufferSize                  int       `yaml:"bufferSize"`
+	BatchSize                   int       `yaml:"batchSize"`
+	FlushInterval               Duration  `yaml:"flushInterval"`
+	CommitDelay                 Duration  `yaml:"commitDelay"`
+	RetentionPeriod             Duration  `yaml:"retentionPeriod"`
+	RetentionSource             string    `yaml:"-"`
+	LegacyRetentionDays         *int      `yaml:"retentionDays,omitempty"`
+	LegacyRetention             *Duration `yaml:"retention,omitempty"`
+	LedgerMode                  string    `yaml:"ledgerMode"`
+	LedgerFailureThreshold      int       `yaml:"ledgerFailureThreshold"`
+	LedgerUnhealthyGrace        Duration  `yaml:"ledgerUnhealthyGrace"`
+	LedgerQueueHighWatermarkPct int       `yaml:"ledgerQueueHighWatermarkPercent"`
 }
 
 // RequestRetryConfig holds the real-time routing guard policy（实时路由守卫，
@@ -263,18 +267,11 @@ type RequestRetryConfig struct {
 	OnExhausted     string   `yaml:"onExhausted"`
 	AccountCooldown Duration `yaml:"accountCooldown"`
 
-	// GuardedModels 限定守卫介入的模型白名单（空=全部推理模型，向后兼容）。
-	// 守卫价值集中在主力推理模型（grok-4.5/4.6）；边缘/退役模型介入只会
-	// 产出噪声拦截（grok-4.3 四连 503 实证）。条目匹配 public/
-	// upstream 模型名，"grok-4.6" 前缀覆盖 "grok-4.6-xhigh" 档位别名。
+	// GuardedModels is the bootstrap selection. Production uses its default
+	// model list when empty, then publishes exact names in the guard snapshot.
 	// yaml 级配置，重启生效；管理端保存不会清空该字段。
 	GuardedModels []string `yaml:"guardedModels"`
 
-	// SameAccountRetry retries the withholding account once before switching.
-	// 仅在旋转代理池出口（每请求换新 IP）下生效：直连/固定出口时网关会
-	// 强制忽略该开关——同号重试再次进入同一脏 IP 的恢复概率≈0。
-	// 默认开启；显式置 false 关闭。
-	SameAccountRetry bool `yaml:"sameAccountRetry"`
 	// EvidenceTimeout 是流式请求的零证据截止：静默期超过该时长仍无思考
 	// 证据且无任何可见输出时，中止该次上游尝试并按空闲路径重试
 	// （0=默认 3.5s）。降智流已被 item.done 零延迟拦截截胡，该截止仅作为
@@ -286,6 +283,10 @@ type RequestRetryConfig struct {
 	// 上游尝试并重试（0=默认 5s）。仅当 CreatedTimeout 短于 EvidenceTimeout
 	// 时比证据截止更早；默认 5s>3.5s 时空流先走证据臂。
 	CreatedTimeout Duration `yaml:"createdTimeout"`
+	// Admission budgets bound the whole guard phase, including retries.
+	// Zero inherits the domain defaults (30s / 3m with tools).
+	AdmissionTimeout     Duration `yaml:"admissionTimeout"`
+	ToolAdmissionTimeout Duration `yaml:"toolAdmissionTimeout"`
 	// IdleAccountCooldown 是空流/静默超时的账号冷却（0=默认 15m），独立于
 	// missing-thinking 的 AccountCooldown；上下限与 AccountCooldown 相同。
 	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
@@ -378,6 +379,9 @@ func Load(path string) (Config, error) {
 				}
 				return Config{}, errors.New("配置文件只能包含一个 YAML 文档")
 			}
+			if err := resolveAuditRetention(&cfg.Audit, data); err != nil {
+				return Config{}, err
+			}
 		}
 	}
 	if loadedFrom != "" {
@@ -437,6 +441,10 @@ func resolveRelativePaths(cfg *Config, configPath string) error {
 		if path != "" && !filepath.IsAbs(path) {
 			cfg.Database.SQLite.Path = filepath.Clean(filepath.Join(baseDir, path))
 		}
+	}
+	journalPath := strings.TrimSpace(cfg.Audit.JournalDirectory)
+	if journalPath != "" && !filepath.IsAbs(journalPath) {
+		cfg.Audit.JournalDirectory = filepath.Clean(filepath.Join(baseDir, journalPath))
 	}
 	mediaPath := strings.TrimSpace(cfg.Media.Local.Path)
 	if mediaPath != "" && !filepath.IsAbs(mediaPath) {
@@ -720,8 +728,20 @@ func (c Config) Validate() error {
 	if c.Routing.ReasoningReplayTTL.Value() <= 0 || c.Routing.ReasoningReplayTTL.Value() > 24*time.Hour {
 		return errors.New("routing.reasoningReplayTTL 必须在 1 纳秒到 24 小时之间")
 	}
+	if c.Routing.ConversationHistoryRetention.Value() < time.Hour || c.Routing.ConversationHistoryRetention.Value() > 90*24*time.Hour {
+		return errors.New("routing.conversationHistoryRetention 必须在 1 小时到 90 天之间")
+	}
+	if c.Routing.ConversationHistoryMaxBytes < 1<<20 || c.Routing.ConversationHistoryMaxBytes > 1<<30 {
+		return errors.New("routing.conversationHistoryMaxBytes 必须在 1 MiB 到 1 GiB 之间")
+	}
 	if c.Routing.ReasoningReplayMaxEntries < 100 || c.Routing.ReasoningReplayMaxEntries > 1000000 {
 		return errors.New("routing.reasoningReplayMaxEntries 必须在 100 到 1000000 之间")
+	}
+	if strings.TrimSpace(c.Audit.JournalDirectory) == "" {
+		return errors.New("audit.journalDirectory 不能为空")
+	}
+	if c.Audit.JournalMaxBytes < 1<<20 || c.Audit.JournalMaxBytes > 64<<30 {
+		return errors.New("audit.journalMaxBytes 必须在 1 MiB 到 64 GiB 之间")
 	}
 	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize {
 		return errors.New("audit.bufferSize 必须在 1 到 100000 之间")
@@ -736,11 +756,8 @@ func (c Config) Validate() error {
 		return errors.New("audit.commitDelay 必须在 1ms 到 50ms 之间")
 	}
 
-	if d := c.Audit.Retention.Value(); d != 0 && (d < 24*time.Hour || d > 8760*time.Hour) {
-		return errors.New("audit.retention 必须在 24h 到 8760h 之间（0 表示永久保留）")
-	}
-	if c.Audit.RetentionDays < 0 || c.Audit.RetentionDays > 365 {
-		return errors.New("audit.retentionDays 必须在 0 到 365 之间")
+	if err := (auditdomain.RetentionPolicy{Period: c.Audit.RetentionPeriod.Value()}).Validate(); err != nil {
+		return err
 	}
 	if c.Audit.LedgerMode != "observe" && c.Audit.LedgerMode != "enforce" {
 		return errors.New("audit.ledgerMode 必须是 observe 或 enforce")
@@ -755,9 +772,6 @@ func (c Config) Validate() error {
 		return errors.New("audit.ledgerQueueHighWatermarkPercent 必须在 50 到 100 之间")
 	}
 	if err := validateRequestRetry(c.RequestRetry); err != nil {
-		return err
-	}
-	if err := c.AccountRisk.Validate(); err != nil {
 		return err
 	}
 	if err := c.Egress.Validate(); err != nil {
@@ -786,43 +800,27 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// GuardPolicy decodes the legacy file shape. Domain policy owns bootstrap
+// compatibility, defaults, normalization and validation.
+func (value RequestRetryConfig) GuardPolicy() guardpolicy.Config {
+	return guardpolicy.Bootstrap(guardpolicy.Config{
+		Enabled: value.Enabled, MaxAttempts: value.MaxAttempts, GuardedModels: value.GuardedModels,
+		EvidenceTimeout: value.EvidenceTimeout.Value(), CreatedTimeout: value.CreatedTimeout.Value(),
+		AdmissionTimeout: value.AdmissionTimeout.Value(), ToolAdmissionTimeout: value.ToolAdmissionTimeout.Value(),
+		AccountCooldown: value.AccountCooldown.Value(), IdleAccountCooldown: value.IdleAccountCooldown.Value(),
+	})
+}
+
 func validateRequestRetry(value RequestRetryConfig) error {
-	if !value.Enabled {
-		return nil
-	}
-	// 预算是安全属性而非调优旋钮（蓝图 §3.2）：上限 3 = 默认 2（初始+1 次
-	// 重试）留一档旋转池同号重试余量；历史上限 6 会重建零延迟拦截前的
-	// 90-120s 串行黑洞性时延。
-	if value.MaxAttempts != 0 && (value.MaxAttempts < 1 || value.MaxAttempts > 3) {
-		return errors.New("requestRetry.maxAttempts 必须在 1 到 3 之间（全局请求预算上限，默认 2）")
-	}
+	// The deprecated field remains readable for upgrades; effective policy is
+	// always fail_closed. This check validates the old encoding, not a choice.
 	switch strings.TrimSpace(value.OnExhausted) {
 	case "", "fail_open", "fail_closed":
 	default:
-		return errors.New("requestRetry.onExhausted 必须是 fail_open 或 fail_closed")
+		return errors.New("requestRetry.onExhausted: legacy value must be fail_open or fail_closed; effective policy is fail_closed")
 	}
-	if len(value.GuardedModels) > 32 {
-		return errors.New("requestRetry.guardedModels 最多 32 个条目")
-	}
-	for _, name := range value.GuardedModels {
-		if strings.TrimSpace(name) == "" {
-			return errors.New("requestRetry.guardedModels 含空条目")
-		}
-	}
-	if d := value.AccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
-		return errors.New("requestRetry.accountCooldown 必须在 1m 到 168h 之间")
-	}
-	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
-		return errors.New("requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间（0 表示默认 15m）")
-	}
-	if d := value.EvidenceTimeout.Value(); d != 0 && (d < time.Second || d > 5*time.Minute) {
-		return errors.New("requestRetry.evidenceTimeout 必须在 1s 到 5m 之间（0 表示默认 3.5s）")
-	}
-	if d := value.CreatedTimeout.Value(); d != 0 && (d < time.Second || d > 2*time.Minute) {
-		return errors.New("requestRetry.createdTimeout 必须在 1s 到 2m 之间（0 表示默认 5s）")
-	}
-	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
-		return errors.New("qualityGuard.requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间")
+	if err := guardpolicy.Validate(value.GuardPolicy()); err != nil {
+		return fmt.Errorf("requestRetry: %w", err)
 	}
 	return nil
 }
@@ -856,6 +854,7 @@ func NormalizeBuildFallbackBaseURL(value string) string {
 }
 
 func defaultConfig() Config {
+	guardDefaults := guardpolicy.DefaultConfig()
 	return Config{
 		Server: ServerConfig{
 			Listen:                "127.0.0.1:8000",
@@ -910,33 +909,36 @@ func defaultConfig() Config {
 			Local: LocalMediaConfig{Path: "./data/media"},
 		},
 		Routing: RoutingConfig{
-			StickyTTL:                   Duration(time.Hour),
-			CooldownBase:                Duration(30 * time.Second),
-			CooldownMax:                 Duration(30 * time.Minute),
-			CapacityWait:                Duration(500 * time.Millisecond),
-			MaxAttempts:                 999,
-			VideoMaxAttempts:            999,
-			MarkBuildChatDeniedAsReauth: false,
-			PreferFreeBuild:             false,
-			AccountIsolatedConnections:  false,
-			SegmentedSelectorEnabled:    true,
-			SegmentedMinCandidates:      3000,
-			SegmentedWindowSize:         64,
-			ReasoningReplayEnabled:      true,
-			ReasoningReplayTTL:          Duration(time.Hour),
-			ReasoningReplayMaxEntries:   10240,
+			StickyTTL:                    Duration(time.Hour),
+			CooldownBase:                 Duration(30 * time.Second),
+			CooldownMax:                  Duration(30 * time.Minute),
+			CapacityWait:                 Duration(500 * time.Millisecond),
+			MaxAttempts:                  999,
+			VideoMaxAttempts:             999,
+			MarkBuildChatDeniedAsReauth:  false,
+			PreferFreeBuild:              false,
+			AccountIsolatedConnections:   false,
+			SegmentedSelectorEnabled:     true,
+			SegmentedMinCandidates:       3000,
+			SegmentedWindowSize:          64,
+			ReasoningReplayEnabled:       true,
+			ReasoningReplayTTL:           Duration(time.Hour),
+			ConversationHistoryRetention: Duration(24 * time.Hour),
+			ConversationHistoryMaxBytes:  64 << 20,
+			ReasoningReplayMaxEntries:    10240,
 		},
 		Audit: AuditConfig{
+			JournalDirectory: "./data/audit", JournalMaxBytes: 512 << 20,
 			BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond), CommitDelay: Duration(5 * time.Millisecond),
-			RetentionDays: 7,
-			LedgerMode:    "enforce", LedgerFailureThreshold: 1,
+			RetentionPeriod: Duration(auditdomain.DefaultRetentionPeriod),
+			RetentionSource: "default",
+			LedgerMode:      "enforce", LedgerFailureThreshold: 1,
 			LedgerUnhealthyGrace: Duration(10 * time.Second), LedgerQueueHighWatermarkPct: 90,
 		},
 
-		AccountRisk: DefaultAccountRiskConfig(),
 		RequestRetry: RequestRetryConfig{
-			MaxAttempts: 2, OnExhausted: "fail_closed", SameAccountRetry: true,
-			AccountCooldown: Duration(24 * time.Hour), EvidenceTimeout: Duration(3500 * time.Millisecond), CreatedTimeout: Duration(5 * time.Second)},
+			MaxAttempts: guardDefaults.MaxAttempts, OnExhausted: guardDefaults.ExhaustionPolicy(),
+			AccountCooldown: Duration(guardDefaults.AccountCooldown), EvidenceTimeout: Duration(guardDefaults.EvidenceTimeout), CreatedTimeout: Duration(guardDefaults.CreatedTimeout)},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{
 			MarkBuildForbiddenReauth:             false,

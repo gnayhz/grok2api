@@ -22,23 +22,30 @@ func preflightDeployment(cfg config.Config) error {
 	want := strings.TrimSpace(cfg.Deployment.ClusterID) + "\n"
 	current, err := os.ReadFile(markerPath)
 	if errors.Is(err, os.ErrNotExist) {
-		file, createErr := os.OpenFile(markerPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if createErr == nil {
-			if _, writeErr := file.WriteString(want); writeErr != nil {
-				_ = file.Close()
-				return fmt.Errorf("write shared media cluster marker: %w", writeErr)
-			}
-			if closeErr := file.Close(); closeErr != nil {
-				return fmt.Errorf("close shared media cluster marker: %w", closeErr)
-			}
-			current = []byte(want)
-		} else if errors.Is(createErr, os.ErrExist) {
-			current, err = os.ReadFile(markerPath)
-			if err != nil {
-				return fmt.Errorf("read shared media cluster marker: %w", err)
-			}
-		} else {
+		// Publish only complete content. Creating the final empty file first
+		// allows another replica to mistake an in-progress write for a different
+		// cluster. Link preserves the existing marker when creators compete.
+		file, createErr := os.CreateTemp(directory, ".grok2api-cluster-")
+		if createErr != nil {
 			return fmt.Errorf("create shared media cluster marker: %w", createErr)
+		}
+		defer os.Remove(file.Name())
+		defer file.Close()
+		if _, writeErr := file.WriteString(want); writeErr != nil {
+			return fmt.Errorf("write shared media cluster marker: %w", writeErr)
+		}
+		if syncErr := file.Sync(); syncErr != nil {
+			return fmt.Errorf("sync shared media cluster marker: %w", syncErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return fmt.Errorf("close shared media cluster marker: %w", closeErr)
+		}
+		if publishErr := os.Link(file.Name(), markerPath); publishErr != nil && !errors.Is(publishErr, os.ErrExist) {
+			return fmt.Errorf("publish shared media cluster marker: %w", publishErr)
+		}
+		current, err = os.ReadFile(markerPath)
+		if err != nil {
+			return fmt.Errorf("read shared media cluster marker: %w", err)
 		}
 	} else if err != nil {
 		return fmt.Errorf("read shared media cluster marker: %w", err)

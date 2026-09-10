@@ -70,7 +70,7 @@ func TestDegradedUsageClaimNeverDeliversChat(t *testing.T) {
 	if sig.ReasoningTokens != 928 {
 		t.Fatalf("audit field lost: %#v", sig)
 	}
-	if verdict := classifyQualityHold(sig); verdict != QualityWithhold {
+	if verdict := classifyQualityHoldShadowed(sig); verdict != QualityWithhold {
 		t.Fatalf("degraded burst must withhold, got %s (%#v)", verdict, sig)
 	}
 }
@@ -90,7 +90,7 @@ func TestDegradedUsageClaimNeverDeliversResponses(t *testing.T) {
 	if sig.HasThinking {
 		t.Fatalf("responses usage claim must not count as thinking: %#v", sig)
 	}
-	if verdict := classifyQualityHold(sig); verdict != QualityWithhold {
+	if verdict := classifyQualityHoldShadowed(sig); verdict != QualityWithhold {
 		t.Fatalf("degraded responses burst must withhold, got %s", verdict)
 	}
 }
@@ -108,8 +108,8 @@ func TestPeekQualityStreamWithholdsDegradedBurst(t *testing.T) {
 	if verdict != QualityWithhold {
 		t.Fatalf("verdict = %s, want withhold", verdict)
 	}
-	if usage.ReasoningTokens != 928 {
-		t.Fatalf("usage reasoning tokens = %d, want 928 preserved for audit", usage.ReasoningTokens)
+	if usage.Reported {
+		t.Fatalf("later usage must not delay interception: %+v", usage)
 	}
 }
 
@@ -129,7 +129,7 @@ func TestThinkingMarkerStillDeliversWhenCoalesced(t *testing.T) {
 	if !sig.HasThinking {
 		t.Fatalf("reasoning events must still deliver: %#v", sig)
 	}
-	if classifyQualityHold(sig) != QualityDeliver {
+	if classifyQualityHoldShadowed(sig) != QualityDeliver {
 		t.Fatalf("thinking fixture withheld")
 	}
 }

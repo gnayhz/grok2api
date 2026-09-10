@@ -31,22 +31,22 @@ func TestClientKeyBillingReservationsEnforceLimitAndExpire(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_limit_0001", 60, now.Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_limit_0001", 60, now.Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatal(err)
 	}
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_limit_0001", 60, now.Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_limit_0001", 60, now.Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("idempotent reserve: %v", err)
 	}
-	if _, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_limit_0002", 50, now.Add(time.Hour)); !errors.Is(err, repository.ErrLimitExceeded) {
+	if _, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_limit_0002", 50, now.Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); !errors.Is(err, repository.ErrLimitExceeded) {
 		t.Fatalf("limit error = %v", err)
 	}
 	if err := keys.CancelBillingReservation(ctx, "evt_reservation_limit_0001"); err != nil {
 		t.Fatal(err)
 	}
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_expired_0001", 80, now.Add(-time.Minute)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_expired_0001", 80, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatal(err)
 	}
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_after_expiry_0001", 100, now.Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_reservation_after_expiry_0001", 100, now.Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("reserve after expiry cleanup: %v", err)
 	}
 	stored, err := keys.Get(ctx, key.ID)
@@ -64,10 +64,10 @@ func TestClientKeyBillingReservationSkipsExpiryCleanupWithoutPressure(t *testing
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_cleanup_pressure_expired", 20, now.Add(-time.Minute)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_cleanup_pressure_expired", 20, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("expired reserve: reserved=%v, err=%v", reserved, err)
 	}
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_cleanup_pressure_active_1", 30, now.Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_cleanup_pressure_active_1", 30, now.Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("reserve with remaining capacity: reserved=%v, err=%v", reserved, err)
 	}
 	var reservations int64
@@ -84,7 +84,7 @@ func TestClientKeyBillingReservationSkipsExpiryCleanupWithoutPressure(t *testing
 	if stored.ReservedUsageUSDTicks != 50 {
 		t.Fatalf("reserved usage = %d, want 50", stored.ReservedUsageUSDTicks)
 	}
-	cleaned, err := keys.CleanupExpiredBillingReservations(ctx, now, 10)
+	cleaned, err := keys.CleanupExpiredBillingReservations(ctx, now, 10, repository.BillingReservationScope{OwnerID: "test-owner"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,11 +110,11 @@ func TestClientKeyBillingReservationRecreatesExpiredEvent(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	const eventID = "evt_renew_expired_reservation"
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 40, now.Add(-time.Minute)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 40, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("expired reserve: reserved=%v, err=%v", reserved, err)
 	}
 	renewedUntil := now.Add(time.Hour)
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 60, renewedUntil); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, eventID, 60, renewedUntil, repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("recreate reserve: reserved=%v, err=%v", reserved, err)
 	}
 	var reservation billingReservationModel
@@ -146,10 +146,10 @@ func TestClientKeyBillingReservationCannotMoveExpiredEventBetweenKeys(t *testing
 		t.Fatal(err)
 	}
 	const eventID = "evt_expired_reservation_owner"
-	if reserved, err := keys.ReserveBillingUsage(ctx, first.ID, eventID, 40, time.Now().UTC().Add(-time.Minute)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, first.ID, eventID, 40, time.Now().UTC().Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatalf("expired reserve: reserved=%v, err=%v", reserved, err)
 	}
-	if _, err := keys.ReserveBillingUsage(ctx, second.ID, eventID, 40, time.Now().UTC().Add(time.Hour)); !errors.Is(err, repository.ErrConflict) {
+	if _, err := keys.ReserveBillingUsage(ctx, second.ID, eventID, 40, time.Now().UTC().Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); !errors.Is(err, repository.ErrConflict) {
 		t.Fatalf("cross-key reserve error = %v, want conflict", err)
 	}
 	stored, err := keys.Get(ctx, first.ID)
@@ -179,7 +179,7 @@ func TestClientKeyBillingReservationsDoNotExceedLimitConcurrently(t *testing.T) 
 		go func() {
 			defer wait.Done()
 			<-start
-			reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, fmt.Sprintf("evt_concurrent_reservation_%04d", index), 10, time.Now().UTC().Add(time.Hour))
+			reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, fmt.Sprintf("evt_concurrent_reservation_%04d", index), 10, time.Now().UTC().Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"})
 			switch {
 			case reserveErr == nil && reserved:
 				successes.Add(1)
@@ -232,7 +232,7 @@ func TestCleanupExpiredBillingReservationsProtectsPendingMediaUsage(t *testing.T
 	}
 	for index, test := range cases {
 		eventID := "video_usage_" + test.id
-		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, now.Add(-time.Minute)); reserveErr != nil || !reserved {
+		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 100, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 			t.Fatalf("reserve %s: reserved=%v err=%v", eventID, reserved, reserveErr)
 		}
 		var usageRecordedAt *time.Time
@@ -250,7 +250,7 @@ func TestCleanupExpiredBillingReservationsProtectsPendingMediaUsage(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	cleaned, err := keys.CleanupExpiredBillingReservations(ctx, now, 10)
+	cleaned, err := keys.CleanupExpiredBillingReservations(ctx, now, 10, repository.BillingReservationScope{OwnerID: "test-owner"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,11 +276,11 @@ func TestCleanupExpiredBillingReservationsLimitsActualRows(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	for index := range 5 {
-		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, fmt.Sprintf("evt_cleanup_row_%02d", index), 10, now.Add(-time.Minute)); reserveErr != nil || !reserved {
+		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, fmt.Sprintf("evt_cleanup_row_%02d", index), 10, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 			t.Fatalf("reserve %d: reserved=%v err=%v", index, reserved, reserveErr)
 		}
 	}
-	cleaned, err := keys.CleanupExpiredBillingReservations(ctx, now, 2)
+	cleaned, err := keys.CleanupExpiredBillingReservations(ctx, now, 2, repository.BillingReservationScope{OwnerID: "test-owner"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestBillingSettlementRacesExpiredCleanupWithoutLosingUsage(t *testing.T) {
 	for index := range iterations {
 		now := time.Now().UTC()
 		eventID := fmt.Sprintf("evt_settlement_cleanup_%02d", index)
-		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 10, now.Add(-time.Minute)); reserveErr != nil || !reserved {
+		if reserved, reserveErr := keys.ReserveBillingUsage(ctx, key.ID, eventID, 10, now.Add(-time.Minute), repository.BillingReservationScope{OwnerID: "test-owner"}); reserveErr != nil || !reserved {
 			t.Fatalf("reserve %d: reserved=%v err=%v", index, reserved, reserveErr)
 		}
 		start := make(chan struct{})
@@ -324,7 +324,7 @@ func TestBillingSettlementRacesExpiredCleanupWithoutLosingUsage(t *testing.T) {
 		}()
 		go func() {
 			<-start
-			_, cleanupErr := keys.CleanupExpiredBillingReservations(ctx, now, 1)
+			_, cleanupErr := keys.CleanupExpiredBillingReservations(ctx, now, 1, repository.BillingReservationScope{OwnerID: "test-owner"})
 			errorsCh <- cleanupErr
 		}()
 		close(start)
@@ -352,11 +352,11 @@ func TestClientKeyUpdateDoesNotOverwriteConcurrentBillingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := key
-	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_update_preserves_reservation_0001", 40, time.Now().UTC().Add(time.Hour)); err != nil || !reserved {
+	if reserved, err := keys.ReserveBillingUsage(ctx, key.ID, "evt_update_preserves_reservation_0001", 40, time.Now().UTC().Add(time.Hour), repository.BillingReservationScope{OwnerID: "test-owner"}); err != nil || !reserved {
 		t.Fatal(err)
 	}
 	stale.Name = "after"
-	updated, err := keys.Update(ctx, stale)
+	updated, err := keys.Patch(ctx, stale.ID, clientkeydomain.ManagementPatch{Name: &stale.Name})
 	if err != nil {
 		t.Fatal(err)
 	}

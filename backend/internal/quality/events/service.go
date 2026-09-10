@@ -1,0 +1,136 @@
+// Package events owns durable request receipts and their incident-consumption
+// policy. Storage transactions, evidence windows and case decisions retain their
+// separate owners; the composition root only adapts and wires these ports.
+package events
+
+import (
+	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/quality/journal"
+	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/google/uuid"
+	"time"
+)
+
+type Journal interface {
+	RecordMany(context.Context, []journal.Event) error
+	CheckCapacity(context.Context) error
+	Stats(context.Context) (journal.BacklogStats, error)
+	Release(context.Context, string, time.Time) error
+	ProcessOne(context.Context, string, func(context.Context, journal.Event) error) (bool, error)
+}
+type Evidence interface {
+	Record(context.Context, model.Observation) error
+}
+type Incidents interface {
+	ReportDegradedObservation(context.Context, model.Observation) error
+}
+
+type Service struct {
+	journal   Journal
+	evidence  Evidence
+	incidents Incidents
+}
+
+func New(store Journal, evidence Evidence, incidents Incidents) *Service {
+	return &Service{journal: store, evidence: evidence, incidents: incidents}
+}
+func (s *Service) Backlog(ctx context.Context) (journal.BacklogStats, error) {
+	return s.journal.Stats(ctx)
+}
+func (s *Service) CheckQualityEventCapacity(ctx context.Context) error {
+	return s.journal.CheckCapacity(ctx)
+}
+
+type Receipt struct {
+	Attempt         attemptmeta.Identity
+	Outcome         Outcome
+	Rule, ErrorCode string
+	At              time.Time
+}
+type Outcome string
+
+const (
+	// The persisted value "delivered" means admission only.
+	Admitted    Outcome = "delivered"
+	Degraded    Outcome = "degraded"
+	Rejected    Outcome = "rejected"
+	Completed   Outcome = "completed"
+	Interrupted Outcome = "interrupted"
+	Canceled    Outcome = "canceled"
+)
+
+func (s *Service) RecordPhysicalEvents(ctx context.Context, facts []attemptmeta.PhysicalFact) error {
+	events := make([]journal.Event, 0, len(facts))
+	for _, fact := range facts {
+		event := journal.Event{Attempt: fact.Attempt, Stage: "exchange", Outcome: "observed", At: fact.At, Physical: &fact}
+		events = append(events, event)
+	}
+	return s.journal.RecordMany(ctx, events)
+}
+
+func (s *Service) RecordQualityEvent(ctx context.Context, obs Receipt, ttl time.Duration) error {
+	stage := "completion"
+	if obs.Outcome == Admitted || obs.Outcome == Degraded || obs.Outcome == Rejected {
+		stage = "admission"
+	}
+	e := journal.Event{Attempt: obs.Attempt, Stage: stage, Outcome: string(obs.Outcome), Rule: obs.Rule, ErrorCode: obs.ErrorCode, At: obs.At}
+	if obs.Outcome == Degraded {
+		e.HoldUntil = obs.At.Add(ttl)
+	}
+	if obs.Outcome == Degraded || obs.Outcome == Rejected {
+		completion := journal.Event{Attempt: obs.Attempt, Stage: "completion", Outcome: "interrupted", At: obs.At, ErrorCode: obs.ErrorCode}
+		if completion.ErrorCode == "" {
+			completion.ErrorCode = "quality_degraded"
+		}
+		if completion.ErrorCode == "request_canceled" {
+			completion.Outcome = "canceled"
+		}
+		return s.journal.RecordMany(ctx, []journal.Event{e, completion})
+	}
+	return s.journal.RecordMany(ctx, []journal.Event{e})
+}
+
+func (s *Service) handle(ctx context.Context, e journal.Event) error {
+	// Admission and completion remain in the journal. Merely observing thinking
+	// cannot provide a healthy comparison sample, even if delivery later succeeds.
+	// Only explicit rule violations enter the incident window from live traffic;
+	// positive comparison evidence must come from a completed controlled probe.
+	if e.Stage != "admission" || e.Attempt.Provider != "grok_build" {
+		return nil
+	}
+	if e.Outcome != string(Degraded) {
+		return nil
+	}
+	exit := model.EpochKey{}
+	if !e.Attempt.Path.Rotating && (e.Attempt.Path.Status == attemptmeta.PathRegistered || e.Attempt.Path.Status == attemptmeta.PathVerified) {
+		exit = model.EpochKey{NodeID: e.Attempt.Path.NodeID, Epoch: e.Attempt.Path.Epoch}
+	}
+	observation := model.Observation{EventID: e.ID(), Attempt: e.Attempt, At: e.At, AccountID: e.Attempt.AccountID, Exit: exit, Source: model.SourceTraffic, Outcome: model.OutcomeDegraded, Rule: e.Rule}
+	if err := s.evidence.Record(ctx, observation); err != nil {
+		return err
+	}
+	if err := s.incidents.ReportDegradedObservation(ctx, observation); err != nil {
+		return err
+	}
+	return s.journal.Release(ctx, e.ID(), time.Now().UTC())
+}
+
+func (s *Service) Run(ctx context.Context) error {
+	for {
+		worked, err := s.journal.ProcessOne(ctx, uuid.NewString(), s.handle)
+		if err != nil {
+			return err
+		} // supervisor backs off; the outbox retains the fact.
+		if worked {
+			continue
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}

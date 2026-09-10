@@ -7,6 +7,7 @@ Thumbs.db
 *.swo
 *~
 
+# Private design notes under /docs/ stay local; durable guides live at the root.
 # Local environment and secrets
 .env
 .env.*
@@ -55,6 +56,7 @@ __pycache__/
 # GitNexus
 .claude
 AGENTS.md
+!/AGENTS.md
 CLAUDE.md
 
 # 实验日志与加固记录不入库（本地知识库）。
@@ -76,3 +78,33 @@ deploy.config.yaml
 
 # REASONING0 工作笔记（本地知识库，不入库）。
 REASONING0_LEDGER.md
+
+# Private work records and raw observations (maintained tests remain tracked).
+/architecture/
+/optimization-evidence/
+/OPTIMIZATION_LOG.md
+**/verification/
+**/test-results/
+**/playwright-report/
+*.jsonl
+*.sse
+*.trace
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.dump
+*.prof
+*.cpuprofile
+*.heapprofile
+/scripts/survey_*.py
+/scripts/survey_report.sh
+/scripts/trace_*.py
+
+# Local process reports; module README and product contracts are allowed.
+ACCEPTANCE.md
+FINAL_REVIEW*.md
+SECOND_REVIEW*.md
+VALIDATION.md

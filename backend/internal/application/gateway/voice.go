@@ -8,19 +8,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 type TTSInput struct {
@@ -82,8 +85,10 @@ type VoiceIDInput struct {
 type voiceProviderSupport func(accountdomain.Provider) bool
 
 type voiceExecutionResult struct {
-	response *provider.Response
-	pricing  audit.PricingResult
+	response         *provider.Response
+	pricing          audit.PricingResult
+	duration         float64
+	durationReported bool
 }
 
 func (s *Service) SynthesizeSpeech(ctx context.Context, input TTSInput) (*Result, error) {
@@ -104,6 +109,7 @@ func (s *Service) SynthesizeSpeech(ctx context.Context, input TTSInput) (*Result
 		if err != nil {
 			return voiceExecutionResult{}, err
 		}
+		pricing, _ := audit.EstimateOfficialTTSCharacterCost(result.InputCharacters)
 		if result.JSONEnvelope || input.WithTimestamps {
 			payload := map[string]any{
 				"audio":        firstNonEmpty(result.Base64Audio, base64.StdEncoding.EncodeToString(result.Audio)),
@@ -117,7 +123,7 @@ func (s *Service) SynthesizeSpeech(ctx context.Context, input TTSInput) (*Result
 				}
 				payload["audio_timestamps"] = map[string]any{"graph_chars": result.Timestamps.GraphChars, "graph_times": times}
 			}
-			return voiceExecutionResult{response: jsonVoiceResponse(http.StatusOK, payload), pricing: reservation}, nil
+			return voiceExecutionResult{response: jsonMediaResponse(http.StatusOK, payload), pricing: pricing}, nil
 		}
 		header := http.Header{}
 		header.Set("Content-Type", firstNonEmpty(result.ContentType, "audio/mpeg"))
@@ -128,7 +134,7 @@ func (s *Service) SynthesizeSpeech(ctx context.Context, input TTSInput) (*Result
 			Header:     header,
 			Body:       io.NopCloser(bytes.NewReader(result.Audio)),
 			QuotaUnits: 1,
-		}, pricing: reservation}, nil
+		}, pricing: pricing}, nil
 	})
 }
 
@@ -155,7 +161,7 @@ func (s *Service) ListTTSVoices(ctx context.Context, input VoiceListInput) (*Res
 			}
 			items = append(items, item)
 		}
-		response := jsonVoiceResponse(http.StatusOK, map[string]any{"voices": items})
+		response := jsonMediaResponse(http.StatusOK, map[string]any{"voices": items})
 		response.QuotaUnits = 0
 		return voiceExecutionResult{response: response}, nil
 	})
@@ -180,7 +186,7 @@ func (s *Service) GetTTSVoice(ctx context.Context, input VoiceIDInput) (*Result,
 		} else {
 			payload["language"] = nil
 		}
-		response := jsonVoiceResponse(http.StatusOK, payload)
+		response := jsonMediaResponse(http.StatusOK, payload)
 		response.QuotaUnits = 0
 		return voiceExecutionResult{response: response}, nil
 	})
@@ -205,7 +211,7 @@ func (s *Service) TranscribeSpeech(ctx context.Context, input STTInput) (*Result
 			return voiceExecutionResult{}, err
 		}
 		pricing, _ := audit.EstimateOfficialSTTCost(result.Duration, false)
-		return voiceExecutionResult{response: formatSTTResponse(result, input.ResponseFormat), pricing: pricing}, nil
+		return voiceExecutionResult{response: formatSTTResponse(result, input.ResponseFormat), pricing: pricing, duration: result.Duration, durationReported: result.DurationReported}, nil
 	})
 }
 
@@ -218,7 +224,7 @@ func formatSTTResponse(result provider.STTResult, responseFormat string) *provid
 		header.Set("Content-Length", strconv.Itoa(len(data)))
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(bytes.NewReader(data)), QuotaUnits: 1}
 	case "json":
-		return jsonVoiceResponse(http.StatusOK, map[string]any{"text": result.Text})
+		return jsonMediaResponse(http.StatusOK, map[string]any{"text": result.Text})
 	case "verbose_json":
 		payload := map[string]any{"task": "transcribe", "text": result.Text, "language": result.Language, "duration": result.Duration}
 		if len(result.Words) > 0 {
@@ -232,7 +238,7 @@ func formatSTTResponse(result provider.STTResult, responseFormat string) *provid
 			}
 			payload["words"] = words
 		}
-		return jsonVoiceResponse(http.StatusOK, payload)
+		return jsonMediaResponse(http.StatusOK, payload)
 	}
 	if len(result.RawJSON) > 0 {
 		header := http.Header{}
@@ -271,7 +277,7 @@ func formatSTTResponse(result provider.STTResult, responseFormat string) *provid
 		}
 		payload["channels"] = channels
 	}
-	return jsonVoiceResponse(http.StatusOK, payload)
+	return jsonMediaResponse(http.StatusOK, payload)
 }
 
 func (s *Service) executeVoice(
@@ -320,8 +326,22 @@ func (s *Service) executeVoice(
 	if err := s.checkLedgerReady(); err != nil {
 		return nil, err
 	}
+	ctx = attemptmeta.WithRequest(ctx, eventID, 0, "", nil)
+	ctx = infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
+	requestBudget := inferencedomain.NewAttemptBudget(infraegress.MaxPhysicalCalls)
+	ctx = infraegress.WithPhysicalCallBudget(ctx, requestBudget)
+	handedOff, reserved := false, false
+	defer func() {
+		if !handedOff {
+			requestBudget.Close()
+			if reserved {
+				s.cancelBillingReservation(eventID)
+			}
+		}
+	}()
 	if reservation.CostInUSDTicks > 0 {
-		if _, err := s.clientKeys.ReserveBilling(ctx, key, eventID, reservation.CostInUSDTicks, mediaBillingReservationTTL); err != nil {
+		reserved, err = s.clientKeys.ReserveBilling(ctx, key, eventID, reservation.CostInUSDTicks, mediaBillingReservationTTL)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -329,6 +349,18 @@ func (s *Service) executeVoice(
 		record := auditBase
 		record.StatusCode = statusCode
 		record.ErrorCode = errorCode
+		record.AdmissionOutcome, record.GenerationOutcome, record.DeliveryOutcome = "not_admitted", "not_started", "not_started"
+		record.HistoryCommit, record.ProviderStateCommit, record.OwnershipCommit, record.QualityReceipt = "not_required", "not_required", "not_required", "not_required"
+		for _, fact := range infraegress.PhysicalFacts(ctx) {
+			if fact.Stage == "credential_prepare" {
+				continue
+			}
+			record.UpstreamStatusCode = fact.Status
+			if consumesQuota && (fact.Status == 0 || fact.Status >= 200 && fact.Status < 300) {
+				record.GenerationOutcome = "unconfirmed"
+			}
+		}
+		record.PhysicalReceipt = s.finishPhysicalReceipt(ctx)
 		record.DurationMS = time.Since(startedAt).Milliseconds()
 		record.CreatedAt = time.Now().UTC()
 		if credential != nil {
@@ -351,9 +383,14 @@ func (s *Service) executeVoice(
 	excluded := make(map[uint64]bool)
 	selection := preselectedSession
 	var lease *accountLease
+	defer func() {
+		if !handedOff {
+			lease.Release()
+		}
+	}()
 	var credential accountdomain.Credential
 	var response *provider.Response
-	var completedPricing audit.PricingResult
+	var completed voiceExecutionResult
 	var responseRequestScoped bool
 	var lastCredentialFailure *accountdomain.Credential
 	var lastCredentialError error
@@ -384,9 +421,23 @@ func (s *Service) executeVoice(
 		}
 		lease.markSelectorUpstreamStarted()
 		responseRequestScoped = false
-		execution, executionErr := execute(ctx, route.Provider, credential, route.UpstreamModel)
-		response, completedPricing, err = execution.response, execution.pricing, executionErr
+		attemptCtx := attemptmeta.WithAccount(ctx, credential.ID, string(route.Provider), route.UpstreamModel)
+		execution, executionErr := execute(attemptCtx, route.Provider, credential, route.UpstreamModel)
+		response, completed, err = execution.response, execution, executionErr
 		if err != nil {
+			var validation *inferencedomain.RequestValidationError
+			if errors.As(err, &validation) {
+				lease.skipSelectorObservation()
+				lease.Release()
+				writeFailureAudit(http.StatusBadRequest, validation.Code, nil)
+				return nil, err
+			}
+			if errors.Is(err, inferencedomain.ErrAttemptBudget) {
+				lease.skipSelectorObservation()
+				lease.Release()
+				writeFailureAudit(http.StatusServiceUnavailable, "physical_attempt_limit", &credential)
+				return nil, &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "physical_attempt_limit", PublicMessage: "上游尝试次数达到安全上限", Cause: err}
+			}
 			if _, ok := provider.ErrorHTTPStatus(err); ok {
 				responseRequestScoped = provider.IsRequestScopedError(err)
 				response, err = voiceErrorResponse(err)
@@ -441,7 +492,7 @@ func (s *Service) executeVoice(
 			continue
 		}
 		if response.StatusCode == http.StatusPaymentRequired || response.StatusCode == http.StatusTooManyRequests {
-			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+			retryAfter := retryafter.Header(response.Header.Get("Retry-After"), time.Now().UTC())
 			if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode != "" {
 				state, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
 				s.applyRateLimitReconciliation(ctx, credential, response.StatusCode, retryAfter, state, reconcileErr)
@@ -469,38 +520,44 @@ func (s *Service) executeVoice(
 		return nil, fmt.Errorf("%w: %w", ErrNoAvailableAccount, lastCredentialError)
 	}
 	accountID := credential.ID
-	var once sync.Once
-	finalize := func(_ Usage, _ string, errorCode string) {
-		once.Do(func() {
-			successful := auditRequestSucceeded(response.StatusCode, errorCode)
-			lease.completeSelectorObservation(successful)
+	generated := consumesQuota && completed.response != nil && completed.response.StatusCode >= 200 && completed.response.StatusCode < 300
+	response.Body = lease.ownBody(response.Body)
+	handoff := &mediaHandoff{ctx: ctx, response: response, budget: requestBudget,
+		release: func() {
+			if generated {
+				lease.completeSelectorObservation(true)
+			} else if ctx.Err() != nil {
+				lease.skipSelectorObservation()
+			} else {
+				lease.completeSelectorObservation(response.StatusCode < 400)
+			}
 			lease.Release()
+		},
+		finish: func(stats DeliveryStats, admitted bool, errorCode string) {
 			budget := newFinalizationBudget(string(operation), string(route.Provider))
 			record := auditBase
-			record.AccountID, record.AccountName, record.StatusCode = &accountID, credential.Name, response.StatusCode
-			record.ErrorCode = errorCode
+			record.AccountID, record.AccountName = &accountID, credential.Name
+			applyMediaDelivery(&record, stats, admitted, response.StatusCode, errorCode)
+			record.GenerationOutcome = "not_started"
+			if generated {
+				record.GenerationOutcome = "completed"
+			}
+			record.PhysicalReceipt = s.finishPhysicalReceipt(ctx)
 			record.DurationMS, record.CreatedAt = time.Since(startedAt).Milliseconds(), time.Now().UTC()
 			applyAuditEgress(&record, egressTrace, route.Provider)
-			if successful && completedPricing.CostInUSDTicks > 0 {
-				record.EstimatedCostInUSDTicks = completedPricing.CostInUSDTicks
-				record.PricingModel = completedPricing.Model
+			if completed.durationReported {
+				record.UsageSource = audit.UsageSourceUpstream
+				record.AudioDurationMS = int64(math.Round(min(completed.duration*1000, float64(math.MaxInt64-1024))))
+			}
+			if generated && completed.pricing.CostInUSDTicks > 0 {
+				record.EstimatedCostInUSDTicks = completed.pricing.CostInUSDTicks
+				record.PricingModel = completed.pricing.Model
 				record.PricingVersion = audit.OfficialPricingAsOf
 			}
-			if successful && response.QuotaUnits > 0 && quotaMode != "" && quotaMode != "weekly" {
-				units := response.QuotaUnits
-				var updated bool
-				err := budget.run("quota_decrement", finalizationQuotaBudget, func(stageCtx context.Context) error {
-					var decrementErr error
-					updated, decrementErr = s.accounts.DecrementQuota(stageCtx, accountID, quotaMode, units)
-					return decrementErr
-				})
-				if err != nil {
-					s.logger.Warn("voice_quota_decrement_failed", "provider", route.Provider, "account_id", accountID, "mode", quotaMode, "units", units, "error", err)
-				} else if updated {
-					s.selector.ConsumeQuota(route.Provider, accountID, quotaMode, units)
-				}
+			if generated && response.QuotaUnits > 0 && lease.QuotaMode != "" {
+				s.finishQuotaConsumption(budget, accountdomain.QuotaConsumption{EventID: "quota_" + eventID, AccountID: accountID, Mode: lease.QuotaMode, SnapshotVersion: lease.QuotaSnapshotVersion, Units: response.QuotaUnits})
 			}
-			if successful && response.QuotaUnits > 0 && quotaMode != "" {
+			if generated && response.QuotaUnits > 0 && quotaMode != "" {
 				if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow {
 					s.accounts.QueueQuotaRefresh(accountID, quotaMode)
 				}
@@ -510,12 +567,13 @@ func (s *Service) executeVoice(
 			}); err != nil {
 				s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", requestID, "error", err)
 			}
-		})
+		},
 	}
-	return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Finalize: finalize}, nil
+	handedOff = true
+	return handoff.result(), nil
 }
 
-func jsonVoiceResponse(status int, value any) *provider.Response {
+func jsonMediaResponse(status int, value any) *provider.Response {
 	data, _ := json.Marshal(value)
 	header := http.Header{}
 	header.Set("Content-Type", "application/json")
@@ -535,9 +593,9 @@ func voiceErrorResponse(err error) (*provider.Response, error) {
 		if !safe {
 			message = "上游语音服务返回错误"
 		}
-		response := jsonVoiceResponse(status, map[string]any{"error": map[string]any{"type": "upstream_error", "message": message}})
+		response := jsonMediaResponse(status, map[string]any{"error": map[string]any{"type": "upstream_error", "message": message}})
 		if retryAfter := provider.ErrorRetryAfter(err); retryAfter > 0 {
-			seconds := max(int64(1), int64((retryAfter+time.Second-1)/time.Second))
+			seconds := retryafter.SecondsCeil(retryAfter)
 			response.Header.Set("Retry-After", strconv.FormatInt(seconds, 10))
 		}
 		return response, nil

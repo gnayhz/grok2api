@@ -50,10 +50,10 @@ func BenchmarkRoutingAccountBaseProjectionWithLargePayloads(b *testing.B) {
 	}
 	resetAt := now.Add(time.Hour)
 	for _, credential := range created {
-		if err := repository.SaveBilling(ctx, account.Billing{AccountID: credential.ID, PlanName: "SuperGrok", MonthlyLimit: 100, History: history, SyncedAt: now}); err != nil {
+		if err := saveBilling(database.db.WithContext(ctx), account.Billing{AccountID: credential.ID, PlanName: "SuperGrok", MonthlyLimit: 100, History: history, SyncedAt: now}); err != nil {
 			b.Fatal(err)
 		}
-		if err := repository.SaveQuotaWindows(ctx, credential.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+		if err := saveQuotaWindowsFixture(repository, ctx, credential.ID, account.WebTierSuper, now, []account.QuotaWindow{{
 			AccountID: credential.ID, Mode: "weekly", Remaining: 10, Total: 20,
 			Breakdown: breakdown, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream,
 		}}); err != nil {

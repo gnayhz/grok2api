@@ -1,58 +1,127 @@
 import { Settings2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import {
+	OperationsButton as Button,
+	OperationsDialogContent as DialogContent,
+	OperationsField,
+} from "@/features/operations/operations-ui";
+import {
+	Dialog,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
+import { IntervalInput } from "./operations-context";
+import { useEgressOperations } from "./operations-shared";
 
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Spinner } from "@/components/ui/spinner";
-import { IntervalInput } from "@/features/proxies/operations-context";
-import { useEgressOperations } from "@/features/proxies/operations-shared";
-
-/** Probe settings dialog: which IP echo service checks exits and how often.
- *  Lives in the nodes toolbar so the dedicated tab can go away. */
+/** Edits stay local until explicitly applied to the shared configuration draft.
+ * Closing or cancelling this dialog never modifies the routing draft. */
 export function ProbeSettingsButton() {
-  const { t } = useTranslation();
-  const operations = useEgressOperations();
-  const [open, setOpen] = useState(false);
-  const form = operations.form;
-
-  return (
-    <>
-      <Button type="button" size="sm" variant="secondary" disabled={operations.isPending} onClick={() => setOpen(true)}>
-        <Settings2 />{t("proxies.automation.settingsButton")}
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("proxies.automation.title")}</DialogTitle>
-            <DialogDescription>{t("proxies.automation.help")}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="egress-probe-provider">{t("settings.egress.probeProvider")}</Label>
-              <Select value={form.probeProvider} onValueChange={(probeProvider: "ipinfo" | "cloudflare") => operations.update((current) => ({ ...current, probeProvider }))}>
-                <SelectTrigger id="egress-probe-provider" className="h-8 w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ipinfo">IPinfo</SelectItem>
-                  <SelectItem value="cloudflare">Cloudflare</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs leading-5 text-muted-foreground">{t("settings.egress.probeProviderHelp")}</p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="egress-probe-interval">{t("settings.egress.probeInterval")}</Label>
-              <IntervalInput id="egress-probe-interval" value={form.probeIntervalSeconds ? String(form.probeIntervalSeconds) : ""} onChange={(probeIntervalSeconds) => operations.update((current) => ({ ...current, probeIntervalSeconds: Number(probeIntervalSeconds) || 0 }))} />
-              <p className="text-xs leading-5 text-muted-foreground">{t("settings.egress.probeIntervalHelp")}</p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="secondary" size="sm" onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
-            <Button type="button" size="sm" disabled={!operations.isDirty || operations.savePending || form.probeIntervalSeconds < 60 || form.probeIntervalSeconds > 86400} onClick={() => { void operations.save().then((saved) => { if (saved) setOpen(false); }); }}>{operations.savePending ? <Spinner /> : null}{t("common.save")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
-  );
+	const { t } = useTranslation();
+	const operations = useEgressOperations();
+	const [open, setOpen] = useState(false);
+	const [provider, setProvider] = useState(operations.form.probeProvider);
+	const [interval, setInterval] = useState(
+		String(operations.form.probeIntervalSeconds),
+	);
+	const seconds = Number(interval),
+		invalid =
+			!interval.trim() ||
+			!Number.isInteger(seconds) ||
+			seconds < 60 ||
+			seconds > 86400;
+	return (
+		<>
+			<Button
+				type="button"
+				size="sm"
+				variant="outline"
+				disabled={operations.isPending}
+				onClick={() => {
+					setProvider(operations.form.probeProvider);
+					setInterval(String(operations.form.probeIntervalSeconds));
+					setOpen(true);
+				}}
+			>
+				<Settings2 />
+				{t("proxies.automation.settingsButton")}
+			</Button>
+			<Dialog open={open} onOpenChange={setOpen}>
+				<DialogContent className="sm:max-w-[620px]">
+					<DialogHeader>
+						<DialogTitle>{t("proxies.automation.title")}</DialogTitle>
+						<DialogDescription>{t("ops.probeDraftHelp")}</DialogDescription>
+					</DialogHeader>
+					<div>
+						<OperationsField
+							controlId="egress-probe-provider"
+							label={t("settings.egress.probeProvider")}
+							description={t("settings.egress.probeProviderHelp")}
+						>
+							<Select
+								value={provider}
+								onValueChange={(value: "ipinfo" | "cloudflare") =>
+									setProvider(value)
+								}
+							>
+								<SelectTrigger id="egress-probe-provider">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="ipinfo">IPinfo</SelectItem>
+									<SelectItem value="cloudflare">Cloudflare</SelectItem>
+								</SelectContent>
+							</Select>
+						</OperationsField>
+						<OperationsField
+							controlId="egress-probe-interval"
+							label={t("settings.egress.probeInterval")}
+							description={t("settings.egress.probeIntervalHelp")}
+							error={invalid ? t("ops.probeIntervalInvalid") : undefined}
+						>
+							<IntervalInput
+								id="egress-probe-interval"
+								value={interval}
+								onChange={setInterval}
+							/>
+						</OperationsField>
+					</div>
+					<DialogFooter>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={() => setOpen(false)}
+						>
+							{t("common.cancel")}
+						</Button>
+						<Button
+							type="button"
+							size="sm"
+							disabled={invalid}
+							onClick={() => {
+								operations.update((current) => ({
+									...current,
+									probeProvider: provider,
+									probeIntervalSeconds: seconds,
+								}));
+								setOpen(false);
+							}}
+						>
+							{t("ops.applyDraft")}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</>
+	);
 }

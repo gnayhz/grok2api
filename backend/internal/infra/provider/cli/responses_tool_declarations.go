@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 func normalizeResponsesTools(payload map[string]json.RawMessage) (*responsesToolCompatibility, error) {
@@ -34,7 +37,7 @@ func normalizeResponsesTools(payload map[string]json.RawMessage) (*responsesTool
 
 	if rawInput := payload["input"]; !isEmptyJSON(rawInput) {
 		var input any
-		if err := json.Unmarshal(rawInput, &input); err != nil {
+		if err := jsonvalue.Unmarshal(rawInput, &input); err != nil {
 			return nil, &responsesRequestError{Message: "input 必须是字符串或数组", Param: "input", Code: "invalid_parameter"}
 		}
 		if items, ok := input.([]any); ok {
@@ -54,6 +57,9 @@ func normalizeResponsesTools(payload map[string]json.RawMessage) (*responsesTool
 			return nil, searchErr
 		}
 		normalizedTools = append(normalizedTools, searchTool)
+	}
+	if err := xaitools.ValidateDeclarations(normalizedTools); err != nil {
+		return nil, toolConstraintError(err)
 	}
 	normalizedTools = dedupeNormalizedTools(normalizedTools)
 	if len(normalizedTools) > 0 {
@@ -106,7 +112,7 @@ func decodeOptionalArray(raw json.RawMessage, param string) ([]any, bool, error)
 		return nil, false, nil
 	}
 	var values []any
-	if err := json.Unmarshal(raw, &values); err != nil {
+	if err := jsonvalue.Unmarshal(raw, &values); err != nil {
 		return nil, false, &responsesRequestError{Message: param + " 必须是数组", Param: param, Code: "invalid_parameter"}
 	}
 	return values, true, nil
@@ -237,7 +243,6 @@ func (c *responsesToolCompatibility) normalizeTool(raw any, namespace string, cl
 		if execution == "" || execution == "server" {
 			// Build 上游没有服务端 Tool Search。将已声明的延迟工具提前展开，
 			// 比让 Codex 因一个可选优化能力整次失败更符合兼容层语义。
-			c.serverSearchEager = true
 			c.changed = true
 			c.addWarning("server_tool_search_eager_loaded")
 			return nil, nil

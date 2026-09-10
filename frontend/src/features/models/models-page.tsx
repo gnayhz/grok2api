@@ -21,8 +21,9 @@ import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { createModel, deleteModel, deleteModels, fetchModelSyncRun, listModelAccountOptions, listModelGroups, syncModels, updateModel, updateModelsEnabled } from "@/entities/model/model-api";
+import { createModel, deleteModel, deleteModels, fetchModelSyncRun, listModelGroups, syncModels, updateModel, updateModelsEnabled } from "@/entities/model/model-api";
 import type { ModelEndpointCapability, ModelRouteDTO, ModelRouteGroupDTO } from "@/entities/model/types";
+import { ModelAccountPicker } from "./model-account-picker";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -49,7 +50,6 @@ export function ModelsPage() {
   const [editing, setEditing] = useState<ModelRouteDTO | "new" | null>(null);
   const [deleting, setDeleting] = useState<ModelRouteGroup | null>(null);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
-  const [accountSearch, setAccountSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search);
   const schema = z.object({
     publicId: z.string().min(1, t("errors.required")),
@@ -76,18 +76,17 @@ export function ModelsPage() {
     queryFn: () => listModelGroups({ page, pageSize, search: debouncedSearch, status: statusFilter, provider: providerFilter, sortBy: sort.field || undefined, sortOrder: sort.field ? sort.order : undefined }),
   });
 
-  const accountOptionsQuery = useQuery({
-    queryKey: ["models", "account-options", selectedProvider],
-    queryFn: () => listModelAccountOptions(selectedProvider),
-    enabled: editing !== null,
-  });
-
   const updateMutation = useMutation({
     mutationFn: (values: ModelForm) => {
       if (!editing) throw new Error(t("errors.generic"));
       const input = { ...values, accountIds: values.bindingMode ? values.accountIds : [] };
       if (editing === "new") return createModel(input);
-      return updateModel(editing.id, { publicId: input.publicId, enabled: input.enabled, accountIds: input.accountIds });
+      const patch: Parameters<typeof updateModel>[1] = {};
+      if (input.publicId !== editing.publicId) patch.publicId = input.publicId;
+      if (input.enabled !== editing.enabled) patch.enabled = input.enabled;
+      const oldIDs = new Set(editing.accountIds);
+      if (oldIDs.size !== input.accountIds.length || input.accountIds.some((id) => !oldIDs.has(id))) patch.accountIds = input.accountIds;
+      return updateModel(editing.id, patch);
     },
     onSuccess: () => {
       setSelected(new Set());
@@ -201,7 +200,6 @@ export function ModelsPage() {
 
   function beginEdit(model: ModelRouteDTO): void {
     setEditing(model);
-    setAccountSearch("");
     form.reset({
       publicId: model.publicId,
       provider: model.provider,
@@ -215,7 +213,6 @@ export function ModelsPage() {
 
   function beginCreate(): void {
     setEditing("new");
-    setAccountSearch("");
     form.reset({ publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [] });
   }
 
@@ -223,12 +220,6 @@ export function ModelsPage() {
     const current = form.getValues("accountIds");
     form.setValue("accountIds", checked ? [...new Set([...current, id])] : current.filter((value) => value !== id), { shouldValidate: true });
   }
-
-  const accountOptions = accountOptionsQuery.data?.items ?? [];
-  const normalizedAccountSearch = accountSearch.trim().toLocaleLowerCase();
-  const visibleAccountOptions = normalizedAccountSearch
-    ? accountOptions.filter((account) => account.name.toLocaleLowerCase().includes(normalizedAccountSearch) || account.id.includes(normalizedAccountSearch))
-    : accountOptions;
 
   const result = useMemo(() => modelsQuery.data ? { ...modelsQuery.data, items: modelsQuery.data.items.map((group) => newModelRouteGroup(group, t)) } : undefined, [modelsQuery.data, t]);
   const pageIDs = result?.items.flatMap((group) => group.routes.map((route) => route.id)) ?? [];
@@ -352,7 +343,7 @@ export function ModelsPage() {
                   <TableCell className="min-w-0">
                     <span className="block truncate text-xs text-muted-foreground" title={model.upstreamModel}>{model.upstreamModel}</span>
                   </TableCell>
-                  <TableCell className="text-center"><ModelCapabilities capabilities={model.capabilities} /></TableCell>
+                  <TableCell className="text-center"><ModelCapabilities capabilities={model.capabilities} />{model.routes.some((route) => route.capabilitySupported === false) ? <span className="mt-1 block text-[10px] text-destructive">{t("models.unsupportedCapability")}</span> : null}</TableCell>
                   <TableCell className="text-center">{model.enabledState === "enabled" ? <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("common.enabled")}</Badge> : model.enabledState === "disabled" ? <Badge variant="outline" className="text-muted-foreground">{t("common.disabled")}</Badge> : <Badge variant="outline" className="text-amber-700 dark:text-amber-300">{t("models.partiallyEnabled")}</Badge>}</TableCell>
                   <TableCell className="text-center"><ModelProvider provider={model.provider} /></TableCell>
                   <TableCell className="text-center text-xs">
@@ -420,28 +411,7 @@ export function ModelsPage() {
                 </div>
                 {bindingMode ? (
                   <div className="mt-3">
-                    <div className="overflow-hidden rounded-md bg-background/55 p-1">
-                      <div className="relative">
-                        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                        <Input className="bg-transparent pl-8 shadow-none focus-visible:bg-background/70" value={accountSearch} onChange={(event) => setAccountSearch(event.target.value)} placeholder={t("models.searchAccounts")} />
-                      </div>
-                      <div className="mt-1 max-h-40 overflow-y-auto overscroll-contain sm:max-h-44">
-                        {accountOptionsQuery.isPending ? <div className="flex min-h-20 items-center justify-center"><Spinner /></div> : null}
-                        {accountOptionsQuery.isError ? <p className="p-3 text-center text-xs text-destructive">{accountOptionsQuery.error.message}</p> : null}
-                        {!accountOptionsQuery.isPending && visibleAccountOptions.length === 0 ? <p className="p-3 text-center text-xs text-muted-foreground">{t("models.noBindableAccounts")}</p> : null}
-                        {visibleAccountOptions.map((account) => {
-                          const controlId = `model-account-${account.id}`;
-                          const checked = selectedAccountIDs.includes(account.id);
-                          return (
-                            <label key={account.id} htmlFor={controlId} className={cn("flex h-8 cursor-pointer items-center gap-2.5 rounded-md px-2 text-xs transition-colors hover:bg-accent/40", checked && "bg-accent/55")}>
-                              <Checkbox id={controlId} checked={checked} onCheckedChange={(value) => toggleBoundAccount(account.id, value === true)} />
-                              <span className="min-w-0 flex-1 truncate" title={account.name}>{account.name}</span>
-                              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">#{account.id}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
+                    <ModelAccountPicker provider={selectedProvider} selectedIDs={selectedAccountIDs} onToggle={toggleBoundAccount} />
                     {form.formState.errors.accountIds ? <p className="mt-2 text-xs text-destructive">{form.formState.errors.accountIds.message}</p> : null}
                   </div>
                 ) : null}

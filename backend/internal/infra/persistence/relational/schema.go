@@ -20,6 +20,9 @@ const mediaJobInputMetadataPendingIndex = "CREATE INDEX IF NOT EXISTS idx_media_
 const postgresSchemaMigrationLockID int64 = 0x47524f4b32415049
 
 var schemaModels = []any{
+	&conversationSessionModel{},
+	&conversationRequestModel{},
+	&conversationTurnModel{},
 	&adminModel{},
 	&adminSessionModel{},
 	&schemaMigrationMarkerModel{},
@@ -29,12 +32,17 @@ var schemaModels = []any{
 	&egressNodeModel{},
 	&egressOperationsConfigModel{},
 	&accountRiskVerdictModel{},
+	// accountTombstoneModel 账号删除墓碑:手动删除的账号不再被
+	// 导入/同步复活(批9 事故:删除后 SSO 批量导入重建同号,反复涉案)。
+	&accountTombstoneModel{},
 	&accountModel{},
 	&accountCredentialModel{},
 	&accountProviderLinkModel{},
 	&webConsoleAccountLinkModel{},
 	&webAccountProfileModel{},
 	&quotaWindowModel{},
+	&quotaStateModel{},
+	&quotaConsumptionModel{},
 	&billingModel{},
 	&quotaRecoveryModel{},
 	&modelRouteModel{},
@@ -47,8 +55,10 @@ var schemaModels = []any{
 	&clientKeyModel{},
 	&clientKeyModelPermission{},
 	&billingReservationModel{},
+	&billingSettlementModel{},
 	&requestAuditModel{},
 	&requestAuditAttemptModel{},
+	&requestAuditGenerationModel{},
 	&responseOwnershipModel{},
 	&webResponseStateModel{},
 	&mediaJobModel{},
@@ -162,6 +172,7 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 
 func (d *Database) initializeSchema(ctx context.Context) error {
 	db := d.db.WithContext(ctx)
+	hadBillingSettlements := db.Migrator().HasTable(&billingSettlementModel{})
 	hadClientKeys := db.Migrator().HasTable(&clientKeyModel{})
 	hadProviderScope := hadClientKeys && db.Migrator().HasColumn(&clientKeyModel{}, "ProviderScopeMask")
 	hadTierScope := hadClientKeys && db.Migrator().HasColumn(&clientKeyModel{}, "TierScopeMask")
@@ -182,11 +193,24 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 	var migrateErr error
 	if err := preMigrate(); err != nil {
 		migrateErr = err
+	} else if err := d.migrateModelAliasKey(ctx); err != nil {
+		migrateErr = err
+	} else if err := d.migrateModelNameSources(ctx); err != nil {
+		migrateErr = err
+	} else if err := d.migrateModelRestrictionKey(ctx); err != nil {
+		migrateErr = err
+	} else if err := d.migrateClientKeyModelScope(ctx); err != nil {
+		migrateErr = err
 	} else {
 		migrateErr = autoMigrate()
 	}
 	if migrateErr != nil {
 		return fmt.Errorf("初始化数据库表: %w", migrateErr)
+	}
+	if !hadBillingSettlements {
+		if err := d.migrateBillingSettlements(ctx); err != nil {
+			return fmt.Errorf("迁移持久结算身份: %w", err)
+		}
 	}
 	if err := d.restoreLegacyEgressRouting(ctx, legacyRouting); err != nil {
 		return fmt.Errorf("迁移出口路由配置: %w", err)
@@ -307,7 +331,7 @@ func (d *Database) migrateBuildResponseHeaderTimeout(ctx context.Context) error 
 		if err := json.Unmarshal([]byte(row.ValueJSON), &payload); err != nil {
 			return fmt.Errorf("decode runtime settings: %w", err)
 		}
-		if payload.Config.ProviderBuild.ResponseHeaderTimeout > 0 {
+		if payload.UseFileDefaults || payload.Config.ProviderBuild.ResponseHeaderTimeout > 0 {
 			return nil
 		}
 		payload.Config.ProviderBuild.ResponseHeaderTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
@@ -343,6 +367,9 @@ func (d *Database) migrateProviderStreamIdleTimeouts(ctx context.Context) error 
 		var payload runtimeSettingsPayload
 		if err := json.Unmarshal([]byte(row.ValueJSON), &payload); err != nil {
 			return fmt.Errorf("decode runtime settings: %w", err)
+		}
+		if payload.UseFileDefaults {
+			return nil
 		}
 		changed := false
 		if payload.Config.ProviderBuild.StreamIdleTimeout <= 0 {
@@ -809,8 +836,8 @@ func (d *Database) constraintDefinition(ctx context.Context, value consoleConstr
 		if err := d.db.WithContext(ctx).Raw(`
 			SELECT pg_get_constraintdef(constraint_row.oid)
 			FROM pg_constraint constraint_row
-			JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
-			WHERE table_row.relname = ? AND constraint_row.conname = ?
+			WHERE constraint_row.conrelid = to_regclass(?)
+              AND constraint_row.conname = ?
 		`, value.table, value.name).Scan(&definition).Error; err != nil {
 			return "", err
 		}

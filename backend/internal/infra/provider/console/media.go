@@ -16,10 +16,13 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 const (
@@ -85,35 +88,39 @@ func (e *consoleMediaUpstreamError) PublicErrorMessage() string {
 	return e.summary
 }
 
+func invalidConsoleImageRequest(message string) error {
+	return &inferencedomain.RequestValidationError{Code: "invalid_request", Message: message}
+}
+
 func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGenerationRequest) (*provider.Response, error) {
 	if !ResolveMedia(request.Model, modeldomain.CapabilityImage) {
-		return invalidConsoleMediaRequest("模型不支持 Console 图片生成"), nil
+		return nil, invalidConsoleImageRequest("模型不支持 Console 图片生成")
 	}
 	if request.Streaming || request.PartialImages != 0 {
-		return invalidConsoleMediaRequest("Grok Console 标准图片接口不支持 stream 或 partial_images"), nil
+		return nil, invalidConsoleImageRequest("Grok Console 标准图片接口不支持 stream 或 partial_images")
 	}
 	count := request.Count
 	if count <= 0 {
 		count = 1
 	}
 	if count > 10 {
-		return invalidConsoleMediaRequest("n 必须在 1 到 10 之间"), nil
+		return nil, invalidConsoleImageRequest("n 必须在 1 到 10 之间")
 	}
 	format, err := normalizeConsoleImageFormat(request.ResponseFormat)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	ratio, err := resolveConsoleImageAspectRatio(request.AspectRatio, request.Size)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	resolution, err := normalizeConsoleImageResolution(request.Resolution)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	quality, err := normalizeConsoleImageQuality(request.Model, request.Quality)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	payload := map[string]any{"model": request.Model, "prompt": request.Prompt, "n": count, "response_format": format}
 	if ratio != "" {
@@ -125,47 +132,47 @@ func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGener
 	if quality != "" {
 		payload["quality"] = quality
 	}
-	return a.forwardConsoleMedia(ctx, request.Credential, "/images/generations", payload, format, count)
+	return a.forwardConsoleMedia(ctx, request.Credential, "/images/generations", payload, format, count, request.Observe)
 }
 
 func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditRequest) (*provider.Response, error) {
 	if !ResolveMedia(request.Model, modeldomain.CapabilityImageEdit) {
-		return invalidConsoleMediaRequest("模型不支持 Console 图片编辑"), nil
+		return nil, invalidConsoleImageRequest("模型不支持 Console 图片编辑")
 	}
 	if request.Streaming || request.PartialImages != 0 {
-		return invalidConsoleMediaRequest("Grok Console 标准图片接口不支持 stream 或 partial_images"), nil
+		return nil, invalidConsoleImageRequest("Grok Console 标准图片接口不支持 stream 或 partial_images")
 	}
 	if len(request.ImageURLs) == 0 || len(request.ImageURLs) > consoleMaxEditImages {
-		return invalidConsoleMediaRequest("Console 图片编辑必须提供 1 到 3 张图片"), nil
+		return nil, invalidConsoleImageRequest("Console 图片编辑必须提供 1 到 3 张图片")
 	}
 	count := request.Count
 	if count <= 0 {
 		count = 1
 	}
 	if count > 10 {
-		return invalidConsoleMediaRequest("n 必须在 1 到 10 之间"), nil
+		return nil, invalidConsoleImageRequest("n 必须在 1 到 10 之间")
 	}
 	format, err := normalizeConsoleImageFormat(request.ResponseFormat)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	ratio, err := resolveConsoleImageAspectRatio(request.AspectRatio, request.Size)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	resolution, err := normalizeConsoleImageResolution(request.Resolution)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	quality, err := normalizeConsoleImageQuality(request.Model, request.Quality)
 	if err != nil {
-		return invalidConsoleMediaRequest(err.Error()), nil
+		return nil, invalidConsoleImageRequest(err.Error())
 	}
 	images := make([]map[string]any, 0, len(request.ImageURLs))
 	for _, rawURL := range request.ImageURLs {
 		value := strings.TrimSpace(rawURL)
 		if !validConsoleMediaInputURL(value, "image") {
-			return invalidConsoleMediaRequest("每张编辑图片都必须是 HTTPS URL 或 image data URL"), nil
+			return nil, invalidConsoleImageRequest("每张编辑图片都必须是 HTTPS URL 或 image data URL")
 		}
 		images = append(images, map[string]any{"type": "image_url", "url": value})
 	}
@@ -184,10 +191,10 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	if quality != "" {
 		payload["quality"] = quality
 	}
-	return a.forwardConsoleMedia(ctx, request.Credential, "/images/edits", payload, format, count)
+	return a.forwardConsoleMedia(ctx, request.Credential, "/images/edits", payload, format, count, request.Observe)
 }
 
-func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Credential, path string, payload any, format string, quotaUnits int) (*provider.Response, error) {
+func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Credential, path string, payload any, format string, quotaUnits int, observe func(provider.ImageGenerationObservation)) (*provider.Response, error) {
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, err
@@ -197,7 +204,7 @@ func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Cr
 		return nil, err
 	}
 	cfg := a.config()
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	lease, err := a.egress.AcquireCredential(requestCtx, egressdomain.ScopeConsole, credential)
 	if err != nil {
 		cancel()
@@ -205,7 +212,7 @@ func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Cr
 	}
 	response, err := a.doDPoPRequest(requestCtx, credential, token, lease, http.MethodPost, consoleV1Endpoint(cfg.BaseURL, path), body, "application/json")
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		lease.Release()
 		cancel()
 		return nil, err
@@ -227,7 +234,7 @@ func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Cr
 			lease.InvalidateClearance()
 		}
 		if !dpopRequired {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+			lease.Observe(response.StatusCode, nil)
 		}
 		lease.Release()
 		cancel()
@@ -245,40 +252,51 @@ func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Cr
 		result.RateLimit = rateLimit
 		return result, nil
 	}
+	provider.ObserveImageGeneration(observe, provider.ImageGenerationObservation{Started: true, UpstreamStatus: response.StatusCode})
+	limit := consoleImageJSONLimit
 	if format == "url" {
-		data, readErr := io.ReadAll(io.LimitReader(response.Body, consoleMediaBodyLimit+1))
-		_ = response.Body.Close()
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, readErr)
-		lease.Release()
-		cancel()
-		if readErr == nil && len(data) > consoleMediaBodyLimit {
-			readErr = errors.New("Console 图片上游响应超过 2 MiB")
+		limit = consoleMediaBodyLimit
+	}
+	buffered, readErr := responsebuffer.ReadAll(response.Body, responsebuffer.FromContext(ctx), limit)
+	_ = response.Body.Close()
+	lease.Observe(response.StatusCode, readErr)
+	lease.Release()
+	cancel()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = buffered.Close()
 		}
-		if readErr == nil {
-			data, readErr = a.localizeConsoleImageResponse(ctx, credential, cfg.BaseURL, data)
+	}()
+	if readErr != nil {
+		return nil, readErr
+	}
+	data, release, _ := buffered.BorrowBytes()
+	defer release()
+	actual, err := inspectConsoleImages(ctx, data, format, quotaUnits, observe)
+	if err != nil {
+		return nil, err
+	}
+	if format == "url" {
+		workspace, err := responsebuffer.JSONWorkspace(responsebuffer.FromContext(ctx), data)
+		if err != nil {
+			return nil, err
 		}
-		if readErr != nil {
-			if !provider.IsMediaPostProcessingError(readErr) {
-				readErr = provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, readErr)
-			}
-			return nil, readErr
+		defer workspace.Release()
+		data, err = a.localizeConsoleImageResponse(ctx, credential, cfg.BaseURL, data)
+		if err != nil {
+			return nil, err
 		}
 		response.Body = io.NopCloser(bytes.NewReader(data))
-		response.ContentLength = int64(len(data))
-		response.Header.Set("Content-Length", strconv.Itoa(len(data)))
-		response.Header.Set("Content-Type", "application/json")
-		result := responseResult(response, response.Body)
-		result.QuotaUnits = max(1, quotaUnits)
-		result.RateLimit = rateLimit
-		return result, nil
+	} else {
+		response.Body = buffered
+		handedOff = true
 	}
-	release := func() {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
-		lease.Release()
-		cancel()
-	}
-	result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
-	result.QuotaUnits = max(1, quotaUnits)
+	response.ContentLength = int64(len(data))
+	response.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	response.Header.Set("Content-Type", "application/json")
+	result := responseResult(response, response.Body)
+	result.QuotaUnits = actual
 	result.RateLimit = rateLimit
 	return result, nil
 }
@@ -366,7 +384,7 @@ func (a *Adapter) downloadConsoleImageAttempt(ctx context.Context, credential ac
 	request.Header.Set("User-Agent", userAgent)
 	response, err := lease.DoDeferredForbidden(request)
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return nil, ctx.Err() == nil, fmt.Errorf("下载 Console 图片: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -379,7 +397,7 @@ func (a *Adapter) downloadConsoleImageAttempt(ctx context.Context, credential ac
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		retryable := response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		return nil, retryable, fmt.Errorf("下载 Console 图片返回 %d", response.StatusCode)
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
@@ -393,7 +411,7 @@ func (a *Adapter) downloadConsoleImageAttempt(ctx context.Context, credential ac
 	if len(raw) == 0 || len(raw) > consoleImageBodyLimit {
 		return nil, false, errors.New("Console 图片为空或超过 32 MiB")
 	}
-	a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	return raw, false, nil
 }
 
@@ -442,6 +460,9 @@ func trustedConsoleImageHost(host string) bool {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	if request.Resume != nil {
+		return a.resumeConsoleVideo(ctx, request)
+	}
 	modelName := strings.TrimSpace(request.Model)
 	if modelName == "" {
 		modelName = "grok-imagine-video"
@@ -611,17 +632,48 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	case provider.VideoOperationExtend:
 		createPath = "/videos/extensions"
 	}
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitting, Route: "console", Endpoint: baseURL}); err != nil {
+		return provider.VideoResult{}, err
+	}
 	created, err := a.doConsoleVideoJSON(ctx, request.Credential, token, lease, http.MethodPost, consoleV1Endpoint(baseURL, createPath), body)
 	if err != nil {
+		if checkpointErr := provider.CheckpointVideoRejection(request, err); checkpointErr != nil {
+			return provider.VideoResult{}, checkpointErr
+		}
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
 	requestID, err := parseConsoleVideoCreate(created)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStageSubmitted, 0, err)
 	}
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitted, NativeJobID: requestID}); err != nil {
+		return provider.VideoResult{}, err
+	}
 	if request.Progress != nil {
 		request.Progress(1)
 	}
+	return a.pollConsoleVideo(ctx, request, token, lease, baseURL, requestID)
+}
+
+func (a *Adapter) resumeConsoleVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	saved := request.Resume
+	if saved.Route != "console" || saved.NativeJobID == "" || saved.Endpoint == "" {
+		return provider.VideoResult{}, mediadomain.ErrInvalidVideoExecution
+	}
+	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
+	if err != nil {
+		return provider.VideoResult{}, err
+	}
+	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassVideo)
+	lease, err := a.egress.AcquireCredential(ctx, egressdomain.ScopeConsole, request.Credential)
+	if err != nil {
+		return provider.VideoResult{}, err
+	}
+	defer lease.Release()
+	return a.pollConsoleVideo(ctx, request, token, lease, saved.Endpoint, saved.NativeJobID)
+}
+
+func (a *Adapter) pollConsoleVideo(ctx context.Context, request provider.VideoRequest, token string, lease *infraegress.Lease, baseURL, requestID string) (provider.VideoResult, error) {
 	ticker := time.NewTicker(consoleVideoPollEvery)
 	defer ticker.Stop()
 	for {
@@ -630,30 +682,41 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, pollErr)
 		}
 		result, done, parseErr := parseConsoleVideoStatus(statusBody, request.Progress)
+		if done {
+			if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionGenerated, Result: result}); err != nil {
+				return result, err
+			}
+		}
 		if parseErr != nil {
-			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, parseErr)
+			if err := provider.CheckpointVideoFailure(request, parseErr); err != nil {
+				return result, err
+			}
+			return result, provider.WrapVideoStage(provider.VideoStagePoll, 0, parseErr)
 		}
 		if done {
 			return result, nil
 		}
 		select {
 		case <-ctx.Done():
-			return provider.VideoResult{}, ctx.Err()
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, ctx.Err())
 		case <-ticker.C:
 		}
 	}
 }
 
 func (a *Adapter) doConsoleVideoJSON(ctx context.Context, credential account.Credential, token string, lease *infraegress.Lease, method, endpoint string, body []byte) ([]byte, error) {
+	if method == http.MethodGet {
+		ctx = infraegress.WithPhysicalCallStage(ctx, "video_poll")
+	}
 	requestCtx := ctx
 	cancel := func() {}
-	if timeout := a.config().TimeoutSeconds; timeout > 0 {
-		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	if timeout := a.config().Timeout; timeout > 0 {
+		requestCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 	response, err := a.doDPoPRequest(requestCtx, credential, token, lease, method, endpoint, body, "application/json")
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -673,15 +736,16 @@ func (a *Adapter) doConsoleVideoJSON(ctx context.Context, credential account.Cre
 			lease.InvalidateClearance()
 		}
 		if !dpopRequired {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+			lease.Observe(response.StatusCode, nil)
 		}
-		return nil, newConsoleMediaUpstreamError(response.StatusCode, data, parseConsoleRetryAfterHeader(response.Header.Get("Retry-After"), time.Now().UTC()))
+		return nil, newConsoleMediaUpstreamError(response.StatusCode, data, retryafter.Header(response.Header.Get("Retry-After"), time.Now().UTC()))
 	}
-	a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	return data, nil
 }
 
 func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credential, rawURL string) (io.ReadCloser, string, int64, error) {
+	ctx = infraegress.WithPhysicalCallStage(ctx, "asset_download")
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !trustedConsoleVideoHost(parsed.Hostname()) {
 		return nil, "", 0, errors.New("Console 视频内容 URL 不受信任")
@@ -705,7 +769,7 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	request.Header.Set("User-Agent", userAgent)
 	response, err := lease.DoDeferredForbidden(request)
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		lease.Release()
 		return nil, "", 0, err
 	}
@@ -719,7 +783,7 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_ = response.Body.Close()
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		lease.Release()
 		return nil, "", 0, fmt.Errorf("下载 Console 视频返回 %d", response.StatusCode)
 	}
@@ -734,9 +798,9 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	}
 	onFinished := func(readErr error, complete bool) {
 		if readErr != nil {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, 0, readErr)
+			lease.Observe(0, readErr)
 		} else if complete {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsoleAsset, lease.NodeID, response.StatusCode, nil)
+			lease.Observe(response.StatusCode, nil)
 		}
 		lease.Release()
 	}
@@ -843,7 +907,7 @@ func parseConsoleVideoStatus(body []byte, progress func(int)) (provider.VideoRes
 	switch status := strings.ToLower(strings.TrimSpace(payload.Status)); status {
 	case "done", "completed", "succeeded", "success", "ready":
 		if strings.TrimSpace(payload.Video.URL) == "" {
-			return provider.VideoResult{}, false, errors.New("Console 视频生成完成但没有返回内容 URL")
+			return provider.VideoResult{ContentType: "video/mp4"}, true, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, errors.New("Console 视频生成完成但没有返回内容 URL"))
 		}
 		return provider.VideoResult{URL: strings.TrimSpace(payload.Video.URL), ContentType: "video/mp4"}, true, nil
 	case "failed", "expired", "cancelled", "canceled", "error":
@@ -851,7 +915,7 @@ func parseConsoleVideoStatus(body []byte, progress func(int)) (provider.VideoRes
 		if message == "" {
 			message = strings.ToLower(strings.TrimSpace(payload.Status))
 		}
-		return provider.VideoResult{}, false, fmt.Errorf("Console 视频生成失败: %s", message)
+		return provider.VideoResult{}, false, &provider.VideoGenerationFailure{Err: fmt.Errorf("Console 视频生成失败: %s", message)}
 	case "pending", "processing", "in_progress", "queued":
 		return provider.VideoResult{}, false, nil
 	default:
@@ -876,7 +940,7 @@ func newConsoleMediaUpstreamError(status int, body []byte, retryAfter time.Durat
 		summary += ": " + message
 	}
 	if retryAfter <= 0 {
-		retryAfter = consoleRetryAfter(body)
+		retryAfter = retryafter.ResetText(string(body))
 	}
 	return &consoleMediaUpstreamError{
 		status: status, summary: summary, retryAfter: retryAfter,

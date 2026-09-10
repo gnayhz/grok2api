@@ -1,4 +1,4 @@
-.PHONY: run swagger verify verify-full fuzz
+.PHONY: run swagger verify-check verify verify-full fuzz
 
 CONFIG ?= $(CURDIR)/config.yaml
 
@@ -14,6 +14,9 @@ swagger:
 		--outputTypes go,json,yaml
 
 # One-shot verification matrix (see scripts/verify.sh).
+verify-check:
+	scripts/verify.sh check
+
 verify:
 	scripts/verify.sh fast
 

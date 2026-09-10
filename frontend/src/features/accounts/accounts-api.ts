@@ -93,6 +93,8 @@ export type AccountDTO = {
   riskDetail?: string;
   /** Numeric bot_flag_source/bfs claim when risk-flagged: 1 or 2. */
   buildBotFlagSource?: number;
+  /** 裁决亭(质量轴)状态徽章;undefined=未被裁决亭动过。 */
+  quality?: AccountQualityDTO;
   modelSyncFailed?: boolean;
   refreshDueAt?: string;
   lastRefreshAt?: string;
@@ -107,6 +109,7 @@ export type AccountDTO = {
   failureCount: number;
   cooldownUntil?: string;
   lastError?: string;
+  authError?: string;
 /** Last observed upstream model (capability sync). */
   observedModel?: string;
   observedModelAt?: string;
@@ -175,6 +178,15 @@ const billingHistoryValidator = hasShape({
   year: isNumber, month: isNumber, periodType: isOptional(isString), periodStart: isOptional(isString), periodEnd: isOptional(isString),
   includedUsed: isNumber, onDemandUsed: isNumber, totalUsed: isNumber,
 });
+export type AccountQualityDTO = {
+	state: "remanded" | "sentenced" | string;
+	caseId?: string;
+};
+
+const accountQualityValidator = hasShape({
+	state: isString, caseId: isOptional(isString),
+});
+
 const billingValidator = hasShape({
   planCode: isOptional(isString), planName: isOptional(isString), monthlyLimit: isNumber, used: isNumber, remaining: isNumber,
   onDemandCap: isNumber, onDemandUsed: isNumber, prepaidBalance: isNumber, creditUsagePercent: isNumber,
@@ -200,9 +212,9 @@ const accountValidator = hasShape({
   id: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), authType: isOneOf("oauth", "sso"), webTier: isOptional(isOneOf("auto", "basic", "super", "heavy")),
   webTierSyncedAt: isOptional(isString), nsfwEnabledAt: isOptional(isString), termsAcceptedAt: isOptional(isString), name: isString, email: isOptional(isString), userId: isOptional(isString), teamId: isOptional(isString),
   enabled: isBoolean, authStatus: isOneOf("active", "reauthRequired"), expiresAt: isOptional(isString), refreshable: isBoolean, cloudflareCookieConfigured: isBoolean,
-  buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), riskTrigger: isOptional(isString), riskOriginAccountId: isOptional(isString), riskCheckedAt: isOptional(isString), riskDetail: isOptional(isString), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
+  buildSuperEntitled: isBoolean, buildRouteMode: isOneOf("auto", "build", "xai"), buildBotFlagged: isBoolean, buildBotFlagSource: isOptional(isNumber), riskStatus: isOptional(isOneOf("rsc_denied")), quality: isOptional(accountQualityValidator), riskTrigger: isOptional(isString), riskOriginAccountId: isOptional(isString), riskCheckedAt: isOptional(isString), riskDetail: isOptional(isString), modelSyncFailed: isOptional(isBoolean), refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
   lastRefreshErrorStatus: isOptional(isNumber), lastRefreshErrorCode: isOptional(isString), lastRefreshErrorMessage: isOptional(isString), lastRefreshErrorResponse: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
-  failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), enabledDoesNotClearCooldown: isOptional(isBoolean), lastUsedAt: isOptional(isString),
+  failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), authError: isOptional(isString), observedModel: isOptional(isString), observedModelAt: isOptional(isString), enabledDoesNotClearCooldown: isOptional(isBoolean), lastUsedAt: isOptional(isString),
   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")), linkedAccounts: isOptional(isArrayOf(linkedAccountValidator)),
   createdAt: isString, billing: isOptional(billingValidator), quota: quotaValidator, quotaWindows: isOptional(isArrayOf(quotaWindowValidator)),
 });
@@ -223,7 +235,7 @@ const decodeDevicePoll = createObjectDecoder<DevicePollDTO>("device poll", {
   status: isOneOf("pending", "succeeded", "syncFailed"), account: isOptional(accountValidator), synced: isOptional(isNumber), syncFailed: isOptional(isNumber),
 });
 
-type ListAccountsInput = {
+export type ListAccountsInput = {
   page: number;
   pageSize: number;
   search?: string;
@@ -256,6 +268,8 @@ export function listAccounts(input: ListAccountsInput, signal?: AbortSignal): Pr
   return apiRequest(`/api/admin/v1/accounts?${query}`, { signal }, decodeAccountPage);
 }
 
+// 管理端少量跨页面关联数据需要完整的账号身份映射。逐页读取而不是把
+// pageSize 写死为某个池规模，避免质量仲裁页面只显示最新一页账号的编号。
 export function getAccountSummary(): Promise<AccountSummaryDTO> {
   return apiRequest("/api/admin/v1/accounts/summary", {}, decodeAccountSummary);
 }
@@ -317,9 +331,6 @@ export function refreshAccountToken(id: string): Promise<AccountDTO> {
   return apiRequest(`/api/admin/v1/accounts/${id}/refresh-token`, { method: "POST" }, decodeAccount);
 }
 
-export function checkAccountRisk(id: string): Promise<AccountDTO> {
-  return apiRequest(`/api/admin/v1/accounts/${id}/risk-check`, { method: "POST" }, decodeAccount);
-}
 
 /** Manual operator escape hatch: unconditionally lift the request-path cooldown
  *  (failure count / cooldown until / reason marker). The enabled state is untouched. */
@@ -718,4 +729,23 @@ export function startDeviceAuthorization(): Promise<DeviceSessionDTO> {
 
 export function pollDeviceAuthorization(sessionId: string, signal: AbortSignal): Promise<DevicePollDTO> {
   return apiRequest(`/api/admin/v1/accounts/device/${sessionId}/poll`, { method: "POST", signal }, decodeDevicePoll);
+}
+
+// 管理端少量跨页面关联数据需要完整的账号身份映射。逐页读取而不是把
+// pageSize 写死为某个池规模，避免质量仲裁页面只显示最新一页账号的编号。
+export async function listAllAccounts(
+  input: Omit<ListAccountsInput, "page" | "pageSize"> = {},
+  signal?: AbortSignal,
+): Promise<PaginatedDTO<AccountDTO>> {
+  const pageSize = 2000;
+  const first = await listAccounts({ ...input, page: 1, pageSize }, signal);
+  const items = [...first.items];
+  for (let page = 2; items.length < first.total; page += 1) {
+    const next = await listAccounts({ ...input, page, pageSize }, signal);
+    if (next.items.length === 0) {
+      break;
+    }
+    items.push(...next.items);
+  }
+  return { ...first, items, page: 1, pageSize, total: items.length };
 }

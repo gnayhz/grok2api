@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,10 +44,24 @@ func (d *Database) Dialect() string {
 // OpenSQLite 打开纯 Go SQLite 数据库并启用 WAL、外键与 busy timeout。
 // 显式事务使用 IMMEDIATE，避免并发读后写事务在锁升级时直接返回 SQLITE_BUSY。
 func OpenSQLite(ctx context.Context, path string) (*Database, error) {
+	return openSQLite(ctx, path, false)
+}
+
+func openSQLite(ctx context.Context, path string, durable bool) (*Database, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("解析数据库路径: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据库目录: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(INCREMENTAL)&_txlock=immediate", path)
+	// The public input is a filesystem path. URI delimiters in directory/file
+	// names must not change the target file or replace connection pragmas.
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(INCREMENTAL)&_txlock=immediate"}
+	if durable {
+		uri.RawQuery += "&_pragma=synchronous(FULL)&_pragma=fullfsync(1)"
+	}
+	dsn := uri.String()
 	db, err := gorm.Open(glebarezsqlite.Open(dsn), gormConfig())
 	if err != nil {
 		return nil, fmt.Errorf("打开 SQLite: %w", err)
@@ -60,6 +75,7 @@ func OpenSQLite(ctx context.Context, path string) (*Database, error) {
 	// 从不回收，页扫描与备份体积虚胖）。仅当模式尚未生效时执行一次。
 	if mode := database.sqliteAutoVacuumMode(ctx); mode != incrementalAutoVacuum {
 		if vacuumErr := database.sqliteVacuumOnce(ctx); vacuumErr != nil {
+			_ = database.Close()
 			return nil, fmt.Errorf("迁移 SQLite auto_vacuum: %w", vacuumErr)
 		}
 	}

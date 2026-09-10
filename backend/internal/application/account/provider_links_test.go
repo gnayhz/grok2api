@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"path/filepath"
 	"testing"
 
@@ -30,7 +31,8 @@ func TestSyncAccountIdentityLinksUniqueBuildWithoutSharingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	build.Enabled = false
-	build, err = repo.Update(ctx, build)
+	edit, err := repo.UpdateAdministration(ctx, build.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &build.Enabled}})
+	build = edit.Credential
 	if err != nil {
 		t.Fatal(err)
 	}

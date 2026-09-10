@@ -20,3 +20,17 @@ type Session struct {
 	LastUsedAt       *time.Time
 	CreatedAt        time.Time
 }
+
+// PasswordRef identifies the exact password material verified by an operation.
+// Bcrypt creates fresh salted material for every change, including reuse of the
+// same plaintext. Persistence must compare it while acquiring the admin lock.
+type PasswordRef struct {
+	AdminID uint64
+	Hash    string `json:"-"`
+}
+
+func (a Admin) PasswordRef() PasswordRef {
+	return PasswordRef{AdminID: a.ID, Hash: a.PasswordHash}
+}
+
+const MaxSessions = 100

@@ -10,6 +10,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestModelCapabilitiesAggregateAndGateEnabledRoutes(t *testing.T) {
@@ -33,7 +34,7 @@ func TestModelCapabilitiesAggregateAndGateEnabledRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-basic", "grok-premium"}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{"grok-basic", "grok-premium"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,13 +43,13 @@ func TestModelCapabilitiesAggregateAndGateEnabledRoutes(t *testing.T) {
 		t.Fatalf("before sync = %#v, err = %v", beforeSync, err)
 	}
 	now := time.Now().UTC()
-	if err := models.ReplaceAccountCapabilities(ctx, first.ID, []string{"grok-basic"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, first.ID, []string{"grok-basic"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if synced, err := models.HasSuccessfulAccountSync(ctx, first.ID); err != nil || !synced {
 		t.Fatalf("first account sync state = %v, err = %v", synced, err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, second.ID, []string{"grok-basic", "grok-premium"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, second.ID, []string{"grok-basic", "grok-premium"}, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,14 +67,18 @@ func TestModelCapabilitiesAggregateAndGateEnabledRoutes(t *testing.T) {
 	if got := byModel["grok-premium"]; got.supported != 1 || got.synced != 2 || got.total != 2 {
 		t.Fatalf("premium availability = %#v", got)
 	}
-	if err := models.MarkAccountCapabilitySyncFailed(ctx, second.ID, now.Add(30*time.Second), "temporary failure"); err != nil {
+	failedRef, err := models.BeginAccountCapabilitySync(ctx, second.ID, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := models.CompleteAccountCapabilitySync(ctx, failedRef, model.CapabilitySyncResult{Credential: second.CredentialRef(), Err: errors.New("temporary failure")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := models.GetByPublicID(ctx, "grok-premium"); err != nil {
 		t.Fatalf("last successful capability must survive a failed refresh: %v", err)
 	}
 
-	if err := models.ReplaceAccountCapabilities(ctx, second.ID, []string{"grok-basic"}, now.Add(time.Minute)); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, second.ID, []string{"grok-basic"}, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	enabled, err := models.ListEnabled(ctx)
@@ -98,7 +103,7 @@ func TestConsoleBuiltInModelIgnoresStaleAccountCapabilitySnapshot(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.3"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, credential.ID, []string{"grok-4.3"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,17 +145,17 @@ func TestConsoleCatalogRoutesUseAutomaticAccountPoolWithoutCapabilitySnapshot(t 
 	second := createAccount("console-second")
 	disabled := createAccount("console-disabled")
 	disabled.Enabled = false
-	if _, err := accounts.Update(ctx, disabled); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, disabled.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &disabled.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 	reauth := createAccount("console-reauth")
 	reauth.AuthStatus = account.AuthStatusReauthRequired
-	if _, err := accounts.Update(ctx, reauth); err != nil {
+	if _, err := accounts.ApplyCredential(ctx, reauth.CredentialRef(), account.CredentialEvent{Kind: account.CredentialRejected, Reason: "fixture rejected"}); err != nil {
 		t.Fatal(err)
 	}
 
 	const publicID = "grok-imagine-image-quality"
-	if err := models.UpsertRoutes(ctx, []model.Route{
+	if err := testsupport.Routes(ctx, models, []model.Route{
 		{PublicID: publicID, Provider: account.ProviderConsole, UpstreamModel: publicID, Capability: model.CapabilityImage, Origin: model.OriginCatalog, Enabled: true},
 		{PublicID: publicID, Provider: account.ProviderConsole, UpstreamModel: publicID, Capability: model.CapabilityImageEdit, Origin: model.OriginCatalog, Enabled: true},
 	}); err != nil {
@@ -195,7 +200,7 @@ func TestConsoleCatalogRoutesUseAutomaticAccountPoolWithoutCapabilitySnapshot(t 
 
 	boundIDs := []uint64{first.ID}
 	boundRoute := enabled[0]
-	boundRoute, err = models.Update(ctx, boundRoute, &boundIDs)
+	boundRoute, err = models.Patch(ctx, boundRoute.ID, model.RoutePatch{AccountIDs: &boundIDs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +215,7 @@ func TestModelRouteGroupsKeepCapabilitiesCompleteAcrossStatusFilters(t *testing.
 	models := NewModelRepository(database)
 
 	const publicID = "grouped-console-image"
-	if err := models.UpsertRoutes(ctx, []model.Route{
+	if err := testsupport.Routes(ctx, models, []model.Route{
 		{PublicID: publicID, Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImage, Origin: model.OriginCatalog, Enabled: true},
 		{PublicID: publicID, Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImageEdit, Origin: model.OriginCatalog, Enabled: true},
 	}); err != nil {
@@ -226,7 +231,7 @@ func TestModelRouteGroupsKeepCapabilitiesCompleteAcrossStatusFilters(t *testing.
 		editRoute = values[0].Routes[1]
 	}
 	editRoute.Enabled = false
-	if _, err := models.Update(ctx, editRoute, nil); err != nil {
+	if _, err := models.Patch(ctx, editRoute.ID, model.RoutePatch{Enabled: &editRoute.Enabled}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -290,15 +295,15 @@ func TestBuildPaidCapabilitiesAreSharedAcrossActiveSuperAccounts(t *testing.T) {
 	freeObserver := createAccount("free-observer")
 	freePeer := createAccount("free-peer")
 	now := time.Now().UTC()
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: observer.ID, MonthlyLimit: 100, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: observer.ID, MonthlyLimit: 100, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: peer.ID, OnDemandCap: 50, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: peer.ID, OnDemandCap: 50, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
 	const sharedModel = "grok-super-shared"
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{sharedModel, "grok-4.5"}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{sharedModel, "grok-4.5"}); err != nil {
 		t.Fatal(err)
 	}
 	for accountID, capabilities := range map[uint64][]string{
@@ -307,7 +312,7 @@ func TestBuildPaidCapabilitiesAreSharedAcrossActiveSuperAccounts(t *testing.T) {
 		freeObserver.ID: {sharedModel},
 		freePeer.ID:     {"grok-4.5"},
 	} {
-		if err := models.ReplaceAccountCapabilities(ctx, accountID, capabilities, now); err != nil {
+		if err := testsupport.Capabilities(ctx, models, accounts, accountID, capabilities, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -346,7 +351,7 @@ func TestBuildPaidCapabilitiesAreSharedAcrossActiveSuperAccounts(t *testing.T) {
 	}
 
 	observer.Enabled = false
-	if _, err := accounts.Update(ctx, observer); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, observer.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &observer.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 	route, err = models.Get(ctx, route.ID)
@@ -388,31 +393,31 @@ func TestPublicModelNameResolvesAcrossAvailableProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, providerValue := range []account.Provider{account.ProviderBuild, account.ProviderConsole} {
-		if err := models.UpsertDiscovered(ctx, providerValue, []string{"grok-shared"}); err != nil {
+		if err := testsupport.Discover(ctx, models, providerValue, []string{"grok-4.3"}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	now := time.Now().UTC()
-	if err := models.ReplaceAccountCapabilities(ctx, build.ID, []string{"grok-shared"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, build.ID, []string{"grok-4.3"}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, console.ID, []string{"grok-shared"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, console.ID, []string{"grok-4.3"}, now); err != nil {
 		t.Fatal(err)
 	}
 
-	routes, err := models.GetByPublicIDCandidates(ctx, "grok-shared")
+	routes, err := models.GetByPublicIDCandidates(ctx, "grok-4.3")
 	if err != nil || len(routes) != 2 || routes[0].Provider != account.ProviderBuild || routes[1].Provider != account.ProviderConsole {
 		t.Fatalf("shared routes = %#v, err = %v", routes, err)
 	}
-	explicit, err := models.GetByPublicIDCandidates(ctx, "Console/grok-shared")
+	explicit, err := models.GetByPublicIDCandidates(ctx, "Console/grok-4.3")
 	if err != nil || len(explicit) != 1 || explicit[0].Provider != account.ProviderConsole {
 		t.Fatalf("explicit Console route = %#v, err = %v", explicit, err)
 	}
 	build.Enabled = false
-	if _, err := accounts.Update(ctx, build); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, build.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &build.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
-	route, err := models.GetByPublicID(ctx, "grok-shared")
+	route, err := models.GetByPublicID(ctx, "grok-4.3")
 	if err != nil || route.Provider != account.ProviderConsole {
 		t.Fatalf("fallback route = %#v, err = %v", route, err)
 	}
@@ -445,7 +450,7 @@ func TestModelRouteLookupPrioritizesDirectPublicIDOverAlias(t *testing.T) {
 	if err != nil || len(routes) != 2 {
 		t.Fatalf("routes = %#v, err = %v", routes, err)
 	}
-	if routes[0].ID != directRoute.ID || routes[1].ID != aliasRoute.ID {
+	if routes[0].Route.ID != directRoute.ID || routes[1].Route.ID != aliasRoute.ID {
 		t.Fatalf("direct/alias priority = %#v", routes)
 	}
 	value, err := models.GetByPublicIDIncludingDisabled(ctx, "grok-priority")
@@ -466,14 +471,14 @@ func TestReplaceProviderRoutesReconcilesStaticCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.ReplaceAccountCapabilities(ctx, webAccount.ID, []string{"fast"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, repo, accounts, webAccount.ID, []string{"fast"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repo.UpsertRoutes(ctx, []model.Route{
-		{PublicID: "grok-chat-fast", Provider: account.ProviderWeb, UpstreamModel: "fast", Capability: model.CapabilityChat, Enabled: false},
-		{PublicID: "old-obsolete", Provider: account.ProviderWeb, UpstreamModel: "obsolete", Capability: model.CapabilityChat, Enabled: true},
-		{PublicID: "build-model", Provider: account.ProviderBuild, UpstreamModel: "build-model", Capability: model.CapabilityResponses, Enabled: true},
+	if err := testsupport.Routes(ctx, repo, []model.Route{
+		{Origin: model.OriginCatalog, PublicID: "grok-chat-fast", Provider: account.ProviderWeb, UpstreamModel: "fast", Capability: model.CapabilityChat, Enabled: false},
+		{Origin: model.OriginCatalog, PublicID: "old-obsolete", Provider: account.ProviderWeb, UpstreamModel: "obsolete", Capability: model.CapabilityChat, Enabled: true},
+		{Origin: model.OriginDiscovered, PublicID: "build-model", Provider: account.ProviderBuild, UpstreamModel: "build-model", Capability: model.CapabilityResponses, Enabled: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -522,9 +527,9 @@ func TestReplaceProviderRoutesCanRenameUpstreamModels(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	repo := NewModelRepository(database)
-	if err := repo.UpsertRoutes(ctx, []model.Route{
-		{PublicID: "grok-imagine-image", Provider: account.ProviderWeb, UpstreamModel: "imagine-lite", Capability: model.CapabilityImage, Enabled: true},
-		{PublicID: "grok-imagine-image-quality", Provider: account.ProviderWeb, UpstreamModel: "imagine", Capability: model.CapabilityImage, Enabled: true},
+	if err := testsupport.Routes(ctx, repo, []model.Route{
+		{Origin: model.OriginCatalog, PublicID: "grok-imagine-image", Provider: account.ProviderWeb, UpstreamModel: "imagine-lite", Capability: model.CapabilityImage, Enabled: true},
+		{Origin: model.OriginCatalog, PublicID: "grok-imagine-image-quality", Provider: account.ProviderWeb, UpstreamModel: "imagine", Capability: model.CapabilityImage, Enabled: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -560,9 +565,9 @@ func TestReplaceProviderRoutesSplitsWebImagineProtocolProducts(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	repo := NewModelRepository(database)
-	if err := repo.UpsertRoutes(ctx, []model.Route{
-		{PublicID: "grok-imagine-image-lite", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImage, Enabled: true},
-		{PublicID: "grok-imagine-image-quality-lite", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image-quality", Capability: model.CapabilityImage, Enabled: true},
+	if err := testsupport.Routes(ctx, repo, []model.Route{
+		{Origin: model.OriginCatalog, PublicID: "grok-imagine-image-lite", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImage, Enabled: true},
+		{Origin: model.OriginCatalog, PublicID: "grok-imagine-image-quality-lite", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image-quality", Capability: model.CapabilityImage, Enabled: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -574,8 +579,10 @@ func TestReplaceProviderRoutesSplitsWebImagineProtocolProducts(t *testing.T) {
 		t.Fatalf("before = %#v", before)
 	}
 	fastID, qualityID := before[0].ID, before[1].ID
+	// These are explicitly generated catalog edges. Pre-metadata legacy edges
+	// have a separate migration test that verifies their conservative retention.
 	for _, alias := range []string{"Web/grok-imagine-image", "Web/grok-imagine-image-2.0"} {
-		if err := database.db.WithContext(ctx).Create(&modelRouteAliasModel{Alias: alias, ModelRouteID: fastID}).Error; err != nil {
+		if err := database.db.WithContext(ctx).Create(&modelRouteAliasModel{Alias: alias, ModelRouteID: fastID, NameSource: string(model.NameSourceGenerated)}).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -625,12 +632,12 @@ func TestReplaceProviderRoutesRestoresThreeConsoleImageModels(t *testing.T) {
 	database := openTestDatabase(t)
 	repo := NewModelRepository(database)
 	legacyCatalog := []model.Route{
-		{PublicID: "grok-imagine-image-quality-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image-quality", Capability: model.CapabilityImage, Enabled: true},
-		{PublicID: "grok-imagine-image-quality-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image-quality", Capability: model.CapabilityImageEdit, Enabled: true},
-		{PublicID: "grok-imagine-image-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImage, Enabled: true},
-		{PublicID: "grok-imagine-image-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImageEdit, Enabled: true},
+		{Origin: model.OriginDiscovered, PublicID: "grok-imagine-image-quality-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image-quality", Capability: model.CapabilityImage, Enabled: true},
+		{Origin: model.OriginDiscovered, PublicID: "grok-imagine-image-quality-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image-quality", Capability: model.CapabilityImageEdit, Enabled: true},
+		{Origin: model.OriginDiscovered, PublicID: "grok-imagine-image-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImage, Enabled: true},
+		{Origin: model.OriginDiscovered, PublicID: "grok-imagine-image-2.0", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImageEdit, Enabled: true},
 	}
-	if err := repo.UpsertRoutes(ctx, legacyCatalog); err != nil {
+	if err := testsupport.Routes(ctx, repo, legacyCatalog); err != nil {
 		t.Fatal(err)
 	}
 	var before []modelRouteModel
@@ -724,10 +731,10 @@ func TestManualModelRouteBindingsAndRediscovery(t *testing.T) {
 	if err := models.Delete(ctx, created.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, first.ID, []string{created.UpstreamModel}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, first.ID, []string{created.UpstreamModel}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{created.UpstreamModel}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{created.UpstreamModel}); err != nil {
 		t.Fatal(err)
 	}
 	recreated, err := models.GetByPublicID(ctx, created.UpstreamModel)
@@ -784,7 +791,7 @@ func TestBatchDeleteModelRoutesAllowsRediscovery(t *testing.T) {
 	if err != nil || deleted != 2 {
 		t.Fatalf("deleted = %d, err = %v", deleted, err)
 	}
-	if err := repo.UpsertDiscovered(ctx, account.ProviderBuild, []string{first.UpstreamModel, second.UpstreamModel}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderBuild, []string{first.UpstreamModel, second.UpstreamModel}); err != nil {
 		t.Fatal(err)
 	}
 	for _, value := range []model.Route{first, second} {
@@ -812,7 +819,7 @@ func TestWebRediscoveryRestoresCatalogRouteDefaults(t *testing.T) {
 	if err := repo.Delete(ctx, value.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpsertDiscovered(ctx, account.ProviderWeb, []string{value.UpstreamModel}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderWeb, []string{value.UpstreamModel}); err != nil {
 		t.Fatal(err)
 	}
 	items, total, err := repo.List(ctx, repository.ModelListQuery{Page: repository.PageQuery{Limit: 10, Search: value.UpstreamModel}})
@@ -838,10 +845,10 @@ func TestWebBasicMediaCatalogRemainsAvailableAcrossStaleSnapshots(t *testing.T) 
 	}
 	// Record a successful historical sync that predates Basic image-edit and
 	// video support.
-	if err := models.ReplaceAccountCapabilities(ctx, basic.ID, []string{"grok-chat-fast"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, basic.ID, []string{"grok-chat-fast"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.UpsertRoutes(ctx, []model.Route{
+	if err := testsupport.Routes(ctx, models, []model.Route{
 		{
 			PublicID: "grok-imagine-image", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image-quality",
 			Capability: model.CapabilityImage, Origin: model.OriginCatalog, Enabled: true,
@@ -912,7 +919,7 @@ func TestWebImageRediscoveryUsesProtocolProductNames(t *testing.T) {
 		"grok-imagine-image-2.0":     "Web/grok-imagine-image-2.0",
 	}
 	for upstreamModel, publicID := range tests {
-		if err := repo.UpsertDiscovered(ctx, account.ProviderWeb, []string{upstreamModel}); err != nil {
+		if err := testsupport.Discover(ctx, repo, account.ProviderWeb, []string{upstreamModel}); err != nil {
 			t.Fatal(err)
 		}
 		route, err := repo.GetByPublicIDIncludingDisabled(ctx, publicID)
@@ -941,11 +948,11 @@ func TestBuildVideo15DiscoveredAsVideoCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.5", "grok-imagine-video-1.5"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderBuild, []string{"grok-4.5", "grok-imagine-video-1.5"}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := repo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-4.5", "grok-imagine-video-1.5"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, repo, accounts, buildAccount.ID, []string{"grok-4.5", "grok-imagine-video-1.5"}, now); err != nil {
 		t.Fatal(err)
 	}
 	video, err := repo.GetByPublicID(ctx, "Build/grok-imagine-video-1.5")
@@ -963,10 +970,10 @@ func TestBuildVideo15DiscoveredAsVideoCapability(t *testing.T) {
 		t.Fatalf("build chat route capability = %s", chat.Capability)
 	}
 	// Web 既有 video 分类不受影响。
-	if err := repo.UpsertDiscovered(ctx, account.ProviderWeb, []string{"grok-imagine-video"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderWeb, []string{"grok-imagine-video"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.ReplaceAccountCapabilities(ctx, webAccount.ID, []string{"grok-imagine-video"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, repo, accounts, webAccount.ID, []string{"grok-imagine-video"}, now); err != nil {
 		t.Fatal(err)
 	}
 	webVideo, err := repo.GetByPublicID(ctx, "grok-imagine-video")

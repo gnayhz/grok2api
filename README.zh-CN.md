@@ -61,6 +61,8 @@ Grok2API 是一个内置 React 管理端的 Go 网关。它分别管理 Grok Bui
 
 ### 项目架构
 
+开发者请先阅读 [整体架构与职责边界](ARCHITECTURE.md) 和 [开发与二次开发指南](DEVELOPMENT.md)。AI 开发者入口为 [AGENTS.md](AGENTS.md)。
+
 ```mermaid
 flowchart LR
     %% 颜色定义
@@ -321,7 +323,14 @@ Authorization: Bearer g2a_xxx_xxx
 | `GET` | `/v1/stt`、`/v1/realtime` | 代理语音 WebSocket 会话 |
 | `GET` | `/v1/media/images/{asset_id}`、`/v1/media/videos/{asset_id}` | 读取归档媒体 |
 
-stored response 和 compact 取决于最终 Provider。登录管理端后可在 `/docs` 查看当前模型与调用示例；仅在 `server.swaggerEnabled: true` 时提供 Swagger。
+流式 STT 保留音频配置 query 及重复的 `keyterm` 值。例如连接 `/v1/stt?model=grok-stt&encoding=pcm&sample_rate=48000&multichannel=true&channels=2`。无效或不支持的参数在连接上游前返回 HTTP 400；只有全部配置声道都报告完成，才将请求记为生成完成。
+
+
+stored response 和 compact 取决于最终 Provider 与模型。登录管理端后可在 `/docs` 查看当前模型与调用示例；仅在 `server.swaggerEnabled: true` 时提供 Swagger。
+
+Responses 显式传入 `store:false` 时，新响应 ID 不能通过 `GET/DELETE` 或 `previous_response_id` 使用；本次请求仍可读取已有的已保存父响应。Web 文本 Responses 在省略 `store`、传入 `null` 或 `true` 时保存资源；Build 将明确的保存选择传给上游，Console 保持无状态。用量、审计和另行配置的 Build 会话历史各自遵循对应的保留设置。
+
+Web 图片模型可通过 Responses、Chat Completions 和 Messages 返回生成图片。此类响应 ID 是临时标识：Responses 返回 `store:false`，不能通过 `GET/DELETE` 或 `previous_response_id` 恢复会话；显式 `store:true` 在生成前拒绝。三种协议均保留 `image_config` 扩展，例如 `{"n":2,"response_format":"b64_json"}`。有限额 Key 在生成前预留请求图片费用，并按已确认生成的图片结算；后续下载或客户端交付失败仍保留实际消耗。
 
 通过 `previous_response_id` 续聊可能被上游组织拒绝（HTTP 404、`upstream_server_error_not_found`）——部分 Grok 组织不允许跨请求复用会话。网关会正确固定原账号并转发会话；此处的 404 反映的是上游策略而非状态丢失。网关侧存储的响应仍可用 `GET/DELETE /v1/responses/{id}` 读取或删除。
 
@@ -356,110 +365,39 @@ curl http://127.0.0.1:8000/v1/responses \
 
 Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址，因此自动刷新 Clearance 暂不能直接使用隧道分享链接。
 
-实时路由守卫（`requestRetry`）在 `config.yaml` 顶层配置，默认关闭：
+实时响应守卫以 `config.yaml` 的 `requestRetry` 作为首次启动基线；管理端保存后，版本化的 `quality_guard` 记录是配置权威。Go 基线默认关闭，示例配置开启：
 
 ```yaml
 requestRetry:
-  enabled: true             # 生产推荐开启（Go 内置默认保持关闭，升级不翻转）
-  maxAttempts: 2            # 全局请求预算：1 次初始尝试 + 最多 1 次重试（硬上限 3）
-  guardedModels: []          # 守卫白名单（空=全部推理模型；如 ["grok-4.5","grok-4.6"]），名单外模型整体豁免
-  createdTimeout: 5s        # 首事件截止：任何 SSE data 事件到达前中止该次尝试
-  evidenceTimeout: 3.5s     # 零证据截止：防网络假死死锁的兜底（无思考证据且无任何输出）
-  onExhausted: fail_closed # fail_open | fail_closed（fail_closed 返回 503 upstream_degraded）
-  sameAccountRetry: true   # 仅旋转池出口生效——直连/固定出口强制禁用
-  accountCooldown: 12h     # missing-thinking 定罪的账号冷却
-  idleAccountCooldown: 15m # 空流/静默冷却（独立配置）
+  enabled: true
+  maxAttempts: 2
+  guardedModels: ["grok-4.5", "grok-4.6"]
+  createdTimeout: 5s
+  evidenceTimeout: 3.5s
+  onExhausted: fail_closed
+  accountCooldown: 2m
+  idleAccountCooldown: 15m
 ```
 
-两个截止按**请求类自动缩放**（2026-08 全链路轨迹摸底的制度表
-`qualityLivenessSchedule`）：携带服务端搜索工具（`web_search`/`x_search`）的请求
-两个截止不设界——搜索排队/执行/思考三段静默皆合法，死连接由传输层流空闲超时
-（Build 默认 2m）兜底；`high`/`xhigh` 重推理请求的首事件截止放宽到 30s（上游
-排队静默实测 >5s）；其余请求按上表默认值。截止触发只代表排队界，不构成降智
-证据——降智判定永远由证据规则（推理项密文闭合零增量等签名）承担。
+在守卫页选择实际公开模型名称。启动清单为空时沿用默认 grok-4.5/grok-4.6 清单；管理端保存启用的守卫时必须至少选择一个模型。保存带 revision，过期编辑返回冲突。每个请求固定范围、规则和预算的不可变快照；配置读取或内核故障显式报错。
 
-开启后，每条思考型模型的响应（流式与非流式）由零延迟状态机判决：可见思考增量即时放行（守卫随即退出路径）；推理项闭合却无任何思考增量——密文降智签名——0 毫秒扣留；无思考却抢跑的正文不论长度瞬间扣留；终态兜底拦截；零内容流走空流短路（短冷却 + RSC 归因 + 重试）而不是 missing-thinking 定罪。纯语义输出（工具调用）直接交付。豁免路径（非推理操作/模型、显式关闭推理、compaction）按原因计入 guard-stats，不再无痕放行。`fail_closed` 下预算耗尽返回 `503 upstream_degraded`。该节已纳入管理端运行时设置面（守卫页）热更新；`config.yaml` 只提供启动默认值。
+可见思考满足准入规则；推理阶段闭合仍无可见思考，或正文/refusal 先于思考到达时扣留。密文与 usage 计数不能提供思考证据。未知协议、资源超限、超时、空流与取消各有独立结果。Chat 仅支持 index=0 的一个选项；受保护的 `n > 1` 请求在生成前拒绝。质量重试耗尽返回 `503 upstream_degraded`。
 
-守卫的全部行为可在管理端「质量防护」页观测：「命中统计」面板列出四个特征信号（首事件截止/零证据截止/空流/缺少思考证据）的触发、救回与失败计数；豁免台账按八个原因统计守卫未介入的请求——排查“为什么这批降智请求没被拦”先看这里；同号补偿重试与预算耗尽的两条出路（放行最后一次/拒绝）也在同页汇总，canary 验证结论单独成表。审计明细提供逐尝试轨迹：`quality_hold`/`quality_idle` 阶段即守卫判决（含耗时），`terminal_burst` 档位让“末尾整包爆发+零思考”的最强签名在速度列空白处可见，fail-open 交付的行带专门交付标记；审计错误码过滤器提供守卫四码一键预设（降智扣留/零证据超时/首事件超时/空流）。仪表盘资源卡汇总冷却账号、风控标记与期内降智拦截数。
+准入总截止覆盖选号、响应头、检查、转换与重试：默认普通请求 30 秒，包含工具的请求 3 分钟。搜索和重推理可以放宽单项静默截止，但仍受总截止约束。传输层在发送响应头前提交交付；完整交付另行记录。会话输出只有在交付成功且必要完成事件取得持久化回执后才提交。首个思考增量之后断流不能计为成功救回。
 
-### 风险归因（RSC）
+Build 与 Console 的 SSE 消费者共享一个事件组装器。缓冲分配及解析/转换状态在处理前预留请求和进程容量：默认单请求 96 MiB、进程 512 MiB，前缀、单事件和 JSON 另有限制。这是响应容量计费，并非 RSS 上限。容量不足返回 `response_resource_exhausted`，不投降智票、不轮换账号。自动重放还必须满足工具安全策略；无法确认副作用的服务端工具阻止再次生成。
 
+准入、完成与实际 HTTP 交换分别持久化。每次传输尝试保存原始账号、出口 epoch、策略 revision 与规则版本，包含内部重试。实际用量区分未报告与明确的零值。临时限制归属于来源事件或案件，释放一个不会释放另一个。降智事件最初对账号施加 2 分钟临时限制，不修改人工启停状态。持久化回执失败会停止重试并留下有界的本地保护。待处理队列默认最多 10,000 个事件，`/guard-stats` 提供积压与资源容量。
 
-扣留一条流并不等于账号本身降智——出口 IP 同样可能是元凶。启用 `accountRisk.rscCheck` 后，
-每次扣留都会通过关联的 Web SSO 身份对 grok.com 发起异步注册风控检查（SSO 思考探针；
-旧 homepage 载荷解析已随重构删除——grok.com 改版后恒读作 clean，回滚语义由
-`enabled: false` 承担）：
+协议、资源边界、迁移和验证命令见[实时响应守卫架构](backend/internal/quality/guard/README.md)。
 
-- **ssoProbe（默认，优先）**：用 SSO Cookie 发起一次临时 `fast` 会话（不落会话、不写记忆），
-  首个流里出现 notetaker/thinking 通道 => 账号健康；答案文本直接到达且全程无 thinking =>
-  已被风控。grok.com 已停止在首页 RSC 载荷中下发 botFlag 字段，这是当前唯一有效的账号级
-  信号（不受出口 IP 质量影响）。每次检查消耗该账号 1 条消息额度；限流/挑战等异常一律按
-  error 处理，绝不误判。
-- **buildProbe（Build 通道降智，有无关联都走）**：Build 的 grok-4.5/4.6 扣留用该账号自身凭据
-  发一次同通道微型推理请求判定——不再用 grok.com `fast` SSO 探针冒充主力推理结论（那是大账号池
-  误判路径）。IP 污染是该信号的固有混淆项，因此降智时自动发起**差分第二次尝试**（旋转池节点=重摇新 IP /
-  固定节点=排除换路 / 仅直连=不可差分记 error，绝不定罪）；双路降智还需库内近期 build 探测 clean
-  见证人才生效，否则压制为 error 重试。无可用推理 Build 模型时功能自动停用（保持行为兜底）。
-  SSO 仍用于 Web/Console 降智与巡检。
+### 质量归因与出口处置
 
-- **denied/flagged**：已确认结论在 `deniedTTL`（默认 24h）内可信，且需连续
-  `deniedConfirmations` 次（默认 2）才打标。请求路径降智**按通道隔离处置**——只有实际降智被抓的那个账号被打
-  `rsc_denied`/停用，不连坐身份组其他通道（例如 Build 降智只标 Build，SSO 仍可调度）。
-  **例外：SSO 身份本身 denied**（主动巡检，或 Web 通道降智触发的探针）时连坐同一身份组的
-  Web/Build/Console——SSO 已是注册风控后，其他渠道再降智无法调度 SSO 探针归因，会永远停在冷却。被标记账号保持启用
-  （flag 模式），但不参与调度，直到管理员手动解除，或 `deniedTTL` 过期后巡检复测为 clean
-  （会自动清标，含 SSO 身份组）。探针内置通道词汇熔断：连续
-  denied 且零 clean 见证时压制判定并自动用最近 clean 身份复验自愈，防止上游改版误杀整池。
-- **clean**：本次降智与账号无关（出口 IP 嫌疑）；missing-thinking 与空流冷却会被解除，
-  该账号上的 `rsc_denied` 标记一并清除，账号恢复可调度。泛型 5xx 故障永不因 clean 结论被清除。
-- 巡检循环按 `patrol.bucketDays` 复查 clean/error，未确认 denied 按 error 重试窗口补确认，
-  已确认 denied 在 `deniedTTL` 过期后重探。
-  本段全部参数已进管理后台「守卫 → 风险归因」，保存后立即生效（含检测方式、
-  denied 处置、并发、巡检开关/周期/每批数量，以及立即巡检）；账号列表可看出是
-  主动巡检还是请求降智打的标，也可对单个账号立即检测。直接改 config.yaml 仍需重启，且后台保存过设置后
-  以运行时设置为准。
+一次扣留触发暂时保护和受控对照调查，不能直接确认账号或出口为原因。Build 调查比较涉案出口上的其他账号、其他已验证路径上的涉案账号，以及同路径的匹配正常对照。缺失结果与传输失败不会变成降智票。结论分别表示账号质量问题、账号可用性问题、出口/IP 问题或证据不足。
 
-### 出口 IP 质量守卫与自动换 IP
+调查具有固定样本预算和截止时间。限制属于具体案件和出口 epoch，其他案件与人工账号状态独立。管理页展示支持证据、反证、路径验证和人工复核入口。探针必须在预算内读到成功完成，才能提供 clean 结果；另一业务面的一次 clean 不构成归因判决。
 
-账号归因是 **CLEAN** 时，降智元凶就是出口 IP。出口 IP 质量守卫把这条链路闭环（`egress` 配置段）：
-
-
-> 完整部署步骤（一机多 WARP 实例、批量模板配置 webhook、端到端验证与排障）见 [EXIT-IP-GUARD.md](EXIT-IP-GUARD.md)；多实例轮换 webhook 服务在 `scripts/rotate-server/`。
-```
-请求降智（扣留/空流/头预算早断）
-  ├─ 本请求内：坏节点加入排除集 → 下一次尝试立即换出口继续（会话不断）
-  └─ 异步归因 CLEAN → 节点隔离（默认 24h），后续请求由路由层自动落到其他可用出口
-       → POST 节点"换 IP Webhook"（如重启 MicroWARP）
-       → 静默期 → 连通探活 → 校验出口 IP 已变化
-       → 一次性 canary 验证（极小流式请求：首事件 <10s 且有思考证据 = 通过）
-            ├─ 通过 → 解除隔离回池
-            └─ 降智 → 再换（每周期最多 3 次；耗尽保持隔离并告警）
-```
-
-要点：
-
-- **只作用于固定节点**（非代理池模式）。代理池/sticky 节点（如 resin 池）豁免质量隔离与自动换 IP——它们的出口本就不固定，但请求内排除（降智重试立即换出口）仍然生效。
-- RSC 归因关闭或未链接账号时，**跨账号确认**兜底：同一节点在 30 分钟窗口内有 2 个不同账号降智即隔离。
-- canary 未配置模型或无可用账号时**暂定放行**（短冷却 30m），被动守卫继续兜底。
-- 频率护栏：单节点两次换 IP ≥10 分钟，全局每小时 ≤6 次。
-- **死出口确认**（连通性，与降智判定正交）：定时检测/手动测试发现 **IPv4 与 IPv6 双族同时失败**只记一次观测，45 秒后自动补测确认；连续两次才判定死出口——单次探活抖动（"显示不通、重试又通"）不会误伤。确认后节点加 10 分钟 transport 冷却立即退出调度，配了换 IP Webhook 的同时入轮换队列（restart 正是隧道卡死的对症药）。任何一次健康探活自动清除冷却回池；质量隔离中与代理池模式节点豁免。
-- 节点编辑页可为每个节点单独配置「换 IP Webhook」；节点行菜单可手动触发轮换；列表显示降智次数与换 IP 尝试。
-
-#### 换 IP Webhook（B/C 服务器侧）
-
-grok2api 只做一次带 JSON 体的 POST；节点侧用现成的多实例轮换服务执行重启（仓库 `scripts/rotate-server/`，纯 Python 标准库）：
-
-- **Docker 部署**：`Dockerfile` + `docker-compose.example.yml` 现成可用，**全部环境变量配置**（`ROTATE_TOKEN`、`ROTATE_INSTANCES`，如 `"41081=microwarp-warp1-1"`）；脚本以只读卷挂载进容器，改 `rotate-server.py` 后 `docker compose restart` 即生效，无需重建镜像；挂载 `/var/run/docker.sock` 后按端口或容器名精确重启某一个 WARP 容器（一机多实例、不同宿主端口场景）。
-
-节点配置里填 `http://<B服务器>:9000/rotate/{port}?token=xxx`（批量模板，`{port}` 即实例宿主端口）；
-URL 与 token 一起加密存储，管理端只回显「已配置」。内置 token 校验（错误返回 404）与同实例 60s 冷却（429）。
-建议配合防火墙仅放行 A 服务器来源。
-
-#### MicroWARP 固定出口直连拓扑（推荐）
-
-每个 MicroWARP 端点在 grok2api 建一个**独立固定节点**（socks5/http），开启本守卫即可实现
-「坏 IP 自动隔离 + 自动重启换 IP + 验证回池」；resin 可保留作兜底代理池节点（守卫不动代理池节点）。
-多实例 grok2api 部署时出口状态共享（数据库），轮换 worker 按节点账本（尝试次数/最近轮换时间）自然收敛。
+决策规则与运行边界见[受控对照协议](backend/internal/quality/README.md)。当前调查工作进程要求每个数据库只运行一个调查进程。出口路由与轮换是独立的运行机制；节点编辑页支持配置轮换 webhook，服务端实现位于 `scripts/rotate-server/`。
 
 ### 请求审计
 
@@ -654,6 +592,8 @@ docker run --rm --volumes-from grok2api -v "$PWD/backups:/backup" alpine:3.23 \
 
 ## 开发验证
 
+功能定位、扩展合同、迁移、测试和分发要求见 [开发指南](DEVELOPMENT.md)。提交前执行 `python3 scripts/check-repository.py --staged`，检查实际暂存内容。
+
 ```bash
 cd backend
 go test ./...
@@ -675,23 +615,15 @@ pnpm build
 make swagger
 ```
 
-## 上游形态观测工具链（调研资产）
+## 私有协议诊断
 
-```bash
-# 常备报告：形态聚合 + 近30审计 + 整库回放 + 归档规模
-GROK2API_ADMIN_PASSWORD=... sh scripts/survey_report.sh 8003
-# 去重采集：把运行实例的原始上游轨迹增量并入本地语料库
-python3 scripts/survey_harvest.py upstream-traces/unique
-# 整库回放：全部真实轨迹过当前扫描器（降智类必须扣留、干净类必须交付）
-cd backend && GROK2API_TRACE_REPLAY_DIR=$PWD/../upstream-traces/unique go test ./internal/application/gateway/ -run TestCorpusReplay -v
-# 全库普查 / 时间线
-python3 scripts/trace_census.py && python3 scripts/trace_census_timeline.py
-```
-
-采集端为 `internal/pkg/upstreamtrace`（环境变量 `GROK2API_UPSTREAM_TRACE_DIR` 门控，默认零开销）。
+`internal/pkg/upstreamtrace` 采集默认关闭，通过 `GROK2API_UPSTREAM_TRACE_DIR` 启用。轨迹可能包含对话正文和身份信息，应写入仓库外的私有目录，不提交 Git，不进入源码包、镜像、公开 issue 或 CI 输出。可选语料回放测试读取 `GROK2API_TRACE_REPLAY_DIR`；常规回归使用最小人工构造输入。
 
 ## 相关文档
 
+- [开发与二次开发指南](./DEVELOPMENT.md)：功能定位、扩展方式、状态约束、验证、迁移与分发
+- [整体架构和模块边界](./ARCHITECTURE.md)
+- [AI 开发者入口](./AGENTS.md)
 - [English README](./README.md)
 - [后端说明](./backend/README.md)
 - [前端说明](./frontend/README.md)

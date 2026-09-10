@@ -1,0 +1,20 @@
+# Keep source archives useful for development, including guides and tests.
+# Private records are also rejected by check-repository.py; these are defense in depth.
+/architecture export-ignore
+/optimization-evidence export-ignore
+/OPTIMIZATION_LOG.md export-ignore
+/upstream-traces export-ignore
+/docs export-ignore
+/data export-ignore
+/backend/data export-ignore
+/local-demo export-ignore
+/.tmp export-ignore
+/tmp export-ignore
+/release export-ignore
+/frontend/node_modules export-ignore
+/frontend/dist export-ignore
+/config.yaml export-ignore
+/config.local.yaml export-ignore
+/.env export-ignore
+/.env.* export-ignore
+/.env.example -export-ignore

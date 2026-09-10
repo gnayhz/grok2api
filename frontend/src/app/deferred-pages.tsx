@@ -10,7 +10,8 @@ const CreativeConsolePage = lazyNamed(() => import("@/features/creative-console/
 const DashboardPage = lazyNamed(() => import("@/features/dashboard/dashboard-page"), "DashboardPage");
 const ApiDocsPage = lazyNamed(() => import("@/features/docs/api-docs-page"), "ApiDocsPage");
 const GalleryPage = lazyNamed(() => import("@/features/media/gallery-page"), "GalleryPage");
-const GuardPage = lazyNamed(() => import("@/features/guard/guard-page"), "GuardPage");
+const QualityConsole = lazyNamed(() => import("@/features/guard/quality-console"), "QualityConsole");
+const QualitySettingsPage = lazyNamed(() => import("@/features/guard/quality-settings-page"), "QualitySettingsPage");
 const VideoGalleryPage = lazyNamed(() => import("@/features/media/video-gallery-page"), "VideoGalleryPage");
 const ModelsPage = lazyNamed(() => import("@/features/models/models-page"), "ModelsPage");
 const ProxiesPage = lazyNamed(() => import("@/features/proxies/proxies-page"), "ProxiesPage");
@@ -57,7 +58,11 @@ export function DeferredRequestAuditsPage() {
 }
 
 export function DeferredGuardPage() {
-  return <DeferredPage page={GuardPage} />;
+  return <DeferredPage page={QualityConsole} />;
+}
+
+export function DeferredQualitySettingsPage() {
+  return <DeferredPage page={QualitySettingsPage} />;
 }
 
 export function DeferredGalleryPage() {

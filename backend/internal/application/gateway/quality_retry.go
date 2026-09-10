@@ -1,81 +1,73 @@
-// Package gateway 是请求路由与实时质量守卫的应用层：账号选择、协议转换后的
-// 零延迟判决（quality_retry*.go）、预算化扣留重试循环（service.go）与守卫
-// 观测（guard_stats.go）。防降智手段的判决核心全部收敛在本包内、包私有。
+// Package gateway 是请求路由与实时质量守卫的应用层：账号选择、协议转换前的
+// 原始响应扫描（quality_retry_scan.go）、流/整包扣留（quality_stream.go、
+// quality_body.go）、预算化重试（service.go）与观测（guard_stats.go）。
+// 判定规则由 QualityHoldKernel 注入，质量层 guard.Judge 是生产规则源。
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"strings"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
+	guardpolicy "github.com/chenyme/grok2api/backend/internal/domain/guard"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	qualityguard "github.com/chenyme/grok2api/backend/internal/quality/guard"
 )
 
 const (
 	ErrorQualityDegraded   = "quality_degraded"
-	qualityRetryFailOpen   = "fail_open"
 	qualityRetryFailClosed = "fail_closed"
-	// defaultQualityMaxAttempts = 2（1 次初始尝试 + 最多 1 次换号重试）：
-	// 全局请求预算的一环。历史上限 6 在零延迟拦截落地后失去意义——降智
-	// 判定已是毫秒级，串行换号重试的边际收益趋零，反而把单请求时延推高
-	// 到下游超时（499 级联）。预算耗尽即 Fail-Closed 503。
-	defaultQualityMaxAttempts = 2
-	// defaultQualityEvidenceTimeout = 3.5s：降智流已被 0ms 早断截胡，该截止
-	// 仅作为网络假死/静默丢包的防死锁兜底（旧值 15s 是"死等密证证据"时代
-	// 的产物，在零延迟拦截下纯属浪费客户端时间）；也是健康流思考增量的
-	// 到达窗口（实测 clean 首增量 2.1s 内到达）。
-	defaultQualityEvidenceTimeout = 3500 * time.Millisecond
-	// 首事件截止：零 data 事件（keepalive 不算）时中止该次尝试。
-	// 仅当 CreatedTimeout 短于 EvidenceTimeout 时比证据截止更早；
-	// 默认 5s>3.5s，空流先走证据臂。
-	defaultQualityCreatedTimeout     = 5 * time.Second
-	defaultMissingThinkingCooldown   = 12 * time.Hour
-	lastErrorMissingThinking         = accountdomain.LastErrorMissingThinking
-	lastErrorMissingThinkingDisabled = accountdomain.LastErrorMissingThinkingDisabled
-	// An empty stream that idles while held is treated as an account-quality
-	// failure: the request can still rotate before any bytes reach the client.
-	// 空流冷却默认 15m：空流多与出口 IP/瞬态相关（RSC clean 会自动解除），
-	// 重冷却收益低；真降智走 missing-thinking 路径而非此处。
-	qualityIdleAccountCooldown = 15 * time.Minute
+	// Compatibility aliases for standalone embedded gateways; values remain
+	// owned by the admission domain. Production consumes a complete snapshot.
+	defaultQualityMaxAttempts      = guardpolicy.DefaultMaxAttempts
+	defaultQualityEvidenceTimeout  = guardpolicy.DefaultEvidenceTimeout
+	defaultQualityCreatedTimeout   = guardpolicy.DefaultCreatedTimeout
+	defaultMissingThinkingCooldown = guardpolicy.DefaultAccountCooldown
+	qualityIdleAccountCooldown     = guardpolicy.DefaultIdleAccountCooldown
 )
 
 var (
 	errQualityDegraded    = errors.New("上游响应缺少推理")
 	errQualityEmptyStream = errors.New("上游流式响应为空")
+	// Resource/protocol failures are inconclusive, never evidence of degradation.
+	errQualityHoldLimit = errors.New("上游响应超出质量守卫缓冲上限")
+	errQualityBodyShape = errors.New("上游响应不是可识别的推理响应")
+	errQualityChoices   = errors.New("质量守卫仅支持单个响应选项")
 	// errQualityEvidenceTimeout 标记流式零证据截止：静默期超过预算仍无
-	// 思考证据且无可见输出。按空闲路径处理（短冷却+RSC 归因+重试），
+	// 思考证据且无可见输出。按空闲路径处理（短冷却+重试），
 	// 不计入 missing-thinking 惩罚，也不作为指纹熔断。
 	errQualityEvidenceTimeout = errors.New("上游流式响应零证据超时")
 	// errQualityCreatedTimeout 标记首事件截止：静默期内连一个 SSE data
 	// 事件都未到达（直连复测：降智排队期间上游只发 keepalive 注释或不发
 	// 任何字节，response.created 要等 68-125s；clean 恒定 0.8-2.2s）。按
-	// 空闲路径处理（短冷却+RSC 归因+重试）。
+	// 空闲路径处理（短冷却+重试）。
 	errQualityCreatedTimeout = errors.New("上游流式响应首事件超时")
 )
 
 // QualityRetryRuntime is the isolated request-path withhold/retry policy.
 // Zero Enabled leaves production behavior unchanged.
 type QualityRetryRuntime struct {
+	Revision             uint64
+	RuleVersion          string
+	AdmissionTimeout     time.Duration
+	ToolAdmissionTimeout time.Duration
+	kernel               QualityHoldKernel
+	pathResolver         attemptmeta.PathResolver
+	unavailable          error
+
 	Enabled     bool
 	MaxAttempts int
 	OnExhausted string
 	// AccountCooldown 是 missing-thinking 定罪的账号冷却。
 	AccountCooldown time.Duration
-	// SameAccountRetry retries the withholding account once before switching.
-	// Tunnel-pool egress rotates the exit IP per request, so one same-account
-	// retry distinguishes transient exit-IP pollution (retry delivers) from a
-	// degraded account (retry still withholds, then the account is penalized
-	// and, when the budget still has room, the next attempt switches; at the
-	// default budget of 2 the retry is itself the last attempt). The retry
-	// consumes the attempt budget.
-	SameAccountRetry bool
 	// IdleAccountCooldown 是空流/静默超时的账号冷却，独立于 missing-thinking
 	// 的 AccountCooldown（二者诱因与置信度不同：空流常与出口 IP 相关）。
 	// 0 = 默认 15m。
@@ -107,9 +99,9 @@ type QualityRetryRuntime struct {
 	GuardedModels []string
 }
 
-// qualityStreamSignals is the hold classifier input. Tests drive this
+// QualityStreamSignals is the hold classifier input. Tests drive this
 // directly and via observeQualityChunk on SSE fixtures.
-type qualityStreamSignals struct {
+type QualityStreamSignals struct {
 	// HasThinking 是否已收到有效思考增量（可见的 reasoning/thinking 文本
 	// delta——密文、注释、usage 声明都不算）。
 	HasThinking bool
@@ -129,6 +121,8 @@ type qualityStreamSignals struct {
 // 干净流: created→summary.delta 0-6ms），不在请求头/请求体键。本结构只
 // 记录类型与毫秒，不含增量文本或密文。
 type qualityHoldFingerprint struct {
+	Completed       bool     `json:"completed,omitempty"`
+	Failed          bool     `json:"failed,omitempty"`
 	Protocol        string   `json:"protocol"`
 	Verdict         string   `json:"verdict,omitempty"`
 	Rule            string   `json:"rule,omitempty"`
@@ -152,25 +146,30 @@ type qualityHoldFingerprint struct {
 	Error        string `json:"error,omitempty"`
 }
 
-func qualityHoldRule(sig qualityStreamSignals, err error) string {
+func qualityHoldRule(sig QualityStreamSignals, err error) string {
 	switch {
+	case errors.Is(err, responsebuffer.ErrExhausted):
+		return "resource_exhausted"
+	case errors.Is(err, errQualityChoices):
+		return "unsupported_choices"
+	case errors.Is(err, errQualityHoldLimit):
+		return "buffer_limit"
+	case errors.Is(err, errQualityBodyShape):
+		return "unrecognized"
 	case errors.Is(err, errQualityCreatedTimeout):
 		return "created_timeout"
 	case errors.Is(err, errQualityEvidenceTimeout):
 		return "evidence_timeout"
 	case errors.Is(err, errQualityEmptyStream):
 		return "empty"
-	case sig.HasThinking:
-		return "thinking"
-	case sig.ReasoningEndedWithoutThinking:
-		return "item_done"
-	case sig.VisibleTokens > 0 || sig.OutputTokens > 0:
-		return "outrun"
-	case sig.Terminal:
-		return "terminal"
-	default:
-		return "wait"
 	}
+	// Ordinary evidence explanations come from the same admission rule that
+	// decides the verdict. Transport/resource failures above keep their source.
+	_, rule := qualityguard.Judge(qualityguard.Signals{
+		HasThinking: sig.HasThinking, ReasoningEndedWithoutThinking: sig.ReasoningEndedWithoutThinking,
+		VisibleTokens: sig.VisibleTokens, OutputTokens: sig.OutputTokens, Terminal: sig.Terminal,
+	})
+	return string(rule)
 }
 
 func (fp qualityHoldFingerprint) json() []byte {
@@ -197,13 +196,18 @@ const (
 type QualityRetryAction string
 
 const (
-	QualityActionDeliver     QualityRetryAction = "deliver"
-	QualityActionDeliverLast QualityRetryAction = "deliver_last"
-	QualityActionRetry       QualityRetryAction = "retry"
-	QualityActionReject      QualityRetryAction = "reject"
+	QualityActionDeliver QualityRetryAction = "deliver"
+	QualityActionRetry   QualityRetryAction = "retry"
+	QualityActionReject  QualityRetryAction = "reject"
 )
 
 func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
+	if cfg.AdmissionTimeout <= 0 {
+		cfg.AdmissionTimeout = guardpolicy.DefaultAdmissionTimeout
+	}
+	if cfg.ToolAdmissionTimeout <= 0 {
+		cfg.ToolAdmissionTimeout = guardpolicy.DefaultToolAdmissionTimeout
+	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = defaultQualityMaxAttempts
 	}
@@ -219,63 +223,19 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
 	if cfg.CreatedTimeout <= 0 {
 		cfg.CreatedTimeout = defaultQualityCreatedTimeout
 	}
-	cfg.OnExhausted = normalizeQualityExhaustionPolicy(cfg.OnExhausted)
+	// The effective configuration must describe the enforced policy, including
+	// when an older settings row still contains fail_open.
+	cfg.OnExhausted = qualityRetryFailClosed
 	return cfg
-}
-
-// Attributor is the risk-attribution surface the gateway consumes; the
-// concrete risk.Service satisfies it. egressNodeID carries the egress node
-// that served the degraded attempt (0 = direct/untraced) so a clean RSC
-// verdict can be routed into exit-IP quarantine instead of account penalty.
-type Attributor interface {
-	OnDegraded(ctx context.Context, credential accountdomain.Credential, egressNodeID uint64)
-}
-
-// EgressDegradationObserver receives request-level exit-IP degradation
-// evidence. The egress application service implements it to run cross-account
-// confirmation and (with RSC attribution disabled or pending) node quarantine.
-type EgressDegradationObserver interface {
-	OnEgressDegraded(ctx context.Context, nodeID, accountID uint64)
-	// MarkDegradeEvidence applies the pending node soft-cooldown after one
-	// degrade verdict so other accounts stop hitting the suspect exit until
-	// attribution confirms or the escalated deadline expires.
-	MarkDegradeEvidence(nodeID uint64)
-}
-
-// UpdateAccountRisk installs the attribution hook; nil keeps it unset.
-func (s *Service) UpdateAccountRisk(attributor Attributor) {
-	if attributor == nil {
-		return
-	}
-	s.accountRisk.Store(attributor)
-}
-
-func (s *Service) accountRiskAttributor() Attributor {
-	if value, ok := s.accountRisk.Load().(Attributor); ok {
-		return value
-	}
-	return nil
-}
-
-// UpdateEgressGuard installs the exit-IP degradation observer; nil keeps it
-// unset.
-func (s *Service) UpdateEgressGuard(observer EgressDegradationObserver) {
-	if observer == nil {
-		return
-	}
-	s.egressGuard.Store(observer)
-}
-
-func (s *Service) egressDegradationObserver() EgressDegradationObserver {
-	if value, ok := s.egressGuard.Load().(EgressDegradationObserver); ok {
-		return value
-	}
-	return nil
 }
 
 func (s *Service) UpdateQualityRetry(cfg QualityRetryRuntime) {
 	normalized := normalizeQualityRetry(cfg)
+	normalized.GuardedModels = append([]string(nil), cfg.GuardedModels...)
 	s.qualityRetry.Store(&normalized)
+	// 生效配置投影进 guard-stats:面板状态卡与指标面据此回答
+	// "守卫现在是否在场"。
+	guardStats.setEffective(normalized)
 }
 
 func (s *Service) qualityRetryConfig() QualityRetryRuntime {
@@ -283,67 +243,18 @@ func (s *Service) qualityRetryConfig() QualityRetryRuntime {
 		return normalizeQualityRetry(QualityRetryRuntime{})
 	}
 	if value := s.qualityRetry.Load(); value != nil {
-		return *value
+		return *value // Private immutable snapshot; copy only at the public boundary.
 	}
 	return normalizeQualityRetry(QualityRetryRuntime{})
 }
 
-// classifyQualityHold decides whether a held stream may be forwarded.
-// Streamed visible thinking (reasoning/summary text deltas) always delivers.
-// An empty reasoning item header, encrypted_content ciphertext, SSE comment
-// lines (keepalive included), and usage claims are NOT evidence — degraded
-// upstreams fill all four while never streaming visible thinking.
-// 实测（测试环境 A/B 抓流）：RSC risk 降智账号的流携带 encrypted_content
-// 密文但零可见思考增量；clean 账号的流在密文之外还有成串的
-// reasoning_summary_text.delta。密文两边都有，毫无判别力——只有可见思考
-// 增量能把降智流与健康流分开。
-//
-// 判决顺序（零延迟状态机，见 ANTI_DEGRADATION_ARCHITECTURE §四）：
-//  1. 收到思考增量：瞬间放行直通（客户端不再经过守卫）。
-//  2. 推理阶段闭合却无增量（密文降智包）：0 毫秒瞬间拦截——这是降智的
-//     确切签名，无需等待任何超时或缓冲阈值。
-//  3. 正文抢跑（无思考却出正文）：瞬间拦截。推理模型对每个回答都会思考，
-//     健康流的思考增量必然先于任何正文；不论长度，无思考的正文即降智。
-//  4. 终态兜底拦截（零输出零思考的流由空流短路先行接管，此处防御性）。
-//  5. 其余：继续等待思考增量；静默挂起（排队/假死）由证据截止
-//     （EvidenceTimeout=3.5s，空闲路径：短冷却+RSC 归因+重试）收口，而不是
-//     判成 missing-thinking（12h 长冷却）——空流多与出口 IP/瞬态相关
-//     （蓝图 §2#7 保留空流短冷却语义），误罚排队中的干净账号代价过高。
-//
-// 两个收口点约定（分类器在各收集点之前/之后运行的精确分层）：
-//   - 空流短路在本分类器之前运行，但 reasoningEndedWithoutThinking 是
-//     负证据、压制空流分类（EOF 补齐的降智末行按扣留而非空流收口）；
-//     redacted_thinking 既非证据也非负证据，仅它时仍走空流（可能是健康
-//     账号的隐私脱敏，round 46/47）。
-//   - 非流式请求的 body 同样进入判决：Responses 原生形状与转换后的
-//     chat/messages 客户端形状共用同一证据语义（round 41 起）。
-func classifyQualityHold(sig qualityStreamSignals) QualityVerdict {
-	// ReasoningTokens is audit metadata that may come from the upstream
-	// usage claim; degraded streams report large counts while never emitting
-	// reasoning events, so only observed events (HasThinking) deliver.
-	if sig.HasThinking {
-		return QualityDeliver
-	}
-	// 规则 2：推理阶段已闭合且未产出任何思考增量（item.done/content_block_stop
-	// 携 encrypted_content 结束）——零延迟直接扣留。
-	if sig.ReasoningEndedWithoutThinking {
-		return QualityWithhold
-	}
-	// 规则 3：无思考却出正文（正文抢跑）——瞬间拦截，与长度无关。
-	// 推理模型对每个回答都会思考：语料复核证实续写轮同样
-	// 思考（未指定强度 136/153、显式低强度 12/18 均产生思考，零思考仅
-	// 出现在降智时刻）。规模轮 16 引入的续写豁免（「推理已在历史完成」）
-	// 据此推翻——它放行了 17 条零思考交付（REASONING0_LEDGER §C2/C3）。
-	if sig.VisibleTokens > 0 || sig.OutputTokens > 0 {
-		return QualityWithhold
-	}
-	// 规则 4：终态兜底拦截（含续写轮——同上；零输出零思考的流由空流
-	// 短路先行接管，此处防御性）。
-	if sig.Terminal {
-		return QualityWithhold
-	}
-	// 规则 5：初始等待思考增量到达。
-	return QualityWait
+// QualityRetryConfig 返回当前请求路径实际使用的守卫运行时配置。
+// 组合根用它把管理面质量守卫配置投影到网关,避免 API 已更新而请求路径
+// 仍读取旧快照。返回值包含独立的模型切片,调用方不能修改原子快照。
+func (s *Service) QualityRetryConfig() QualityRetryRuntime {
+	cfg, _ := s.requestGuardSnapshot()
+	cfg.GuardedModels = append([]string(nil), cfg.GuardedModels...)
+	return cfg
 }
 
 // qualityPeekAbortError prefers the idle-timeout cause over a plain
@@ -383,12 +294,15 @@ func isClientRequestCancel(ctx context.Context, err error) bool {
 }
 
 // decideQualityRetry caps withhold recovery at maxAttempts (default 2:
-// original + one rotated account). The last withhold
-// (attemptIndex == maxAttempts-1) is fail-open unless OnExhausted is fail_closed
-// (the default), which rejects instead.
-func decideQualityRetry(verdict QualityVerdict, attemptIndex, maxAttempts int, onExhausted string) QualityRetryAction {
-	if verdict != QualityWithhold {
+// original + one rotated account). The last withhold (attemptIndex ==
+// maxAttempts-1) is fail-closed: 扣留预算耗尽即 Reject(503),绝无
+// DeliverLast——"降智不进上下文"铁律(G12,fail-open 已废除)。
+func decideQualityRetry(verdict QualityVerdict, attemptIndex, maxAttempts int) QualityRetryAction {
+	if verdict == QualityDeliver {
 		return QualityActionDeliver
+	}
+	if verdict != QualityWithhold {
+		return QualityActionReject
 	}
 	if maxAttempts <= 0 {
 		maxAttempts = defaultQualityMaxAttempts
@@ -399,31 +313,17 @@ func decideQualityRetry(verdict QualityVerdict, attemptIndex, maxAttempts int, o
 	if attemptIndex < maxAttempts-1 {
 		return QualityActionRetry
 	}
-	// attemptIndex == maxAttempts-1 (or past it): do not retry again.
-	if normalizeQualityExhaustionPolicy(onExhausted) == qualityRetryFailClosed {
-		return QualityActionReject
-	}
-	return QualityActionDeliverLast
+	// attemptIndex == maxAttempts-1 (or past it): exhausted ⇒ reject.
+	return QualityActionReject
 }
 
-// boundQualityRetry turns a Retry into DeliverLast/Reject when the routing
-// loop has no remaining account slot, so the already-held body is not dropped
-// on continue-into-exhausted-loop.
-func boundQualityRetry(action QualityRetryAction, hasNextRoutingAttempt bool, onExhausted string) QualityRetryAction {
+// boundQualityRetry turns a Retry into Reject when the routing loop has no
+// remaining account slot, so the loop never spins into exhausted iterations.
+func boundQualityRetry(action QualityRetryAction, hasNextRoutingAttempt bool) QualityRetryAction {
 	if action != QualityActionRetry || hasNextRoutingAttempt {
 		return action
 	}
-	if normalizeQualityExhaustionPolicy(onExhausted) == qualityRetryFailClosed {
-		return QualityActionReject
-	}
-	return QualityActionDeliverLast
-}
-
-func normalizeQualityExhaustionPolicy(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), qualityRetryFailOpen) {
-		return qualityRetryFailOpen
-	}
-	return qualityRetryFailClosed
+	return QualityActionReject
 }
 
 // QualityCommit is the single attempt-loop decision for a held stream.
@@ -433,19 +333,35 @@ type QualityCommit struct {
 	KeepBody bool
 }
 
+// decideQualityCommit is the retry-primitive seam (D3-3b): a quality-layer
+// policy decides the retry action when installed; nil keeps the built-in
+// commitQualityHold. Either way the base still bounds the action by the
+// routing budget (boundQualityRetry). 耗尽动作只剩 Reject(fail-closed,
+// G12):策略层若仍返回 DeliverLast 一律按 Reject 收口。
+func (s *Service) decideQualityCommit(verdict QualityVerdict, qualityAttempt, maxAttempts int, hasNextRouting bool, onExhausted string) QualityCommit {
+	commit := commitQualityHold(verdict, qualityAttempt, maxAttempts, hasNextRouting)
+	// A policy may stop recovery early, but cannot expand either budget or
+	// release a response the classifier has withheld. Unknown/legacy actions
+	// fail closed as well.
+	if commit.Action == QualityActionRetry {
+		if policy := s.qualityPolicyObserver(); policy != nil &&
+			policy.DecideQualityRetry(verdict, qualityAttempt, maxAttempts, onExhausted) != QualityActionRetry {
+			commit.Action = QualityActionReject
+		}
+	}
+	return commit
+}
+
 // commitQualityHold is the shipped withhold/retry/commit unit. The attempt
 // loop must not re-derive this from Decide+Bound+switch.
-func commitQualityHold(verdict QualityVerdict, qualityAttempt, maxAttempts int, hasNextRouting bool, onExhausted string) QualityCommit {
+func commitQualityHold(verdict QualityVerdict, qualityAttempt, maxAttempts int, hasNextRouting bool) QualityCommit {
 	action := boundQualityRetry(
-		decideQualityRetry(verdict, qualityAttempt, maxAttempts, onExhausted),
+		decideQualityRetry(verdict, qualityAttempt, maxAttempts),
 		hasNextRouting,
-		onExhausted,
 	)
 	switch action {
 	case QualityActionRetry, QualityActionReject:
 		return QualityCommit{Action: action, Audit: true, KeepBody: false}
-	case QualityActionDeliverLast:
-		return QualityCommit{Action: action, Audit: false, KeepBody: true}
 	default:
 		return QualityCommit{Action: QualityActionDeliver, Audit: false, KeepBody: true}
 	}
@@ -460,14 +376,22 @@ const (
 	QualityExemptOperation        = "operation"             // 非推理操作（image/media/embedding...）
 	QualityExemptCompaction       = "compaction"            // 请求体命中 compaction 标记（CreateResponse TUI 记 skip_input）
 	QualityExemptProvider         = "provider"              // 非 Build/Console 供应商
-	QualityExemptMessagesNoThink  = "messages_thinking_off" // Messages 协议未请求 thinking
+	QualityExemptMessagesNoThink  = "messages_thinking_off" // 仅保留统计 API 的历史 token；请求不再走此豁免。
 	QualityExemptModelScope       = "model_out_of_scope"    // 模型不在守卫白名单（guardedModels）
 	QualityExemptModelNoReasoning = "model_no_reasoning"    // 目标模型不支持推理
 )
 
+// QualityJurisdiction 是管辖判定缝隙(G13):质量层守卫配置的模型勾选
+// 清单成为请求路径的权威——面板改勾选即改扣留范围。条目支持渠道
+// 限定("grok_build:grok-4.5" 只拦该渠道;裸名=任意渠道)。
+// nil=沿用文件基线(requestRetry.guardedModels)。
+type QualityJurisdiction interface {
+	Jurisdiction(provider, model string) bool
+}
+
 // qualityHoldExemptReason 返回守卫不介入该请求的原因；空串表示应介入。
 // shouldHoldQualityStream 是它的布尔投影（reason==""）。
-func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) string {
+func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime, jurisdiction QualityJurisdiction) string {
 	// 非流式与流式同样纳入 hold：peekQualityBody 对完整 body 判决，证据规则
 	// 一致（此前 !input.Streaming 豁免导致非流式降智响应直接交付，
 	// 实测复现；修复后 clean/risk 的 summary 区分 11/11）。
@@ -493,11 +417,15 @@ func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwn
 	if route.Provider != accountdomain.ProviderBuild && route.Provider != accountdomain.ProviderConsole {
 		return QualityExemptProvider
 	}
-	// 模型范围白名单（requestRetry.guardedModels）：非空时守卫只介入名单内
-	// 的模型，其余直接豁免——运营上守卫只对主力推理模型（grok-4.5/4.6）
-	// 有价值，边缘模型介入只产出噪声拦截与误罚（grok-4.3 四连
-	// quality_degraded 503 实证）。空名单 = 全部推理模型照旧介入。
-	if !qualityModelGuarded(cfg, input.PublicModel, route.UpstreamModel) {
+	// 模型范围(G13 管辖勾选):质量层守卫配置注入时以它为权威(公开名/
+	// 上游名任一命中即受管辖;清单为空=全部豁免——守卫关闭的物理表达);
+	// 未注入时沿用文件白名单(requestRetry.guardedModels,空名单=全部介入)。
+	if jurisdiction != nil {
+		provider := string(route.Provider)
+		if !jurisdiction.Jurisdiction(provider, input.PublicModel) && !jurisdiction.Jurisdiction(provider, route.UpstreamModel) {
+			return QualityExemptModelScope
+		}
+	} else if !qualityModelGuarded(cfg, input.PublicModel, route.UpstreamModel) {
 		return QualityExemptModelScope
 	}
 	// 判定只看流特征,不看请求体里的工具标记(线上实证:同一 agent
@@ -510,16 +438,8 @@ func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwn
 	// 非法组合，上游直接 400，豁免与否结果相同；白名单外的模型在上一行已
 	// 整体豁免。若未来把支持 none 的模型纳入白名单，应将其排除在名单外而
 	// 非恢复此豁免。）
-	// Anthropic Messages 协议未请求 thinking 的【流式】请求：转换器以
-	// ThinkingEvidenceComment 内部注释保留思考证据，守卫照常判决
-	// （修正：上游对未指定强度的请求按默认强度思考——首轮
-	// 36/36、续写 136/153 均有思考，零思考即降智；原整体豁免放行了
-	// 15 条零思考交付，见 REASONING0_LEDGER §C2）。非流式 body 没有注释
-	// 通道、转换后也不含思考块，证据无法注入——保留豁免，为已知残留
-	// 覆盖面缺口（同档 §C2 r4a，1 例）。
-	if operation == audit.OperationMessages && !input.Streaming && !qualityMessagesThinkingEnabled(input.Body) {
-		return QualityExemptMessagesNoThink
-	}
+	// Both adapters defer successful JSON conversion, so Messages requests
+	// retain native reasoning evidence even when clients hide thinking blocks.
 	if modeldomain.SupportsReasoningForProvider(route.Provider, input.PublicModel) {
 		return ""
 	}
@@ -529,8 +449,8 @@ func qualityHoldExemptReason(input Input, ownership *inferencedomain.ResponseOwn
 	return QualityExemptModelNoReasoning
 }
 
-func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime) bool {
-	return qualityHoldExemptReason(input, ownership, route, operation, cfg) == ""
+func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwnership, route modeldomain.Route, operation audit.Operation, cfg QualityRetryRuntime, jurisdiction QualityJurisdiction) bool {
+	return qualityHoldExemptReason(input, ownership, route, operation, cfg, jurisdiction) == ""
 }
 
 // qualityModelGuarded 报告模型是否在守卫白名单内（cfg.GuardedModels 为空
@@ -585,52 +505,11 @@ const qualityHeavyReasoningCreatedBudget = 30 * time.Second
 //
 // deadline 触发只代表排队界，不构成降智证据；降智判定永远由证据规则承担。
 func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRuntime) QualityRetryRuntime {
-	// 守卫在转换器之前看原始 Responses SSE（summary 增量 0-6ms 即达）。
-	// chat/messages 不再需要「证据截止不适用」行——那是转换器把 summary
-	// 推迟到 item.done 时的补偿，会把客户端 TTFB 拉成整段思考时长。
-	// 单次解析同时取 tools 与 effort（基准：128KB body 两次全量解析
-	// 1.3ms/请求，合并后减半；小 body ~3µs 本可忽略，长对话场景值得）。
-	// 历史消息（续写检测）不再解析：语料复核推翻了「续写轮可
-	// 合法零思考」假设（未指定强度 136/153、显式低强度 12/18 均思考），
-	// 续写豁免随之删除——判决不再需要请求历史，省去逐消息结构化解析。
-	var probe struct {
-		ReasoningEffort string `json:"reasoning_effort"`
-		Reasoning       *struct {
-			Effort string `json:"effort"`
-		} `json:"reasoning"`
-		Tools []struct {
-			Type string `json:"type"`
-		} `json:"tools"`
-		// tool_choice 可能是字符串（"auto"/"none"/"required"）或对象
-		//（{"type":"tool","name":"web_search"} 等强制形态）。用 RawMessage
-		// 避免 string 字段遇对象形态产生 UnmarshalTypeError 令整个探测失败
-		// ——规模轮 76 实证：forced 对象形态曾使探测回退默认行，chat 转换
-		// 请求连 converted 无界证据行都落空，搜索静默期被 3.5s 误杀 504。
-		ToolChoice json.RawMessage `json:"tool_choice"`
-	}
-	if json.Unmarshal(body, &probe) != nil {
-		return cfg
-	}
-	search := false
-	// tool_choice:"none" 时工具被显式禁用（规模轮 12 发现归一化层也会
-	// 注入禁用态工具）——禁用态不改变时序形态，按无工具处理。其余一切
-	// 形态（"auto"/"required"/对象强制）均视为启用。
-	toolsEnabled := !bytes.Equal(bytes.TrimSpace(probe.ToolChoice), []byte(`"none"`))
-	for _, tool := range probe.Tools {
-		// 任意启用工具都改变时序：搜索排队/执行与函数组织期会出现数秒静默，
-		// 3.5s 证据截止会误杀工作中的请求。
-		if toolsEnabled && strings.TrimSpace(tool.Type) != "" {
-			search = true
-			break
-		}
-	}
-	effort := probe.ReasoningEffort
-	if probe.Reasoning != nil && probe.Reasoning.Effort != "" {
-		effort = probe.Reasoning.Effort
-	}
-	effort = strings.ToLower(strings.TrimSpace(effort))
+	profile := inferencedomain.ReplayPolicyFromRequest(body)
+	search, effort := profile.Tools, profile.ReasoningEffort
 	heavy := effort == "high" || effort == "xhigh"
 	if search {
+		cfg.AdmissionTimeout = cfg.ToolAdmissionTimeout
 		cfg.EvidenceTimeout = qualitySearchSilenceBudget
 		cfg.CreatedTimeout = qualitySearchSilenceBudget
 	} else if heavy {
@@ -640,62 +519,13 @@ func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRunt
 	return cfg
 }
 
-func jsonStringEquals(raw json.RawMessage, want string) bool {
-	var value string
-	return json.Unmarshal(raw, &value) == nil && strings.EqualFold(strings.TrimSpace(value), want)
-}
-
-// qualityMessagesThinkingEnabled 报告 Anthropic Messages 请求是否显式启用了
-// thinking。必须与转换器的发射门（messages_request.go 的 thinkingEnabled）
-// 使用同一词表：type=enabled 与 type=adaptive 都会让转换器输出 thinking_delta
-// （证据通道存在，守卫应当介入）——此前 adaptive 被这里漏掉，自适应思考的
-// 请求整体绕过守卫。未启用时转换器不输出思考增量，扫描器无证据通道。
-func qualityMessagesThinkingEnabled(body []byte) bool {
-	var payload map[string]json.RawMessage
-	if json.Unmarshal(body, &payload) != nil {
-		return false
-	}
-	var nested map[string]json.RawMessage
-	if json.Unmarshal(payload["thinking"], &nested) != nil {
-		return false
-	}
-	if !jsonStringEquals(nested["type"], "enabled") && !jsonStringEquals(nested["type"], "adaptive") {
-		return false
-	}
-	var budget int64
-	if raw, ok := nested["budget_tokens"]; ok && json.Unmarshal(raw, &budget) == nil && budget <= 0 {
-		return false
-	}
-	return true
-}
-
-// commitableSameAccountRetry reports whether the withhold path may retry the
-// same account once. Same-account retry is meaningful ONLY through a rotating
-// egress pool (Selection.Pool): pool members hand every request a DIFFERENT
-// exit IP, so one retry cleanly separates transient exit-IP pollution (retry
-// delivers) from a degraded account (retry withholds again). Under direct or
-// fixed-egress deployments the retry re-enters the same dirty IP with ~0%
-// recovery probability — burning 5-10s of the request budget for nothing —
-// so it is force-disabled there (blueprint item #9).
-// Quota-probe leases are excluded: RetryAccount only re-queues normal
-// candidates, so a probe lease would silently switch accounts while the log
-// still claims a same-account retry.
-func commitableSameAccountRetry(cfg QualityRetryRuntime, used bool, quotaProbe bool, selection *selectionSession, poolEgress bool) bool {
-	return cfg.SameAccountRetry && poolEgress && !used && !quotaProbe && selection != nil
-}
-
-func (s *Service) applyMissingThinkingPenalty(ctx context.Context, requestID string, credential accountdomain.Credential, cooldown time.Duration) {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-	defer cancel()
-	action, err := s.selector.markMissingThinking(writeCtx, credential, cooldown)
-	if err != nil {
-		s.logger.Error("quality_degraded_penalty_failed", "request_id", requestID, "account_id", credential.ID, "action", action, "error", err)
-		return
-	}
-	switch action {
-	case missingThinkingPenaltyDisabled:
-		s.logger.Info("quality_degraded_disabled", "request_id", requestID, "account_id", credential.ID)
-	case missingThinkingPenaltyCooled:
-		s.logger.Info("quality_degraded_cooldown", "request_id", requestID, "account_id", credential.ID, "cooldown", cooldown.String())
-	}
+// Upstream counters are metadata, never quality evidence. Malformed negative
+// values must not overflow estimates or escape into attempt accounting.
+func boundedQualityUsage(usage Usage) Usage {
+	usage.InputTokens = max(0, usage.InputTokens)
+	usage.OutputTokens = max(0, usage.OutputTokens)
+	usage.ReasoningTokens = max(0, usage.ReasoningTokens)
+	usage.TotalTokens = max(0, usage.TotalTokens)
+	usage.CostInUSDTicks = max(0, usage.CostInUSDTicks)
+	return usage
 }

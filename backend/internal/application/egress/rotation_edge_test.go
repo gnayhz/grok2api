@@ -56,13 +56,13 @@ func newBareRotationService(t *testing.T, repo bareRotationRepo, cfg RotationCon
 	t.Helper()
 	service := &Service{
 		repository: repo, cipher: newRotationCipher(t), qualityQuarantiner: &fakeQuarantiner{},
-		qualityGuard: DefaultQualityGuardConfig(), rotationCfg: cfg,
+		rotationCfg: cfg,
 	}
 	service.operations = repo
 	if prober != nil {
 		service.SetNodeProber(prober)
 	}
-	service.SetRotationConfig(cfg)
+	setTestRotationConfig(service, cfg)
 	return service
 }
 
@@ -81,7 +81,7 @@ func TestRotationConfigDisableDropsQueue(t *testing.T) {
 
 	disabled := fastRotationConfig()
 	disabled.Enabled = false
-	service.SetRotationConfig(disabled)
+	setTestRotationConfig(service, disabled)
 	if _, ok := service.rotation.next(); ok {
 		t.Fatal("disable must drop queued work")
 	}
@@ -111,16 +111,17 @@ func TestRotationSkipPaths(t *testing.T) {
 	}
 	repo.mu.Unlock()
 
-	// (2) 无 webhook:记状态、不计尝试、不探活。
+	// (2) 无 webhook 且无生效质量隔离:被动验证路径短路(无事可验证),
+	// 不写任何状态——隔离中的无 Webhook 节点才走被动验证(见 rotation_passive_test)。
 	noWebhook := base
 	repo = &rotationStubRepo{node: noWebhook}
 	service = newBareRotationService(t, repo, fastRotationConfig(), &rotationTestProber{result: healthy})
 	service.processRotation(context.Background(), 9)
 	repo.mu.Lock()
-	rotatedAt, attempts, lastErr := repo.rotationState[0], repo.rotationState[1].(int), repo.rotationState[2].(string)
+	calls := repo.rotationCalls
 	repo.mu.Unlock()
-	if repo.rotationCalls != 1 || nonNilTime(rotatedAt) || attempts != 2 || lastErr != "no rotation webhook configured" {
-		t.Fatalf("no-webhook state = %+v calls=%d", repo.rotationState, repo.rotationCalls)
+	if calls != 0 {
+		t.Fatalf("no-webhook node without quarantine wrote rotation state: %d", calls)
 	}
 
 	// (3) 节点级轮换关闭:同上,理由不同(需要有效 webhook 密文,该检查在前)。
@@ -135,7 +136,7 @@ func TestRotationSkipPaths(t *testing.T) {
 	service = newBareRotationService(t, repo, fastRotationConfig(), &rotationTestProber{result: healthy})
 	service.processRotation(context.Background(), 9)
 	repo.mu.Lock()
-	_, attempts, lastErr = repo.rotationState[0], repo.rotationState[1].(int), repo.rotationState[2].(string)
+	_, attempts, lastErr := repo.rotationState[0], repo.rotationState[1].(int), repo.rotationState[2].(string)
 	repo.mu.Unlock()
 	if attempts != 2 || lastErr != "rotation disabled for this node" {
 		t.Fatalf("per-node-off state = %+v", repo.rotationState)
@@ -236,7 +237,7 @@ func TestRotationMinIntervalDefersViaRequeue(t *testing.T) {
 }
 
 // waitNodeHealthy:先不健康后健康 → 重试后返回健康;持续不健康 → 超时返回
-// 最后一次(不健康)结果且错误为 nil,由上层按探活不健康处理。
+// 最后一次(不健康)结果和截止错误,由上层计入失败尝试。
 func TestRotationWaitNodeHealthyRetryAndDeadline(t *testing.T) {
 	unhealthy := domain.ProbeResult{Status: domain.ProbeStatusUnhealthy, Error: "warming up", TestedAt: time.Now()}
 	healthy := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "203.0.113.9", TestedAt: time.Now()}
@@ -259,13 +260,13 @@ func TestRotationWaitNodeHealthyRetryAndDeadline(t *testing.T) {
 		t.Fatalf("probe calls = %d, want 3 (retry loop)", calls)
 	}
 
-	// 超时:返回最后的不健康结果,错误为 nil。
+	// 超时:返回最后的不健康结果和截止错误。
 	stuck := &sequenceProber{results: []domain.ProbeResult{unhealthy}}
 	cfg.ProbeTimeout = 40 * time.Millisecond
 	service = newBareRotationService(t, repo, cfg, stuck)
 	result, err = service.waitNodeHealthy(context.Background(), 13, cfg)
-	if err != nil || result.Status != domain.ProbeStatusUnhealthy {
-		t.Fatalf("deadline result = %+v err = %v, want unhealthy/nil", result, err)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Status != domain.ProbeStatusUnhealthy {
+		t.Fatalf("deadline result = %+v err = %v, want unhealthy/deadline", result, err)
 	}
 	stuck.mu.Lock()
 	calls = stuck.calls

@@ -8,6 +8,7 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type ResponseRepository struct{ db *Database }
@@ -21,7 +22,29 @@ func (r *ResponseRepository) Save(ctx context.Context, value inferencedomain.Res
 		PromptCacheKey: value.PromptCacheKey, ReasoningReplayKey: value.ReasoningReplayKey,
 		ExpiresAt: value.ExpiresAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
-	return r.db.db.WithContext(ctx).Save(&row).Error
+	// A response identity can be acknowledged again, but can never be rebound
+	// to another client, account, route or continuity scope by an upstream ID
+	// collision. The conflict predicate and insert execute atomically.
+	result := r.db.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "response_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"expires_at": gorm.Expr("CASE WHEN response_ownership.expires_at > excluded.expires_at THEN response_ownership.expires_at ELSE excluded.expires_at END"),
+			"updated_at": gorm.Expr("CASE WHEN response_ownership.updated_at > excluded.updated_at THEN response_ownership.updated_at ELSE excluded.updated_at END"),
+		}),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: `response_ownership.account_id = excluded.account_id
+			AND response_ownership.client_key_id = excluded.client_key_id
+			AND response_ownership.model_route_id = excluded.model_route_id
+			AND response_ownership.provider = excluded.provider
+			AND response_ownership.prompt_cache_key = excluded.prompt_cache_key
+			AND response_ownership.reasoning_replay_key = excluded.reasoning_replay_key`}}},
+	}).Create(&row)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrConflict
+	}
+	return nil
 }
 
 func (r *ResponseRepository) Get(ctx context.Context, responseID string, clientKeyID uint64, now time.Time) (inferencedomain.ResponseOwnership, error) {
@@ -105,7 +128,25 @@ func (r *ResponseRepository) SaveWebState(ctx context.Context, value inferencedo
 		UpstreamParentResponseID: value.UpstreamParentResponseID, ResponseJSON: value.ResponseJSON,
 		Status: value.Status, ExpiresAt: value.ExpiresAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
-	return r.db.db.WithContext(ctx).Save(&row).Error
+	result := r.db.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "response_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"expires_at": gorm.Expr("CASE WHEN web_response_states.expires_at > excluded.expires_at THEN web_response_states.expires_at ELSE excluded.expires_at END"),
+			"updated_at": gorm.Expr("CASE WHEN web_response_states.updated_at > excluded.updated_at THEN web_response_states.updated_at ELSE excluded.updated_at END"),
+		}),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: `web_response_states.account_id = excluded.account_id
+			AND web_response_states.conversation_id = excluded.conversation_id
+			AND web_response_states.upstream_parent_response_id = excluded.upstream_parent_response_id
+			AND web_response_states.response_json = excluded.response_json
+			AND web_response_states.status = excluded.status`}}},
+	}).Create(&row)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrConflict
+	}
+	return nil
 }
 
 func (r *ResponseRepository) GetWebState(ctx context.Context, responseID string, now time.Time) (inferencedomain.WebResponseState, error) {

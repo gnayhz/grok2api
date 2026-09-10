@@ -179,8 +179,8 @@ func TestPublicNodeReportsAccountBoundProxy(t *testing.T) {
 	if !public.AccountBoundProxy {
 		t.Fatal("Resin proxy was not reported as account-bound")
 	}
-	if !public.ProxyPool {
-		t.Fatal("account-bound proxy was not reported as a proxy pool")
+	if !public.RotatingEndpoint {
+		t.Fatal("account-bound proxy was not reported as a rotating endpoint")
 	}
 	if public.Health != 1 || public.FailureCount != 0 || public.CooldownUntil != nil || public.LastError != "" {
 		t.Fatalf("proxy pool exposed obsolete node health: %#v", public)
@@ -249,8 +249,10 @@ func TestProxyPoolRequiresConfiguredProxy(t *testing.T) {
 	}
 }
 
-// publicNode 的"代理池模式"投影必须与 domain 唯一判定一致,
-// 不得在应用层重新发明规则。
+// publicNode 的"旋转端点"投影必须与 domain 唯一判定一致(不得在应用层重新
+// 发明规则);ProxyPool 则回显节点原始"代理池型隧道"标志供编辑表单往返——
+// 二者曾在同一字段上混用:勾选代理池但未配换IP轮换时回显恒为 false,
+// 保存看似无效(历史事故:运维反复勾选无效,节点一直按固定出口参与惩罚)。
 func TestPublicNodePoolModeMatchesDomainRule(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -266,20 +268,24 @@ func TestPublicNodePoolModeMatchesDomainRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name string
-		node domain.Node
-		want bool
+		name    string
+		node    domain.Node
+		want    bool // 外部代理池/旋转端点(domain 唯一判定)
+		wantRaw bool // 原始代理池标志(表单回显)
 	}{
-		{"plain node", domain.Node{ID: 1, EncryptedProxyURL: plainURL}, false},
-		{"flag node", domain.Node{ID: 2, EncryptedProxyURL: plainURL, ProxyPool: true}, false},
-		{"flag+rotation", domain.Node{ID: 4, EncryptedProxyURL: plainURL, ProxyPool: true, RotationEnabled: true}, true},
-		{"template node", domain.Node{ID: 3, EncryptedProxyURL: templateURL}, true},
+		{"plain node", domain.Node{ID: 1, EncryptedProxyURL: plainURL}, false, false},
+		{"external pool node", domain.Node{ID: 2, EncryptedProxyURL: plainURL, ProxyPool: true}, true, true},
+		{"self-hosted warp node", domain.Node{ID: 4, EncryptedProxyURL: plainURL, RotationEnabled: true}, false, false},
+		{"template node", domain.Node{ID: 3, EncryptedProxyURL: templateURL}, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			public := s.publicNode(tc.node, nil)
-			if public.ProxyPool != tc.want {
-				t.Fatalf("publicNode.ProxyPool = %v, want %v", public.ProxyPool, tc.want)
+			if public.RotatingEndpoint != tc.want {
+				t.Fatalf("publicNode.RotatingEndpoint = %v, want %v", public.RotatingEndpoint, tc.want)
+			}
+			if public.ProxyPool != tc.wantRaw {
+				t.Fatalf("publicNode.ProxyPool = %v, want raw flag %v", public.ProxyPool, tc.wantRaw)
 			}
 		})
 	}

@@ -2,6 +2,8 @@
 
 Grok2API 的管理端 SPA，用于管理账号池、模型路由、客户端密钥、请求审计和运行设置。
 
+修改前阅读 [模块边界](../ARCHITECTURE.md) 和 [开发指南](../DEVELOPMENT.md)。页面拥有交互和显示资源；后端拥有权限、业务规则及持久结果。会话退出、组件卸载和迟到响应必须保持隔离。
+
 ## 技术栈
 
 - React 19 + TypeScript
@@ -50,6 +52,7 @@ src/components/ui/   shadcn/ui 基础组件
 ## 验证
 
 ```bash
+pnpm test
 pnpm lint
 pnpm build
 ```

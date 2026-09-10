@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,18 +41,20 @@ func TestCleanupAccountsDeletesOnlySelectedCurrentStatuses(t *testing.T) {
 
 	create := func(name string, providerValue accountdomain.Provider, mutate func(*accountdomain.Credential)) uint64 {
 		t.Helper()
-		value, _, createErr := repo.UpsertByIdentity(ctx, accountdomain.Credential{
+		input := accountdomain.Credential{
 			Provider: providerValue, AuthType: accountdomain.AuthTypeSSO, Name: name, SourceKey: fmt.Sprintf("cleanup-%s", name),
 			EncryptedAccessToken: token, Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
-		})
+		}
+		if mutate != nil {
+			mutate(&input)
+		}
+		value, _, createErr := repo.UpsertByIdentity(ctx, input)
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		if mutate != nil {
-			mutate(&value)
-			value, createErr = repo.Update(ctx, value)
-			if createErr != nil {
-				t.Fatal(createErr)
+		if !input.Enabled {
+			if _, err := repo.UpdateAdministration(ctx, value.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &input.Enabled}}); err != nil {
+				t.Fatal(err)
 			}
 		}
 		return value.ID
@@ -107,7 +110,7 @@ func TestCleanupAccountsWithLinkedTargets(t *testing.T) {
 	web, build, console := seedLinkedTrio(t, repo, strings.Repeat("7", 64), "u-cleanup")
 	// Mark the Web root invalid while keeping active peers to verify peer state is ignored.
 	web.AuthStatus = accountdomain.AuthStatusReauthRequired
-	if _, err := repo.Update(ctx, web); err != nil {
+	if _, err := repo.ApplyCredential(ctx, web.CredentialRef(), accountdomain.CredentialEvent{Kind: accountdomain.CredentialRejected, Reason: "fixture rejected"}); err != nil {
 		t.Fatal(err)
 	}
 	healthyWeb := mustUpsertLinked(t, repo, accountdomain.Credential{
@@ -136,7 +139,7 @@ func TestPreviewCleanupCountsWithoutDeleting(t *testing.T) {
 
 	web, build, console := seedLinkedTrio(t, repo, strings.Repeat("9", 64), "u-preview")
 	web.Enabled = false
-	if _, err := repo.Update(ctx, web); err != nil {
+	if _, err := repo.UpdateAdministration(ctx, web.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &web.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 

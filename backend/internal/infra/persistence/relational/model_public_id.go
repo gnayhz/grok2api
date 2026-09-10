@@ -10,19 +10,30 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type modelPublicIDMigration struct {
 	ID       uint64
 	Previous string
 	Current  string
+	Source   modeldomain.NameSource
 }
+
+// Explicit columns make name governance safe on connections opened before an
+// additive SQLite schema migration: SELECT * can expose cached old columns on
+// the first statement after another connection's DDL.
+const modelRouteNameColumns = "id, public_id, provider, upstream_model, capability, origin, name_source, enabled, created_at, updated_at"
+const modelAliasNameColumns = "alias, model_route_id, name_source, replaced_by_catalog, created_at"
 
 // ensureCanonicalModelPublicIDs 原位迁移内部路由 ID，保留路由主键和所有下游授权关系。
 func (d *Database) ensureCanonicalModelPublicIDs(ctx context.Context) error {
 	return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockModelNamespaces(tx, account.Providers()...); err != nil {
+			return err
+		}
 		var rows []modelRouteModel
-		if err := tx.Order("id ASC").Find(&rows).Error; err != nil {
+		if err := tx.Select(modelRouteNameColumns).Order("id ASC").Find(&rows).Error; err != nil {
 			return err
 		}
 		migrations := make([]modelPublicIDMigration, 0, len(rows))
@@ -35,13 +46,17 @@ func (d *Database) ensureCanonicalModelPublicIDs(ctx context.Context) error {
 			if publicID == row.PublicID {
 				continue
 			}
-			migrations = append(migrations, modelPublicIDMigration{ID: row.ID, Previous: row.PublicID, Current: publicID})
+			source, err := modelPrimaryNameSource(tx, row.ID, publicID, modeldomain.NameSource(row.NameSource))
+			if err != nil {
+				return err
+			}
+			migrations = append(migrations, modelPublicIDMigration{ID: row.ID, Previous: row.PublicID, Current: publicID, Source: source})
 		}
 		for _, migration := range migrations {
 			if err := ensureModelPublicIDNotAlias(tx, migration.Current, migration.ID); err != nil {
 				return err
 			}
-			if err := preserveModelRouteAlias(tx, migration.Previous, migration.ID); err != nil {
+			if err := preserveModelRouteAlias(tx, migration.Previous, migration.ID, migration.Source); err != nil {
 				return err
 			}
 		}
@@ -53,7 +68,7 @@ func (d *Database) ensureCanonicalModelPublicIDs(ctx context.Context) error {
 			}
 		}
 		for _, migration := range migrations {
-			if err := tx.Model(&modelRouteModel{}).Where("id = ?", migration.ID).Update("public_id", migration.Current).Error; err != nil {
+			if err := tx.Model(&modelRouteModel{}).Where("id = ?", migration.ID).Updates(map[string]any{"public_id": migration.Current, "name_source": migration.Source}).Error; err != nil {
 				return fmt.Errorf("迁移模型路由 %d 到 %q: %w", migration.ID, migration.Current, mapError(err))
 			}
 		}
@@ -61,45 +76,66 @@ func (d *Database) ensureCanonicalModelPublicIDs(ctx context.Context) error {
 	})
 }
 
-func preserveModelRouteAlias(tx *gorm.DB, alias string, routeID uint64) error {
+// Only a route that currently owns this name may preserve its relationship.
+// Other current/previous members of the same name remain separate identities.
+func preserveModelRouteAlias(tx *gorm.DB, alias string, routeID uint64, source modeldomain.NameSource) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" || routeID == 0 {
 		return nil
 	}
-	var route modelRouteModel
-	if err := tx.Where("public_id = ? AND id <> ?", alias, routeID).First(&route).Error; err == nil {
-		// Another target still owns the old public name, so the group remains
-		// reachable without creating a compatibility alias for this renamed target.
-		return nil
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+	var owner modelRouteModel
+	if err := tx.Select("id").Where("id = ? AND public_id = ?", routeID, alias).First(&owner).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("%w: route %d does not own public name %q", repository.ErrConflict, routeID, alias)
+		}
 		return err
 	}
-	var existing modelRouteAliasModel
-	err := tx.Where("alias = ?", alias).First(&existing).Error
-	if err == nil {
-		if existing.ModelRouteID == routeID {
+	merged, err := modelPrimaryNameSource(tx, routeID, alias, source)
+	if err != nil {
+		return err
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "alias"}, {Name: "model_route_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"name_source", "replaced_by_catalog"}),
+	}).Create(&modelRouteAliasModel{Alias: alias, ModelRouteID: routeID, NameSource: string(merged)}).Error
+}
+
+// All callers hold the Provider namespace lock. Reading and merging in this
+// transaction shares M05's policy without encoding a second precedence in SQL.
+func modelPrimaryNameSource(tx *gorm.DB, routeID uint64, name string, source modeldomain.NameSource) (modeldomain.NameSource, error) {
+	var alias modelRouteAliasModel
+	err := tx.Select("name_source").Where("alias = ? AND model_route_id = ?", name, routeID).First(&alias).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return modeldomain.MergeNameSource(source, source), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return modeldomain.MergeNameSource(source, modeldomain.NameSource(alias.NameSource)), nil
+}
+
+func ensureModelPublicIDNotAlias(tx *gorm.DB, publicID string, routeID uint64) error {
+	var aliases []modelRouteAliasModel
+	if err := tx.Where("alias = ? AND replaced_by_catalog = ?", publicID, false).Find(&aliases).Error; err != nil {
+		return err
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	for _, alias := range aliases {
+		if routeID != 0 && alias.ModelRouteID == routeID {
 			return nil
 		}
-		return fmt.Errorf("%w: 模型兼容名称 %q 已绑定路由 %d", repository.ErrConflict, alias, existing.ModelRouteID)
+	}
+	// A currently named pool may accept additional targets as before; a name
+	// held only by historical aliases cannot be claimed by an unrelated route.
+	var direct modelRouteModel
+	err := tx.Select("id").Where("public_id = ?", publicID).First(&direct).Error
+	if err == nil {
+		return nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	return tx.Create(&modelRouteAliasModel{Alias: alias, ModelRouteID: routeID}).Error
-}
-
-func ensureModelPublicIDNotAlias(tx *gorm.DB, publicID string, routeID uint64) error {
-	var alias modelRouteAliasModel
-	query := tx.Where("alias = ?", publicID)
-	if routeID != 0 {
-		query = query.Where("model_route_id <> ?", routeID)
-	}
-	err := query.First(&alias).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return fmt.Errorf("%w: 模型公开 ID %q 已被路由 %d 保留为兼容名称", repository.ErrConflict, publicID, alias.ModelRouteID)
+	return fmt.Errorf("%w: 模型公开 ID %q 已被保留为兼容名称", repository.ErrConflict, publicID)
 }

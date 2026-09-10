@@ -83,7 +83,7 @@ func TestSemanticOnlyChatToolCallsWithholdAndBodyPath(t *testing.T) {
 }
 
 // web_search_call item 头只抬 semanticOutput（证据截止不误杀搜索静默），
-// 不得被当成健康证据。思考期望内终态仍扣留；classifyQualityHold 在
+// 不得被当成健康证据。思考期望内终态仍扣留；classifyQualityHoldShadowed 在
 // 仅有该头时保持 Wait。
 func TestWebSearchCallHeaderIsLivenessNotHealth(t *testing.T) {
 	t.Parallel()
@@ -92,7 +92,7 @@ func TestWebSearchCallHeaderIsLivenessNotHealth(t *testing.T) {
 	if !mid.semanticOutput {
 		t.Fatal("web_search_call item header must mark semanticOutput")
 	}
-	if v := classifyQualityHold(mid.signals()); v != QualityWait {
+	if v := classifyQualityHoldShadowed(mid.signals()); v != QualityWait {
 		t.Fatalf("search item header must not deliver: verdict=%s", v)
 	}
 
@@ -145,7 +145,7 @@ func TestReasoningHeaderPlusWebSearchIsNotThinkingEvidence(t *testing.T) {
 	if !mid.semanticOutput {
 		t.Fatal("web_search_call must still mark liveness")
 	}
-	if v := classifyQualityHold(mid.signals()); v != QualityWait {
+	if v := classifyQualityHoldShadowed(mid.signals()); v != QualityWait {
 		t.Fatalf("mid-search during empty reasoning must wait, not deliver: %s", v)
 	}
 

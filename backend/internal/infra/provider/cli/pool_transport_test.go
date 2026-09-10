@@ -70,6 +70,7 @@ func TestPoolTargetRoutesThroughPoolMember(t *testing.T) {
 		member: map[uint64][]domainegress.Node{poolID: {member}},
 	}
 	manager := infraegress.NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
 
 	ctx := infraegress.WithTrafficClass(context.Background(), domainegress.TrafficClassInference)
@@ -118,6 +119,7 @@ func TestPoolTargetExhaustedFailsStrict(t *testing.T) {
 		member: map[uint64][]domainegress.Node{poolID: {quarantined}},
 	}
 	manager := infraegress.NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
 
 	ctx := infraegress.WithTrafficClass(context.Background(), domainegress.TrafficClassInference)

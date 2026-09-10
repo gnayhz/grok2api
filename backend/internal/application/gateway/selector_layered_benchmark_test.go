@@ -9,6 +9,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func BenchmarkSelectorMultiModelCandidateLoad(b *testing.B) {
@@ -42,7 +43,7 @@ func BenchmarkSelectorMultiModelCandidateLoad(b *testing.B) {
 	}
 	syncedAt := time.Now().UTC()
 	for _, value := range created {
-		if err := routes.ReplaceAccountCapabilities(ctx, value.ID, models, syncedAt); err != nil {
+		if err := testsupport.Capabilities(ctx, routes, accounts, value.ID, models, syncedAt); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -70,7 +71,7 @@ func BenchmarkSelectorMultiModelCandidateLoad(b *testing.B) {
 // BenchmarkSelectorCandidateCacheHit 度量生产热路径的真实每请求成本：
 // 快照缓存命中（固定 now < expiresAt，免 30s TTL 失效）。这是选号在每个
 // 请求上实际发生的事——cold-load（上方 models_N 基准）只在 TTL 过期后
-// 每 30s 一次，且被 singleflight 合并。区分两者避免把冷启动成本误当
+// 每 30s 一次，且被在途读取组共享。区分两者避免把冷启动成本误当
 // 每请求成本（轮4甄别记录）。
 func BenchmarkSelectorCandidateCacheHit(b *testing.B) {
 	const accountCount = 300
@@ -100,7 +101,7 @@ func BenchmarkSelectorCandidateCacheHit(b *testing.B) {
 	}
 	syncedAt := time.Now().UTC()
 	for _, value := range created {
-		if err := routes.ReplaceAccountCapabilities(ctx, value.ID, models, syncedAt); err != nil {
+		if err := testsupport.Capabilities(ctx, routes, accounts, value.ID, models, syncedAt); err != nil {
 			b.Fatal(err)
 		}
 	}

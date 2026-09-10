@@ -41,6 +41,7 @@ func TestCachedRoutingTargetNodeMergesConcurrentReloads(t *testing.T) {
 	}
 	repo := &targetGatedRepo{gate: make(chan struct{}), node: domain.Node{ID: 42, Name: "fixed", Enabled: true, Health: 1}}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	if _, ok, err := manager.cachedRoutingTargetNode(ctx, 42); err != nil || !ok {
@@ -48,11 +49,11 @@ func TestCachedRoutingTargetNodeMergesConcurrentReloads(t *testing.T) {
 	}
 
 	// 缓存条目置为已过期。
-	manager.routeRuleNodeMu.Lock()
-	stale := manager.routeRuleNodeCache[42]
+	manager.routing.routeRuleNodeMu.Lock()
+	stale := manager.routing.routeRuleNodeCache[42]
 	stale.expiresAt = time.Now().UTC().Add(-time.Second)
-	manager.routeRuleNodeCache[42] = stale
-	manager.routeRuleNodeMu.Unlock()
+	manager.routing.routeRuleNodeCache[42] = stale
+	manager.routing.routeRuleNodeMu.Unlock()
 	repo.blocking.Store(true)
 
 	const concurrency = 24

@@ -31,6 +31,7 @@ func TestLeaseLifecycleUnderCancellationStorm(t *testing.T) {
 		repo.nodes = append(repo.nodes, domain.Node{ID: i, Name: fmt.Sprintf("node-%d", i), Enabled: true, Health: 1, EncryptedProxyURL: encrypted})
 	}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	const workers = 32
 	const iterations = 60
@@ -55,14 +56,14 @@ func TestLeaseLifecycleUnderCancellationStorm(t *testing.T) {
 	wait.Wait()
 
 	// inflight 守恒:所有节点计数归零。
-	manager.nodeMu.RLock()
+	manager.routing.nodeMu.RLock()
 	for _, node := range repo.nodes {
 		if value := manager.inflightCount(node.ID); value != 0 {
-			manager.nodeMu.RUnlock()
+			manager.routing.nodeMu.RUnlock()
 			t.Fatalf("node %d inflight = %d after storm, want 0", node.ID, value)
 		}
 	}
-	manager.nodeMu.RUnlock()
+	manager.routing.nodeMu.RUnlock()
 
 	// 风暴后正常获取不受污染。
 	healthy, err := manager.Acquire(context.Background(), domain.ScopeBuild, "post-storm")

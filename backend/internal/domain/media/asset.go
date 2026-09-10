@@ -44,6 +44,9 @@ type Asset struct {
 	MIMEType   string
 	SizeBytes  int64
 	SHA256     string
+	// SourceJobID records the immutable origin of a local video archive. It is
+	// retention provenance, not the job's chosen result or execution authority.
+	SourceJobID string
 	// ExpiresAt 仅用于临时输入；nil 表示持久图库/视频资产。
 	ExpiresAt *time.Time
 	CreatedAt time.Time

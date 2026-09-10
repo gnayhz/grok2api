@@ -114,3 +114,75 @@ func TestEventKeyKeepsAccountHealthInvalidationsDistinct(t *testing.T) {
 		t.Fatalf("account health invalidations were coalesced: first=%#v second=%#v", first, second)
 	}
 }
+
+func TestPublisherCoalescesQuotaByAccountModeAndSQLRevision(t *testing.T) {
+	bus := &testBus{}
+	service := NewService(bus, "quota-test", nil, nil)
+	event := func(id uint64, mode string, revision uint64) repository.InvalidationEvent {
+		return repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, AccountID: id, Quota: &account.QuotaProjection{Mode: mode, SnapshotVersion: 1, Revision: revision, Remaining: 1}}
+	}
+	for _, value := range []repository.InvalidationEvent{event(1, "fast", 3), event(1, "fast", 2), event(1, "other", 2), event(2, "fast", 2), {Kind: repository.InvalidationAccountQuotaChanged}} {
+		service.Notify(context.Background(), value)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- service.RunPublisher(ctx) }()
+	defer func() { cancel(); <-done }()
+	for {
+		bus.mu.Lock()
+		values := append([]repository.InvalidationEvent(nil), bus.published...)
+		bus.mu.Unlock()
+		if len(values) >= 4 {
+			if len(values) != 4 {
+				t.Fatalf("coalesced notifications=%+v", values)
+			}
+			found := false
+			for _, value := range values {
+				if value.Quota != nil && value.AccountID == 1 && value.Quota.Mode == "fast" {
+					found = true
+					if value.Quota.Revision != 3 {
+						t.Fatalf("late old projection replaced new=%+v", value)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("quota event disappeared")
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("publisher incomplete=%+v", values)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestPublisherCoalescesHealthBySQLRevision(t *testing.T) {
+	bus := &testBus{}
+	service := NewService(bus, "health-test", nil, nil)
+	for _, revision := range []uint64{3, 2, 0} {
+		service.Notify(context.Background(), repository.InvalidationEvent{Kind: repository.InvalidationAccountHealthChanged, Provider: account.ProviderBuild, AccountID: 1, HealthRevision: revision})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	done := make(chan error, 1)
+	go func() { done <- service.RunPublisher(ctx) }()
+	defer func() { cancel(); <-done }()
+	for {
+		bus.mu.Lock()
+		values := append([]repository.InvalidationEvent(nil), bus.published...)
+		bus.mu.Unlock()
+		if len(values) > 0 {
+			if len(values) != 1 || values[0].HealthRevision != 3 {
+				t.Fatalf("coalesced health=%+v", values)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("publisher timed out")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}

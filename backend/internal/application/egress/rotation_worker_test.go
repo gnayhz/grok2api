@@ -41,13 +41,13 @@ func TestRotateNodeServicePath(t *testing.T) {
 	_ = saved
 	disabled := fastRotationConfig()
 	disabled.Enabled = false
-	service.SetRotationConfig(disabled)
+	setTestRotationConfig(service, disabled)
 	if err := service.RotateNode(ctx, 5); err == nil || errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotate while rotation disabled = %v, want explicit error", err)
 	}
 
 	// 启用:成功入队(经调度器集合)。
-	service.SetRotationConfig(fastRotationConfig())
+	setTestRotationConfig(service, fastRotationConfig())
 	if err := service.RotateNode(ctx, 5); err != nil {
 		t.Fatalf("rotate enabled = %v", err)
 	}
@@ -56,7 +56,7 @@ func TestRotateNodeServicePath(t *testing.T) {
 	}
 }
 
-// panic 隔离:processRotation 内任一 panic(webhook/解密/探测/canary)不得
+// panic 隔离:processRotation 内任一 panic(webhook/解密/探测)不得
 // 击穿 worker 循环——后续节点继续被处理,batch.Do 捕获后记错误日志。
 type panicRotationRepo struct {
 	*multiNodeRotationRepo
@@ -97,12 +97,10 @@ func TestRotationWorkerSurvivesProcessingPanic(t *testing.T) {
 	healthy := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.77", TestedAt: time.Now()}
 	service := &Service{
 		repository: repo, cipher: cipher, qualityQuarantiner: &fakeQuarantiner{},
-		qualityGuard: DefaultQualityGuardConfig(), qualityEvidence: map[uint64][]degradeObservation{},
 	}
 	service.operations = repo
 	service.SetNodeProber(&rotationTestProber{result: healthy})
-	service.SetRotationConfig(fastRotationConfig())
-	service.SetEgressQualityProber(&canaryStub{result: EgressQualityProbeResult{Outcome: EgressQualityProbeClean}})
+	setTestRotationConfig(service, fastRotationConfig())
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()

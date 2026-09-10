@@ -12,6 +12,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // 适用边界：多账号循环测试（流式/非流式 hold、fail-closed）。单账号 +
@@ -34,7 +35,7 @@ func newGuardLoopDatabase(t *testing.T, model string, names ...string) (*relatio
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := relational.NewModelRepository(database).UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{model}); err != nil {
+	if err := testsupport.Discover(ctx, relational.NewModelRepository(database), accountdomain.ProviderBuild, []string{model}); err != nil {
 		t.Fatal(err)
 	}
 	accountRepo := relational.NewAccountRepository(database)
@@ -51,7 +52,7 @@ func newGuardLoopDatabase(t *testing.T, model string, names ...string) (*relatio
 		credentials = append(credentials, credential)
 	}
 	for _, credential := range credentials {
-		if err := relational.NewModelRepository(database).ReplaceAccountCapabilities(ctx, credential.ID, []string{model}, time.Now().UTC()); err != nil {
+		if err := testsupport.Capabilities(ctx, relational.NewModelRepository(database), accountRepo, credential.ID, []string{model}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -73,7 +74,25 @@ func newGuardLoopService(t *testing.T, adapter *scriptedBuildAdapter, names ...s
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
 	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed})
 	return service, credentials
+}
+
+// newGuardLoopServiceWithDB 同 newGuardLoopService,但额外返回库句柄
+// (审计主行落库断言需要直揥 request_audits)。
+func newGuardLoopServiceWithDB(t *testing.T, adapter *scriptedBuildAdapter, names ...string) (*Service, []accountdomain.Credential, *relational.AuditRepository) {
+	t.Helper()
+	database, credentials := newGuardLoopDatabase(t, "grok-4.6", names...)
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed})
+	return service, credentials, auditRepo
 }

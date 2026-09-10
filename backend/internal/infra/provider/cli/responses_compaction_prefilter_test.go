@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
@@ -17,28 +18,28 @@ func TestExpandGatewayCompactionHistoryPrefilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codec := newGatewayCompactionCodec(cipher)
+	codec := historydomain.NewCompactionCodec(cipher)
 
 	// 无字面量:大 body 原样返回。
 	bigBody := []byte(`{"model":"grok-4.5","input":[{"type":"message","role":"user","content":"` +
 		strings.Repeat("ordinary conversation text ", 4000) + `"}],"instructions":"be helpful"}`)
-	expanded, foreign, drifted, err := expandGatewayCompactionHistory(bigBody, codec, "session-1")
+	plan, err := codec.Prepare(bigBody, "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if &bigBody[0] != &expanded[0] || foreign != 0 || drifted != 0 {
+	if &bigBody[0] != &plan.Body[0] || plan.Unavailable != 0 || plan.SessionDrifted != 0 {
 		t.Fatal("no-literal body must return unchanged without expansion")
 	}
 
 	// 歧义命中(字面量出现在用户文本里,非类型字段):走全量解码,
 	// 没有 type==compaction 的项,同样原样返回(字节相同)。
 	ambiguous := []byte(`{"input":[{"type":"message","role":"user","content":"the word 'compaction' appeared in prose"}]}`)
-	expanded, foreign, drifted, err = expandGatewayCompactionHistory(ambiguous, codec, "session-1")
+	plan, err = codec.Prepare(ambiguous, "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(expanded) != string(ambiguous) || foreign != 0 || drifted != 0 {
-		t.Fatalf("ambiguous body changed: %s foreign=%d drifted=%d", expanded, foreign, drifted)
+	if string(plan.Body) != string(ambiguous) || plan.Unavailable != 0 || plan.SessionDrifted != 0 {
+		t.Fatalf("ambiguous body changed: %s foreign=%d drifted=%d", plan.Body, plan.Unavailable, plan.SessionDrifted)
 	}
 }
 
@@ -49,13 +50,13 @@ func BenchmarkExpandGatewayCompactionHistoryNoCompaction(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	codec := newGatewayCompactionCodec(cipher)
+	codec := historydomain.NewCompactionCodec(cipher)
 	body := []byte(`{"model":"grok-4.5","input":[{"type":"message","role":"user","content":"` +
 		strings.Repeat("ordinary conversation text ", 4000) + `"}],"instructions":"be helpful"}`)
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, _, err := expandGatewayCompactionHistory(body, codec, "session-1"); err != nil {
+		if _, err := codec.Prepare(body, "session-1"); err != nil {
 			b.Fatal(err)
 		}
 	}

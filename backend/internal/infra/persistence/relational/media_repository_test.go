@@ -212,15 +212,17 @@ func TestMediaAssetRepositoryExpiresInputOnlyWhenUnreferenced(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	expiresAt := now.Add(-time.Hour)
+	// Jobs are admitted with live inputs; active-reference protection is
+	// independent of the timestamp a later release asks to store.
+	expiresAt := now.Add(time.Hour)
 	activeID := "input_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	terminalID := "input_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 	assets := NewMediaAssetRepository(database)
 	for _, id := range []string{activeID, terminalID} {
-		if err := assets.CreateMediaAsset(ctx, mediadomain.Asset{
+		if err := assets.CreateMediaInputAsset(ctx, mediadomain.Asset{
 			ID: id, Kind: "image", StorageKey: id + ".png", MIMEType: "image/png",
 			SizeBytes: 68, SHA256: strings.Repeat("a", 64), ExpiresAt: &expiresAt, CreatedAt: now.Add(-2 * time.Hour),
-		}); err != nil {
+		}, 1<<30); err != nil {
 			t.Fatal(err)
 		}
 	}

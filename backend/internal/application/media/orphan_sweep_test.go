@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	localmedia "github.com/chenyme/grok2api/backend/internal/infra/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 // TestSweepOrphanObjectsReclaimsCrashResidue：saveObject 先硬链接提交对象、
@@ -82,8 +84,10 @@ func TestSweepOrphanObjectsReclaimsCrashResidue(t *testing.T) {
 	if _, err := os.Stat(freshOrphan); err != nil {
 		t.Fatalf("in-flight file within grace must survive: %v", err)
 	}
-	if _, _, err := service.OpenImage(ctx, live.ID); err != nil {
+	if _, body, err := service.OpenImage(ctx, live.ID); err != nil {
 		t.Fatalf("live asset must survive sweep: %v", err)
+	} else if err := body.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	// 再跑一次：幂等，无残留可删。
@@ -128,7 +132,16 @@ func TestRunCleanupTriggersOrphanSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	go service.RunCleanup(ctx, func(error) {})
+	done := make(chan struct{})
+	go func() { defer close(done); service.RunCleanup(ctx, func(error) {}) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("cleanup did not stop")
+		}
+	}()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -157,13 +170,8 @@ type stubObjectStorage struct{}
 func (stubObjectStorage) SaveImage(context.Context, string, string, []byte) (string, error) {
 	return "", nil
 }
-func (stubObjectStorage) SaveVideo(context.Context, string, string, []byte) (string, error) {
-	return "", nil
+func (stubObjectStorage) BeginVideoUpload(context.Context, string, string) (repository.MediaVideoUpload, error) {
+	return nil, errors.New("unused video upload")
 }
-func (stubObjectStorage) BeginVideoUpload(context.Context, string, string) (string, string, error) {
-	return "", "", nil
-}
-func (stubObjectStorage) CommitVideoUpload(context.Context, string, string) error { return nil }
-func (stubObjectStorage) AbortVideoUpload(context.Context, string) error          { return nil }
-func (stubObjectStorage) Open(context.Context, string) (io.ReadCloser, error)     { return nil, nil }
-func (stubObjectStorage) Delete(context.Context, string) error                    { return nil }
+func (stubObjectStorage) Open(context.Context, string) (io.ReadCloser, error) { return nil, nil }
+func (stubObjectStorage) Delete(context.Context, string) error                { return nil }

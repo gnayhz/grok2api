@@ -6,8 +6,8 @@
 # 运行时设置优先级：管理后台保存过「设置」后，可编辑字段会持久化到
 # 数据库（runtime_settings 表），此后每次启动以数据库为准——直接改
 # 本文件中这些字段并重启不会生效。首次部署（未在后台保存过设置）时
-# 本文件即为生效值。要把控制权还给本文件：先在后台把值改回期望值，
-# 或备份后删除数据库中的 runtime_settings 行再重启。
+# 本文件即为生效值。恢复文件基线请使用管理端相应配置域的重置操作：
+# 重置会保留并推进持久版本，供并发编辑和其他实例正确识别。
 
 server:
   # [运行时管理] 最大并发请求门禁（1-100000）也可在管理后台「设置-服务」修改；此处仅启动默认。
@@ -172,6 +172,10 @@ routing:
   reasoningReplayEnabled: true
   reasoningReplayTTL: 1h
   reasoningReplayMaxEntries: 10240
+  # 持久历史独立于内存/Redis TTL；超出容量明确拒绝新增，不截断旧前缀。
+  # 以下两项修改后重启生效。
+  conversationHistoryRetention: 24h
+  conversationHistoryMaxBytes: 67108864
   # [按需修改] 按账号隔离上游连接池，适合外部 L4/连接哈希负载均衡；会增加连接数、TLS 握手和文件描述符占用。
   accountIsolatedConnections: false
   # [通常不要修改] 大账号池默认使用有界分段选号；保留完整池回退、额度优先级和原子并发门禁。
@@ -180,126 +184,60 @@ routing:
   segmentedSelectorWindowSize: 64
 
 audit:
-  # [通常不要修改] 审计批量写入参数；bufferSize 的修改需重启生效。
+  # [按部署修改] 持久待写账本目录；相对配置文件解析，必须位于持久本地磁盘。
+  # 同 clusterID/instanceID 沿原目录恢复；每实例独占文件。不能放在网络文件系统。
+  journalDirectory: ./data/audit
+  # [按需修改] 已接受载荷的字节上限（含待修复记录），不含 SQLite 索引/WAL 开销。
+  journalMaxBytes: 536870912
+  # [通常不要修改] bufferSize 限制待写条数（含正在提交和待修复记录）。
+  # journalDirectory、journalMaxBytes、bufferSize 的修改均需重启；容量不足不会淘汰旧记录。
   bufferSize: 16384
   batchSize: 256
   flushInterval: 250ms
   # [通常不要修改] 需要调用方确认提交的审计最多聚合等待该时长；建议保持 1ms–50ms。
   commitDelay: 5ms
-  # [按需修改] 自动清理超过该天数的请求审计与尝试诊断；0 表示永久保留。
-  # 注意与下方 retention 同时生效时，实际保留窗口取两者更短者；
-  # 该值属于运行时设置面（管理端可改，无需重启）。
-  retentionDays: 7
-  # [通常不要修改] enforce 会在异常持续超过宽限期后暂停新的推理请求；
-  # 确认发生数据丢失（队列溢出丢行）时立即暂停，且该状态不可自愈——
-  # 恢复推理需重启进程（设计语义：宁可拒绝服务也不静默丢账）。observe
-  # 只记日志不拦截。该开关对所有推理入口生效（文本/图像/视频/语音）。
+  # [按需修改] 唯一审计保留时长；0 永久，非零 24h–8760h，默认 168h（7 天）。
+  # 管理端可在线修改，下一批清理读取最新持久值；每批 500 条、每轮最多 30s。
+  # 升级旧文件时先合并 retention/retentionDays，不可与此字段混写。
+  retentionPeriod: 168h
+  # [通常不要修改] enforce 在持续 SQL 故障或条数/字节容量压力超过宽限期后暂停新推理。
+  # observe 允许可恢复的积压；未接收事实或持久隔离的坏记录在两种模式下均阻断。
+  # 重启沿原文件补交记录；坏记录启动时重试一次，仍失败则保留等待修复，不会自动丢弃。
   ledgerMode: enforce # observe | enforce
   ledgerFailureThreshold: 1
   ledgerUnhealthyGrace: 10s
   ledgerQueueHighWatermarkPercent: 90
-  # 审计保留时长：超过该时长的 request_audits 及 attempts 明细由后台任务
-  # 每小时分批删除（每批 500 条，单轮 30s 预算）。0 = 永久保留（默认）；
-  # 非零须在 24h-8760h 之间；修改需重启进程。与 retentionDays 相互独立、
-  # 同时启用时实际保留窗口取两者更短者。
-  retention: 0
 
-# 实时路由守卫（requestRetry）：进程内请求级降智拦截，在请求路径上完成
-# 检测与重试（推理证据判定 + 同号重试 + 换号 + RSC 归因），
-# 不依赖主动探测或被动 TPS 统计；修改后需重启进程生效（本段不在
-# 管理端运行时设置面内，配置热加载总线不会重读本文件——
-# 实测：yaml 翻转 enabled 后未重启守卫行为不变，重启后生效）。
+# 实时守卫启动基线。首次装配后由管理端 quality_guard 版本化配置维护；
+# 每个请求固定策略快照，修改本文件需要重启，管理端保存热更新后续请求。
 requestRetry:
   # 实时质量守卫（零延迟流式状态机）：思考增量瞬时放行；推理阶段闭合
   # （output_item.done 携 reasoning item / thinking 块 stop）却零思考增量
   # 或正文抢跑时 0ms 扣留换号重试；预算耗尽 Fail-Closed 503。
   enabled: true
-  # 守卫介入的模型白名单（空=全部推理模型）。守卫价值集中在主力推理模型
-  #（grok-4.5/4.6）；边缘/退役模型建议排除，避免噪声拦截（如 grok-4.3
-  # 的 503 连发）。"grok-4.6" 前缀自动覆盖 "grok-4.6-xhigh" 档位别名。
-  # yaml 级配置，重启生效。
+  # 首次启动清单为空时沿用默认 grok-4.5/grok-4.6 清单。
+  # 管辖按公开模型名精确匹配；管理端保存启用状态必须勾选至少一个模型。
   guardedModels: [] # 例: ["grok-4.5", "grok-4.6"]
-  # 请求级全局预算：1 次初始尝试 + 最多 1 次换号重试（蓝图 §3.2）。
-  # 降智判定已是毫秒级，串行换号重试的边际收益趋零，反而把单请求时延
-  # 推高到下游超时（499 级联）。
-  maxAttempts: 2 # 硬上限 3（预算是安全属性,非调优旋钮）
-  # 流式零证据截止：降智流已被 item.done 零延迟拦截截胡，该截止仅作为
-  # 网络假死/静默丢包的防死锁兜底（旧默认 15s 是"死等密文证据"时代的
-  # 产物）。干净流首个思考增量 2.1s 即达，3.5s 仍有安全边际。
-  # 0 = 默认 3.5s；非零须在 1s-5m。仅作用流式（非流式读完整 body 后判决：
+  # 文件与管理共用 1–100 次质量尝试范围；默认首次 + 1 次重试。
+  # 请求还受全局尝试预算和总准入截止限制。
+  maxAttempts: 2
+  # 流式零证据截止，超时不是降智证据。
+  # 0 = 默认 3.5s；非零须为正数且不超过 24h。仅作用流式（非流式读完整 body 后判决：
   # Responses 原生形状与转换后的 chat/messages 客户端形状共用同一证据语义）。
   evidenceTimeout: 3.5s
-  # 流式首事件截止：连任何 SSE data 事件（response.created/首 chunk）都
-  # 未到达即中止该次尝试并重试。直连复测（绕过网关）：clean 首事件恒定
-  # 0.8-2.2s（与提示词复杂度无关），降智排队期间零 data 事件达 68-125s
-  # （仅 keepalive 注释）。0 = 默认 5s；非零须在 1s-2m。
+  # 流式首事件截止：首个 SSE data 事件到达前的等待上限。
+  # 0 = 默认 5s；非零须为正数且不超过 24h。总准入截止仍有效。
   createdTimeout: 5s
-  onExhausted: fail_closed # fail_open | fail_closed
-  # 首次扣留时先重试当前账号一次（配额探测通道账号除外）。仅在旋转
-  # 代理池出口（每请求换新 IP）下生效：直连/固定出口时网关强制忽略
-  # 该开关——同号重试再次进入同一脏 IP 的恢复概率≈0，只会烧掉请求
-  # 预算（蓝图 #9）。重试仍扣留才进入换号重试与账号惩罚。
-  sameAccountRetry: true
-  # First missing-thinking hit cools the account; a later hit after the
-  # cooldown expires disables it. 0 disables account cooldown; nonzero
-  # must be 1m-168h.
-  accountCooldown: 12h
-  # 空流/静默超时（0 token 或 2min 无数据）的账号冷却，独立于上面的
-  # missing-thinking 冷却（空流常与出口 IP 相关而非账号本身，冷却时长
-  # 可独立调整）。0 = 默认 15m；非零须在 1m-168h。冷却中的账号可在
-  # 管理页「冷却」徽标上一键解除（人工逃生门）。空流多与出口 IP/瞬态
-  # 相关（RSC clean 自动解除），默认短冷却即可。
+  # 总准入期限，覆盖等待与质量重试；0 使用下面的默认值，非零须在 (0,24h]。
+  admissionTimeout: 30s
+  toolAdmissionTimeout: 3m
+  onExhausted: fail_closed # 旧 fail_open 仍可读取，但有效政策始终为 fail_closed
+  # 临时质量限制默认 2 分钟，以事件为 owner；后续案件限制独立持有。
+  # 质量判定不修改账号人工 enabled 状态，也不累计禁用 strike。
+  accountCooldown: 2m
+  # 空流/静默超时的可用性冷却，与质量事件的 owner 限制独立。
+  # 文件中 0 = 默认 15m；两类冷却非零均须为正数且不超过 168h。
   idleAccountCooldown: 15m
-
-# [按需启用] 账号级 RSC 风险归因：质量扣留触发异步 RSC 检查（经关联的
-# Web SSO）。clean 账号免于惩罚（出口 IP 嫌疑）；已确认 risk 结论在
-# deniedTTL 内缓存，过期后巡检重探，clean 复测清标自愈。本段已进管理
-# 后台「守卫」页，保存后立即生效；
-# 直接改文件仍需重启，且后台保存过设置后以运行时设置为准（可在后台
-# 「恢复文件默认」清除运行时覆盖）。
-accountRisk:
-  rscCheck:
-    enabled: false
-    # 检测方式：ssoProbe（默认）= 用 SSO Cookie 向 grok.com 发起一次临时
-    # fast 会话（不落会话、不写记忆），首个流里有 notetaker/thinking 通道
-    # => 账号健康(clean)；答案文本直接到达且全程无 thinking => 已被风控
-    # (denied)。限流/挑战/断流等异常一律按 error 处理，绝不误判为风控。
-    # 注意：每次检查消耗该账号 1 条消息额度（basic 档约 30 条/24h），
-    # 归因由降智事件触发且并发受限，量级可控。
-    # method 恒为 ssoProbe：homepage 载荷解析器已删除（grok.com 改版后
-    # 恒读作 clean，等效于关闭 enabled）。字段保留仅为旧配置兼容。
-    method: ssoProbe
-    concurrency: 2        # RSC 检查全局并发上限（1-8）
-    timeout: 30s          # 单次检查超时（5s-60s）
-    # denied 处置（按通道隔离，只作用于实际降智的账号，不级联身份组）：
-    # flag = 打风控标记（账号保持启用、调度跳过、UI 徽章；可人工解除，
-    # 或 deniedTTL 过期后巡检复测 clean 自愈，推荐）；disable = 直接停用该账号；
-    # markOnly = 仅记日志。
-    onDenied: flag
-    # 探针出口代理（空 = 服务器直连）。历史生产事故：部署机直连出口
-    # 不干净时首批巡检被上游整批按降级模式服务，健康 SSO 身份被误判
-    # 风控并连坐关联账号。部署机出口 IP 不干净时务必指向
-    # 干净代理（socks5/http(s)）。
-    probeProxyURL: ""
-    # denied 定罪所需连续确认次数（0=默认 2，范围 0-5）。未达次数只记录
-    # 不处置，ErrorRetry 后由下一轮巡检/归因重探；连续一致才打标/连坐。
-    # 设 1 恢复旧的"单次即定罪"行为（不建议）。
-    deniedConfirmations: 2
-    # 已确认 denied 结论的有效期（0=默认 24h，范围 1h-720h）。过期后巡检
-    # 会重探该身份；clean 复测覆盖旧结论并清除 rsc_denied（含 SSO 连坐组）
-    # ——误判可自愈。flag 排除调度，因此必须由巡检触发重探，不能只靠
-    # 请求路径 OnDegraded。
-    deniedTTL: 24h
-    # Build 通道差分探针（默认关闭）：Build 降智时用该账号自身凭据发一次
-    # 微型推理请求判定（有无 Web 关联都走同通道；不再用 grok.com fast 探针
-    # 给主力推理模型定罪）。SSO 仍用于 Web/Console 降智与巡检。
-    buildProbe:
-      enabled: false
-    patrol:
-      enabled: false      # clean 账号低频巡检
-      bucketDays: 30      # clean 结论的有效期（7-90 天）
-      interval: 15m       # 巡检循环间隔（1m-6h，管理后台可改）
-      batchSize: 50       # 每个周期最多复查的到期身份数（1-200）
 
 # 新建客户端 Key 的默认限流值（管理端创建界面仍可逐 Key 覆盖）。
 clientKeyDefaults:
@@ -308,25 +246,19 @@ clientKeyDefaults:
   # [按需修改] 并发请求数默认值（1-1024）。
   maxConcurrent: 8
 
-# 出口 IP 质量守卫与自动换 IP（应对"IP 被标记后路由到降智模型"）。
-# 触发链：请求降智 → 账号 RSC 归因 CLEAN → 该出口节点隔离（后续请求由路由层自动落到其他可用出口）
-# → POST 节点的换 IP webhook（如重启 MicroWARP）→ 探活 + 校验出口 IP 已变化
-# → 一次性 canary 验证（极小推理请求，首事件延迟判定）→ 通过回池 / 失败再换。
+# 出口自动换 IP（webhook 轮换）。质量侧的隔离/解禁判定已由新质量层
+# （仲裁庭/执行所）承接:IP 变化解禁与人工解禁入口见「质量防护」页;
+# 此处只保留轮换执行的机械参数。
 egress:
-  qualityGuard:
-    # 隔离时长：坏出口在轮换+验证完成前不参与调度（验证通过会提前解除）。
-    quarantineCooldown: 24h
-    # 跨账号确认兜底：RSC 归因关闭/未链接/进行中时，同一节点在窗口内有
-    # N 个不同账号降智即隔离（账号去重）。<2 关闭该兜底。
-    crossAccountThreshold: 2
-    crossAccountWindow: 30m
-    # canary 无法执行（未配置模型/无可用账号）时的暂定放行冷却：
-    # 降智证据软冷却(L2):证据出现即让全池账号避开该出口,不等 RSC 归因;
-    # 重复证据指数翻倍,封顶 softCooldownMax。RSC 判 RISK(账号有罪)时立即解除。
-    softCooldownBase: 5m
-    softCooldownMax: 1h
-    # 回池但保留短冷却，被动守卫兜底。
-    tentativeReleaseCooldown: 30m
+  # 每进程网络预算；变更后重启生效，零值采用下列默认值。
+  # 建立中、活跃、空闲与已从缓存淘汰但尚未关闭的 socket 都计入额度。
+  runtime:
+    maxConnections: 512
+    maxDialing: 32
+    maxRequests: 2048
+    maxWaiters: 512
+    maxClients: 2048
+    queueTimeout: 2s
   rotation:
     enabled: true
     # 单次隔离周期内每节点最多换 IP 尝试次数（耗尽后保持隔离并告警）。
@@ -342,9 +274,3 @@ egress:
     # 轮换后连通探活的窗口与间隔。
     probeTimeout: 2m
     probeInterval: 5s
-    # canary 验证用的模型 public ID（在「模型路由」里查）。留空 = 关闭
-    # 主动验证（换 IP 后暂定放行，靠被动守卫兜底）。
-    canaryModelPublicId: ""
-    # canary 首事件预算：健康出口实测 0.8-2.2s；降智排队 68-125s。
-    canaryCreatedTimeout: 10s
-

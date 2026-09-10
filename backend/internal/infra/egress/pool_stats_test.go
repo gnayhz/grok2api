@@ -11,6 +11,8 @@ func TestPoolStatsRecordAndReset(t *testing.T) {
 	poolNodeStats.mu.Lock()
 	poolNodeStats.failures = make(map[uint64]poolNodeFailure)
 	poolNodeStats.pools = make(map[uint64]map[uint64]*PoolNodeStat)
+	poolNodeStats.lru.Init()
+	poolNodeStats.entries = nil
 	poolNodeStats.mu.Unlock()
 	ResetPoolStats(101)
 	ResetPoolStats(102)
@@ -68,6 +70,8 @@ func TestPoolStatsRecordAndReset(t *testing.T) {
 func TestPoolStatsCapacityEviction(t *testing.T) {
 	poolNodeStats.mu.Lock()
 	poolNodeStats.pools = make(map[uint64]map[uint64]*PoolNodeStat)
+	poolNodeStats.lru.Init()
+	poolNodeStats.entries = nil
 	poolNodeStats.poolSince = make(map[uint64]time.Time)
 	poolNodeStats.failures = make(map[uint64]poolNodeFailure)
 	poolNodeStats.since = time.Now().UTC().Add(-time.Hour)
@@ -118,6 +122,8 @@ func TestPoolStatsCapacityEviction(t *testing.T) {
 func TestPoolStatsResetIsolationAndGlobalFailureMerge(t *testing.T) {
 	poolNodeStats.mu.Lock()
 	poolNodeStats.pools = make(map[uint64]map[uint64]*PoolNodeStat)
+	poolNodeStats.lru.Init()
+	poolNodeStats.entries = nil
 	poolNodeStats.poolSince = make(map[uint64]time.Time)
 	poolNodeStats.failures = make(map[uint64]poolNodeFailure)
 	poolNodeStats.since = time.Now().UTC()

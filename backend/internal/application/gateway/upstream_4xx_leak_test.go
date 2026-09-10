@@ -16,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // TestNonRetryableUpstream4xxNeverLeaksRawBody: a 400 with an upstream
@@ -48,13 +49,13 @@ func TestNonRetryableUpstream4xxNeverLeaksRawBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll,
 		Name: "leak-key", Prefix: "leak", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "enc",
 		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
 	})
@@ -69,7 +70,7 @@ func TestNonRetryableUpstream4xxNeverLeaksRawBody(t *testing.T) {
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-leak-4xx", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: false,

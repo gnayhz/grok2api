@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +18,20 @@ import (
 type EgressRepository struct{ db *Database }
 
 func NewEgressRepository(db *Database) *EgressRepository { return &EgressRepository{db: db} }
+
+// ListEgressNodesFromSource is the sync projection. Avoid loading all other
+// subscriptions and their pool/display enrichment to compare one feed.
+func (r *EgressRepository) ListEgressNodesFromSource(ctx context.Context, sourceID uint64) ([]egress.Node, error) {
+	var rows []egressNodeModel
+	if err := r.db.db.WithContext(ctx).Where("source_id = ?", sourceID).Find(&rows).Error; err != nil {
+		return nil, mapError(err)
+	}
+	nodes := make([]egress.Node, 0, len(rows))
+	for _, row := range rows {
+		nodes = append(nodes, toEgressDomain(row))
+	}
+	return nodes, nil
+}
 
 func (r *EgressRepository) ListEgressNodes(ctx context.Context, sort repository.SortQuery) ([]egress.Node, error) {
 	var rows []egressNodeModel
@@ -160,7 +175,7 @@ func (r *EgressRepository) CreateEgressNodes(ctx context.Context, values []egres
 	return len(rows), nil
 }
 
-func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error) {
+func (r *EgressRepository) UpdateEgressNodeConfiguration(ctx context.Context, value egress.Node, validate egress.FixedTargetValidator) (egress.Node, error) {
 	row := fromEgressDomain(value)
 	// 管理端编辑只写配置面列。此前 Select("*").Updates 全行覆盖:读-改-写窗口
 	// 内后台 rotation worker / 探测 / 质量隔离的窄列写(last_rotated_at/
@@ -171,6 +186,8 @@ func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.No
 	// 运行态全零的特征整组写入, 与旧行为一致。
 	updates := map[string]any{
 		"name": row.Name, "enabled": row.Enabled, "proxy_pool": row.ProxyPool,
+		"binding_revision":       gorm.Expr("binding_revision + 1"),
+		"probe_sequence":         gorm.Expr("probe_sequence + 1"),
 		"encrypted_proxy_url":    row.EncryptedProxyURL,
 		"encrypted_rotation_url": row.EncryptedRotationURL, "rotation_enabled": row.RotationEnabled,
 		"updated_at": time.Now().UTC(),
@@ -182,6 +199,7 @@ func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.No
 		// 传输层健康/探测按文档意图重置(配置变更使观测失效)。与
 		// UpdateEgressNodeProbe 对传输错误的 CASE 守护同一模式。
 		quarantined := "last_error = ?"
+		updates["health_revision"] = gorm.Expr("health_revision + 1")
 		updates["health"] = gorm.Expr("CASE WHEN "+quarantined+" THEN health ELSE 1 END", egress.LastErrorExitIPQuality)
 		updates["failure_count"] = gorm.Expr("CASE WHEN "+quarantined+" THEN failure_count ELSE 0 END", egress.LastErrorExitIPQuality)
 		updates["cooldown_until"] = gorm.Expr("CASE WHEN "+quarantined+" THEN cooldown_until ELSE NULL END", egress.LastErrorExitIPQuality)
@@ -194,12 +212,30 @@ func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.No
 		updates["last_degraded_at"] = gorm.Expr("CASE WHEN "+quarantined+" THEN last_degraded_at ELSE NULL END", egress.LastErrorExitIPQuality)
 	}
 	updates["clearance_refreshed_at"], updates["clearance_fingerprint"] = nil, ""
-	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", row.ID).Updates(updates)
-	if result.Error != nil {
-		return egress.Node{}, mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return egress.Node{}, repository.ErrNotFound
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		config, err := lockEgressOperationsConfig(tx)
+		if err != nil {
+			return err
+		}
+		var current egressNodeModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", row.ID).Error; err != nil {
+			return err
+		}
+		if configReferencesAnyRoutingNode(config.Routing, []uint64{row.ID}) {
+			if !egress.CanNodeServeFixedTarget(value) {
+				return repository.ErrEgressRoutingNodeInUse
+			}
+			if validate == nil {
+				return errors.New("fixed target validator is required")
+			}
+			if err := validate(value); err != nil {
+				return err
+			}
+		}
+		return tx.Model(&egressNodeModel{}).Where("id = ?", row.ID).Updates(updates).Error
+	})
+	if err != nil {
+		return egress.Node{}, mapError(err)
 	}
 	return r.GetEgressNode(ctx, row.ID)
 }
@@ -211,7 +247,7 @@ func (r *EgressRepository) UpdateEgressNodesEnabled(ctx context.Context, ids []u
 	if enabled {
 		result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).
 			Where("id IN ? AND enabled <> ?", ids, true).
-			Updates(map[string]any{"enabled": true, "updated_at": time.Now().UTC()})
+			Updates(map[string]any{"enabled": true, "binding_revision": gorm.Expr("binding_revision + 1"), "probe_sequence": gorm.Expr("probe_sequence + 1"), "updated_at": time.Now().UTC()})
 		return int(result.RowsAffected), mapError(result.Error)
 	}
 	var updated int64
@@ -230,58 +266,13 @@ func (r *EgressRepository) UpdateEgressNodesEnabled(ctx context.Context, ids []u
 		}
 		result := tx.Model(&egressNodeModel{}).
 			Where("id IN ? AND enabled <> ?", lockedIDs, false).
-			Updates(map[string]any{"enabled": false, "updated_at": time.Now().UTC()})
+			Updates(map[string]any{"enabled": false, "binding_revision": gorm.Expr("binding_revision + 1"), "probe_sequence": gorm.Expr("probe_sequence + 1"), "updated_at": time.Now().UTC()})
 		updated = result.RowsAffected
 		return mapError(result.Error)
 	})
 	return int(updated), mapError(err)
 }
 
-func (r *EgressRepository) UpdateEgressNodeClearance(ctx context.Context, id uint64, encryptedCookie, userAgent, fingerprint, bindingFingerprint string, refreshedAt time.Time) error {
-	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
-		"encrypted_cloudflare_cookie": encryptedCookie, "user_agent": userAgent,
-		"clearance_fingerprint": fingerprint, "clearance_refreshed_at": refreshedAt,
-		"clearance_binding_fingerprint": bindingFingerprint,
-		"last_error":                    "", "updated_at": time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
-}
-
-func (r *EgressRepository) UpdateEgressNodeHealth(ctx context.Context, id uint64, health float64, failureCount int, cooldownUntil *time.Time, lastError string) error {
-	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
-		"health": health, "failure_count": failureCount, "cooldown_until": cooldownUntil, "last_error": lastError, "updated_at": time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
-}
-
-func (r *EgressRepository) UpdateEgressNodeLastError(ctx context.Context, id uint64, lastError string) error {
-	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
-		"last_error": lastError, "updated_at": time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
-}
-
-// UpdateEgressNodeRotationURL persists the encrypted rotation webhook together
-// with its enabled flag, so batch template updates cannot clobber health or
-// degrade state — and a non-empty webhook always leaves rotation armed.
 func (r *EgressRepository) UpdateEgressNodeRotationURL(ctx context.Context, id uint64, encryptedRotationURL string, enabled bool) error {
 	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
 		"encrypted_rotation_url": encryptedRotationURL,
@@ -336,52 +327,6 @@ func (r *EgressRepository) GetEgressPool(ctx context.Context, id uint64) (egress
 		return egress.Pool{}, mapError(err)
 	}
 	return toPoolDomain(row), nil
-}
-
-func (r *EgressRepository) CreateEgressPool(ctx context.Context, value egress.Pool) (egress.Pool, error) {
-	row := fromPoolDomain(value)
-	if err := r.db.db.WithContext(ctx).Create(&row).Error; err != nil {
-		return egress.Pool{}, mapError(err)
-	}
-	return toPoolDomain(row), nil
-}
-
-func (r *EgressRepository) UpdateEgressPool(ctx context.Context, value egress.Pool) (egress.Pool, error) {
-	row := fromPoolDomain(value)
-	result := r.db.db.WithContext(ctx).Model(&egressPoolModel{}).Where("id = ?", value.ID).Updates(map[string]any{
-		"name": row.Name, "enabled": row.Enabled, "strategy": row.Strategy,
-		"fallback_mode": row.FallbackMode, "fallback_pool_id": row.FallbackPoolID,
-		"updated_at": time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return egress.Pool{}, mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return egress.Pool{}, repository.ErrNotFound
-	}
-	return r.GetEgressPool(ctx, value.ID)
-}
-
-func (r *EgressRepository) DeleteEgressPool(ctx context.Context, id uint64) error {
-	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("pool_id = ?", id).Delete(&egressPoolMemberModel{}).Error; err != nil {
-			return mapError(err)
-		}
-		if err := tx.Model(&egressPoolModel{}).Where("fallback_pool_id = ?", id).Updates(map[string]any{"fallback_mode": string(egress.PoolFallbackNone), "fallback_pool_id": 0}).Error; err != nil {
-			return mapError(err)
-		}
-		if err := clearEgressRoutingPoolReferences(tx, id); err != nil {
-			return err
-		}
-		result := tx.Delete(&egressPoolModel{}, "id = ?", id)
-		if result.Error != nil {
-			return mapError(result.Error)
-		}
-		if result.RowsAffected == 0 {
-			return repository.ErrNotFound
-		}
-		return nil
-	})
 }
 
 // ListEgressNodesByPool returns the members of one pool ordered by id.
@@ -452,48 +397,52 @@ func (r *EgressRepository) egressNodePoolIDs(ctx context.Context) (map[uint64][]
 	return byNode, nil
 }
 
-// SetEgressPoolMembers replaces the full membership of one pool in a single
-// transaction. Pool-side editing is the only membership write path.
+// SetEgressPoolMembers replaces membership only while the pool and every node
+// still exist. The graph lock also serializes parent deletion and priority
+// updates, so retained members keep the latest committed preference.
 func (r *EgressRepository) SetEgressPoolMembers(ctx context.Context, poolID uint64, nodeIDs []uint64) error {
-	if poolID == 0 {
-		return errors.New("pool id is required")
-	}
-	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 必须在 Delete 之前读取已有 priority:替换成员时保留首选设置,
-		// 勾选管理不该顺手清掉星标。先删后读会恒读到空集。
-		priorities := map[uint64]int64{}
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockEgressPoolGraph(tx); err != nil {
+			return err
+		}
+		var pool egressPoolModel
+		if err := tx.Select("id").First(&pool, "id = ?", poolID).Error; err != nil {
+			return err
+		}
+		ids := uniqueUint64(nodeIDs)
+		// Bound each query for SQLite's parameter limit. Parent deletion takes
+		// the same graph lock, so existence remains stable through commit.
+		for start := 0; start < len(ids); start += 500 {
+			batch := ids[start:min(start+500, len(ids))]
+			var count int64
+			if err := tx.Model(&egressNodeModel{}).Where("id IN ?", batch).Count(&count).Error; err != nil {
+				return err
+			}
+			if count != int64(len(batch)) {
+				return egress.ErrInvalidPoolMember
+			}
+		}
+		priorities := make(map[uint64]int64)
 		var existing []egressPoolMemberModel
 		if err := tx.Where("pool_id = ?", poolID).Find(&existing).Error; err != nil {
-			return mapError(err)
+			return err
 		}
 		for _, row := range existing {
 			priorities[row.NodeID] = row.Priority
 		}
 		if err := tx.Where("pool_id = ?", poolID).Delete(&egressPoolMemberModel{}).Error; err != nil {
-			return mapError(err)
+			return err
 		}
-		if len(nodeIDs) == 0 {
+		if len(ids) == 0 {
 			return nil
 		}
-		rows := make([]egressPoolMemberModel, 0, len(nodeIDs))
-		seen := make(map[uint64]struct{}, len(nodeIDs))
-		for _, nodeID := range nodeIDs {
-			if nodeID == 0 {
-				continue
-			}
-			if _, exists := seen[nodeID]; exists {
-				continue
-			}
-			seen[nodeID] = struct{}{}
+		rows := make([]egressPoolMemberModel, 0, len(ids))
+		for _, nodeID := range ids {
 			rows = append(rows, egressPoolMemberModel{PoolID: poolID, NodeID: nodeID, Priority: priorities[nodeID]})
 		}
-		if len(rows) > 0 {
-			if err := tx.Create(&rows).Error; err != nil {
-				return mapError(err)
-			}
-		}
-		return nil
+		return tx.CreateInBatches(&rows, 500).Error
 	})
+	return mapError(err)
 }
 
 // EgressPoolPreferredNodes 返回每池的首选节点（priority 最小者；未设置则无条目）。
@@ -540,41 +489,25 @@ func (r *EgressRepository) UpdateEgressPoolRotationCursor(ctx context.Context, p
 // SetEgressPoolMemberPriority 设置池内一个成员的首选顺序。priority 越小越
 // 靠前；首选优先/节点轮询取“最靠前的可用成员”。
 func (r *EgressRepository) SetEgressPoolMemberPriority(ctx context.Context, poolID, nodeID uint64, priority int64) error {
-	result := r.db.db.WithContext(ctx).
-		Model(&egressPoolMemberModel{}).
-		Where("pool_id = ? AND node_id = ?", poolID, nodeID).
-		Update("priority", priority)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
-}
-
-// UpdateEgressNodeQualityState persists an exit-IP quality quarantine. It is
-// a narrow targeted write so concurrent health feedback and probe updates
-// cannot clobber each other.
-func (r *EgressRepository) UpdateEgressNodeQualityState(ctx context.Context, id uint64, health float64, failureCount int, cooldownUntil *time.Time, lastError string, degradeCount int, lastDegradedAt *time.Time) error {
-	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
-		"health": health, "failure_count": failureCount, "cooldown_until": cooldownUntil, "last_error": lastError,
-		"degrade_count": degradeCount, "last_degraded_at": lastDegradedAt, "updated_at": time.Now().UTC(),
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockEgressPoolGraph(tx); err != nil {
+			return err
+		}
+		result := tx.Model(&egressPoolMemberModel{}).
+			Where("pool_id = ? AND node_id = ?", poolID, nodeID).
+			Where("EXISTS (SELECT 1 FROM egress_pools WHERE id = ?) AND EXISTS (SELECT 1 FROM egress_nodes WHERE id = ?)", poolID, nodeID).
+			Update("priority", priority)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return egress.ErrInvalidPoolMember
+		}
+		return nil
 	})
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
+	return mapError(err)
 }
 
-// UpdateEgressNodeRotationState persists rotation bookkeeping without
-// touching health or probe columns. lastRotatedAt==nil 表示"本次没有真正换 IP"
-// (无 webhook/禁用/解密失败/尝试耗尽等跳过路径), 此时保留既有值而非写 NULL——
-// 否则失败路径会抹掉上一次成功轮换的时间, 击穿 MinNodeInterval 护栏, 下一次
-// 隔离事件可立即再次触发 webhook。显式传入时间才推进。
 func (r *EgressRepository) UpdateEgressNodeRotationState(ctx context.Context, id uint64, lastRotatedAt *time.Time, attempts int, lastError string) error {
 	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
 		"last_rotated_at":   gorm.Expr("COALESCE(?, last_rotated_at)", lastRotatedAt),
@@ -589,12 +522,59 @@ func (r *EgressRepository) UpdateEgressNodeRotationState(ctx context.Context, id
 	return nil
 }
 
+// UpdateEgressNodeRotationStateForBinding rejects a rotation completion or
+// attempt reservation made for a configuration that an administrator replaced.
+func (r *EgressRepository) UpdateEgressNodeRotationStateForBinding(ctx context.Context, binding egress.Node, lastRotatedAt *time.Time, attempts int, lastError string) error {
+	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).
+		Where("id = ? AND binding_revision = ? AND encrypted_proxy_url = ? AND encrypted_rotation_url = ?", binding.ID, binding.BindingRevision, binding.EncryptedProxyURL, binding.EncryptedRotationURL).
+		Updates(map[string]any{"last_rotated_at": gorm.Expr("COALESCE(?, last_rotated_at)", lastRotatedAt), "rotation_attempts": attempts, "last_rotation_error": lastError, "updated_at": time.Now().UTC()})
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrConflict
+	}
+	return nil
+}
+
+// BeginEgressNodeProbe orders measurements in the shared database before any
+// network work. Only the newest issued measurement may publish its result.
+func (r *EgressRepository) BeginEgressNodeProbe(ctx context.Context, id uint64, expectedEncryptedProxyURL string) (uint64, error) {
+	var row egressNodeModel
+	result := r.db.db.WithContext(ctx).Model(&row).
+		Clauses(clause.Returning{Columns: []clause.Column{{Name: "probe_sequence"}}}).
+		Where("id = ? AND encrypted_proxy_url = ?", id, expectedEncryptedProxyURL).
+		Updates(map[string]any{"probe_sequence": gorm.Expr("probe_sequence + 1"), "probe_health_revision": gorm.Expr("health_revision")})
+	if result.Error != nil {
+		return 0, mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return 0, r.probeWriteConflict(ctx, id)
+	}
+	return row.ProbeSequence, nil
+}
+
+func (r *EgressRepository) probeWriteConflict(ctx context.Context, id uint64) error {
+	var count int64
+	if err := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Count(&count).Error; err != nil {
+		return mapError(err)
+	}
+	if count == 0 {
+		return repository.ErrNotFound
+	}
+	return repository.ErrConflict
+}
+
 // UpdateEgressNodeProbe persists a direct proxy probe. A healthy result also
 // clears a transport-only request failure because the proxy has just been
 // verified independently; anti-bot and other request failures stay intact.
 func (r *EgressRepository) UpdateEgressNodeProbe(ctx context.Context, id uint64, expectedEncryptedProxyURL string, value egress.ProbeResult) error {
+	if value.Revision == 0 {
+		return repository.ErrConflict
+	}
 	updates := map[string]any{
-		"probe_status": value.Status, "last_probed_at": value.TestedAt.UTC(),
+		"probe_revision": value.Revision,
+		"probe_status":   value.Status, "last_probed_at": value.TestedAt.UTC(),
 		"probe_latency_ms": value.LatencyMS, "exit_ip": value.ExitIP, "probe_error": value.Error, "probe_provider": storedProbeProvider(value.Provider),
 		"ipv4_probe_status": normalizedProbeStatus(value.IPv4.Status), "ipv4_last_probed_at": probeTestedAt(value.IPv4),
 		"ipv4_probe_latency_ms": value.IPv4.LatencyMS, "ipv4_exit_ip": value.IPv4.ExitIP, "ipv4_probe_error": value.IPv4.Error,
@@ -603,7 +583,8 @@ func (r *EgressRepository) UpdateEgressNodeProbe(ctx context.Context, id uint64,
 		"updated_at": time.Now().UTC(),
 	}
 	if value.Status == egress.ProbeStatusHealthy {
-		condition := "last_error = ?"
+		condition := "last_error = ? AND health_revision = probe_health_revision"
+		updates["health_revision"] = gorm.Expr("CASE WHEN "+condition+" THEN health_revision + 1 ELSE health_revision END", egress.LastErrorTransport)
 		updates["health"] = gorm.Expr("CASE WHEN "+condition+" THEN ? ELSE health END", egress.LastErrorTransport, 1)
 		updates["failure_count"] = gorm.Expr("CASE WHEN "+condition+" THEN ? ELSE failure_count END", egress.LastErrorTransport, 0)
 		updates["cooldown_until"] = gorm.Expr("CASE WHEN "+condition+" THEN NULL ELSE cooldown_until END", egress.LastErrorTransport)
@@ -611,19 +592,13 @@ func (r *EgressRepository) UpdateEgressNodeProbe(ctx context.Context, id uint64,
 	}
 	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).
 		Where("id = ? AND encrypted_proxy_url = ?", id, expectedEncryptedProxyURL).
+		Where("probe_sequence = ? AND probe_revision < ?", value.Revision, value.Revision).
 		Updates(updates)
 	if result.Error != nil {
 		return mapError(result.Error)
 	}
 	if result.RowsAffected == 0 {
-		var count int64
-		if err := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Count(&count).Error; err != nil {
-			return mapError(err)
-		}
-		if count == 0 {
-			return repository.ErrNotFound
-		}
-		return repository.ErrConflict
+		return r.probeWriteConflict(ctx, id)
 	}
 	return nil
 }
@@ -714,38 +689,53 @@ func (r *EgressRepository) CreateEgressSource(ctx context.Context, value egress.
 	return toEgressSubscriptionSourceDomain(row), nil
 }
 
+// UpdateEgressSource writes only configuration and invalidates in-flight syncs
+// against the current row. Completed sync metadata survives ordinary edits;
+// changing URL/proxy re-arms the schedule as before.
 func (r *EgressRepository) UpdateEgressSource(ctx context.Context, value egress.SubscriptionSource) (egress.SubscriptionSource, error) {
-	row := fromEgressSubscriptionSourceDomain(value)
-	// 管理端编辑只写配置面列,与 UpdateEgressNode 修复的同类缺陷一致:此前
-	// 全行 Save 会把读-改-写窗口内维护循环窄写的运行态(last_synced_at/
-	// next_sync_at/last_sync_imported/last_sync_error)用陈旧快照整体回滚。
-	// 调度重置(配置变更 → next_sync_at 清空、last_sync_error 清空)在 UPDATE
-	// 语句内对**当前行**原子判定:仅当同步相关配置(订阅地址/拉取代理)真的
-	// 变化时才重置——陈旧快照的 NextSyncAt=nil(从未同步)不再被误判为重置。
-	configChanged := "(encrypted_url <> ? OR encrypted_proxy_url <> ?)"
-	updates := map[string]any{
-		"name": row.Name, "enabled": row.Enabled,
-		"encrypted_url": row.EncryptedURL, "encrypted_proxy_url": row.EncryptedProxyURL,
-		"refresh_interval_seconds": row.RefreshIntervalSeconds,
-		"updated_at":               time.Now().UTC(),
-		"next_sync_at":             gorm.Expr("CASE WHEN "+configChanged+" THEN NULL ELSE next_sync_at END", row.EncryptedURL, row.EncryptedProxyURL),
-		"last_sync_error":          gorm.Expr("CASE WHEN "+configChanged+" THEN '' ELSE last_sync_error END", row.EncryptedURL, row.EncryptedProxyURL),
-	}
-	result := r.db.db.WithContext(ctx).Model(&egressSubscriptionSourceModel{}).Where("id = ?", value.ID).Updates(updates)
-	if result.Error != nil {
-		return egress.SubscriptionSource{}, mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return egress.SubscriptionSource{}, repository.ErrNotFound
-	}
-	// 回读合并后的真实状态(含运行态列),而不是把陈旧快照当作更新结果返回。
-	return r.GetEgressSource(ctx, value.ID)
+	var updated egress.SubscriptionSource
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, err := lockEgressSource(tx, value.ID)
+		if err != nil {
+			return err
+		}
+		row := fromEgressSubscriptionSourceDomain(value)
+		revision := current.SyncRevision
+		if !egress.SameSourceSyncConfiguration(toEgressSubscriptionSourceDomain(current), value) {
+			if revision >= math.MaxInt64 {
+				return errors.New("subscription sync revision exhausted")
+			}
+			revision++
+		}
+		updates := map[string]any{
+			"name": row.Name, "enabled": row.Enabled, "encrypted_url": row.EncryptedURL,
+			"encrypted_proxy_url": row.EncryptedProxyURL, "refresh_interval_seconds": row.RefreshIntervalSeconds,
+			"sync_revision": revision, "updated_at": time.Now().UTC(),
+		}
+		if current.EncryptedURL != row.EncryptedURL || current.EncryptedProxyURL != row.EncryptedProxyURL {
+			updates["next_sync_at"] = nil
+			updates["last_sync_error"] = ""
+		}
+		if err := tx.Model(&current).Updates(updates).Error; err != nil {
+			return mapError(err)
+		}
+		if err := tx.First(&current, value.ID).Error; err != nil {
+			return mapError(err)
+		}
+		updated = toEgressSubscriptionSourceDomain(current)
+		return nil
+	})
+	return updated, err
 }
 
 // DeleteEgressSource keeps already imported nodes intact. They become normal
 // manually managed nodes rather than silently losing proxy configuration.
 func (r *EgressRepository) DeleteEgressSource(ctx context.Context, id uint64) error {
 	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Sync commit uses the same source-before-node order.
+		if _, err := lockEgressSource(tx, id); err != nil {
+			return err
+		}
 		if err := tx.Model(&egressNodeModel{}).Where("source_id = ?", id).Updates(map[string]any{"source_id": nil, "source_key": ""}).Error; err != nil {
 			return mapError(err)
 		}
@@ -760,29 +750,77 @@ func (r *EgressRepository) DeleteEgressSource(ctx context.Context, id uint64) er
 	})
 }
 
-func (r *EgressRepository) UpdateEgressSourceSync(ctx context.Context, id uint64, syncedAt, nextSyncAt time.Time, imported int, lastError string) error {
-	result := r.db.db.WithContext(ctx).Model(&egressSubscriptionSourceModel{}).Where("id = ?", id).Updates(map[string]any{
-		"last_synced_at": syncedAt.UTC(), "next_sync_at": nextSyncAt.UTC(), "last_sync_imported": imported,
-		"last_sync_error": lastError, "updated_at": time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
+func lockEgressSource(tx *gorm.DB, id uint64) (egressSubscriptionSourceModel, error) {
+	var row egressSubscriptionSourceModel
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, id).Error
+	return row, mapError(err)
 }
 
-// UpsertEgressNodesFromSource replaces the active representation of a source
-// atomically. Stale nodes are disabled instead of deleted so operators keep
-// their history until an explicit cleanup.
-func (r *EgressRepository) UpsertEgressNodesFromSource(ctx context.Context, sourceID uint64, values []egress.Node) (int, error) {
-	if sourceID == 0 {
-		return 0, errors.New("subscription source id is required")
+func (r *EgressRepository) BeginEgressSourceSync(ctx context.Context, expected egress.SubscriptionSource) (egress.SourceSyncClaim, error) {
+	var claim egress.SourceSyncClaim
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		row, err := lockEgressSource(tx, expected.ID)
+		if err != nil {
+			return err
+		}
+		if !egress.SameSourceSyncConfiguration(toEgressSubscriptionSourceDomain(row), expected) {
+			return egress.ErrSourceSyncStale
+		}
+		// Reserve room for completion to consume the claim without wrapping.
+		if row.SyncRevision >= math.MaxInt64-1 {
+			return errors.New("subscription sync revision exhausted")
+		}
+		claim = egress.SourceSyncClaim{SourceID: row.ID, Revision: row.SyncRevision + 1}
+		return mapError(tx.Model(&row).UpdateColumn("sync_revision", claim.Revision).Error)
+	})
+	return claim, err
+}
+
+func lockEgressSourceClaim(tx *gorm.DB, claim egress.SourceSyncClaim) (egressSubscriptionSourceModel, error) {
+	row, err := lockEgressSource(tx, claim.SourceID)
+	if err != nil {
+		return row, err
 	}
+	if claim.Revision == 0 || row.SyncRevision != claim.Revision || claim.Revision >= math.MaxInt64 {
+		return row, egress.ErrSourceSyncStale
+	}
+	return row, nil
+}
+
+func completeEgressSourceSync(tx *gorm.DB, row egressSubscriptionSourceModel, syncedAt, nextSyncAt time.Time, imported int, lastError string) error {
+	return mapError(tx.Model(&row).Updates(map[string]any{
+		"sync_revision":  row.SyncRevision + 1,
+		"last_synced_at": syncedAt.UTC(), "next_sync_at": nextSyncAt.UTC(), "last_sync_imported": imported,
+		"last_sync_error": lastError, "updated_at": time.Now().UTC(),
+	}).Error)
+}
+
+func (r *EgressRepository) FailEgressSourceSync(ctx context.Context, claim egress.SourceSyncClaim, syncedAt, nextSyncAt time.Time, lastError string) error {
+	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		row, err := lockEgressSourceClaim(tx, claim)
+		if err != nil {
+			return err
+		}
+		return completeEgressSourceSync(tx, row, syncedAt, nextSyncAt, 0, lastError)
+	})
+}
+
+// CommitEgressSourceSync atomically replaces the active source nodes and
+// records its result only while the download claim is current. Stale entries
+// are disabled, preserving their history. No lock is held during downloading.
+func (r *EgressRepository) CommitEgressSourceSync(ctx context.Context, claim egress.SourceSyncClaim, values []egress.Node, syncedAt, nextSyncAt time.Time) (int, error) {
+	sourceID := claim.SourceID
 	returned := 0
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		currentSource, err := lockEgressSourceClaim(tx, claim)
+		if err != nil {
+			return err
+		}
+		// Routing validation/deletion takes the singleton before node rows.
+		// Use that order even when the first configuration is not yet present.
+		if _, err := lockEgressOperationsConfig(tx); err != nil {
+			return err
+		}
 		var existingKeys []string
 		if err := tx.Model(&egressNodeModel{}).Where("source_id = ?", sourceID).Pluck("source_key", &existingKeys).Error; err != nil {
 			return mapError(err)
@@ -807,11 +845,14 @@ func (r *EgressRepository) UpsertEgressNodesFromSource(ctx context.Context, sour
 				DoUpdates: clause.Assignments(map[string]any{
 					"name": row.Name, "enabled": row.Enabled, "proxy_pool": row.ProxyPool,
 					"encrypted_proxy_url": row.EncryptedProxyURL,
+					"binding_revision":    gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.binding_revision ELSE egress_nodes.binding_revision + 1 END", row.EncryptedProxyURL),
+					"probe_sequence":      gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_sequence ELSE egress_nodes.probe_sequence + 1 END", row.EncryptedProxyURL),
+					"health_revision":     gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.health_revision ELSE egress_nodes.health_revision + 1 END", row.EncryptedProxyURL),
 					"updated_at":          time.Now().UTC(),
 					"health":              gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.health ELSE 1 END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
 					"failure_count":       gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.failure_count ELSE 0 END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
 					"cooldown_until":      gorm.Expr("CASE WHEN egress_nodes.last_error = ? OR egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.cooldown_until ELSE NULL END", egress.LastErrorExitIPQuality, row.EncryptedProxyURL),
-					"last_error":          gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.last_error ELSE '' END", row.EncryptedProxyURL),
+					"last_error":          gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? OR egress_nodes.last_error = ? THEN egress_nodes.last_error ELSE '' END", row.EncryptedProxyURL, egress.LastErrorExitIPQuality),
 					"probe_status":        gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_status ELSE ? END", row.EncryptedProxyURL, egress.ProbeStatusUnknown),
 					"last_probed_at":      gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.last_probed_at ELSE NULL END", row.EncryptedProxyURL),
 					"probe_latency_ms":    gorm.Expr("CASE WHEN egress_nodes.encrypted_proxy_url = ? THEN egress_nodes.probe_latency_ms ELSE 0 END", row.EncryptedProxyURL),
@@ -833,16 +874,22 @@ func (r *EgressRepository) UpsertEgressNodesFromSource(ctx context.Context, sour
 			stale = stale.Where("source_key NOT IN ?", keys)
 		}
 		if err := stale.Updates(map[string]any{
-			"enabled": false, "probe_status": string(egress.ProbeStatusUnknown), "probe_error": "subscription entry removed", "probe_provider": "",
+			"enabled": false, "binding_revision": gorm.Expr("binding_revision + 1"), "probe_sequence": gorm.Expr("probe_sequence + 1"), "probe_status": string(egress.ProbeStatusUnknown), "probe_error": "subscription entry removed", "probe_provider": "",
 			"ipv4_probe_status": string(egress.ProbeStatusUnknown), "ipv4_last_probed_at": nil, "ipv4_probe_latency_ms": 0, "ipv4_exit_ip": "", "ipv4_probe_error": "subscription entry removed",
 			"ipv6_probe_status": string(egress.ProbeStatusUnknown), "ipv6_last_probed_at": nil, "ipv6_probe_latency_ms": 0, "ipv6_exit_ip": "", "ipv6_probe_error": "subscription entry removed",
 			"updated_at": time.Now().UTC(),
 		}).Error; err != nil {
 			return mapError(err)
 		}
-		return clearInvalidEgressRoutingReferences(tx)
+		if err := clearInvalidEgressRoutingReferences(tx); err != nil {
+			return err
+		}
+		return completeEgressSourceSync(tx, currentSource, syncedAt, nextSyncAt, returned, "")
 	})
-	return returned, err
+	if err != nil {
+		return 0, err
+	}
+	return returned, nil
 }
 
 func (r *EgressRepository) GetEgressOperationsConfig(ctx context.Context) (egress.OperationsConfig, error) {
@@ -860,14 +907,14 @@ func (r *EgressRepository) GetEgressOperationsConfig(ctx context.Context) (egres
 	return config, nil
 }
 
-func (r *EgressRepository) SaveEgressOperationsConfig(ctx context.Context, value egress.OperationsConfig) (egress.OperationsConfig, error) {
+func (r *EgressRepository) SaveEgressOperationsConfig(ctx context.Context, value egress.OperationsConfig, validate egress.FixedTargetValidator) (egress.OperationsConfig, error) {
 	row := fromEgressOperationsConfigDomain(value)
 	row.ID = 1
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockEgressOperationsConfig(tx); err != nil {
 			return err
 		}
-		if err := validateLockedEgressRouting(tx, row); err != nil {
+		if err := validateLockedEgressRouting(tx, row, validate); err != nil {
 			return err
 		}
 		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
@@ -891,7 +938,7 @@ func (r *EgressRepository) SaveEgressOperationsConfig(ctx context.Context, value
 // since 必须取自 GetEgressOperationsConfig 的读取结果:SaveEgressOperations
 // Config 的返回值是内存构造行,其 UpdatedAt 未经存储往返(驱动可能截断
 // 精度),不能直接用作条件写令牌。
-func (r *EgressRepository) SaveEgressOperationsConfigIfCurrent(ctx context.Context, value egress.OperationsConfig, since time.Time) (egress.OperationsConfig, error) {
+func (r *EgressRepository) SaveEgressOperationsConfigIfCurrent(ctx context.Context, value egress.OperationsConfig, since time.Time, validate egress.FixedTargetValidator) (egress.OperationsConfig, error) {
 	row := fromEgressOperationsConfigDomain(value)
 	row.ID = 1
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -902,7 +949,7 @@ func (r *EgressRepository) SaveEgressOperationsConfigIfCurrent(ctx context.Conte
 		if !current.UpdatedAt.Equal(since) {
 			return repository.ErrEgressConfigStale
 		}
-		if err := validateLockedEgressRouting(tx, row); err != nil {
+		if err := validateLockedEgressRouting(tx, row, validate); err != nil {
 			return err
 		}
 		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
@@ -981,7 +1028,7 @@ func configReferencesAnyRoutingNode(encoded string, ids []uint64) bool {
 // validateLockedEgressRouting verifies that every configured node target is
 // schedulable and every pool target exists, so a saved routing decision can
 // never silently degrade to the automatic schedule.
-func validateLockedEgressRouting(tx *gorm.DB, config egressOperationsConfigModel) error {
+func validateLockedEgressRouting(tx *gorm.DB, config egressOperationsConfigModel, validate egress.FixedTargetValidator) error {
 	payload, err := unmarshalEgressRouting(config.Routing)
 	if err != nil {
 		return repository.ErrEgressRoutingInvalid
@@ -1022,6 +1069,12 @@ func validateLockedEgressRouting(tx *gorm.DB, config egressOperationsConfigModel
 			node, exists := byID[id]
 			if !exists || !egress.CanNodeServeFixedTarget(egress.Node{ID: node.ID, Enabled: node.Enabled, ProxyPool: node.ProxyPool, EncryptedProxyURL: node.EncryptedProxyURL}) {
 				return repository.ErrEgressRoutingNodeInUse
+			}
+			if validate == nil {
+				return errors.New("fixed target validator is required")
+			}
+			if err := validate(toEgressDomain(node)); err != nil {
+				return err
 			}
 		}
 	}
@@ -1242,6 +1295,12 @@ func clearInvalidEgressRoutingReferences(tx *gorm.DB) error {
 
 func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) error {
 	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockEgressPoolGraph(tx); err != nil {
+			return err
+		}
+		if _, err := lockEgressOperationsConfig(tx); err != nil {
+			return err
+		}
 		if err := clearEgressRoutingNodeReferences(tx, []uint64{id}); err != nil {
 			return err
 		}
@@ -1266,6 +1325,12 @@ func (r *EgressRepository) DeleteEgressNodes(ctx context.Context, ids []uint64) 
 	}
 	var deleted int64
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockEgressPoolGraph(tx); err != nil {
+			return err
+		}
+		if _, err := lockEgressOperationsConfig(tx); err != nil {
+			return err
+		}
 		var err error
 		deleted, err = deleteEgressNodeIDs(tx, ids)
 		return err
@@ -1292,6 +1357,12 @@ func (r *EgressRepository) unhealthyEgressNodes(ctx context.Context) *gorm.DB {
 func (r *EgressRepository) DeleteUnhealthyEgressNodes(ctx context.Context) ([]uint64, error) {
 	ids := make([]uint64, 0)
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockEgressPoolGraph(tx); err != nil {
+			return err
+		}
+		if _, err := lockEgressOperationsConfig(tx); err != nil {
+			return err
+		}
 		query := tx.Model(&egressNodeModel{}).
 			Where("ipv4_probe_status = ? AND ipv6_probe_status = ?", egress.ProbeStatusUnhealthy, egress.ProbeStatusUnhealthy).
 			Order("id ASC")
@@ -1350,7 +1421,7 @@ func toEgressDomain(row egressNodeModel) egress.Node {
 		EncryptedRotationURL:        row.EncryptedRotationURL, RotationEnabled: row.RotationEnabled, LastRotatedAt: row.LastRotatedAt,
 		RotationAttempts: row.RotationAttempts, LastRotationError: row.LastRotationError,
 		DegradeCount: row.DegradeCount, LastDegradedAt: row.LastDegradedAt,
-		Health: row.Health, FailureCount: row.FailureCount, CooldownUntil: row.CooldownUntil, LastError: row.LastError,
+		ClearanceRevision: row.ClearanceRevision, BindingRevision: row.BindingRevision, HealthRevision: row.HealthRevision, Health: row.Health, FailureCount: row.FailureCount, CooldownUntil: row.CooldownUntil, LastError: row.LastError,
 		ProbeStatus: egress.ProbeStatus(row.ProbeStatus), LastProbedAt: row.LastProbedAt, ProbeLatencyMS: row.ProbeLatencyMS, ExitIP: row.ExitIP, ProbeError: row.ProbeError,
 		ProbeProvider: storedProbeProvider(egress.ProbeProvider(row.ProbeProvider)),
 		IPv4Probe:     probeFamilyFromRow(row.IPv4ProbeStatus, row.IPv4LastProbedAt, row.IPv4ProbeLatencyMS, row.IPv4ExitIP, row.IPv4ProbeError),
@@ -1377,7 +1448,7 @@ func fromEgressDomain(value egress.Node) egressNodeModel {
 		EncryptedRotationURL:        value.EncryptedRotationURL, RotationEnabled: value.RotationEnabled, LastRotatedAt: value.LastRotatedAt,
 		RotationAttempts: value.RotationAttempts, LastRotationError: value.LastRotationError,
 		DegradeCount: value.DegradeCount, LastDegradedAt: value.LastDegradedAt,
-		Health: health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
+		ClearanceRevision: value.ClearanceRevision, BindingRevision: value.BindingRevision, HealthRevision: value.HealthRevision, Health: health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		ProbeStatus: string(probeStatus), LastProbedAt: value.LastProbedAt, ProbeLatencyMS: value.ProbeLatencyMS, ExitIP: value.ExitIP, ProbeError: value.ProbeError,
 		ProbeProvider:   string(storedProbeProvider(value.ProbeProvider)),
 		IPv4ProbeStatus: string(normalizedProbeStatus(value.IPv4Probe.Status)), IPv4LastProbedAt: probeTestedAt(value.IPv4Probe), IPv4ProbeLatencyMS: value.IPv4Probe.LatencyMS, IPv4ExitIP: value.IPv4Probe.ExitIP, IPv4ProbeError: value.IPv4Probe.Error,
@@ -1420,7 +1491,7 @@ func probeFamilyFromRow(status string, testedAt *time.Time, latencyMS int, exitI
 
 func toEgressSubscriptionSourceDomain(row egressSubscriptionSourceModel) egress.SubscriptionSource {
 	return egress.SubscriptionSource{
-		ID: row.ID, Name: row.Name, Enabled: row.Enabled, EncryptedURL: row.EncryptedURL, EncryptedProxyURL: row.EncryptedProxyURL,
+		SyncRevision: row.SyncRevision, ID: row.ID, Name: row.Name, Enabled: row.Enabled, EncryptedURL: row.EncryptedURL, EncryptedProxyURL: row.EncryptedProxyURL,
 		RefreshIntervalSeconds: row.RefreshIntervalSeconds,
 		LastSyncedAt:           row.LastSyncedAt, NextSyncAt: row.NextSyncAt, LastSyncImported: row.LastSyncImported, LastSyncError: row.LastSyncError,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
@@ -1429,7 +1500,7 @@ func toEgressSubscriptionSourceDomain(row egressSubscriptionSourceModel) egress.
 
 func fromEgressSubscriptionSourceDomain(value egress.SubscriptionSource) egressSubscriptionSourceModel {
 	return egressSubscriptionSourceModel{
-		ID: value.ID, Name: value.Name, Enabled: value.Enabled, EncryptedURL: value.EncryptedURL, EncryptedProxyURL: value.EncryptedProxyURL,
+		SyncRevision: value.SyncRevision, ID: value.ID, Name: value.Name, Enabled: value.Enabled, EncryptedURL: value.EncryptedURL, EncryptedProxyURL: value.EncryptedProxyURL,
 		RefreshIntervalSeconds: value.RefreshIntervalSeconds,
 		LastSyncedAt:           value.LastSyncedAt, NextSyncAt: value.NextSyncAt, LastSyncImported: value.LastSyncImported, LastSyncError: value.LastSyncError,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,

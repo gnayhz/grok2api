@@ -18,6 +18,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestModelProviderFilterAcceptsOnlyKnownProviders(t *testing.T) {
@@ -33,9 +34,9 @@ func TestModelProviderFilterAcceptsOnlyKnownProviders(t *testing.T) {
 
 func TestEndpointCapabilitiesFollowProviderSurface(t *testing.T) {
 	routes := []modeldomain.Route{
-		{Provider: account.ProviderConsole, Capability: modeldomain.CapabilityResponses},
-		{Provider: account.ProviderConsole, Capability: modeldomain.CapabilityImage},
-		{Provider: account.ProviderConsole, Capability: modeldomain.CapabilityImageEdit},
+		{Provider: account.ProviderConsole, UpstreamModel: "grok-4.3", Capability: modeldomain.CapabilityResponses},
+		{Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: modeldomain.CapabilityImage},
+		{Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: modeldomain.CapabilityImageEdit},
 	}
 	capabilities := endpointCapabilitiesForDefinition(routes, provider.Definition{
 		Conversation: provider.ConversationSurface{Responses: true, Messages: true},
@@ -73,7 +74,7 @@ func TestCreateAndUpdatePreserveProviderPrefixedPublicNames(t *testing.T) {
 		t.Fatalf("created route = %#v", created)
 	}
 
-	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-edit"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, account.ProviderBuild, []string{"grok-edit"}); err != nil {
 		t.Fatal(err)
 	}
 	toEdit, err := modelRepo.GetByPublicIDIncludingDisabled(ctx, "grok-edit")
@@ -88,7 +89,7 @@ func TestCreateAndUpdatePreserveProviderPrefixedPublicNames(t *testing.T) {
 	if updated.PublicID != "Build/Build/grok-edit" || modeldomain.ExternalPublicID(updated.Provider, updated.PublicID) != publicID {
 		t.Fatalf("updated route = %#v", updated)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-edit"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, account.ProviderBuild, []string{"grok-edit"}); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := modelRepo.GetByPublicIDIncludingDisabled(ctx, publicID)
@@ -257,13 +258,13 @@ func TestSyncAccountNormalizesBuildVideo15ByBillingSuper(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if err := accountRepo.SaveBilling(ctx, account.Billing{AccountID: superPrimary.ID, MonthlyLimit: 100, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accountRepo, account.Billing{AccountID: superPrimary.ID, MonthlyLimit: 100, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accountRepo.SaveBilling(ctx, account.Billing{AccountID: superFallback.ID, OnDemandCap: 50, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accountRepo, account.Billing{AccountID: superFallback.ID, OnDemandCap: 50, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accountRepo.SaveBilling(ctx, account.Billing{AccountID: freeAccount.ID, Used: 1, PlanName: "free", SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accountRepo, account.Billing{AccountID: freeAccount.ID, Used: 1, PlanName: "free", SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -23,6 +23,7 @@ func toSessionDomain(value adminSessionModel) admin.Session {
 }
 
 func toAccountDomain(value accountModel) account.Credential {
+	var generation uint64
 	var expiresAt time.Time
 	var refreshDueAt, lastRefreshAt *time.Time
 	var refreshFailures int
@@ -35,6 +36,7 @@ func toAccountDomain(value accountModel) account.Credential {
 	var authType account.AuthType
 	var clientID, encryptedPrimary, encryptedRefresh, encryptedCloudflareCookie string
 	if value.Credential != nil {
+		generation = value.Credential.Generation
 		authType = account.AuthType(value.Credential.AuthType)
 		clientID = value.Credential.ClientID
 		encryptedPrimary = value.Credential.EncryptedPrimary
@@ -78,14 +80,15 @@ func toAccountDomain(value accountModel) account.Credential {
 		buildRouteMode = account.BuildRouteAuto
 	}
 	return account.Credential{
+		CredentialGeneration: generation, AuthError: value.AuthError,
 		ID: value.ID, Provider: account.Provider(value.Provider), AuthType: authType, Name: value.Name, Email: value.Email,
 		UserID: value.UserID, TeamID: value.TeamID, SourceKey: value.SourceKey, OIDCClientID: clientID,
 		EncryptedAccessToken: encryptedPrimary, EncryptedRefreshToken: encryptedRefresh, EncryptedCloudflareCookie: encryptedCloudflareCookie,
 		ExpiresAt: expiresAt, RefreshDueAt: refreshDueAt, LastRefreshAt: lastRefreshAt,
 		RefreshFailureCount: refreshFailures, RefreshUnclassifiedAuthCount: refreshUnclassifiedAuthFailures, LastRefreshErrorStatus: lastRefreshErrorStatus, LastRefreshErrorCode: lastRefreshError, LastRefreshErrorMessage: lastRefreshErrorMessage, LastRefreshErrorResponse: lastRefreshErrorResponse, RefreshPermanent: refreshPermanent,
 		Enabled: value.Enabled, AuthStatus: account.AuthStatus(value.AuthStatus), ReauthMarkedAt: value.ReauthMarkedAt, Priority: value.Priority,
-		MaxConcurrent: value.MaxConcurrent, MinimumRemaining: value.MinimumRemaining, FailureCount: value.FailureCount,
-		CooldownUntil: value.CooldownUntil, LastError: value.LastError, LastUsedAt: value.LastUsedAt, RiskStatus: value.RiskStatus,
+		MaxConcurrent: value.MaxConcurrent, MinimumRemaining: value.MinimumRemaining, FailureCount: value.FailureCount, HealthRevision: value.HealthRevision, QuotaRecoveryRevision: value.QuotaRecoveryRevision, QuotaRecoveryResetRevision: value.QuotaRecoveryResetRevision,
+		CooldownUntil: value.CooldownUntil, CooldownMarkedAt: value.CooldownMarkedAt, LastError: value.LastError, LastUsedAt: value.LastUsedAt, RiskStatus: value.RiskStatus,
 		RiskTrigger: value.RiskTrigger, RiskOriginAccountID: value.RiskOriginAccountID, RiskCheckedAt: value.RiskCheckedAt, RiskDetail: value.RiskDetail,
 		ObservedModel: value.ObservedModel, ObservedModelAt: value.ObservedModelAt, WebTier: webTier, WebTierSyncedAt: webTierSyncedAt,
 		WebNSFWEnabledAt: webNSFWEnabledAt, WebTermsAcceptedAt: webTermsAcceptedAt, WebTermsAcceptedVersion: webTermsAcceptedVersion, WebBirthDateSetAt: webBirthDateSetAt, EgressIdentity: egressIdentity,
@@ -102,7 +105,8 @@ func toCredentialMaterialDomain(value accountCredentialModel, provider account.P
 		expiresAt = *value.ExpiresAt
 	}
 	return account.CredentialMaterial{
-		AccountID: value.AccountID, Provider: provider, AuthType: account.AuthType(value.AuthType), OIDCClientID: value.ClientID,
+		CredentialGeneration: value.Generation,
+		AccountID:            value.AccountID, Provider: provider, AuthType: account.AuthType(value.AuthType), OIDCClientID: value.ClientID,
 		EncryptedAccessToken: value.EncryptedPrimary, EncryptedRefreshToken: value.EncryptedRefresh,
 		EncryptedCloudflareCookie: value.EncryptedCloudflareCookie, ExpiresAt: expiresAt,
 		RefreshDueAt: value.RefreshDueAt, LastRefreshAt: value.LastRefreshAt,
@@ -120,11 +124,12 @@ func fromAccountDomain(value account.Credential) accountModel {
 		buildRouteMode = value.BuildRouteMode
 	}
 	return accountModel{
-		ID: value.ID, IdentityKey: accountIdentity(value), Provider: string(value.Provider), Name: value.Name, Email: value.Email,
+		AuthError: value.AuthError,
+		ID:        value.ID, IdentityKey: accountIdentity(value), Provider: string(value.Provider), Name: value.Name, Email: value.Email,
 		UserID: value.UserID, TeamID: value.TeamID, SourceKey: value.SourceKey,
 		Enabled: value.Enabled, AuthStatus: string(value.AuthStatus), ReauthMarkedAt: value.ReauthMarkedAt, Priority: value.Priority,
-		MaxConcurrent: value.MaxConcurrent, MinimumRemaining: value.MinimumRemaining, FailureCount: value.FailureCount,
-		CooldownUntil: value.CooldownUntil, LastError: value.LastError, LastUsedAt: value.LastUsedAt, RiskStatus: value.RiskStatus,
+		MaxConcurrent: value.MaxConcurrent, MinimumRemaining: value.MinimumRemaining, FailureCount: value.FailureCount, HealthRevision: value.HealthRevision, QuotaRecoveryRevision: value.QuotaRecoveryRevision, QuotaRecoveryResetRevision: value.QuotaRecoveryResetRevision,
+		CooldownUntil: value.CooldownUntil, CooldownMarkedAt: value.CooldownMarkedAt, LastError: value.LastError, LastUsedAt: value.LastUsedAt, RiskStatus: value.RiskStatus,
 		RiskTrigger: value.RiskTrigger, RiskOriginAccountID: value.RiskOriginAccountID, RiskCheckedAt: value.RiskCheckedAt, RiskDetail: value.RiskDetail,
 		ObservedModel: value.ObservedModel, ObservedModelAt: value.ObservedModelAt,
 		BuildAPIFallback: buildAPIFallback, BuildRouteMode: string(buildRouteMode), BuildSuperEntitled: buildSuperEntitled,
@@ -167,7 +172,8 @@ func fromAccountCredentialDomain(value account.Credential) accountCredentialMode
 		}
 	}
 	return accountCredentialModel{
-		AccountID: value.ID, AuthType: string(authType), ClientID: value.OIDCClientID,
+		Generation: value.CredentialGeneration,
+		AccountID:  value.ID, AuthType: string(authType), ClientID: value.OIDCClientID,
 		EncryptedPrimary: value.EncryptedAccessToken, EncryptedRefresh: value.EncryptedRefreshToken,
 		EncryptedCloudflareCookie: value.EncryptedCloudflareCookie,
 		ExpiresAt:                 expiresAt, RefreshDueAt: refreshDueAt, LastRefreshAt: value.LastRefreshAt,
@@ -245,7 +251,7 @@ func toClientKeyDomain(value clientKeyModel, allowedModels []uint64) clientkey.K
 		InternalKind: internalKind,
 		Enabled:      value.Enabled, ExpiresAt: value.ExpiresAt, RPMLimit: value.RPMLimit, MaxConcurrent: value.MaxConcurrent,
 		BillingLimitUSDTicks: value.BillingLimitUSDTicks, BilledUsageUSDTicks: value.BilledUsageUSDTicks, ReservedUsageUSDTicks: value.ReservedUsageUSDTicks,
-		AllowModelAliases: value.AllowModelAliases, AllowedModels: allowedModels,
+		AllowModelAliases: value.AllowModelAliases, AllowedModels: allowedModels, ModelScope: clientkey.ModelScope(value.ModelScope),
 		ProviderScope: providerScope, TierScope: tierScope,
 		LastUsedAt: value.LastUsedAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
@@ -264,13 +270,13 @@ func toAuditDomain(value requestAuditModel) audit.Record {
 		AccountID:       value.AccountID, AccountName: value.AccountName,
 		EgressNodeID: value.EgressNodeID, EgressNodeName: value.EgressNodeName, EgressScope: value.EgressScope, EgressMode: audit.EgressMode(value.EgressMode),
 		StatusCode: value.StatusCode, Streaming: value.Streaming,
-		MediaInputImages: value.MediaInputImages, MediaOutputImages: value.MediaOutputImages, MediaOutputSeconds: value.MediaOutputSeconds,
+		MediaInputImages: value.MediaInputImages, MediaOutputImages: value.MediaOutputImages, MediaOutputSeconds: value.MediaOutputSeconds, AudioDurationMS: value.AudioDurationMS,
 		InputTokens: value.InputTokens, CachedInputTokens: value.CachedInputTokens, OutputTokens: value.OutputTokens,
 		ReasoningTokens: value.ReasoningTokens, TotalTokens: value.TotalTokens, CostInUSDTicks: value.CostInUSDTicks,
 		EstimatedCostInUSDTicks: value.EstimatedCostInUSDTicks, PricingModel: value.PricingModel, PricingVersion: value.PricingVersion,
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
-		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens, FirstTokenMS: value.FirstTokenMS, DeliveredEvents: value.DeliveredEvents, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
-		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: requestHeaders, AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
+		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens, FirstTokenMS: value.FirstTokenMS, DeliveredEvents: value.DeliveredEvents, HistoryOutcome: value.HistoryOutcome, HistoryScopeHash: value.HistoryScopeHash, HistoryGeneration: value.HistoryGeneration, HistoryRestoredItems: value.HistoryRestoredItems, HistoryNormalizer: value.HistoryNormalizer, HistoryCommit: value.HistoryCommit, UpstreamStatusCode: value.UpstreamStatusCode, ResponseID: value.ResponseID, ProviderStateCommit: value.ProviderStateCommit, AdmissionOutcome: value.AdmissionOutcome, GenerationOutcome: value.GenerationOutcome, OwnershipCommit: value.OwnershipCommit, DeliveryOutcome: value.DeliveryOutcome, PhysicalReceipt: value.PhysicalReceipt, QualityReceipt: value.QualityReceipt, LedgerOutcome: value.LedgerOutcome, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
+		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, QualityExempt: value.QualityExempt, QualityRule: value.QualityRule, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: requestHeaders, AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
 	}
 }
 

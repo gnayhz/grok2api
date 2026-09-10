@@ -14,7 +14,6 @@ before(async () => {
 type RetryKey = "accountCooldown" | "evidenceTimeout" | "createdTimeout" | "idleAccountCooldown";
 type TestConfig = SettingsConfigDTO & {
   requestRetry: NonNullable<SettingsConfigDTO["requestRetry"]>;
-  accountRisk: NonNullable<SettingsConfigDTO["accountRisk"]>;
 };
 
 function baseConfig(retryOverrides: Partial<Record<RetryKey, string>>): TestConfig {
@@ -46,51 +45,33 @@ function baseConfig(retryOverrides: Partial<Record<RetryKey, string>>): TestConf
       autoCleanReauthEnabled: false, autoCleanReauthInterval: "1h", autoCleanReauthMinAge: "24h", autoCleanIncludeDisabled: false,
     },
     requestRetry: {
-      enabled: true, maxAttempts: 2, onExhausted: "fail_closed", accountCooldown: "12h", sameAccountRetry: true,
+      enabled: true, maxAttempts: 2, onExhausted: "fail_closed", accountCooldown: "12h",
       evidenceTimeout: "3.5s", createdTimeout: "5s", idleAccountCooldown: "15m",
       ...retryOverrides,
-    },
-    accountRisk: {
-      enabled: true, method: "ssoProbe", concurrency: 2, timeout: "30s", onDenied: "flag",
-      patrolEnabled: true, patrolInterval: "6h", patrolBucketDays: 30, patrolBatchSize: 50,
-      deniedConfirmations: 2, deniedTTL: "24h", probeProxyURL: "", buildProbeEnabled: true,
     },
   };
   return cfg;
 }
 
-function withDeniedTTL(cfg: TestConfig, deniedTTL: string): TestConfig {
-  cfg.accountRisk.deniedTTL = deniedTTL;
-  return cfg;
-}
-
-describe("0=默认 语义时长字段:载荷加载与往返", () => {
-  it("后端 0=默认 字段载荷为 0s 时表单校验通过且往返不丢", () => {
-    const cases: Array<[string, TestConfig]> = [
-      ["requestRetry.accountCooldown", baseConfig({ accountCooldown: "0s" })],
-      ["requestRetry.evidenceTimeout", baseConfig({ evidenceTimeout: "0s" })],
-      ["requestRetry.createdTimeout", baseConfig({ createdTimeout: "0s" })],
-      ["requestRetry.idleAccountCooldown", baseConfig({ idleAccountCooldown: "0s" })],
-      ["accountRisk.deniedTTL", withDeniedTTL(baseConfig({}), "0s")],
-    ];
-    for (const [name, cfg] of cases) {
+describe("audit retention migration", () => {
+  it("keeps zero and fractional durations exact and writes only the canonical field", () => {
+    for (const period of ["0s", "36h0m0.000000001s", "8760h0m0s"]) {
+      const cfg = baseConfig({});
+      cfg.audit.retentionPeriod = period;
+      cfg.audit.retentionSource = "runtime";
       const form = model.toSettingsForm(cfg);
-      const parsed = model.settingsSchema.safeParse(form);
-      assert.equal(parsed.success, true, name + " =0s 必须通过表单校验");
-      const dto = model.toSettingsDTO(form);
-      const dtoValue = name.startsWith("accountRisk.")
-        ? dto.accountRisk?.deniedTTL
-        : dto.requestRetry?.[name.split(".")[1] as RetryKey];
-      assert.equal(dtoValue, "0s", name + " 往返必须保持 0s(默认语义)");
+      assert.equal(model.settingsSchema.safeParse(form).success, true);
+      const saved = model.toSettingsDTO(form);
+      assert.equal(saved.audit.retentionPeriod, period);
+      assert.equal("retentionDays" in saved.audit, false);
+      assert.equal("retentionSource" in saved.audit, false);
     }
   });
-
-  it("非零值边界仍生效", () => {
-    const bad = model.toSettingsForm(baseConfig({ evidenceTimeout: "0.5s" }));
-    assert.equal(model.settingsSchema.safeParse(bad).success, false, "低于 1s 仍应拒绝");
-    const badCooldown = model.toSettingsForm(baseConfig({ accountCooldown: "30s" }));
-    assert.equal(model.settingsSchema.safeParse(badCooldown).success, false, "低于 1m 仍应拒绝");
-    const ok = model.toSettingsForm(baseConfig({ evidenceTimeout: "3.5s" }));
-    assert.equal(model.settingsSchema.safeParse(ok).success, true);
+  it("reads legacy whole days including explicit zero", () => {
+    for (const days of [0, 7, 365]) {
+      const cfg = baseConfig({});
+      cfg.audit.retentionDays = days;
+      assert.equal(model.toSettingsDTO(model.toSettingsForm(cfg)).audit.retentionPeriod, `${days * 24}h`);
+    }
   });
 });

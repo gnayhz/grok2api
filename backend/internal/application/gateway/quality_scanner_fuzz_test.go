@@ -36,7 +36,7 @@ func FuzzObserveQualityChunk(f *testing.F) {
 			if signals.VisibleTokens < 0 || signals.OutputTokens < 0 || signals.ReasoningTokens < 0 {
 				t.Fatalf("negative counters after %q: %#v", chunk[start:end], signals)
 			}
-			_ = classifyQualityHold(signals)
+			_ = classifyQualityHoldShadowed(signals)
 		}
 		observeQualityChunk(state, nil) // nil must be a no-op
 	})

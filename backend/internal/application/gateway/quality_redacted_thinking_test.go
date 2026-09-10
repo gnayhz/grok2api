@@ -26,7 +26,7 @@ func TestAnthropicRedactedThinkingIsNotEvidenceNorSemantic(t *testing.T) {
 	if state.semanticOutput {
 		t.Fatal("redacted thinking must not count as semantic output (delivery laundering)")
 	}
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("terminal redacted-only stream verdict = %s, want withhold (rule 4)", v)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	fhttptest "github.com/bogdanfinn/fhttp/httptest"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
@@ -95,7 +97,7 @@ func TestWebImagePublicNamesMatchProtocolProducts(t *testing.T) {
 	if !ok || spec.PublicID != "grok-imagine-image-edit" || spec.Capability != modeldomain.CapabilityImageEdit {
 		t.Fatalf("edit upstream resolved as %#v ok=%v", spec, ok)
 	}
-	if alias, ok := provider.NewRegistry(&Adapter{}).ResolveModelAlias("grok-imagine-image-quality-lite"); ok {
+	if alias, ok := modeldomain.ResolveCompatibilityAlias("grok-imagine-image-quality-lite"); ok {
 		t.Fatalf("retired quality-lite alias remains registered: %#v", alias)
 	}
 }
@@ -180,13 +182,9 @@ func TestImageChatRejectsOnlyCurrentTurnAttachment(t *testing.T) {
 		Method: http.MethodPost, Model: "grok-imagine-image", Operation: conversation.OperationChat,
 		Body: []byte(fmt.Sprintf(`{"model":"grok-imagine-image-lite","messages":[{"role":"user","content":%s}]}`, content)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "/v1/images/edits") {
-		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	var invalid *inferencedomain.RequestValidationError
+	if response != nil || !errors.As(err, &invalid) || !strings.Contains(invalid.Message, "/v1/images/edits") {
+		t.Fatalf("local image validation: response=%v err=%v", response, err)
 	}
 }
 
@@ -195,13 +193,9 @@ func TestImagineImageResponsesUsesImageCompatibilityValidation(t *testing.T) {
 		Method: http.MethodPost, Model: "grok-imagine-image-quality", Operation: conversation.OperationResponses,
 		Body: []byte(`{"model":"grok-imagine-image","input":[{"role":"user","content":[{"type":"input_text","text":"draw"}]}],"image_config":{"n":0}}`),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "image_config.n") || strings.Contains(string(body), "模型不支持文本对话") {
-		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	var invalid *inferencedomain.RequestValidationError
+	if response != nil || !errors.As(err, &invalid) || !strings.Contains(invalid.Message, "image_config.n") {
+		t.Fatalf("local image validation: response=%v err=%v", response, err)
 	}
 }
 
@@ -505,7 +499,7 @@ func TestForwardMessagesWebSearchEndToEnd(t *testing.T) {
 			body, _ := json.Marshal(map[string]any{
 				"model": "public", "max_tokens": 256, "stream": streaming,
 				"messages":    []any{map[string]any{"role": "user", "content": "Perform a web search for the query: rust tutorials"}},
-				"tools":       []any{map[string]any{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}},
+				"tools":       []any{map[string]any{"type": "web_search_20250305", "name": "web_search"}},
 				"tool_choice": map[string]any{"type": "tool", "name": "web_search"},
 			})
 			response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
@@ -591,7 +585,7 @@ func TestOpenChatScopesStreamIdleTimeoutToTextStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := NewAdapter(Config{
-		BaseURL: server.URL, StatsigMode: "manual", ChatTimeoutSeconds: 5, StreamIdleTimeoutSeconds: 1,
+		BaseURL: server.URL, StatsigMode: "manual", ChatTimeout: 5 * time.Second, StreamIdleTimeout: 1 * time.Second,
 	}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
 	credential := account.Credential{ID: 1, Provider: account.ProviderWeb, UserID: "497f19f8-49d4-458a-bee4-43ec3dcaf8ca", EncryptedAccessToken: encrypted}
 	spec, ok := Resolve("grok-chat-fast")
@@ -641,9 +635,10 @@ func TestWebNonStreamingResponseStillProtectsGatewayStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := NewAdapter(Config{
-		BaseURL: server.URL, StatsigMode: "manual", ChatTimeoutSeconds: 5, StreamIdleTimeoutSeconds: 1,
+		BaseURL: server.URL, StatsigMode: "manual", ChatTimeout: 5 * time.Second, StreamIdleTimeout: 175 * time.Millisecond,
 	}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
 	body := []byte(`{"model":"grok-chat-fast","input":"hello","stream":false}`)
+	started := time.Now()
 	_, err = adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
 		Credential: account.Credential{ID: 1, Provider: account.ProviderWeb, UserID: "497f19f8-49d4-458a-bee4-43ec3dcaf8ca", EncryptedAccessToken: encrypted},
 		Method:     http.MethodPost, Path: "/responses", Model: "grok-chat-fast", Operation: conversation.OperationResponses,
@@ -652,6 +647,10 @@ func TestWebNonStreamingResponseStillProtectsGatewayStream(t *testing.T) {
 	if !errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout) {
 		t.Fatalf("ForwardResponse() error = %v, want ErrUpstreamStreamIdleTimeout", err)
 	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond || elapsed >= time.Second {
+		t.Fatalf("fractional idle timeout elapsed=%s", elapsed)
+	}
+
 }
 
 type egressRepositoryStub struct{}
@@ -668,7 +667,7 @@ func (egressRepositoryStub) CreateEgressNode(context.Context, egressdomain.Node)
 	return egressdomain.Node{}, errors.New("unsupported")
 }
 
-func (egressRepositoryStub) UpdateEgressNode(context.Context, egressdomain.Node) (egressdomain.Node, error) {
+func (egressRepositoryStub) UpdateEgressNodeConfiguration(context.Context, egressdomain.Node, egressdomain.FixedTargetValidator) (egressdomain.Node, error) {
 	return egressdomain.Node{}, errors.New("unsupported")
 }
 
@@ -682,12 +681,9 @@ func TestLiteChatRejectsInvalidImageConfigBeforeUpstream(t *testing.T) {
 		Method: http.MethodPost, Model: "grok-imagine-image", Operation: "chat",
 		Body: []byte(`{"model":"grok-imagine-image","messages":[{"role":"user","content":"draw"}],"image_config":{"n":0}}`),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d", response.StatusCode)
+	var invalid *inferencedomain.RequestValidationError
+	if response != nil || !errors.As(err, &invalid) || !strings.Contains(invalid.Message, "image_config.n") {
+		t.Fatalf("local image validation: response=%v err=%v", response, err)
 	}
 }
 
@@ -840,13 +836,9 @@ func TestImageEditRejectsUnsupportedCountAndStreamingOptions(t *testing.T) {
 		{ImageURLs: []string{"data:image/png;base64,AA=="}, Count: 1, Resolution: "1k", Streaming: true, PartialImages: 4},
 	} {
 		response, err := adapter.EditImage(context.Background(), request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		if response.StatusCode != http.StatusBadRequest || !bytes.Contains(body, []byte(`"error"`)) {
-			t.Fatalf("status=%d body=%s", response.StatusCode, body)
+		var invalid *inferencedomain.RequestValidationError
+		if response != nil || !errors.As(err, &invalid) {
+			t.Fatalf("local edit validation: response=%v err=%v", response, err)
 		}
 	}
 }
@@ -1302,18 +1294,9 @@ func TestImageStreamingRejectsMultipleOutputs(t *testing.T) {
 	response, err := (&Adapter{}).GenerateImage(context.Background(), provider.ImageGenerationRequest{
 		Model: "grok-imagine-image-quality", Prompt: "cat", Count: 2, Streaming: true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	var payload map[string]any
-	if json.Unmarshal(body, &payload) != nil {
-		t.Fatalf("body=%s", body)
-	}
-	errorValue, _ := payload["error"].(map[string]any)
-	if response.StatusCode != http.StatusBadRequest || errorValue["message"] != "Streaming is only supported with n=1." || errorValue["type"] != "image_generation_user_error" || errorValue["param"] != "input" || errorValue["code"] != "unsupported_parameter" {
-		t.Fatalf("status=%d error=%#v", response.StatusCode, errorValue)
+	var invalid *inferencedomain.RequestValidationError
+	if response != nil || !errors.As(err, &invalid) || !strings.Contains(invalid.Message, "Streaming is only supported with n=1.") || invalid.Param != "input" || invalid.Code != "unsupported_parameter" {
+		t.Fatalf("local image validation: response=%v err=%v", response, err)
 	}
 }
 
@@ -1652,7 +1635,7 @@ func TestGenerateVideoRefreshesOnlyReloadStatsigForbidden(t *testing.T) {
 				t.Fatal(err)
 			}
 			adapter := NewAdapter(Config{
-				BaseURL: server.URL, StatsigMode: "url", StatsigSignerURL: server.URL + "/sign", VideoTimeoutSeconds: 5,
+				BaseURL: server.URL, StatsigMode: "url", StatsigSignerURL: server.URL + "/sign", VideoTimeout: 5 * time.Second,
 			}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
 			adapter.statsig.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
 				return "current-page-meta", nil
@@ -1730,6 +1713,7 @@ func TestGenerateVideoClassifiesOnlyExplicitHTTPRejectionAsCreateFailure(t *test
 		t.Fatal(err)
 	}
 	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "test"}, manager, cipher, nil, nil)
 	request := provider.VideoRequest{
 		Credential: account.Credential{ID: 1, Provider: account.ProviderWeb, EncryptedAccessToken: encryptedToken},

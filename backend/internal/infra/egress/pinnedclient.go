@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -11,8 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/pkg/proxydial"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
-	xproxy "golang.org/x/net/proxy"
 )
 
 // DoPinnedHTTPS sends a request whose URL host is an already validated IP
@@ -20,6 +22,10 @@ import (
 // transport separate from the shared browser client prevents a later DNS
 // lookup or a pooled connection from reopening an SSRF validation gap.
 func (l *Lease) DoPinnedHTTPS(request *http.Request, serverName string) (*http.Response, error) {
+	return l.doPinnedHTTPS(request, serverName, nil)
+}
+
+func (l *Lease) doPinnedHTTPS(request *http.Request, serverName string, tlsConfig *tls.Config) (*http.Response, error) {
 	if l == nil {
 		return nil, errors.New("出口租约未初始化")
 	}
@@ -39,14 +45,50 @@ func (l *Lease) DoPinnedHTTPS(request *http.Request, serverName string) (*http.R
 	if err != nil || strings.TrimSuffix(strings.ToLower(hostURL.Hostname()), ".") != serverName {
 		return nil, errors.New("固定地址请求的 Host 与 TLS ServerName 不一致")
 	}
-	client, err := newPinnedHTTPSClient(l.ProxyURL, serverName, nil)
-	if err != nil {
-		return nil, err
+	var budget *netbudget.Runtime
+	if l.clientHandle != nil {
+		budget = l.clientHandle.registry.network
 	}
-	return client.Do(request)
+	var client requestClient
+	var finish func()
+	if l.clientHandle != nil {
+		handle, closeOwner, err := l.clientHandle.registry.transientClient(request.Context(), func() (requestClient, error) {
+			return newPinnedHTTPSClient(l.ProxyURL, serverName, tlsConfig, budget)
+		})
+		if err != nil {
+			return nil, err
+		}
+		// The active request takes over ownership when this method returns.
+		// Its completion/cancellation finalizes the retired transient handle.
+		defer closeOwner()
+		ctx, done, err := handle.begin(request.Context())
+		if err != nil {
+			return nil, err
+		}
+		client = handle.client
+		finish = done
+		request = request.WithContext(ctx)
+	} else {
+		// Compatibility for standalone leases without a runtime owner.
+		client, err = newPinnedHTTPSClient(l.ProxyURL, serverName, tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+		finish = client.CloseIdleConnections
+	}
+	response, err := client.Do(request)
+	if err != nil || response == nil || response.Body == nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		finish()
+	} else {
+		response.Body = &completionBody{ReadCloser: &observedBody{ReadCloser: response.Body}, finish: finish}
+	}
+	return response, err
 }
 
-func newPinnedHTTPSClient(proxyURL, serverName string, tlsConfig *tls.Config) (*http.Client, error) {
+func newPinnedHTTPSClient(proxyURL, serverName string, tlsConfig *tls.Config, budget ...*netbudget.Runtime) (*http.Client, error) {
 	serverName = strings.TrimSuffix(strings.TrimSpace(serverName), ".")
 	if serverName == "" {
 		return nil, errors.New("TLS ServerName 不能为空")
@@ -77,11 +119,11 @@ func newPinnedHTTPSClient(proxyURL, serverName string, tlsConfig *tls.Config) (*
 		case "http", "https":
 			transport.Proxy = http.ProxyURL(parsed)
 		case "socks4", "socks4a", "socks5", "socks5h":
-			dialer, err := xproxy.FromURL(parsed, direct)
+			dialer, err := proxydial.New(proxyURL)
 			if err != nil {
 				return nil, fmt.Errorf("创建固定地址 SOCKS 代理: %w", err)
 			}
-			transport.DialContext = dialContext(dialer)
+			transport.DialContext = dialer.DialContext
 		case "trojan", "vless", "ss", "vmess":
 			dialer, err := tunnelproxy.NewDialer(proxyURL)
 			if err != nil {
@@ -90,6 +132,12 @@ func newPinnedHTTPSClient(proxyURL, serverName string, tlsConfig *tls.Config) (*
 			transport.DialContext = dialer.DialContext
 		default:
 			return nil, fmt.Errorf("固定地址请求不支持代理协议 %q", parsed.Scheme)
+		}
+	}
+	if len(budget) > 0 && budget[0] != nil {
+		inner := transport.DialContext
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return budget[0].Dial(ctx, inner, network, address)
 		}
 	}
 	return &http.Client{

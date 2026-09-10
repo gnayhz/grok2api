@@ -108,7 +108,7 @@ func (s *Service) Login(ctx context.Context, username, password, remoteAddress s
 	if !security.VerifyPassword(value.PasswordHash, password) {
 		return admin.Admin{}, Tokens{}, ErrInvalidCredentials
 	}
-	tokens, _, err := s.createSession(ctx, value.ID)
+	tokens, _, err := s.createSession(ctx, value.PasswordRef())
 	return value, tokens, err
 }
 
@@ -125,7 +125,9 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 		// 吊销整个 token family。未命中则是真正的未知 token。
 		stale, staleErr := s.sessions.GetByPreviousTokenHash(ctx, hash)
 		if staleErr == nil {
-			s.revokeSessionIfLateReuse(ctx, stale)
+			if err := s.revokeSessionIfLateReuse(ctx, stale); err != nil {
+				return Tokens{}, err
+			}
 			return Tokens{}, ErrInvalidSession
 		}
 		if !errors.Is(staleErr, repository.ErrNotFound) {
@@ -160,7 +162,9 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 			// OAuth BCP（RFC 6819 §5.2.11 / security-topics §4.14.2）吊销
 			// 整个 token family。
 			if fresh, freshErr := s.sessions.GetByID(ctx, session.ID); freshErr == nil {
-				s.revokeSessionIfLateReuse(ctx, fresh)
+				if err := s.revokeSessionIfLateReuse(ctx, fresh); err != nil {
+					return Tokens{}, err
+				}
 			} else if !errors.Is(freshErr, repository.ErrNotFound) {
 				return Tokens{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, freshErr)
 			}
@@ -169,7 +173,7 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 		if errors.Is(err, repository.ErrNotFound) {
 			return Tokens{}, ErrInvalidSession
 		}
-		return Tokens{}, err
+		return Tokens{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	return Tokens{AccessToken: accessToken, AccessTokenExpiresAt: accessExpiresAt, RefreshToken: refreshToken, RefreshTokenExpiresAt: refreshExpiresAt}, nil
 }
@@ -178,23 +182,21 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 // 是该会话最近一次 Rotate 的时间。距其不足宽限窗的重用视为良性重复
 // 刷新（不吊销——赢家 token 存活，重复方自行以新 token 重试）；超窗
 // 重用按窃取处理，吊销整个 token family。
-func (s *Service) revokeSessionIfLateReuse(ctx context.Context, session admin.Session) {
+func (s *Service) revokeSessionIfLateReuse(ctx context.Context, session admin.Session) error {
 	if session.LastUsedAt != nil && time.Since(*session.LastUsedAt) < refreshRotationGrace {
-		return
+		return nil
 	}
-	_ = s.sessions.Revoke(ctx, session.ID)
+	if err := s.sessions.Revoke(ctx, session.ID); err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
+	}
+	return nil
 }
 
 // Logout 撤销当前 refresh session。
 func (s *Service) Logout(ctx context.Context, rawRefreshToken string) error {
-	session, err := s.sessions.GetByTokenHash(ctx, security.HashToken(rawRefreshToken))
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
-	}
-	if err := s.sessions.Revoke(ctx, session.ID); err != nil && !errors.Is(err, repository.ErrNotFound) {
+	// A concurrent refresh may have committed before its new cookie reached
+	// the browser. Explicit logout also revokes its immediately previous token.
+	if err := s.sessions.RevokeByTokenHash(ctx, security.HashToken(rawRefreshToken)); err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	return nil
@@ -245,20 +247,29 @@ func (s *Service) ChangePassword(ctx context.Context, adminID uint64, currentPas
 	if err != nil {
 		return err
 	}
-	return s.admins.UpdatePasswordAndRevokeSessions(ctx, adminID, hash)
+	if err := s.admins.UpdatePasswordAndRevokeSessions(ctx, value.PasswordRef(), hash); err != nil {
+		if errors.Is(err, repository.ErrConflict) || errors.Is(err, repository.ErrNotFound) {
+			return ErrInvalidCredentials
+		}
+		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
+	}
+	return nil
 }
 
-func (s *Service) createSession(ctx context.Context, adminID uint64) (Tokens, admin.Session, error) {
+func (s *Service) createSession(ctx context.Context, expected admin.PasswordRef) (Tokens, admin.Session, error) {
 	refreshToken, err := security.NewOpaqueToken(32)
 	if err != nil {
 		return Tokens{}, admin.Session{}, err
 	}
 	refreshExpiresAt := time.Now().UTC().Add(s.refreshTTL)
-	session, err := s.sessions.Create(ctx, admin.Session{AdminID: adminID, RefreshTokenHash: security.HashToken(refreshToken), ExpiresAt: refreshExpiresAt})
+	session, err := s.sessions.CreateForPassword(ctx, expected, security.HashToken(refreshToken), refreshExpiresAt)
 	if err != nil {
-		return Tokens{}, admin.Session{}, err
+		if errors.Is(err, repository.ErrConflict) || errors.Is(err, repository.ErrNotFound) {
+			return Tokens{}, admin.Session{}, ErrInvalidCredentials
+		}
+		return Tokens{}, admin.Session{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
-	accessToken, accessExpiresAt, err := s.tokens.CreateAccessToken(adminID, session.ID, s.accessTTL)
+	accessToken, accessExpiresAt, err := s.tokens.CreateAccessToken(expected.AdminID, session.ID, s.accessTTL)
 	if err != nil {
 		_ = s.sessions.Revoke(ctx, session.ID)
 		return Tokens{}, admin.Session{}, err

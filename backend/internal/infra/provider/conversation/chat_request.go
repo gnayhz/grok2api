@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 // convertChatRequest 将 Chat Completions 请求完整转换为标准 Responses 输入。
@@ -31,7 +34,7 @@ func convertChatRequest(body []byte, model string) ([]byte, ResponseOptions, err
 		}
 		target["safety_identifier"] = mustJSON(strings.TrimSpace(user))
 	}
-	stopSequences, err := parseChatStopSequences(source["stop"])
+	stopSequences, err := ParseChatStopSequences(source["stop"])
 	if err != nil {
 		return nil, ResponseOptions{}, err
 	}
@@ -55,24 +58,43 @@ func convertChatRequest(body []byte, model string) ([]byte, ResponseOptions, err
 			return nil, ResponseOptions{}, err
 		}
 	}
-	if !isEmptyJSON(source["web_search_options"]) && !containsToolType(tools, "web_search") {
-		tools = append(tools, map[string]any{"type": "web_search"})
-	}
-	if len(tools) > 0 {
-		target["tools"] = mustJSON(tools)
-	}
-	if raw := source["tool_choice"]; !isEmptyJSON(raw) {
-		choice, err := convertChatToolChoice(raw)
+	if !isEmptyJSON(source["web_search_options"]) {
+		var options map[string]any
+		if err := jsonvalue.Unmarshal(source["web_search_options"], &options); err != nil || options == nil {
+			return nil, ResponseOptions{}, errors.New("web_search_options 必须是对象")
+		}
+		options["type"] = "web_search"
+		search, err := convertChatWebSearchTool(options)
 		if err != nil {
 			return nil, ResponseOptions{}, err
 		}
-		target["tool_choice"] = choice
+		if containsToolType(tools, "web_search") {
+			return nil, ResponseOptions{}, errors.New("web_search_options 与 tools.web_search 重复，请合并为一份搜索约束")
+		}
+		tools = append(tools, search)
+	}
+	toolPayload := map[string]any{"tools": tools}
+	if raw := source["tool_choice"]; !isEmptyJSON(raw) {
+		var choice any
+		if err := jsonvalue.Unmarshal(raw, &choice); err != nil {
+			return nil, ResponseOptions{}, errors.New("tool_choice 格式无效")
+		}
+		toolPayload["tool_choice"] = choice
+	}
+	if err := xaitools.NormalizePayload(toolPayload); err != nil {
+		return nil, ResponseOptions{}, err
+	}
+	for _, field := range []string{"tools", "tool_choice"} {
+		if value, exists := toolPayload[field]; exists {
+			target[field] = mustJSON(value)
+		}
 	}
 	converted, err := json.Marshal(target)
 	return converted, ResponseOptions{StopSequences: stopSequences}, err
 }
 
-func parseChatStopSequences(raw json.RawMessage) ([]string, error) {
+// ParseChatStopSequences validates the shared Chat stop field without converting its body.
+func ParseChatStopSequences(raw json.RawMessage) ([]string, error) {
 	if isEmptyJSON(raw) {
 		return nil, nil
 	}
@@ -261,148 +283,39 @@ func convertAssistantToolCalls(raw json.RawMessage) ([]any, error) {
 }
 
 func convertChatTools(raw json.RawMessage) ([]any, error) {
-	var tools []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &tools); err != nil {
+	var tools []map[string]any
+	if err := jsonvalue.Unmarshal(raw, &tools); err != nil {
 		return nil, errors.New("tools 必须是数组")
 	}
 	result := make([]any, 0, len(tools))
 	for _, tool := range tools {
-		var typeName string
-		_ = json.Unmarshal(tool["type"], &typeName)
-		if typeName != "function" {
-			var value any
-			_ = json.Unmarshal(mustJSON(tool), &value)
-			object, _ := value.(map[string]any)
-			switch typeName {
-			case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
-				converted, err := convertChatWebSearchTool(object)
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, converted)
-			default:
-				result = append(result, value)
+		if tool == nil {
+			return nil, errors.New("tools 必须包含对象")
+		}
+		if tool["type"] == "function" {
+			function, ok := tool["function"].(map[string]any)
+			if !ok || function == nil {
+				return nil, errors.New("function tool 格式无效")
 			}
-			continue
+			function["type"] = "function"
+			result = append(result, function)
+		} else {
+			result = append(result, tool)
 		}
-		var function map[string]any
-		if json.Unmarshal(tool["function"], &function) != nil {
-			return nil, errors.New("function tool 格式无效")
-		}
-		function["type"] = "function"
-		result = append(result, function)
 	}
 	return result, nil
 }
 
 func convertChatWebSearchTool(tool map[string]any) (map[string]any, error) {
-	nested := make(map[string][]any, 2)
-	if rawFilters, exists := tool["filters"]; exists && rawFilters != nil {
-		filters, ok := rawFilters.(map[string]any)
-		if !ok {
-			return nil, errors.New("web_search filters 必须是对象")
-		}
-		for _, field := range []string{"allowed_domains", "excluded_domains"} {
-			if value, exists := filters[field]; exists {
-				domains, err := normalizeChatWebSearchDomains(value, field)
-				if err != nil {
-					return nil, err
-				}
-				nested[field] = domains
-			}
-		}
-	}
-
-	resultFilters := make(map[string]any, 2)
-	for _, field := range []string{"allowed_domains", "excluded_domains"} {
-		var topLevel []any
-		if value, exists := tool[field]; exists {
-			domains, err := normalizeChatWebSearchDomains(value, field)
-			if err != nil {
-				return nil, err
-			}
-			topLevel = domains
-		}
-		domains := nested[field]
-		if len(domains) > 0 && len(topLevel) > 0 && !sameChatWebSearchDomains(domains, topLevel) {
-			return nil, fmt.Errorf("web_search %s 声明冲突", field)
-		}
-		if len(domains) == 0 {
-			domains = topLevel
-		}
-		if len(domains) > 0 {
-			resultFilters[field] = domains
-		}
-	}
-	if _, hasAllowed := resultFilters["allowed_domains"]; hasAllowed {
-		if _, hasExcluded := resultFilters["excluded_domains"]; hasExcluded {
-			return nil, errors.New("web_search 不能同时设置 allowed_domains 和 excluded_domains")
-		}
-	}
-	converted := map[string]any{"type": "web_search"}
-	if len(resultFilters) > 0 {
-		converted["filters"] = resultFilters
-	}
-	return converted, nil
-}
-
-func normalizeChatWebSearchDomains(value any, field string) ([]any, error) {
-	if value == nil {
-		return nil, nil
-	}
-	domains, ok := value.([]any)
-	if !ok {
-		return nil, fmt.Errorf("web_search %s 必须是字符串数组", field)
-	}
-	if len(domains) > MaxWebSearchDomains {
-		return nil, fmt.Errorf("web_search %s 不能超过 %d 个域名", field, MaxWebSearchDomains)
-	}
-	for index, value := range domains {
-		domain, ok := value.(string)
-		if !ok || strings.TrimSpace(domain) == "" {
-			return nil, fmt.Errorf("web_search %s[%d] 必须是非空字符串", field, index)
-		}
-	}
-	return domains, nil
-}
-
-func sameChatWebSearchDomains(left, right []any) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
+	return xaitools.WebSearch(tool, "tools.web_search")
 }
 
 func containsToolType(tools []any, kind string) bool {
 	for _, raw := range tools {
 		tool, ok := raw.(map[string]any)
-		if ok && tool["type"] == kind {
+		if typeName, _ := tool["type"].(string); ok && (typeName == kind || xaitools.HostedKind(typeName) == kind) {
 			return true
 		}
 	}
 	return false
-}
-
-func convertChatToolChoice(raw json.RawMessage) (json.RawMessage, error) {
-	var value map[string]json.RawMessage
-	if json.Unmarshal(raw, &value) != nil {
-		return raw, nil
-	}
-	var typeName string
-	_ = json.Unmarshal(value["type"], &typeName)
-	if typeName != "function" {
-		return raw, nil
-	}
-	var function struct {
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(value["function"], &function) != nil || strings.TrimSpace(function.Name) == "" {
-		return nil, errors.New("tool_choice.function.name 无效")
-	}
-	return mustJSON(map[string]any{"type": "function", "name": function.Name}), nil
 }

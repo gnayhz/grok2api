@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"io"
 	"net/http"
 	"strconv"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestPrepareBuildPromptCacheRouteToolFree(t *testing.T) {
-	body, route, err := prepareBuildPromptCacheRoute([]byte(`{"model":"grok-4.5","input":"hello"}`), "responses", "grok-4.5", "cache-key", false)
+	body, route, err := prepareBuildPromptCacheRoute([]byte(`{"model":"grok-4.5","input":"hello"}`), "responses", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,11 +28,11 @@ func TestPrepareBuildPromptCacheRouteToolFree(t *testing.T) {
 	}
 }
 
-func TestPrepareBuildPromptCacheRouteComplementsToolBearingRequest(t *testing.T) {
+func TestPrepareBuildPromptCacheRoutePreservesToolBearingRequest(t *testing.T) {
 	body, route, err := prepareBuildPromptCacheRoute([]byte(`{
 		"model":"grok-4.5","input":"hello","tool_choice":"auto",
 		"tools":[{"type":"function","name":"Read","parameters":{"type":"object"}}]
-	}`), "messages", "grok-4.5", "cache-key", true)
+	}`), "messages", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,16 +41,16 @@ func TestPrepareBuildPromptCacheRouteComplementsToolBearingRequest(t *testing.T)
 		t.Fatal(err)
 	}
 	tools := payload["tools"].([]any)
-	if len(tools) != 2 || stringField(tools[1].(map[string]any), "type") != "x_search" || payload["tool_choice"] != "auto" {
+	if len(tools) != 1 || payload["tool_choice"] != "auto" {
 		t.Fatalf("payload = %#v", payload)
 	}
-	if _, ok := route.clientDeclaredTools["Read"]; !ok || len(route.injectedToolTypes) != 1 || !route.filterXSearch {
+	if _, ok := route.clientDeclaredTools["Read"]; !ok || len(route.injectedToolTypes) != 0 || route.filterXSearch {
 		t.Fatalf("route = %#v", route)
 	}
 }
 
 func TestPrepareBuildPromptCacheRoutePreservesLargeIntegers(t *testing.T) {
-	body, _, err := prepareBuildPromptCacheRoute([]byte(`{"input":"hello","metadata":{"sequence":9007199254740993}}`), "responses", "grok-4.5", "cache-key", false)
+	body, _, err := prepareBuildPromptCacheRoute([]byte(`{"input":"hello","metadata":{"sequence":9007199254740993}}`), "responses", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestPrepareBuildPromptCacheRoutePreservesLargeIntegers(t *testing.T) {
 func TestPrepareBuildPromptCacheRouteDoesNotBroadenUntrustedFunctions(t *testing.T) {
 	body, route, err := prepareBuildPromptCacheRoute([]byte(`{
 		"input":"hello","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]
-	}`), "responses", "grok-4.5", "cache-key", false)
+	}`), "responses", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,22 +71,22 @@ func TestPrepareBuildPromptCacheRouteDoesNotBroadenUntrustedFunctions(t *testing
 	}
 }
 
-func TestPrepareBuildPromptCacheRouteComplementsExistingSearch(t *testing.T) {
-	body, route, err := prepareBuildPromptCacheRoute([]byte(`{"input":"hello","tools":[{"type":"web_search"}]}`), "responses", "grok-4.5", "cache-key", false)
+func TestPrepareBuildPromptCacheRoutePreservesExistingSearch(t *testing.T) {
+	body, route, err := prepareBuildPromptCacheRoute([]byte(`{"input":"hello","tools":[{"type":"web_search"}]}`), "responses", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), `"x_search"`) || !route.filterXSearch {
-		t.Fatalf("existing search route was not completed: body=%s route=%#v", body, route)
+	if strings.Contains(string(body), `"x_search"`) || route.filterXSearch {
+		t.Fatalf("existing search permissions changed: body=%s route=%#v", body, route)
 	}
 }
 
-func TestPrepareBuildPromptCacheRouteExtendsAllowedTools(t *testing.T) {
+func TestPrepareBuildPromptCacheRoutePreservesAllowedTools(t *testing.T) {
 	body, _, err := prepareBuildPromptCacheRoute([]byte(`{
 		"input":"hello",
 		"tools":[{"type":"function","name":"Read"}],
 		"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"Read"}]}
-	}`), "responses", "grok-4.5", "cache-key", true)
+	}`), "responses", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestPrepareBuildPromptCacheRouteExtendsAllowedTools(t *testing.T) {
 	}
 	choice := payload["tool_choice"].(map[string]any)
 	allowed := choice["tools"].([]any)
-	if len(allowed) != 2 || stringField(allowed[1].(map[string]any), "type") != "x_search" {
+	if len(allowed) != 1 || stringField(allowed[0].(map[string]any), "type") != "function" {
 		t.Fatalf("allowed tools = %#v", allowed)
 	}
 }
@@ -103,7 +104,7 @@ func TestPrepareBuildPromptCacheRouteExtendsAllowedTools(t *testing.T) {
 func TestPrepareBuildPromptCacheRoutePreservesExplicitXSearch(t *testing.T) {
 	body, route, err := prepareBuildPromptCacheRoute([]byte(`{
 		"input":"hello","tools":[{"type":"x_search"}],"tool_choice":"auto"
-	}`), "responses", "grok-4.5", "cache-key", false)
+	}`), "responses", "grok-4.5", "cache-key", inferencedomain.AllowDisabledCacheTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestPrepareBuildPromptCacheRouteRespectsBoundaries(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			body, route, err := prepareBuildPromptCacheRoute([]byte(test.body), test.operation, test.model, test.key, false)
+			body, route, err := prepareBuildPromptCacheRoute([]byte(test.body), test.operation, test.model, test.key, inferencedomain.AllowDisabledCacheTools)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,12 +4,14 @@
 #   build, vet, staticcheck, race tests, fuzz seeds, govulncheck, flaky probe.
 #
 # Usage:
-#   scripts/verify.sh          # fast tier: build + vet + staticcheck + race
+#   scripts/verify.sh check    # target preflight + architecture checks
+#   scripts/verify.sh          # fast tier: preflight + architecture + build + fmt + vet + staticcheck + race
 #   scripts/verify.sh full     # + fuzz seeds + govulncheck + flaky (count=3)
 #   scripts/verify.sh fuzz     # run the fuzzing engines for 30s per target
 #
 # Third-party tools (staticcheck, govulncheck) degrade to SKIP with a warning
-# when absent; the core go toolchain checks are always required.
+# when absent; the core go toolchain checks are always required. Fuzz engines
+# discover every target in FUZZ_PACKAGES, including parser and partition tests.
 #
 # Backend integration tests SKIP without env; run them against ephemeral
 # real backends. Publish to 127.0.0.1 ports (round 4 verified green this
@@ -25,22 +27,25 @@
 #     TEST_REDIS_ADDRESS=127.0.0.1:16379 go test ./internal/infra/persistence/relational/ -run Integration -count=1
 #   docker rm -f pg-verify
 #
-# Crash-recovery spot check (optimize round 14 verified this way): kill the
-# running instance mid-stream (docker kill, SIGKILL), restart, then confirm
-# pragma integrity_check=ok, zero orphan attempts, zero null-duration rows,
-# and a normal follow-up request. In-flight requests lose their buffered
-# audit rows to SIGKILL (expected ledger-mode loss, not corruption); clients
-# see a truncated stream with no [DONE] terminator.
+# Crash recovery must be checked in an isolated instance against the current
+# history and ledger contract. A truncated stream alone does not verify that
+# accepted history or pending billing records can be recovered.
 
 set -euo pipefail
 
-cd "$(dirname "$0")/../backend"
+VERIFY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 TIER="${1:-fast}"
 FAILED=0
 SKIPPED=()
 declare -a STAGES=()
 declare -a RESULTS=()
+REPEAT_PACKAGES=(./internal/application/gateway ./internal/application/account
+	./internal/infra/rsc ./internal/infra/persistence/relational ./internal/app
+	./internal/transport/http/inference ./internal/pkg/jsonpeek)
+FUZZ_PACKAGES=(./internal/application/gateway ./internal/pkg/jsonpeek
+	./internal/infra/provider/searchresult ./internal/application/egress
+	./internal/infra/provider/conversation ./internal/pkg/responseflow)
 # SKIPPED_NOW 由 stage 函数体设置：非空时本阶段记 skipped 而非 ok（round 19）。
 
 stage() {
@@ -85,20 +90,16 @@ resolve_bin() {
 
 stage_build() { go build ./...; }
 # gofmt 漂移检查：交付门此前不含 fmt，17 个文件带着未格式化内容入库
-# （round 37 清零）。非空输出即失败，白名单仅限 vendored 测试替身目录。
+# （round 37 清零）。非空输出即失败。
 stage_fmt() {
-	# gofmt 缺失时命令替换拿不到退出码，空输出会被当成"无漂移"——
-	# 曾经虚报 ok（round 1 复现：PATH 无 gofmt 时 fmt 门静默放行）。
-	# 与 staticcheck 同约定：工具缺失显式 skip，绝不假通过。
-	if ! have gofmt; then
-		echo "gofmt not installed — skipping (part of the Go toolchain: check PATH / go env GOROOT)"
-		SKIPPED+=(gofmt)
-		SKIPPED_NOW="tool missing"
-		return 0
-	fi
-	drift=$(gofmt -l . | grep -v '^gateway.test/' || true)
+	# A missing or broken formatter must fail a required toolchain check.
+	local drift
+	# gofmt is part of the required Go toolchain; capture its failure before
+	# inspecting output, rather than treating a broken command as no drift.
+	drift=$(gofmt -l .) || return
 	if [ -n "$drift" ]; then
-		echo "gofmt drift detected:"; echo "$drift"
+		echo "gofmt drift detected:"
+		echo "$drift"
 		return 1
 	fi
 }
@@ -109,14 +110,16 @@ stage_staticcheck() {
 		"$(resolve_bin staticcheck)" ./...
 	else
 		echo "staticcheck not installed — skipping (go install honnef.co/go/tools/cmd/staticcheck@latest)"
-		SKIPPED+=(staticcheck)
+		SKIPPED+=("staticcheck: tool missing")
 		SKIPPED_NOW="tool missing"
 	fi
 }
 stage_race() {
 	# 一次性竞态失败若不留痕将无从排查（verify-full 一次失败、
 	# 五次复跑全绿的无头绪案例）——把完整输出落盘再按需透传。
-	if ! go test -race -count=1 ./... >".race-output.log" 2>&1; then
+	# The full inference suite takes over 10 minutes under -race (E06/G02).
+	# Keep a finite suite deadline without truncating healthy integration runs.
+	if ! go test -race -timeout 30m -count=1 ./... >".race-output.log" 2>&1; then
 		cat ".race-output.log"
 		echo "race suite 完整输出已保存到 .race-output.log"
 		return 1
@@ -124,15 +127,8 @@ stage_race() {
 	rm -f ".race-output.log"
 }
 stage_fuzz_seeds() {
-	# 全部 14 个 fuzz 目标的种子回归：gateway 质量扫描器/body 判决 + jsonpeek
-	# 零分配抽取（守卫热路径，蓝图 #5）+ egress 订阅/代理解析与 provider URL
-	# 规范化（处理外部不可信输入）+ 转换器 SSE 行解析。
-	# 注：FuzzParseRisk 已随 homepage 解析器删除（重构 round 11）。
-	go test -count=1 -run 'FuzzObserveQualityChunk|FuzzPeekQualityBody' ./internal/application/gateway/
-	go test -count=1 -run 'Fuzz' ./internal/pkg/jsonpeek/
-	go test -count=1 -run 'FuzzNormalizeURL' ./internal/infra/provider/searchresult/
-	go test -count=1 -run 'FuzzParseClashSubscription|FuzzResolveRotationTemplate|FuzzParseProxySubscription|FuzzNormalizeProxyURL' ./internal/application/egress/
-	go test -count=1 -run 'FuzzConsumeSSE' ./internal/infra/provider/conversation/
+	# One command preserves any package failure under stage's conditional call.
+	go test -count=1 -run '^Fuzz' "${FUZZ_PACKAGES[@]}"
 }
 stage_govulncheck() {
 	if have govulncheck; then
@@ -142,7 +138,7 @@ stage_govulncheck() {
 		"$(resolve_bin govulncheck)" ./...
 	else
 		echo "govulncheck not installed — skipping (go install golang.org/x/vuln/cmd/govulncheck@latest)"
-		SKIPPED+=(govulncheck)
+		SKIPPED+=("govulncheck: tool missing")
 		SKIPPED_NOW="tool missing"
 	fi
 }
@@ -150,45 +146,76 @@ stage_flaky() {
 	# Repeat core packages three times to surface scheduling-dependent flakes.
 	# transport/http/inference 自 round 25/33 起承载守卫检查器与 copyStream 的
 	# 流式测试（含并发泵），与 gateway 同属时序敏感核心，补入重复探测。
-	go test -count=3 ./internal/application/gateway/ ./internal/application/account/risk/ ./internal/infra/rsc/ ./internal/infra/persistence/relational/ ./internal/app/ ./internal/transport/http/inference/ ./internal/pkg/jsonpeek/
+	# Three complete runs also share one package deadline; the inference suite
+	# takes about five minutes per run without -race.
+	go test -timeout 30m -count=3 "${REPEAT_PACKAGES[@]}"
 }
 stage_fuzz_engines() {
-	# 质量判决链（FuzzParseRisk 已随 homepage 解析器删除，重构 round 11）。
-	go test -fuzz FuzzPeekQualityBody -fuzztime 30s -run xxx ./internal/application/gateway/
-	go test -fuzz FuzzObserveQualityChunk -fuzztime 30s -run xxx ./internal/application/gateway/
-	# 外部不可信输入解析面（round 35 补入；此前 fuzz tier 只覆盖质量链）。
-	go test -fuzz FuzzParseClashSubscription -fuzztime 30s -run xxx ./internal/application/egress/
-	go test -fuzz FuzzParseProxySubscription -fuzztime 30s -run xxx ./internal/application/egress/
-	go test -fuzz FuzzNormalizeProxyURL -fuzztime 30s -run xxx ./internal/application/egress/
-	go test -fuzz FuzzResolveRotationTemplate -fuzztime 30s -run xxx ./internal/application/egress/
-	go test -fuzz FuzzNormalizeURL -fuzztime 30s -run xxx ./internal/infra/provider/searchresult/
+	local package targets target found
+	for package in "${FUZZ_PACKAGES[@]}"; do
+		targets=$(go test -list '^Fuzz' "$package") || return
+		found=0
+		while IFS= read -r target; do
+			[[ "$target" =~ ^Fuzz[A-Za-z0-9_]+$ ]] || continue
+			found=1
+			go test -fuzz "^${target}$" -fuzztime 30s -run '^$' "$package" || return
+		done <<< "$targets"
+		if [[ "$found" == 0 ]]; then
+			echo "No fuzz targets in configured package: $package" >&2
+			return 1
+		fi
+	done
 }
 
-stage "build" stage_build
-stage "gofmt" stage_fmt
-stage "vet" stage_vet
-stage "staticcheck" stage_staticcheck
-stage "race suite" stage_race
+stage_targets() {
+	go list ./internal/architecture "${REPEAT_PACKAGES[@]}" "${FUZZ_PACKAGES[@]}" >/dev/null
+}
+stage_architecture() { go test ./internal/architecture -count=1; }
 
-if [ "$TIER" = "full" ]; then
-	stage "fuzz seeds" stage_fuzz_seeds
-	stage "govulncheck" stage_govulncheck
-	stage "flaky probe (count=3)" stage_flaky
-fi
+main() {
+	case "$TIER" in check|fast|full|fuzz) ;; *) echo "Unknown tier: $TIER" >&2; return 2;; esac
+	cd "$VERIFY_ROOT/backend" || return
+	stage "target preflight" stage_targets
+	if [[ "$FAILED" != 0 ]]; then return 1; fi
+	stage "architecture" stage_architecture
+	if [[ "$TIER" != check ]]; then
+		if [[ -z "${TEST_POSTGRES_DSN:-}" && -z "${TEST_POSTGRES_ADMIN_DSN:-}" ]]; then
+			SKIPPED+=("PostgreSQL integration: test DSN absent")
+		fi
+		if [[ -z "${TEST_REDIS_ADDRESS:-}" ]]; then
+			SKIPPED+=("Redis integration: TEST_REDIS_ADDRESS absent")
+		fi
+		stage "build" stage_build
+		stage "gofmt" stage_fmt
+		stage "vet" stage_vet
+		stage "staticcheck" stage_staticcheck
+		stage "race suite" stage_race
+	fi
 
-if [ "$TIER" = "fuzz" ]; then
-	stage "fuzz engines (30s each)" stage_fuzz_engines
-fi
+	if [ "$TIER" = "full" ]; then
+		stage "fuzz seeds" stage_fuzz_seeds
+		stage "govulncheck" stage_govulncheck
+		stage "flaky probe (count=3)" stage_flaky
+	fi
 
-printf '\n==================== SUMMARY ====================\n'
-for i in "${!STAGES[@]}"; do
-	printf '%-32s %s\n' "${STAGES[$i]}" "${RESULTS[$i]}"
-done
-if [ "${#SKIPPED[@]}" -gt 0 ]; then
-	printf 'skipped (tool missing): %s\n' "${SKIPPED[*]}"
+	if [ "$TIER" = "fuzz" ]; then
+		stage "fuzz engines (30s each)" stage_fuzz_engines
+	fi
+
+	printf '\n==================== SUMMARY ====================\n'
+	for i in "${!STAGES[@]}"; do
+		printf '%-32s %s\n' "${STAGES[$i]}" "${RESULTS[$i]}"
+	done
+	if [ "${#SKIPPED[@]}" -gt 0 ]; then
+		printf 'skipped: %s\n' "${SKIPPED[@]}"
+	fi
+	if [ "$FAILED" -ne 0 ]; then
+		printf 'RESULT: FAILED\n'
+		exit 1
+	fi
+	printf 'RESULT: PASS (%s tier)\n' "$TIER"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main
 fi
-if [ "$FAILED" -ne 0 ]; then
-	printf 'RESULT: FAILED\n'
-	exit 1
-fi
-printf 'RESULT: PASS (%s tier)\n' "$TIER"

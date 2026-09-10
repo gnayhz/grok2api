@@ -32,7 +32,7 @@ func TestBuildProxyPoolLeaseForcesFreshTunnel(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
 	}}
-	lease := &Lease{client: client, Scope: egressdomain.ScopeBuild, proxyPool: true, freshTunnel: true}
+	lease := &Lease{client: client, Scope: egressdomain.ScopeBuild, proxyPool: true, connectionPolicy: ConnectionPolicy{Fresh: true}}
 	request, err := http.NewRequest(http.MethodPost, "https://example.com/generate", bytes.NewReader([]byte("payload")))
 	if err != nil {
 		t.Fatal(err)
@@ -44,13 +44,12 @@ func TestBuildProxyPoolLeaseForcesFreshTunnel(t *testing.T) {
 
 func TestFixedBuildWebAndAccountBoundProxyKeepConnectionReuse(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		scope       egressdomain.Scope
-		proxyPool   bool
-		freshTunnel bool
+		name      string
+		scope     egressdomain.Scope
+		proxyPool bool
 	}{
 		{name: "fixed Build proxy", scope: egressdomain.ScopeBuild},
-		{name: "Web proxy pool", scope: egressdomain.ScopeWeb, proxyPool: true, freshTunnel: true},
+		{name: "Web proxy pool", scope: egressdomain.ScopeWeb, proxyPool: true},
 		{name: "account-bound Build proxy", scope: egressdomain.ScopeBuild, proxyPool: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -60,7 +59,7 @@ func TestFixedBuildWebAndAccountBoundProxyKeepConnectionReuse(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
 			}}
-			lease := &Lease{client: client, Scope: test.scope, proxyPool: test.proxyPool, freshTunnel: test.freshTunnel}
+			lease := &Lease{client: client, Scope: test.scope, proxyPool: test.proxyPool}
 			request, err := http.NewRequest(http.MethodGet, "https://example.com/models", nil)
 			if err != nil {
 				t.Fatal(err)
@@ -143,7 +142,7 @@ func TestLeaseDefersForbiddenClearanceInvalidationUntilClassification(t *testing
 	client := &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: http.NoBody}, nil
 	}}
-	manager := &Manager{clearances: map[string]clearanceState{"account-bound": {}}}
+	manager := &Manager{clearance: &clearanceRuntime{clearances: map[string]clearanceState{"account-bound": {}}}}
 	lease := &Lease{client: client, clearanceManager: manager, clearanceKey: "account-bound"}
 	request, err := http.NewRequest(http.MethodPost, "https://example.com/generate", http.NoBody)
 	if err != nil {
@@ -153,17 +152,17 @@ func TestLeaseDefersForbiddenClearanceInvalidationUntilClassification(t *testing
 	if err != nil || response.StatusCode != http.StatusForbidden {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
-	manager.clearanceMu.Lock()
-	invalidBeforeClassification := manager.clearances["account-bound"].invalid
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	invalidBeforeClassification := manager.clearance.clearances["account-bound"].invalid
+	manager.clearance.clearanceMu.Unlock()
 	if invalidBeforeClassification || client.closedIdle != 0 {
 		t.Fatalf("clearance invalid=%v closedIdle=%d before classification", invalidBeforeClassification, client.closedIdle)
 	}
 
 	lease.InvalidateClearance()
-	manager.clearanceMu.Lock()
-	invalidAfterClassification := manager.clearances["account-bound"].invalid
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	invalidAfterClassification := manager.clearance.clearances["account-bound"].invalid
+	manager.clearance.clearanceMu.Unlock()
 	if !invalidAfterClassification || client.closedIdle != 1 {
 		t.Fatalf("clearance invalid=%v closedIdle=%d after classification", invalidAfterClassification, client.closedIdle)
 	}

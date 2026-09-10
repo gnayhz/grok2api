@@ -218,6 +218,13 @@ func TestEstimateOfficialVoiceCosts(t *testing.T) {
 	if _, ok := EstimateOfficialSTTCost(0, false); ok {
 		t.Fatal("zero-duration STT must remain unpriced")
 	}
+	// Huge finite values must not wrap the integer amount into a one-tick bill.
+	if _, ok := EstimateOfficialSTTCost(1e100, false); ok {
+		t.Fatal("unrepresentable duration was priced")
+	}
+	if _, ok := EstimateOfficialTTSCharacterCost(int(^uint(0) >> 1)); ok {
+		t.Fatal("unrepresentable character count was priced")
+	}
 }
 
 func TestReconstructOfficialCostReturnsExactStoredFormulaInputs(t *testing.T) {

@@ -68,7 +68,7 @@ func TestSchemaUpgradesEgressNodeRotationColumns(t *testing.T) {
 	egressRepo := NewEgressRepository(database)
 	until := time.Now().Add(time.Hour).UTC()
 	degradedAt := time.Now().UTC()
-	if err := egressRepo.UpdateEgressNodeQualityState(ctx, 1, 0.5, 2, &until, domain.LastErrorExitIPQuality, 1, &degradedAt); err != nil {
+	if err := seedLegacyEgressQuality(egressRepo, ctx, 1, 0.5, 2, &until, domain.LastErrorExitIPQuality, 1, &degradedAt); err != nil {
 		t.Fatal(err)
 	}
 	rotatedAt := degradedAt.Add(time.Minute)

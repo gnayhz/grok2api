@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"os"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestPostgresModelGroupsAggregateRouteMetricsBeforeGrouping(t *testing.T) {
 	}
 	models := NewModelRepository(database)
 	const publicID = "postgres-grouped-console-image"
-	if err := models.UpsertRoutes(ctx, []model.Route{
+	if err := testsupport.Routes(ctx, models, []model.Route{
 		{PublicID: publicID, Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImage, Origin: model.OriginCatalog, Enabled: true},
 		{PublicID: publicID, Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-image", Capability: model.CapabilityImageEdit, Origin: model.OriginCatalog, Enabled: true},
 	}); err != nil {

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 const (
@@ -68,7 +70,18 @@ func (c *oauthClient) startDevice(ctx context.Context) (provider.DeviceAuthoriza
 	if payload.ExpiresIn <= 0 {
 		payload.ExpiresIn = 1800
 	}
-	return provider.DeviceAuthorization{DeviceCode: payload.DeviceCode, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, Interval: time.Duration(payload.Interval) * time.Second, ExpiresIn: time.Duration(payload.ExpiresIn) * time.Second}, nil
+	return provider.DeviceAuthorization{DeviceCode: payload.DeviceCode, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, Interval: boundedOAuthSeconds(payload.Interval), ExpiresIn: boundedOAuthSeconds(payload.ExpiresIn)}, nil
+}
+
+// Successful OAuth responses may already have rotated the refresh token. Keep
+// that material and a conservative representable lifetime, rather than letting
+// positive seconds wrap negative or discarding a complete grant on overflow.
+// Callers apply their existing nonpositive/default policy before conversion.
+func boundedOAuthSeconds(seconds int) time.Duration {
+	if int64(seconds) > math.MaxInt64/int64(time.Second) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func (c *oauthClient) pollDevice(ctx context.Context, deviceCode string) (tokenPayload, error) {
@@ -114,7 +127,7 @@ func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRef
 		return tokenPayload{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, truncated, err := readControlDocument(resp.Body, 1<<20)
 	if err != nil {
 		return tokenPayload{}, err
 	}
@@ -136,9 +149,12 @@ func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRef
 		}
 		return tokenPayload{}, &provider.CredentialRefreshError{
 			Status: resp.StatusCode, Code: oauthError.Code, Message: oauthError.Message, Response: oauthError.Response,
-			Permanent:  provider.IsPermanentCredentialRefreshErrorCode(oauthError.Code),
-			RetryAfter: parseOAuthRetryAfter(resp.Header.Get("Retry-After")),
+			Permanent:  account.IsPermanentCredentialRefreshErrorCode(oauthError.Code),
+			RetryAfter: retryafter.Header(resp.Header.Get("Retry-After"), time.Now().UTC()),
 		}
+	}
+	if truncated {
+		return tokenPayload{}, &provider.CredentialRefreshError{Status: resp.StatusCode, Code: "response_too_large", Message: "OAuth response exceeds 1 MiB"}
 	}
 	var value struct {
 		AccessToken  string `json:"access_token"`
@@ -156,7 +172,7 @@ func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRef
 		value.ExpiresIn = 3600
 	}
 	rotated := strings.TrimSpace(value.RefreshToken) != "" && strings.TrimSpace(value.RefreshToken) != strings.TrimSpace(fallbackRefresh)
-	return tokenPayload{AccessToken: value.AccessToken, RefreshToken: firstNonEmpty(value.RefreshToken, fallbackRefresh), ExpiresAt: time.Now().UTC().Add(time.Duration(value.ExpiresIn) * time.Second), IDToken: value.IDToken, RefreshTokenRotated: rotated}, nil
+	return tokenPayload{AccessToken: value.AccessToken, RefreshToken: firstNonEmpty(value.RefreshToken, fallbackRefresh), ExpiresAt: time.Now().UTC().Add(boundedOAuthSeconds(value.ExpiresIn)), IDToken: value.IDToken, RefreshTokenRotated: rotated}, nil
 }
 
 type oauthErrorDetails struct {
@@ -342,17 +358,6 @@ func truncateOAuthDiagnostic(value string, limit int) string {
 	return value
 }
 
-func parseOAuthRetryAfter(value string) time.Duration {
-	value = strings.TrimSpace(value)
-	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
-		return time.Duration(seconds) * time.Second
-	}
-	if parsed, err := http.ParseTime(value); err == nil && parsed.After(time.Now()) {
-		return time.Until(parsed)
-	}
-	return 0
-}
-
 func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Values, output any, deviceFlow bool) error {
 	ctx = infraegress.WithTrafficClass(ctx, domainegress.TrafficClassCredential)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -370,7 +375,7 @@ func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Va
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, truncated, err := readControlDocument(resp.Body, 1<<20)
 	if err != nil {
 		return err
 	}
@@ -379,6 +384,9 @@ func (c *oauthClient) postForm(ctx context.Context, endpoint string, form url.Va
 		// 不应进入日志/管理界面。
 		redacted := normalizeOAuthErrorMessage(redactOAuthDiagnosticText(string(body)), 512)
 		return fmt.Errorf("xAI OAuth 返回 %d: %s", resp.StatusCode, redacted)
+	}
+	if truncated {
+		return fmt.Errorf("xAI OAuth 响应超过 1 MiB")
 	}
 	return json.Unmarshal(body, output)
 }

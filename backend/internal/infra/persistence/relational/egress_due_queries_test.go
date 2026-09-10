@@ -110,8 +110,13 @@ func TestProbeSchedulingNoFlappingUnderFaultInjection(t *testing.T) {
 
 	// 探测失败: 只写观测字段, 调度状态不动(不抖动)。
 	unhealthyAt := now
+	revision, err := repo.BeginEgressNodeProbe(ctx, due[0].ID, "enc")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.UpdateEgressNodeProbe(ctx, due[0].ID, "enc", egress.ProbeResult{
-		Status: egress.ProbeStatusUnhealthy, TestedAt: unhealthyAt, LatencyMS: 7, Error: "dial timeout",
+		Revision: revision,
+		Status:   egress.ProbeStatusUnhealthy, TestedAt: unhealthyAt, LatencyMS: 7, Error: "dial timeout",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,8 +156,13 @@ func TestProbeSchedulingNoFlappingUnderFaultInjection(t *testing.T) {
 
 	// 探测成功: 清除传输层冷却(恢复路径), 其他冷却保留。
 	deadID := due[2].ID
+	revision, err = repo.BeginEgressNodeProbe(ctx, deadID, "enc")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.UpdateEgressNodeProbe(ctx, deadID, "enc", egress.ProbeResult{
-		Status: egress.ProbeStatusHealthy, TestedAt: now, LatencyMS: 42, ExitIP: "198.51.100.9",
+		Revision: revision,
+		Status:   egress.ProbeStatusHealthy, TestedAt: now, LatencyMS: 42, ExitIP: "198.51.100.9",
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -26,14 +26,17 @@ import (
 	"github.com/bogdanfinn/websocket"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
-	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -66,7 +69,7 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 		{publicID: "Console/grok-voice-think-fast-1.0", capability: modeldomain.CapabilityTTS}:          "grok-voice-think-fast-1.0",
 		{publicID: "Console/grok-stt", capability: modeldomain.CapabilitySTT}:                           "grok-stt",
 	}
-	routes := Routes()
+	routes := modeldomain.CatalogRoutes(account.ProviderConsole)
 	if len(routes) != len(expected) {
 		t.Fatalf("routes = %d, want %d", len(routes), len(expected))
 	}
@@ -78,7 +81,7 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 			t.Fatalf("route %q = %q", route.PublicID, route.UpstreamModel)
 		}
 	}
-	aliases := Aliases()
+	aliases := modeldomain.CompatibilityAliases()
 	if len(aliases) != 14 {
 		t.Fatalf("aliases = %d, want 14", len(aliases))
 	}
@@ -94,7 +97,7 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 		"grok-4.5-console",
 		"grok-4.20-multi-agent-low", "grok-4.20-multi-agent-medium", "grok-4.20-multi-agent-high", "grok-4.20-multi-agent-xhigh",
 	} {
-		alias, ok := registry.ResolveModelAlias(name)
+		alias, ok := modeldomain.ResolveCompatibilityAlias(name)
 		if !ok {
 			t.Fatalf("alias %q missing", name)
 		}
@@ -175,78 +178,104 @@ func TestVoiceWebSocketProofEndpointUsesHTTPUpgradeURI(t *testing.T) {
 }
 
 func TestVoiceWebSocketRefreshesDPoPOnceAfterUnauthorized(t *testing.T) {
-	var tokenRequests atomic.Int32
-	var websocketRequests atomic.Int32
-	server := fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
-		switch request.URL.Path {
-		case "/v1/dpop/token":
-			tokenRequests.Add(1)
-			var payload struct {
-				JWK dpopJWK `json:"jwk"`
-			}
-			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-				t.Errorf("decode DPoP token request: %v", err)
-				writer.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			thumbprint, err := dpopJWKThumbprint(payload.JWK)
-			if err != nil {
-				t.Errorf("DPoP thumbprint: %v", err)
-				writer.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			header, _ := json.Marshal(map[string]any{"alg": "HS256", "typ": "JWT"})
-			claims, _ := json.Marshal(map[string]any{
-				"sub": "test-user", "iat": time.Now().UTC().Unix(), "exp": time.Now().UTC().Add(5 * time.Minute).Unix(),
-				"cnf": map[string]any{"jkt": thumbprint}, "token_use": "dpop-bound",
-			})
-			accessToken := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims) + ".dGVzdA"
-			writer.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": accessToken, "token_type": "DPoP", "expires_in": 300})
-		case "/v1/realtime":
-			current := websocketRequests.Add(1)
-			proof, _, err := jwt.NewParser().ParseUnverified(request.Header.Get("DPoP"), jwt.MapClaims{})
-			if err != nil {
-				t.Errorf("parse DPoP proof: %v", err)
-				writer.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			claims := proof.Claims.(jwt.MapClaims)
-			wantHTU := "http://" + request.Host + request.URL.EscapedPath()
-			if claims["htu"] != wantHTU || claims["htm"] != http.MethodGet {
-				t.Errorf("websocket DPoP binding = %#v, want htu=%q", claims, wantHTU)
-			}
-			if current == 1 {
-				writer.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			connection, err := (&websocket.Upgrader{CheckOrigin: func(*fhttp.Request) bool { return true }}).Upgrade(writer, request, nil)
-			if err != nil {
-				t.Errorf("upgrade voice websocket: %v", err)
-				return
-			}
-			_ = connection.Close()
-		default:
-			fhttp.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
+	for _, limit := range []int{1, 2, 3, 4} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			var tokenRequests atomic.Int32
+			var websocketRequests atomic.Int32
+			server := fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
+				switch request.URL.Path {
+				case "/v1/dpop/token":
+					tokenRequests.Add(1)
+					var payload struct {
+						JWK dpopJWK `json:"jwk"`
+					}
+					if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+						t.Errorf("decode DPoP token request: %v", err)
+						writer.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					thumbprint, err := dpopJWKThumbprint(payload.JWK)
+					if err != nil {
+						t.Errorf("DPoP thumbprint: %v", err)
+						writer.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					header, _ := json.Marshal(map[string]any{"alg": "HS256", "typ": "JWT"})
+					claims, _ := json.Marshal(map[string]any{
+						"sub": "test-user", "iat": time.Now().UTC().Unix(), "exp": time.Now().UTC().Add(5 * time.Minute).Unix(),
+						"cnf": map[string]any{"jkt": thumbprint}, "token_use": "dpop-bound",
+					})
+					accessToken := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims) + ".dGVzdA"
+					writer.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": accessToken, "token_type": "DPoP", "expires_in": 300})
+				case "/v1/realtime":
+					current := websocketRequests.Add(1)
+					proof, _, err := jwt.NewParser().ParseUnverified(request.Header.Get("DPoP"), jwt.MapClaims{})
+					if err != nil {
+						t.Errorf("parse DPoP proof: %v", err)
+						writer.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					claims := proof.Claims.(jwt.MapClaims)
+					wantHTU := "http://" + request.Host + request.URL.EscapedPath()
+					if claims["htu"] != wantHTU || claims["htm"] != http.MethodGet {
+						t.Errorf("websocket DPoP binding = %#v, want htu=%q", claims, wantHTU)
+					}
+					if current == 1 {
+						writer.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					connection, err := (&websocket.Upgrader{CheckOrigin: func(*fhttp.Request) bool { return true }}).Upgrade(writer, request, nil)
+					if err != nil {
+						t.Errorf("upgrade voice websocket: %v", err)
+						return
+					}
+					_ = connection.Close()
+				default:
+					fhttp.NotFound(writer, request)
+				}
+			}))
+			defer server.Close()
 
-	adapter, credential := newConsoleTestAdapter(t, server.URL)
-	connection, cleanup, err := adapter.DialVoiceWebSocket(context.Background(), provider.VoiceWebSocketRequest{
-		Credential: credential, Path: "/realtime", Model: "grok-voice-latest",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if connection != nil {
-		_ = connection.Close()
-	}
-	if cleanup != nil {
-		cleanup()
-	}
-	if tokenRequests.Load() != 2 || websocketRequests.Load() != 2 {
-		t.Fatalf("requests token=%d websocket=%d", tokenRequests.Load(), websocketRequests.Load())
+			adapter, credential := newConsoleTestAdapter(t, server.URL)
+			ctx := attemptmeta.WithRequest(context.Background(), "voice-budget", 1, "rules", nil)
+			ctx = attemptmeta.WithAccount(ctx, credential.ID, "grok_console", "grok-voice-latest")
+			ctx = infraegress.WithPhysicalCallTrace(ctx, "grok_console", "realtime")
+			budget := inferencedomain.NewAttemptBudget(limit)
+			defer budget.Close()
+			ctx = infraegress.WithPhysicalCallBudget(ctx, budget)
+			connection, cleanup, err := adapter.DialVoiceWebSocket(ctx, provider.VoiceWebSocketRequest{
+				Credential: credential, Path: "/realtime", Model: "grok-voice-latest",
+			})
+			if limit == 4 && err != nil {
+				t.Fatal(err)
+			}
+			if limit < 4 && !errors.Is(err, inferencedomain.ErrAttemptBudget) {
+				t.Fatalf("budget err=%v", err)
+			}
+			if connection != nil {
+				_ = connection.Close()
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+			expectedTokens, expectedSockets := int32((limit+1)/2), int32(limit/2)
+			if tokenRequests.Load() != expectedTokens || websocketRequests.Load() != expectedSockets {
+				t.Fatalf("requests token=%d websocket=%d limit=%d", tokenRequests.Load(), websocketRequests.Load(), limit)
+			}
+			facts := infraegress.PhysicalFacts(ctx)
+			if len(facts) != limit || budget.Remaining() != 0 {
+				t.Fatalf("missing physical budget receipts: remaining=%d facts=%+v", budget.Remaining(), facts)
+			}
+			for i, fact := range facts {
+				if fact.Attempt.AccountID != credential.ID || fact.Attempt.Ordinal != uint64(i+1) {
+					t.Fatalf("identity=%+v", fact)
+				}
+			}
+			if limit == 4 && (facts[0].Stage != "credential_prepare" || facts[1].Status != 401 || facts[2].Stage != "credential_prepare" || facts[3].Stage != "authorization_retry" || facts[3].HeaderOutcome != "upgraded") {
+				t.Fatalf("wrong retry facts=%+v", facts)
+			}
+		})
 	}
 }
 
@@ -295,7 +324,7 @@ func TestNormalizeRequestAppliesConsoleContract(t *testing.T) {
 		"model":"grok-4.3",
 		"metadata":{"private":"value"},
 		"reasoning":{"effort":"xhigh"},
-		"tools":[{"type":"web_search","custom":true},{"type":"function","name":"lookup","parameters":{"type":"object"}}]
+		"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]
 	}`), spec)
 	if err != nil {
 		t.Fatal(err)
@@ -323,7 +352,7 @@ func TestNormalizeRequestAppliesConsoleContract(t *testing.T) {
 		t.Fatalf("tools = %#v", tools)
 	}
 	webSearch, _ := tools[0].(map[string]any)
-	if webSearch["custom"] != nil || webSearch["enable_image_understanding"] != true {
+	if webSearch["custom"] != nil || webSearch["enable_image_understanding"] != nil {
 		t.Fatalf("web_search = %#v", webSearch)
 	}
 	stateless, err := normalizeRequest([]byte(`{"model":"grok-4.3","store":true,"previous_response_id":"resp_1","service_tier":"priority","prompt_cache_key":"cache_1","input":"hello"}`), spec)
@@ -345,7 +374,7 @@ func TestNormalizeRequestForwardsXSearchTimeRangeAndImageSearch(t *testing.T) {
 	t.Run("forwards enable_image_search on web_search", func(t *testing.T) {
 		body, err := normalizeRequest([]byte(`{
 			"model":"grok-4.3",
-			"tools":[{"type":"web_search","enable_image_search":true,"custom":true}]
+			"tools":[{"type":"web_search","enable_image_search":true}]
 		}`), spec)
 		if err != nil {
 			t.Fatal(err)
@@ -359,7 +388,7 @@ func TestNormalizeRequestForwardsXSearchTimeRangeAndImageSearch(t *testing.T) {
 			t.Fatalf("tools = %#v", tools)
 		}
 		webSearch, _ := tools[0].(map[string]any)
-		if webSearch["type"] != "web_search" || webSearch["enable_image_understanding"] != true {
+		if webSearch["type"] != "web_search" || webSearch["enable_image_understanding"] != nil {
 			t.Fatalf("web_search defaults = %#v", webSearch)
 		}
 		if webSearch["enable_image_search"] != true {
@@ -391,7 +420,7 @@ func TestNormalizeRequestForwardsXSearchTimeRangeAndImageSearch(t *testing.T) {
 	t.Run("forwards valid x_search from_date and to_date", func(t *testing.T) {
 		body, err := normalizeRequest([]byte(`{
 			"model":"grok-4.3",
-			"tools":[{"type":"x_search","from_date":"2026-07-01","to_date":"2026-07-23","noise":1}]
+			"tools":[{"type":"x_search","from_date":"2026-07-01","to_date":"2026-07-23"}]
 		}`), spec)
 		if err != nil {
 			t.Fatal(err)
@@ -401,7 +430,7 @@ func TestNormalizeRequestForwardsXSearchTimeRangeAndImageSearch(t *testing.T) {
 			t.Fatal(err)
 		}
 		xSearch, _ := payload["tools"].([]any)[0].(map[string]any)
-		if xSearch["type"] != "x_search" || xSearch["enable_video_understanding"] != true {
+		if xSearch["type"] != "x_search" || xSearch["enable_video_understanding"] != nil {
 			t.Fatalf("x_search defaults = %#v", xSearch)
 		}
 		if xSearch["from_date"] != "2026-07-01" || xSearch["to_date"] != "2026-07-23" {
@@ -412,42 +441,17 @@ func TestNormalizeRequestForwardsXSearchTimeRangeAndImageSearch(t *testing.T) {
 		}
 	})
 
-	t.Run("drops invalid date formats", func(t *testing.T) {
-		body, err := normalizeRequest([]byte(`{
-			"model":"grok-4.3",
-			"tools":[{"type":"x_search","from_date":"2026-7-01","to_date":"2026-02-30"}]
-		}`), spec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var payload map[string]any
-		if err := json.Unmarshal(body, &payload); err != nil {
-			t.Fatal(err)
-		}
-		xSearch, _ := payload["tools"].([]any)[0].(map[string]any)
-		if xSearch["from_date"] != nil || xSearch["to_date"] != nil {
-			t.Fatalf("invalid dates should be dropped: %#v", xSearch)
-		}
-		if xSearch["type"] != "x_search" || xSearch["enable_video_understanding"] != true {
-			t.Fatalf("x_search defaults should remain: %#v", xSearch)
+	t.Run("rejects invalid date formats", func(t *testing.T) {
+		_, err := normalizeRequest([]byte(`{"model":"grok-4.3","tools":[{"type":"x_search","from_date":"2026-7-01","to_date":"2026-02-30"}]}`), spec)
+		if err == nil {
+			t.Fatal("invalid search boundary accepted")
 		}
 	})
 
-	t.Run("drops inverted date range", func(t *testing.T) {
-		body, err := normalizeRequest([]byte(`{
-			"model":"grok-4.3",
-			"tools":[{"type":"x_search","from_date":"2026-07-24","to_date":"2026-07-23"}]
-		}`), spec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var payload map[string]any
-		if err := json.Unmarshal(body, &payload); err != nil {
-			t.Fatal(err)
-		}
-		xSearch, _ := payload["tools"].([]any)[0].(map[string]any)
-		if xSearch["from_date"] != nil || xSearch["to_date"] != nil {
-			t.Fatalf("inverted range should drop both bounds: %#v", xSearch)
+	t.Run("rejects inverted date range", func(t *testing.T) {
+		_, err := normalizeRequest([]byte(`{"model":"grok-4.3","tools":[{"type":"x_search","from_date":"2026-07-24","to_date":"2026-07-23"}]}`), spec)
+		if err == nil {
+			t.Fatal("invalid search boundary accepted")
 		}
 	})
 
@@ -485,7 +489,7 @@ func TestNormalizeRequestAvoidsClientViewImageToolCollision(t *testing.T) {
 			operation: conversation.OperationResponses,
 			body: `{"model":"grok-4.5","input":"Reply only OK. Do not call tools.","tools":[
 				{"type":"function","name":"view_image","description":"View a local image","strict":false,"parameters":{"type":"object"}},
-				{"type":"web_search","enable_image_understanding":true}],"tool_choice":"auto"}`,
+				{"type":"web_search"}],"tool_choice":"auto"}`,
 		},
 		{
 			name:      "chat completions",
@@ -540,9 +544,9 @@ func TestNormalizeRequestAvoidsClientViewImageToolCollision(t *testing.T) {
 }
 
 func TestNormalizeRequestDoesNotInjectToolsForConsoleCatalog(t *testing.T) {
-	for _, spec := range catalog {
+	for _, spec := range Catalog() {
 		t.Run(spec.PublicID, func(t *testing.T) {
-			body, err := normalizeRequest([]byte(`{"model":"public","input":"hello","tool_choice":"required"}`), spec)
+			body, err := normalizeRequest([]byte(`{"model":"public","input":"hello"}`), spec)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -639,7 +643,6 @@ func TestNormalizeRequestAppliesConsoleCompatibilityBoundary(t *testing.T) {
 			]}
 		],
 		"tools":[
-			{"type":"namespace","name":"crm","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
 			{"type":"web_search","external_web_access":true}
 		],
 		"tool_choice":"required"
@@ -651,7 +654,7 @@ func TestNormalizeRequestAppliesConsoleCompatibilityBoundary(t *testing.T) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["response_format"] != nil || payload["reasoning"] != nil || payload["tool_choice"] != "auto" {
+	if payload["response_format"] != nil || payload["reasoning"] != nil || payload["tool_choice"] != "required" {
 		t.Fatalf("payload boundary = %#v", payload)
 	}
 	include, _ := payload["include"].([]any)
@@ -855,10 +858,10 @@ func TestConsoleImportBareArrayErrors(t *testing.T) {
 }
 
 func TestConsoleRetryAfterParsesCompoundDuration(t *testing.T) {
-	if value := consoleRetryAfter([]byte(`Rate limit reached. Resets in: 1h 2m 3s`)); value != time.Hour+2*time.Minute+3*time.Second {
+	if value := retryafter.ResetText(`Rate limit reached. Resets in: 1h 2m 3s`); value != time.Hour+2*time.Minute+3*time.Second {
 		t.Fatalf("retry after = %s", value)
 	}
-	if value := consoleRetryAfter([]byte(`ordinary error`)); value != 0 {
+	if value := retryafter.ResetText(`ordinary error`); value != 0 {
 		t.Fatalf("ordinary retry after = %s", value)
 	}
 }
@@ -982,7 +985,9 @@ func TestAdapterDoesNotPenalizeEgressForBlockedAccount(t *testing.T) {
 			repository := &recordingConsoleEgressRepository{node: egressdomain.Node{
 				ID: 1, Name: "console", Enabled: true, Health: 1,
 			}}
-			adapter := NewAdapter(Config{BaseURL: server.URL, TimeoutSeconds: 5}, infraegress.NewManager(repository, cipher), cipher, nil)
+			manager := infraegress.NewManager(repository, cipher)
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
+			adapter := NewAdapter(Config{BaseURL: server.URL, Timeout: 5 * time.Second}, manager, cipher, nil)
 			credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}
 			response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
 				Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.3",
@@ -998,6 +1003,9 @@ func TestAdapterDoesNotPenalizeEgressForBlockedAccount(t *testing.T) {
 			_ = response.Body.Close()
 			if response.StatusCode != http.StatusForbidden || string(body) != test.body {
 				t.Fatalf("status=%d body=%s", response.StatusCode, body)
+			}
+			if err := adapter.egress.FlushFeedback(context.Background()); err != nil {
+				t.Fatal(err)
 			}
 			if updates := repository.UpdateCount(); updates != test.wantUpdates {
 				t.Fatalf("egress updates = %d, want %d", updates, test.wantUpdates)
@@ -1102,7 +1110,7 @@ func TestAdapterScopesStreamIdleTimeoutToConsoleTextStreams(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			adapter, credential := newConsoleTestAdapter(t, server.URL)
-			adapter.UpdateConfig(Config{BaseURL: server.URL, TimeoutSeconds: 5, StreamIdleTimeoutSeconds: 1})
+			adapter.UpdateConfig(Config{BaseURL: server.URL, Timeout: 5 * time.Second, StreamIdleTimeout: 1 * time.Second})
 			response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
 				Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.3",
 				Operation: conversation.OperationResponses, Streaming: streaming, NormalizeBody: true,
@@ -1112,13 +1120,9 @@ func TestAdapterScopesStreamIdleTimeoutToConsoleTextStreams(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer response.Body.Close()
-			released, ok := response.Body.(*releaseBody)
-			if !ok {
-				t.Fatalf("response body = %T, want *releaseBody", response.Body)
-			}
-			_, wrapped := released.ReadCloser.(*providerstreamidle.ReadCloser)
-			if wrapped != streaming {
-				t.Fatalf("stream-idle wrapper present = %t, streaming = %t", wrapped, streaming)
+			canonical := responseflow.FromReader(response.Body)
+			if (canonical != nil) != streaming {
+				t.Fatalf("canonical stream present=%v streaming=%v", canonical != nil, streaming)
 			}
 		})
 	}
@@ -1137,7 +1141,8 @@ func TestConsoleStreamingReadReturnsIdleTimeout(t *testing.T) {
 	defer server.Close()
 
 	adapter, credential := newConsoleTestAdapter(t, server.URL)
-	adapter.UpdateConfig(Config{BaseURL: server.URL, TimeoutSeconds: 5, StreamIdleTimeoutSeconds: 1})
+	adapter.UpdateConfig(Config{BaseURL: server.URL, Timeout: 5 * time.Second, StreamIdleTimeout: 175 * time.Millisecond})
+	started := time.Now()
 	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
 		Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.3",
 		Operation: conversation.OperationResponses, Streaming: true, NormalizeBody: true,
@@ -1150,6 +1155,10 @@ func TestConsoleStreamingReadReturnsIdleTimeout(t *testing.T) {
 	if _, err := io.Copy(io.Discard, response.Body); !errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout) {
 		t.Fatalf("body read error = %v, want ErrUpstreamStreamIdleTimeout", err)
 	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond || elapsed >= time.Second {
+		t.Fatalf("fractional idle timeout elapsed=%s", elapsed)
+	}
+
 }
 
 func TestApplyChromiumClientHintsSkipsNonChromiumUserAgent(t *testing.T) {
@@ -1247,7 +1256,7 @@ func TestSyncQuotaUsesDPoPUsageQuotas(t *testing.T) {
 			mode                         string
 			remaining, total, windowSecs int
 		}{
-			{mode: QuotaMode, remaining: 9, total: 10, windowSecs: 24 * 60 * 60},
+			{mode: QuotaMode, remaining: 9, total: 10},
 			{mode: QuotaModeImage, remaining: 5, total: 5},
 			{mode: QuotaModeVideo, remaining: 2, total: 2},
 		}
@@ -1263,7 +1272,7 @@ func TestSyncQuotaUsesDPoPUsageQuotas(t *testing.T) {
 	}
 }
 
-func TestSyncQuotaPredictsChatRecoveryAfter24Hours(t *testing.T) {
+func TestSyncQuotaLeavesRecoveryPredictionToAccountOwner(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/v1/dpop/token" {
 			serveTestDPoPToken(t, writer, request)
@@ -1274,18 +1283,14 @@ func TestSyncQuotaPredictsChatRecoveryAfter24Hours(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter, credential := newConsoleTestAdapter(t, server.URL)
-	startedAt := time.Now().UTC()
 	snapshot, err := adapter.SyncQuota(context.Background(), credential)
 	if err != nil {
 		t.Fatal(err)
 	}
-	chat := snapshot.Windows[0]
-	if chat.ResetAt == nil || chat.WindowSeconds != 24*60*60 {
-		t.Fatalf("chat recovery = %#v", chat)
-	}
-	want := startedAt.Add(24 * time.Hour)
-	if chat.ResetAt.Before(want) || chat.ResetAt.After(time.Now().UTC().Add(24*time.Hour)) {
-		t.Fatalf("predicted recovery = %s, want around %s", chat.ResetAt, want)
+	for _, window := range snapshot.Windows {
+		if window.ResetAt != nil || window.WindowSeconds != 0 {
+			t.Fatalf("protocol adapter manufactured recovery timing: %+v", window)
+		}
 	}
 }
 
@@ -1529,7 +1534,7 @@ func TestConsoleImageGenerationForwardsStandardDPoPRequest(t *testing.T) {
 			t.Errorf("image payload = %#v", payload)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(map[string]any{"created": 123, "data": []any{map[string]any{"url": "http://" + request.Host + "/generated.png", "revised_prompt": "drawn"}}})
+		_ = json.NewEncoder(writer).Encode(map[string]any{"created": 123, "data": []any{map[string]any{"url": "http://" + request.Host + "/generated.png", "revised_prompt": "drawn"}, map[string]any{"url": "http://" + request.Host + "/generated.png", "revised_prompt": "drawn"}}})
 	}))
 	t.Cleanup(server.Close)
 	store := &consoleImageAssetStoreStub{}
@@ -1561,10 +1566,10 @@ func TestConsoleImageGenerationForwardsStandardDPoPRequest(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Created != 123 || len(result.Data) != 1 || result.Data[0].URL != "https://local.example/v1/media/images/console-1" || result.Data[0].MIMEType != "image/png" || result.Data[0].RevisedPrompt != "drawn" {
+	if result.Created != 123 || len(result.Data) != 2 || result.Data[0].URL != "https://local.example/v1/media/images/console-1" || result.Data[0].MIMEType != "image/png" || result.Data[0].RevisedPrompt != "drawn" {
 		t.Fatalf("localized image response = %s", body)
 	}
-	if saved := store.Saved(); len(saved) != 1 || !bytes.Equal(saved[0], imageBytes) {
+	if saved := store.Saved(); len(saved) != 2 || !bytes.Equal(saved[0], imageBytes) {
 		t.Fatalf("saved images = %#v", saved)
 	}
 	if selection, ok := trace.Selection(egressdomain.ScopeConsoleAsset); !ok || selection.Scope != egressdomain.ScopeConsoleAsset {
@@ -1594,7 +1599,7 @@ func TestConsoleImageEditForwardsMultipleImages(t *testing.T) {
 			t.Errorf("response_format = %#v", payload["response_format"])
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"data":[{"b64_json":"aW1hZ2U=","revised_prompt":"merged"}]}`))
+		_, _ = writer.Write([]byte(`{"data":[{"b64_json":"aW1hZ2U=","revised_prompt":"merged"},{"b64_json":"aW1hZ2U=","revised_prompt":"merged"}]}`))
 	}))
 	t.Cleanup(server.Close)
 	adapter, credential := newConsoleTestAdapter(t, server.URL)
@@ -1646,12 +1651,9 @@ func TestConsoleImage20ForwardsQualityAndRejectsItForLegacyModels(t *testing.T) 
 	legacy, err := adapter.GenerateImage(context.Background(), provider.ImageGenerationRequest{
 		Credential: credential, Model: "grok-imagine-image", Prompt: "draw", Count: 1, Quality: "low",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer legacy.Body.Close()
-	if legacy.StatusCode != http.StatusBadRequest {
-		t.Fatalf("legacy quality response = %#v", legacy)
+	var invalid *inferencedomain.RequestValidationError
+	if legacy != nil || !errors.As(err, &invalid) {
+		t.Fatalf("legacy quality validation: response=%v err=%v", legacy, err)
 	}
 }
 
@@ -2134,7 +2136,9 @@ func newConsoleTestAdapterWithAssets(t *testing.T, baseURL string, assets provid
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: baseURL, TimeoutSeconds: 5}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher, assets)
+	manager := infraegress.NewManager(consoleEgressRepositoryStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	adapter := NewAdapter(Config{BaseURL: baseURL, Timeout: 5 * time.Second}, manager, cipher, assets)
 	credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}
 	return adapter, credential
 }
@@ -2179,7 +2183,7 @@ func (consoleEgressRepositoryStub) CreateEgressNode(context.Context, egressdomai
 	return egressdomain.Node{}, errors.New("unsupported")
 }
 
-func (consoleEgressRepositoryStub) UpdateEgressNode(context.Context, egressdomain.Node) (egressdomain.Node, error) {
+func (consoleEgressRepositoryStub) UpdateEgressNodeConfiguration(context.Context, egressdomain.Node, egressdomain.FixedTargetValidator) (egressdomain.Node, error) {
 	return egressdomain.Node{}, errors.New("unsupported")
 }
 
@@ -2209,7 +2213,7 @@ func (r *recordingConsoleEgressRepository) CreateEgressNode(context.Context, egr
 	return egressdomain.Node{}, errors.New("unsupported")
 }
 
-func (r *recordingConsoleEgressRepository) UpdateEgressNode(_ context.Context, value egressdomain.Node) (egressdomain.Node, error) {
+func (r *recordingConsoleEgressRepository) UpdateEgressNodeConfiguration(_ context.Context, value egressdomain.Node, validate egressdomain.FixedTargetValidator) (egressdomain.Node, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.node = value

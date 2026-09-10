@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
-// seedRouteBench 建 1000 条跨 Provider 路由（含启用账号 binding——
+// seedRouteBench 建 1000 个跨 Provider 公开名（含启用账号 binding——
 // availableRoutes 谓词要求，缺失时候选查询按设计返回 not found）。
 func seedRouteBench(b *testing.B, repo *ModelRepository, database *Database) []string {
 	b.Helper()
@@ -22,12 +24,9 @@ func seedRouteBench(b *testing.B, repo *ModelRepository, database *Database) []s
 	}
 	accountRepo := NewAccountRepository(database)
 	syncedAt := time.Now().UTC()
-	// 先建路由（UpsertDiscovered 按 Provider 命名空间），再为每个 Provider
-	// 的账号建 binding——ReplaceAccountCapabilities 只绑已有路由，不建路由。
+	// Each public name keeps three real executable targets. Static Providers
+	// reuse supported products through manual names, not invented upstream IDs.
 	for _, p := range providers {
-		if err := repo.UpsertDiscovered(ctx, p, names); err != nil {
-			b.Fatal(err)
-		}
 		seed := map[account.Provider]string{account.ProviderBuild: "build", account.ProviderWeb: "web", account.ProviderConsole: "console"}[p]
 		created, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
 			Provider: p, Name: "bench-" + seed, SourceKey: "bench-" + seed,
@@ -36,7 +35,16 @@ func seedRouteBench(b *testing.B, repo *ModelRepository, database *Database) []s
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := repo.ReplaceAccountCapabilities(ctx, created.ID, names, syncedAt); err != nil {
+		upstream, capability := "grok-4.5", model.CapabilityResponses
+		if p == account.ProviderWeb {
+			upstream, capability = "grok-chat-fast", model.CapabilityChat
+		}
+		for _, name := range names {
+			if _, err := repo.Create(ctx, model.Route{PublicID: name, Provider: p, UpstreamModel: upstream, Capability: capability, Enabled: true}, []uint64{created.ID}); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := testsupport.Capabilities(ctx, repo, accountRepo, created.ID, []string{upstream}, syncedAt); err != nil {
 			b.Fatal(err)
 		}
 	}

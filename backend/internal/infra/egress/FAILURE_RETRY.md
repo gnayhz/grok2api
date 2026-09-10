@@ -12,7 +12,7 @@ This mechanism reduces long retry stalls after a fixed proxy has a transient tra
 6. A healthy probe atomically clears only transport-failure health, failure-count, and cooldown fields. The waiting request reloads the node and continues immediately.
 7. An unhealthy or failed probe leaves the cooldown in place, so the waiting request returns the normal unavailable result instead of retrying a dead route.
 
-The probe runs with an independent 20-second background timeout. Cancellation of the user request stops only that request's wait; it does not cancel the shared probe. A five-second completion grace closes the race where a retry arrives immediately after the probe finishes.
+Request completion enqueues a versioned observation without waiting for storage. The local overlay applies cooldown immediately; bounded workers persist it and schedule recovery. The probe runs with an independent 20-second background timeout, canceled and joined by runtime shutdown. Cancellation of the user request stops only that request's wait; it does not cancel the shared probe. A five-second completion grace closes the race where a retry arrives immediately after the probe finishes. At most eight immediate probes run concurrently per manager. Overflow nodes retain their cooldown and rely on scheduled probing. Completed entries expire after the grace period, with a hard cap of 1,024 retained states; capacity eviction may shorten that grace for the oldest completion.
 
 ## Fixed nodes and proxy pools
 
@@ -27,18 +27,23 @@ Proxy-pool nodes represent request-level or identity-level rotating exits. One f
 - Persists cooldown before scheduling the recovery probe.
 - Coalesces probes per node to prevent a failure burst from causing a probe burst.
 - Re-reads node state after probe completion instead of trusting stale in-memory state.
-- Uses an expected encrypted proxy value when persisting probe results, so a probe cannot overwrite an operator's concurrent proxy change.
-- Clears only cooldowns whose `last_error` is exactly the transport-failure marker. Anti-bot and operator state remain intact.
+- Uses an expected encrypted proxy value, configuration generation and probe sequence when persisting probe results, so a probe cannot overwrite an operator's concurrent proxy change.
+- Clears only cooldowns whose `last_error` is exactly the transport-failure marker and whose health revision has not changed since probe admission. Anti-bot and operator state remain intact.
 - Honors request cancellation and bounds every wait.
 - Logs node metadata and probe outcome without proxy URLs or credentials.
 
 ## Implementation map
 
-- `manager.go`: failure classification, cooldown, probe scheduling, coalescing, bounded waiting, and retry acquisition.
+- `manager.go`: lease acquisition and retry acquisition.
+- `feedback.go`: failure classification, health feedback, and cooldown.
+- `failure_probe.go`: probe scheduling, coalescing, concurrency limits, and bounded waiting.
+- `node_snapshot.go` / `route_rules.go` / `pool.go`: invalidation of all routing views before waking probe waiters.
 - `application/egress/operations.go`: real connectivity probe and persistence.
 - `relational/egress_repository.go`: compare-and-update persistence and transport-only cooldown recovery.
-- `application/app/application.go`: wires the egress service probe callback into the manager.
+- `app/application.go`: wires the egress service probe callback into the manager.
 
 ## Test coverage
 
 `manager_test.go` covers pool isolation, fixed-node cooldown, probe coalescing, healthy recovery, unhealthy recovery, and request cancellation. Repository and operations tests cover stale-probe rejection and transport-only state clearing.
+
+See [runtime ownership, budgets and verification](README.md) for the complete lifecycle and observation contract.

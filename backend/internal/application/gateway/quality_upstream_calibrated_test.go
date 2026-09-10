@@ -24,16 +24,16 @@ import (
 // 的空闲路径收口。
 func TestDeadlineSemanticsWithholdsOutputStream(t *testing.T) {
 	t.Parallel()
-	sig := qualityStreamSignals{VisibleTokens: 64}
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	sig := QualityStreamSignals{VisibleTokens: 64}
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("可见输出+零思考 = %s，应扣留（降智流不因任何原因放行）", v)
 	}
-	stubOnly := qualityStreamSignals{}
-	if v := classifyQualityHold(stubOnly); v != QualityWait {
+	stubOnly := QualityStreamSignals{}
+	if v := classifyQualityHoldShadowed(stubOnly); v != QualityWait {
 		t.Fatalf("stub-only = %s，应继续等待（空流走 idle 路径）", v)
 	}
-	terminal := qualityStreamSignals{VisibleTokens: 64, Terminal: true}
-	if v := classifyQualityHold(terminal); v != QualityWithhold {
+	terminal := QualityStreamSignals{VisibleTokens: 64, Terminal: true}
+	if v := classifyQualityHoldShadowed(terminal); v != QualityWithhold {
 		t.Fatalf("终态无证据 = %s，应扣留", v)
 	}
 }
@@ -72,7 +72,7 @@ func TestToolDeclarationsStillHeld(t *testing.T) {
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6"}
 	cfg := QualityRetryRuntime{Enabled: true}
 	gate := func(body string) bool {
-		return shouldHoldQualityStream(Input{Streaming: true, Body: []byte(body), PublicModel: "grok-4.6"}, nil, route, audit.OperationResponses, cfg)
+		return shouldHoldQualityStream(Input{Streaming: true, Body: []byte(body), PublicModel: "grok-4.6"}, nil, route, audit.OperationResponses, cfg, nil)
 	}
 	for _, tc := range []struct {
 		name string
@@ -103,7 +103,7 @@ func TestConvertedEncryptedThinkingNotEvidence(t *testing.T) {
 	observeQualityChunk(&chat, []byte(sse(
 		`data: {"choices":[{"delta":{"reasoning_content":"先想一步"}}]}`,
 	)))
-	if v := classifyQualityHold(chat.signals()); v != QualityDeliver {
+	if v := classifyQualityHoldShadowed(chat.signals()); v != QualityDeliver {
 		t.Fatalf("chat 可见 reasoning_content 增量应放行: %s (%#v)", v, chat.signals())
 	}
 	messages := qualityScanState{protocol: qualityProtocolAnthropic}
@@ -113,7 +113,7 @@ func TestConvertedEncryptedThinkingNotEvidence(t *testing.T) {
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"`+content+`"}}`,
 		`data: {"type":"message_stop"}`,
 	)))
-	if v := classifyQualityHold(messages.signals()); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(messages.signals()); v != QualityWithhold {
 		t.Fatalf("signature_delta（Messages 加密思考）不是证据，应扣留: %s (%#v)", v, messages.signals())
 	}
 }
@@ -146,7 +146,8 @@ func TestSemanticAndAggregatedOutputNotEmptyStream(t *testing.T) {
 // 清冷却保留打击标记（二击停用不可绕过）。
 func TestClearCooldownPreservesStrikeMarker(t *testing.T) {
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "strike-preserve.db"))
+	databasePath := filepath.Join(t.TempDir(), "strike-preserve.db")
+	database, err := relational.OpenSQLite(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestClearCooldownPreservesStrikeMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateHealth(ctx, created.ID, accountdomain.ProviderBuild, 0, nil, accountdomain.LastErrorMissingThinkingDisabled, false); err != nil {
+	if err := seedHealthFixture(databasePath, ctx, created.ID, accountdomain.ProviderBuild, 0, nil, accountdomain.LastErrorMissingThinkingDisabled, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.ClearCooldown(ctx, created.ID); err != nil {

@@ -1,7 +1,6 @@
 package inference
 
 import (
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,23 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
-
-func TestStreamingSTTDurationAcceptsOnlyCompletedFiniteEvents(t *testing.T) {
-	duration, ok := streamingSTTDuration([]byte(`{"type":"transcript.done","duration":3.45,"text":"hello"}`))
-	if !ok || math.Abs(duration-3.45) > 1e-9 {
-		t.Fatalf("completed duration = %v, ok = %t", duration, ok)
-	}
-	for _, payload := range [][]byte{
-		[]byte(`{"type":"transcript.delta","duration":3.45}`),
-		[]byte(`{"type":"transcript.done","duration":0}`),
-		[]byte(`{"type":"transcript.done","duration":"3.45"}`),
-		[]byte(`not-json`),
-	} {
-		if duration, ok := streamingSTTDuration(payload); ok || duration != 0 {
-			t.Fatalf("invalid payload %q produced duration %v, ok = %t", payload, duration, ok)
-		}
-	}
-}
 
 func TestOpenAIAudioSpeechValidatesAndMapsFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)

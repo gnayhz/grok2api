@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 )
 
 type reasoningReplayEntry struct {
@@ -87,6 +89,7 @@ func (s *ReasoningReplayStore) Get(_ context.Context, model, sessionKey string, 
 	if !now.Before(entry.expiresAt) {
 		s.totalBytes -= reasoningReplayEntrySize(entry)
 		delete(s.values, key)
+		recordReplayEviction("expired")
 		s.mu.Unlock()
 		return nil, false, nil
 	}
@@ -152,6 +155,7 @@ func (s *ReasoningReplayStore) evictLocked(now time.Time) {
 		if !now.Before(entry.expiresAt) {
 			s.totalBytes -= reasoningReplayEntrySize(entry)
 			delete(s.values, key)
+			recordReplayEviction("expired")
 		}
 	}
 	if len(s.values) < s.maxSize && s.totalBytes <= s.maxBytes {
@@ -183,6 +187,7 @@ func (s *ReasoningReplayStore) evictLocked(now time.Time) {
 		}
 		s.totalBytes -= candidates[index].size
 		delete(s.values, candidates[index].key)
+		recordReplayEviction("capacity")
 	}
 }
 
@@ -194,4 +199,50 @@ func reasoningReplayEntrySize(entry reasoningReplayEntry) int64 {
 		total += int64(len(item)) + 16
 	}
 	return total
+}
+
+// Update serializes read/merge/write with Set/Delete and expiration. The merge
+// operates on owned copies; published entries remain immutable to readers.
+func (s *ReasoningReplayStore) Update(ctx context.Context, model, sessionKey string, expiresAt time.Time, merge func([][]byte) [][]byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if model == "" || sessionKey == "" || merge == nil {
+		return nil
+	}
+	key := reasoningReplayMapKey(model, sessionKey)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	now := time.Now()
+	if !expiresAt.After(now) {
+		return nil
+	}
+	previous, exists := s.values[key]
+	var current [][]byte
+	if exists && now.Before(previous.expiresAt) {
+		current = cloneReplayItems(previous.items)
+	}
+	items := merge(current)
+	if len(items) == 0 {
+		return nil
+	}
+	if exists {
+		s.totalBytes -= reasoningReplayEntrySize(previous)
+	} else {
+		s.evictLocked(now)
+	}
+	entry := reasoningReplayEntry{items: cloneReplayItems(items), expiresAt: expiresAt, storedAt: now}
+	s.values[key] = entry
+	s.totalBytes += reasoningReplayEntrySize(entry)
+	if s.totalBytes > s.maxBytes {
+		s.evictLocked(now)
+	}
+	return nil
+}
+
+func recordReplayEviction(reason string) {
+	perfmetrics.Default.Inc("reasoning_replay_evictions_total", perfmetrics.Labels{Subsystem: "reasoning_replay", Plane: "memory", Outcome: reason})
 }

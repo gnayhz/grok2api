@@ -14,6 +14,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 type layeredAccountRepository struct {
@@ -83,6 +84,23 @@ func (r *layeredAccountRepository) ListRoutingCandidates(context.Context, accoun
 	return r.combined, nil
 }
 
+// Current claim facts are independent of cached load counters and injected
+// material errors. This fixture models its backing state under the same lock.
+func (r *layeredAccountRepository) GetRoutingCandidate(_ context.Context, id uint64, provider account.Provider, routeID uint64, model, mode string) (account.RoutingCandidate, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	overlay := r.overlays[model]
+	if routeID > 0 && r.routeOverlays != nil {
+		overlay = r.routeOverlays[routeID]
+	}
+	for _, candidate := range assembleRoutingCandidates(provider, mode, r.bases, overlay) {
+		if candidate.Credential.ID == id && candidate.Credential.Provider == provider {
+			return candidate, nil
+		}
+	}
+	return account.RoutingCandidate{}, repository.ErrNotFound
+}
+
 func (r *layeredAccountRepository) GetCredentialMaterial(_ context.Context, accountID uint64, provider account.Provider) (account.CredentialMaterial, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -96,35 +114,29 @@ func (r *layeredAccountRepository) GetCredentialMaterial(_ context.Context, acco
 	return account.CredentialMaterial{AccountID: accountID, Provider: provider, AuthType: account.AuthTypeOAuth, EncryptedAccessToken: "encrypted"}, nil
 }
 
-func (r *layeredAccountRepository) UpdateHealth(_ context.Context, id uint64, _ account.Provider, failureCount int, cooldownUntil *time.Time, lastError string, _ bool) error {
+func (r *layeredAccountRepository) ApplyHealth(_ context.Context, id uint64, provider account.Provider, event account.HealthEvent) (account.HealthResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	provider := account.ProviderBuild
+	state := account.HealthState{AccountID: id, Provider: provider}
 	for _, base := range r.bases {
 		if base.Credential.ID == id {
-			provider = base.Credential.Provider
+			state = base.Credential.HealthState()
 			break
 		}
 	}
-	r.healthUpdates = append(r.healthUpdates, repository.InvalidationEvent{
-		Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
-		FailureCount: failureCount, CooldownUntil: cooldownUntil, HealthMarker: account.NormalizeHealthMarker(lastError),
-	})
-	return nil
-}
-
-func (r *layeredAccountRepository) UpdateQualityIdleCooldown(_ context.Context, id uint64, provider account.Provider, until time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if provider == "" {
-		provider = account.ProviderBuild
+	for _, update := range r.healthUpdates {
+		if update.AccountID == id {
+			state.Revision, state.FailureCount, state.CooldownUntil, state.LastError = update.HealthRevision, update.FailureCount, update.CooldownUntil, update.HealthMarker
+		}
 	}
-	copied := until
-	r.healthUpdates = append(r.healthUpdates, repository.InvalidationEvent{
-		Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
-		CooldownUntil: &copied, HealthMarker: account.LastErrorQualityIdle,
-	})
-	return nil
+	result, err := account.TransitionHealth(state, event, time.Now().UTC())
+	if err != nil {
+		return result, err
+	}
+	state = result.State
+	r.healthUpdates = append(r.healthUpdates, repository.InvalidationEvent{Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
+		HealthRevision: state.Revision, FailureCount: state.FailureCount, CooldownUntil: state.CooldownUntil, HealthMarker: account.NormalizeHealthMarker(state.LastError)})
+	return result, nil
 }
 
 func (r *layeredAccountRepository) TouchLastUsed(_ context.Context, id uint64, usedAt time.Time) error {
@@ -513,35 +525,38 @@ func TestSelectorLargePoolCacheUsesCandidateValueBudget(t *testing.T) {
 	}
 }
 
-func TestSelectorQuotaConsumptionUsesDeltaWithoutMutatingLargeSnapshots(t *testing.T) {
+func TestSelectorQuotaInvalidationReloadsAuthoritativeSnapshot(t *testing.T) {
 	repo := newLayeredRepositoryFixture()
-	repo.bases[0].QuotaWindow = &account.QuotaWindow{AccountID: 1, Mode: "fast", Remaining: 1}
+	repo.bases[0].QuotaWindow = &account.QuotaWindow{AccountID: 1, Mode: "fast", Remaining: 1, SnapshotVersion: 7}
 	selector := NewSelector(repo, nil, nil, nil, time.Hour, time.Second, time.Minute)
 	if _, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "fast", "", nil, false); err != nil {
 		t.Fatal(err)
 	}
 	selector.candidateMu.Lock()
-	originalCandidate := selector.candidates[candidateCacheKey{provider: account.ProviderBuild, upstreamModel: "model-a", quotaMode: "fast"}].values[0].QuotaWindow.Remaining
-	originalBase := selector.routingBases[routingBaseCacheKey{provider: account.ProviderBuild, quotaMode: "fast"}].values[0].QuotaWindow.Remaining
+	originalCandidate := selector.candidates[candidateCacheKey{provider: account.ProviderBuild, upstreamModel: "model-a", quotaMode: "fast"}].values[0].QuotaWindow
+	originalBase := selector.routingBases[routingBaseCacheKey{provider: account.ProviderBuild, quotaMode: "fast"}].values[0].QuotaWindow
 	selector.candidateMu.Unlock()
-
-	selector.ConsumeQuota(account.ProviderBuild, 1, "fast", 1)
+	repo.bases[0].QuotaWindow = &account.QuotaWindow{AccountID: 1, Mode: "fast", Remaining: 0, SnapshotVersion: 7}
+	selector.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, Provider: account.ProviderBuild, AccountID: 1})
 	_, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "fast", "", nil, false)
 	var unavailable *SelectionUnavailableError
 	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
-		t.Fatalf("selection error = %v, want quota exhausted", err)
+		t.Fatalf("selection = %v", err)
 	}
-	selector.candidateMu.Lock()
-	currentCandidate := selector.candidates[candidateCacheKey{provider: account.ProviderBuild, upstreamModel: "model-a", quotaMode: "fast"}].values[0].QuotaWindow.Remaining
-	currentBase := selector.routingBases[routingBaseCacheKey{provider: account.ProviderBuild, quotaMode: "fast"}].values[0].QuotaWindow.Remaining
-	selector.candidateMu.Unlock()
-	if currentCandidate != originalCandidate || currentBase != originalBase {
-		t.Fatalf("immutable snapshots changed: candidate %d->%d base %d->%d", originalCandidate, currentCandidate, originalBase, currentBase)
+	if originalCandidate.Remaining != 1 || originalBase.Remaining != 1 {
+		t.Fatal("published snapshot was mutated")
 	}
-
-	selector.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, Provider: account.ProviderBuild})
-	if _, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "fast", "", nil, false); err != nil {
-		t.Fatalf("authoritative quota invalidation did not clear local delta: %v", err)
+	repo.bases[0].QuotaWindow = &account.QuotaWindow{AccountID: 1, Mode: "fast", Remaining: 9, SnapshotVersion: 8}
+	selector.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, Provider: account.ProviderBuild, AccountID: 1})
+	session, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "fast", "", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := &accountLease{}
+	_ = session
+	selector.setLeaseQuota(lease, account.RoutingCandidate{Credential: repo.bases[0].Credential, QuotaWindow: repo.bases[0].QuotaWindow}, "fast")
+	if lease.QuotaMode != "fast" || lease.QuotaSnapshotVersion != 8 {
+		t.Fatalf("selected quota %s/%d", lease.QuotaMode, lease.QuotaSnapshotVersion)
 	}
 }
 
@@ -831,13 +846,13 @@ func TestLayeredRoutingMatchesCombinedRepositoryResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: second.ID, MonthlyLimit: 100, Used: 10, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: second.ID, MonthlyLimit: 100, Used: 10, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, first.ID, []string{"other-model"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, first.ID, []string{"other-model"}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, second.ID, []string{"model-a"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, second.ID, []string{"model-a"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := models.Create(ctx, model.Route{
@@ -845,8 +860,8 @@ func TestLayeredRoutingMatchesCombinedRepositoryResult(t *testing.T) {
 	}, []uint64{second.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{
-		AccountID: second.ID, UpstreamModel: "model-a", Reason: "test", CooldownUntil: now.Add(time.Hour), UpdatedAt: now,
+	if err := testsupport.ModelRestriction(ctx, accounts, account.ModelQuotaBlock{
+		AccountID: second.ID, UpstreamModel: "model-a", Reason: "model_access_denied", CooldownUntil: now.Add(time.Hour), UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}

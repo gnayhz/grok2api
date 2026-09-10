@@ -16,7 +16,7 @@ func TestClearMissingThinkingCooldownAllowList(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	repo := NewAccountRepository(database)
-	rows := seedBatchUpdateAccounts(t, database, 5)
+	rows := seedBatchUpdateAccounts(t, database, 6)
 	ids := accountModelIDs(rows)
 	until := time.Now().UTC().Add(24 * time.Hour)
 
@@ -30,6 +30,7 @@ func TestClearMissingThinkingCooldownAllowList(t *testing.T) {
 		{2, account.LastErrorQualityIdle, true},
 		{3, "upstream status 500", false},
 		{4, "", false}, // healthy: idempotent no-op
+		{5, "upstream status 429", false},
 	}
 	for _, tc := range cases {
 		if tc.lastError == "" {
@@ -43,7 +44,7 @@ func TestClearMissingThinkingCooldownAllowList(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if err := repo.ClearMissingThinkingCooldown(ctx, ids[tc.index]); err != nil {
+		if _, err := repo.ApplyHealth(ctx, ids[tc.index], "", account.HealthEvent{Kind: account.HealthClearQuality}); err != nil {
 			t.Fatalf("clear(%d): %v", tc.index, err)
 		}
 		var after accountModel

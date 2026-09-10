@@ -659,6 +659,8 @@ function UsageDetails({ audit, locale }: { audit: AuditDTO; locale: string }) {
               label={item.label}
               value={item.value}
               reasoningEffort={item.key === "reasoning" ? audit.reasoningEffort : undefined}
+              claimNote={item.key === "reasoning" && audit.usageSource === "upstream" ? t("audits.reasoningClaimOnly") : undefined}
+              warn={item.key === "reasoning" && audit.statusCode >= 200 && audit.statusCode < 300 && (Boolean(audit.qualityExempt) || (audit.qualityRule ? audit.qualityRule !== "thinking" : false))}
             />
           ))}
         </div>
@@ -667,10 +669,14 @@ function UsageDetails({ audit, locale }: { audit: AuditDTO; locale: string }) {
   );
 }
 
-function UsageMetric({ label, value, reasoningEffort }: {
+function UsageMetric({ label, value, reasoningEffort, claimNote, warn }: {
   label: string;
   value: string;
   reasoningEffort?: AuditDTO["reasoningEffort"];
+  /** 值的来源说明(如推理 token 为上游 usage 声明值,非实测)。 */
+  claimNote?: string;
+  /** 声明值与流内观测矛盾时警告着色。 */
+  warn?: boolean;
 }) {
   const { t } = useTranslation();
   const fullLabel = reasoningEffort ? `${label} · ${t(`audits.reasoningEfforts.${reasoningEffort}`)}` : label;
@@ -684,7 +690,9 @@ function UsageMetric({ label, value, reasoningEffort }: {
           </span>
         ) : null}
       </span>
-      <span className="truncate font-medium tabular-nums" title={value}>{value}</span>
+      <span className={cn("truncate font-medium tabular-nums", warn && "text-amber-700 dark:text-amber-300")} title={claimNote ?? value}>
+        {value}{warn ? " ⚠" : ""}
+      </span>
     </div>
   );
 }
@@ -729,6 +737,17 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
         <StatusCode statusCode={audit.statusCode} hasError={hasError} />
       )}
       <span className="block whitespace-nowrap text-[10px] text-muted-foreground">{mode}</span>
+      {audit.statusCode >= 200 && audit.statusCode < 300 && audit.qualityExempt ? (
+        <span className="inline-flex items-center gap-1 whitespace-nowrap text-[10px] leading-4 text-amber-700 dark:text-amber-300">
+          <span className="size-1.5 rounded-full bg-amber-500" />
+          {t("audits.guardExemptShort")}
+        </span>
+      ) : audit.statusCode >= 200 && audit.statusCode < 300 && !audit.qualityExempt && audit.qualityRule && audit.qualityRule !== "thinking" ? (
+        <span className="inline-flex items-center gap-1 whitespace-nowrap text-[10px] leading-4 text-destructive">
+          <span className="size-1.5 rounded-full bg-destructive" />
+          {t("audits.guardNoThinkingShort")}
+        </span>
+      ) : null}
     </>
   );
   return (

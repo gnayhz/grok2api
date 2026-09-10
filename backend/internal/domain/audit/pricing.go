@@ -13,8 +13,12 @@ const officialTTSCharacterTicks int64 = 150_000
 // EstimateOfficialTTSCost prices unary TTS from the exact Unicode character
 // count accepted by the upstream request. xAI publishes $15 per 1M characters.
 func EstimateOfficialTTSCost(text string) (PricingResult, bool) {
-	characters := utf8.RuneCountInString(text)
-	if characters <= 0 {
+	return EstimateOfficialTTSCharacterCost(utf8.RuneCountInString(text))
+}
+
+// EstimateOfficialTTSCharacterCost uses the Provider-confirmed input count.
+func EstimateOfficialTTSCharacterCost(characters int) (PricingResult, bool) {
+	if characters <= 0 || int64(characters) > math.MaxInt64/officialTTSCharacterTicks {
 		return PricingResult{}, false
 	}
 	return PricingResult{
@@ -37,7 +41,11 @@ func EstimateOfficialSTTCost(durationSeconds float64, streaming bool) (PricingRe
 	}
 	// Round upward to one USD tick so a positive billable duration never
 	// disappears through integer truncation.
-	cost := int64(math.Ceil(durationSeconds * float64(hourlyTicks) / 3600))
+	ticks := math.Ceil(durationSeconds * float64(hourlyTicks) / 3600)
+	if ticks >= float64(math.MaxInt64) || math.IsInf(ticks, 0) {
+		return PricingResult{}, false
+	}
+	cost := int64(ticks)
 	return PricingResult{Model: model, CostInUSDTicks: max(int64(1), cost)}, true
 }
 
@@ -199,7 +207,8 @@ func EstimateOfficialCost(model string, inputTokens, cachedInputTokens, outputTo
 	cachedTokens := max(int64(0), min(cachedInputTokens, inputTokens))
 	uncachedTokens := max(int64(0), inputTokens-cachedTokens)
 	outputTokens = max(int64(0), outputTokens)
-	return PricingResult{Model: price.CanonicalModel, CostInUSDTicks: uncachedTokens*inputPrice + cachedTokens*cachedPrice + outputTokens*outputPrice}, true
+	return newPricingResult(price.CanonicalModel,
+		pricingProduct{uncachedTokens, inputPrice}, pricingProduct{cachedTokens, cachedPrice}, pricingProduct{outputTokens, outputPrice})
 }
 
 // EstimateOfficialTextReservation 根据请求内容和输出上限计算保守的文本费用预留。
@@ -277,7 +286,7 @@ func EstimateOfficialImageCost(model, resolution, quality string, count int) (Pr
 		if quality != "" {
 			return PricingResult{}, false
 		}
-		return PricingResult{Model: "grok-imagine-image", CostInUSDTicks: int64(count) * 200_000_000}, true
+		return newPricingResult("grok-imagine-image", pricingProduct{int64(count), 200_000_000})
 	}
 	if model == "grok-imagine-image-2.0" {
 		resolution = strings.ToLower(strings.TrimSpace(resolution))
@@ -291,10 +300,7 @@ func EstimateOfficialImageCost(model, resolution, quality string, count int) (Pr
 		if !ok {
 			return PricingResult{}, false
 		}
-		return PricingResult{
-			Model:          "grok-imagine-image-2.0-" + quality + "-" + resolution,
-			CostInUSDTicks: int64(count) * outputTicks,
-		}, true
+		return newPricingResult("grok-imagine-image-2.0-"+quality+"-"+resolution, pricingProduct{int64(count), outputTicks})
 	}
 	if model != "grok-imagine-image-quality" || quality != "" {
 		return PricingResult{}, false
@@ -312,10 +318,7 @@ func EstimateOfficialImageCost(model, resolution, quality string, count int) (Pr
 	default:
 		return PricingResult{}, false
 	}
-	return PricingResult{
-		Model:          "grok-imagine-image-quality-" + resolution,
-		CostInUSDTicks: int64(count) * ticksPerImage,
-	}, true
+	return newPricingResult("grok-imagine-image-quality-"+resolution, pricingProduct{int64(count), ticksPerImage})
 }
 
 // EstimateOfficialImageEditCost 按输出图片数量计费，并叠加每张输入图片的处理费用。
@@ -373,10 +376,7 @@ func EstimateOfficialImageEditCost(model, resolution, quality string, outputCoun
 			outputTicks = 700_000_000
 		}
 	}
-	return PricingResult{
-		Model:          pricingModel,
-		CostInUSDTicks: int64(outputCount)*outputTicks + int64(inputCount)*inputTicks,
-	}, true
+	return newPricingResult(pricingModel, pricingProduct{int64(outputCount), outputTicks}, pricingProduct{int64(inputCount), inputTicks})
 }
 
 func officialImage20OutputTicks(resolution, quality string) (int64, bool) {
@@ -428,10 +428,7 @@ func EstimateOfficialVideoCost(model, resolution string, seconds, inputImages in
 			return PricingResult{}, false
 		}
 	}
-	return PricingResult{
-		Model:          baseModel + "-" + resolution,
-		CostInUSDTicks: int64(seconds)*ticksPerSecond + int64(inputImages)*ticksPerInputImage,
-	}, true
+	return newPricingResult(baseModel+"-"+resolution, pricingProduct{int64(seconds), ticksPerSecond}, pricingProduct{int64(inputImages), ticksPerInputImage})
 }
 
 // ReconstructOfficialCost builds an admin-facing formula without adding work to the request settlement path.
@@ -500,7 +497,7 @@ func reconstructLegacyImage20Cost(model string, outputCount, outputTicks int64) 
 	}
 	return newPricingBreakdown(model, PricingTierMedia,
 		newPricingComponent(PricingComponentOutputImage, PricingUnitImage, outputCount, outputTicks),
-	), true
+	)
 }
 
 func reconstructLegacyImage20EditCost(model string, inputCount, outputCount int64) (PricingBreakdown, bool) {
@@ -510,7 +507,7 @@ func reconstructLegacyImage20EditCost(model string, inputCount, outputCount int6
 	return newPricingBreakdown(model, PricingTierMedia,
 		newPricingComponent(PricingComponentOutputImage, PricingUnitImage, outputCount, 400_000_000),
 		newPricingComponent(PricingComponentInputImage, PricingUnitImage, inputCount, officialImageEditInputTicks),
-	), true
+	)
 }
 
 func reconstructTextCost(model string, inputTokens, cachedInputTokens, outputTokens, contextInputTokens int64) (PricingBreakdown, bool) {
@@ -533,7 +530,7 @@ func reconstructTextCost(model string, inputTokens, cachedInputTokens, outputTok
 		newPricingComponent(PricingComponentUncachedInput, PricingUnitToken, max(int64(0), inputTokens-cachedTokens), inputPrice),
 		newPricingComponent(PricingComponentOutput, PricingUnitToken, outputTokens, outputPrice),
 		newPricingComponent(PricingComponentCachedInput, PricingUnitToken, cachedTokens, cachedPrice),
-	), true
+	)
 }
 
 func reconstructImageCost(model, resolution, quality string, count int64) (PricingBreakdown, bool) {
@@ -546,7 +543,7 @@ func reconstructImageCost(model, resolution, quality string, count int64) (Prici
 	}
 	return newPricingBreakdown(result.Model, PricingTierMedia,
 		newPricingComponent(PricingComponentOutputImage, PricingUnitImage, count, result.CostInUSDTicks/count),
-	), true
+	)
 }
 
 func reconstructImageEditCost(model, resolution, quality string, inputCount, outputCount int64) (PricingBreakdown, bool) {
@@ -568,7 +565,7 @@ func reconstructImageEditCost(model, resolution, quality string, inputCount, out
 	return newPricingBreakdown(result.Model, PricingTierMedia,
 		newPricingComponent(PricingComponentOutputImage, PricingUnitImage, outputCount, outputCost/outputCount),
 		newPricingComponent(PricingComponentInputImage, PricingUnitImage, inputCount, inputTicks),
-	), true
+	)
 }
 
 func reconstructVideoCost(model, resolution string, inputImages, seconds int64) (PricingBreakdown, bool) {
@@ -590,7 +587,7 @@ func reconstructVideoCost(model, resolution string, inputImages, seconds int64) 
 	return newPricingBreakdown(result.Model, PricingTierMedia,
 		newPricingComponent(PricingComponentOutputSecond, PricingUnitSecond, seconds, outputCost/seconds),
 		newPricingComponent(PricingComponentInputImage, PricingUnitImage, inputImages, inputTicks),
-	), true
+	)
 }
 
 func newPricingComponent(kind PricingComponentKind, unit PricingUnit, quantity, unitPriceInUSDTicks int64) PricingComponent {
@@ -598,16 +595,47 @@ func newPricingComponent(kind PricingComponentKind, unit PricingUnit, quantity, 
 	unitPriceInUSDTicks = max(int64(0), unitPriceInUSDTicks)
 	return PricingComponent{
 		Kind: kind, Unit: unit, Quantity: quantity, UnitPriceInUSDTicks: unitPriceInUSDTicks,
-		CostInUSDTicks: quantity * unitPriceInUSDTicks,
 	}
 }
 
-func newPricingBreakdown(model string, tier PricingTier, components ...PricingComponent) PricingBreakdown {
-	result := PricingBreakdown{Model: model, Tier: tier, Components: components}
-	for _, component := range components {
-		result.CostInUSDTicks += component.CostInUSDTicks
+// A product is kept separate from its amount until the remaining USD tick
+// range is known. Wrapping or saturating would invent a different known price.
+type pricingProduct struct {
+	quantity int64
+	rate     int64
+}
+
+func addPricingProduct(total, quantity, rate int64) (int64, bool) {
+	if total < 0 || quantity < 0 || rate < 0 || (quantity > 0 && rate > (math.MaxInt64-total)/quantity) {
+		return 0, false
 	}
-	return result
+	return total + quantity*rate, true
+}
+
+func newPricingResult(model string, products ...pricingProduct) (PricingResult, bool) {
+	var total int64
+	for _, product := range products {
+		var ok bool
+		total, ok = addPricingProduct(total, product.quantity, product.rate)
+		if !ok {
+			return PricingResult{}, false
+		}
+	}
+	return PricingResult{Model: model, CostInUSDTicks: total}, true
+}
+
+func newPricingBreakdown(model string, tier PricingTier, components ...PricingComponent) (PricingBreakdown, bool) {
+	result := PricingBreakdown{Model: model, Tier: tier, Components: components}
+	for i := range components {
+		component := &components[i]
+		total, ok := addPricingProduct(result.CostInUSDTicks, component.Quantity, component.UnitPriceInUSDTicks)
+		if !ok {
+			return PricingBreakdown{}, false
+		}
+		component.CostInUSDTicks = total - result.CostInUSDTicks
+		result.CostInUSDTicks = total
+	}
+	return result, true
 }
 
 func officialVideoPricingModel(model string) (string, bool) {

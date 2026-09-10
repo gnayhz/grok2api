@@ -1,34 +1,42 @@
 package gateway
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
-// TestClassifyHugeQualityLineProtocolMarkers locks the round-16 protocol
-// symmetrization of huge-line visible/thinking markers; the coverage
-// profile showed these branches walked by no test at the time.
-func TestClassifyHugeQualityLineProtocolMarkers(t *testing.T) {
+// Marker-like text must keep its meaning across the former 64 KiB / 1 MiB
+// shortcuts, JSON field order, and arbitrary transport fragmentation.
+func TestQualityLargeFramesUseProtocolFields(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name, line            string
-		wantThink, wantVisual bool
-	}{
-		{name: "responses output_text delta", line: strings.Repeat("a", 64) + `{"type":"response.output_text.delta","delta":"word"}`, wantThink: false, wantVisual: true},
-		{name: "anthropic text_delta", line: strings.Repeat("a", 64) + `{"type":"text_delta","text":"word"}`, wantThink: false, wantVisual: true},
-		{name: "chat delta content", line: strings.Repeat("a", 64) + `{"delta":{"content":"word"}}`, wantThink: false, wantVisual: true},
-		{name: "responses reasoning delta", line: strings.Repeat("a", 64) + `{"type":"response.reasoning_text.delta"}`, wantThink: true, wantVisual: false},
-		{name: "anthropic thinking delta", line: strings.Repeat("a", 64) + `{"type":"thinking_delta"}`, wantThink: true, wantVisual: false},
-		{name: "ciphertext skipped", line: strings.Repeat("a", 64) + `{"encrypted_content":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"}`, wantThink: false, wantVisual: false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			state := &qualityScanState{}
-			classifyHugeQualityLine(state, []byte(tc.line))
-			if state.hasThinking != tc.wantThink || (state.visibleRunes > 0) != tc.wantVisual {
-				t.Fatalf("hasThinking=%t visibleRunes=%d, want think=%t visual=%t", state.hasThinking, state.visibleRunes, tc.wantThink, tc.wantVisual)
-			}
-		})
+	for _, size := range []int{32, 65 << 10, (1 << 20) + 64} {
+		for _, chunk := range []int{4096, 2 << 20} {
+			t.Run(fmt.Sprintf("size=%d/chunk=%d", size, chunk), func(t *testing.T) {
+				cases := []struct {
+					protocol, payload string
+					thinking          bool
+					visible           bool
+				}{
+					{qualityProtocolResponses, `{"type":"response.output_text.delta","delta":"thinking_delta reasoning_text.delta ` + strings.Repeat("x", size) + `"}`, false, true},
+					{qualityProtocolResponses, `{"delta":"` + strings.Repeat(" ", size) + `","type":"response.reasoning_text.delta"}`, false, false},
+					{qualityProtocolResponses, `{"delta":"` + strings.Repeat(" ", size) + `plan","type":"response.reasoning_text.delta"}`, true, false},
+					{qualityProtocolChat, `{"choices":[{"delta":{"content":"reasoning_content ` + strings.Repeat("x", size) + `"}}]}`, false, true},
+					{qualityProtocolAnthropic, `{"delta":{"thinking":"` + strings.Repeat(" ", size) + `" ,"type":"thinking_delta"},"type":"content_block_delta"}`, false, false},
+				}
+				for _, tc := range cases {
+					state := qualityScanState{protocol: tc.protocol}
+					data := []byte("data: " + tc.payload + "\n\n")
+					for len(data) > 0 {
+						n := min(chunk, len(data))
+						observeQualityChunk(&state, data[:n])
+						data = data[n:]
+					}
+					if state.hasThinking != tc.thinking || (state.visibleRunes > 0) != tc.visible {
+						t.Fatalf("%s: thinking=%v visible=%d", tc.protocol, state.hasThinking, state.visibleRunes)
+					}
+				}
+			})
+		}
 	}
 }

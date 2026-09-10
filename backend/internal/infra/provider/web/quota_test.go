@@ -423,7 +423,7 @@ func (r *recordingWebEgressRepository) CreateEgressNode(context.Context, egressd
 	return egressdomain.Node{}, errors.New("unsupported")
 }
 
-func (r *recordingWebEgressRepository) UpdateEgressNode(_ context.Context, value egressdomain.Node) (egressdomain.Node, error) {
+func (r *recordingWebEgressRepository) UpdateEgressNodeConfiguration(_ context.Context, value egressdomain.Node, validate egressdomain.FixedTargetValidator) (egressdomain.Node, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.node = value

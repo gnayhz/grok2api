@@ -1,0 +1,58 @@
+{
+  "assistant-a": {
+    "affinity": "f9dc0cb6a815fe18760c9a114cf7e4043b26f44c533255dce0e94c5036e0adf2",
+    "isolated": false,
+    "replay": "",
+    "soft": true,
+    "upstream": "ae621d9d-10db-b85f-34b2-aabc307d2d1e"
+  },
+  "assistant-b": {
+    "affinity": "f9dc0cb6a815fe18760c9a114cf7e4043b26f44c533255dce0e94c5036e0adf2",
+    "isolated": false,
+    "replay": "",
+    "soft": true,
+    "upstream": "c9af7b99-6d16-ffcf-2086-4457c0eefa6b"
+  },
+  "composer": {
+    "affinity": "4f2b427649a4b2caa0a3c38d6a6299da984c8a5026577eee4609772e6fc74f72",
+    "isolated": true,
+    "replay": "",
+    "soft": false,
+    "upstream": "47ea85a0-c245-6d87-561d-49af65054521"
+  },
+  "empty": {
+    "affinity": "",
+    "isolated": false,
+    "replay": "",
+    "soft": false,
+    "upstream": ""
+  },
+  "explicit": {
+    "affinity": "a06dc874d1912953964e623896de5dac5b1c22ba8ba7f70ead804ccb498a0a6c",
+    "isolated": false,
+    "replay": "599fc662cc9fcbe399d9963eeb4b19757edc019fe30fbd19c421ed5ad233a6cc",
+    "soft": false,
+    "upstream": "c40786cd-7b63-aaf0-1544-6d1170a3bc37"
+  },
+  "inherited": {
+    "affinity": "",
+    "isolated": false,
+    "replay": "",
+    "soft": false,
+    "upstream": "saved-hint"
+  },
+  "soft": {
+    "affinity": "f9dc0cb6a815fe18760c9a114cf7e4043b26f44c533255dce0e94c5036e0adf2",
+    "isolated": false,
+    "replay": "",
+    "soft": true,
+    "upstream": "ae621d9d-10db-b85f-34b2-aabc307d2d1e"
+  },
+  "unicode": {
+    "affinity": "de1373ae4959003ebf699d81305e8387df3edfa69ae8f741414b3c1155948bbe",
+    "isolated": false,
+    "replay": "",
+    "soft": true,
+    "upstream": "e568c0d6-0d8c-f456-570d-e7e61ed88055"
+  }
+}

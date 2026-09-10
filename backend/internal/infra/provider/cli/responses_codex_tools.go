@@ -259,8 +259,8 @@ func normalizeLegacyLocalShellOutputInput(item map[string]any, param string) (ma
 		if strings.EqualFold(stringField(item, "status"), "failed") {
 			exitCode = 1
 		}
-		if number, ok := item["exit_code"].(float64); ok {
-			exitCode = int(number)
+		if number, ok := shellExitCode(item["exit_code"]); ok {
+			exitCode = number
 		}
 		output = []any{map[string]any{
 			"stdout": value, "stderr": "",
@@ -497,7 +497,8 @@ func shellExitCode(value any) (int, bool) {
 	case int64:
 		return int(typed), true
 	case json.Number:
-		parsed, err := typed.Int64()
+		// Keep the historical numeric JSON behavior, including 1.0 and 1e0.
+		parsed, err := typed.Float64()
 		return int(parsed), err == nil
 	default:
 		return 0, false

@@ -3,6 +3,7 @@ package conversation
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 )
 
 func TestParseAndMapBuildWebSearchCall(t *testing.T) {
@@ -263,7 +265,7 @@ func TestConvertAnthropicWebSearchToolChoiceRequired(t *testing.T) {
 	converted, options, err := ConvertRequestWithOptions([]byte(`{
 		"model":"public","max_tokens":64,
 		"messages":[{"role":"user","content":"Perform a web search for the query: x"}],
-		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
 		"tool_choice":{"type":"tool","name":"web_search"}
 	}`), "grok-4.5", OperationMessages)
 	if err != nil {
@@ -676,7 +678,7 @@ func TestStreamRejectsOversizedDeferredSearchText(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = converter.handle("response.output_text.delta", data)
-	if err == nil || !strings.Contains(err.Error(), "缓冲") {
+	if !errors.Is(err, responsebuffer.ErrLimit) {
 		t.Fatalf("oversized deferred text error = %v", err)
 	}
 }
@@ -807,7 +809,7 @@ func TestStreamUsesRequestContextWhenTextArrivesBeforeWebSearchItem(t *testing.T
 	_, options, err := ConvertRequestWithOptions([]byte(`{
 		"model":"public","max_tokens":64,"stream":true,
 		"messages":[{"role":"user","content":"Perform a web search for the query: rust tutorials"}],
-		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
 		"tool_choice":{"type":"tool","name":"web_search"}
 	}`), "grok-4.5", OperationMessages)
 	if err != nil {

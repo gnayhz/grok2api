@@ -15,7 +15,7 @@ import (
 func TestUpdateApplyPanicDoesNotAdvanceRevision(t *testing.T) {
 	repository := &runtimeSettingsRepositoryStub{}
 	applies := 0
-	service := NewService(testConfig(t), time.Time{}, 0, repository, nil, func(next config.Config) {
+	service := newTestService(testConfig(t), time.Time{}, 0, repository, nil, func(next config.Config) {
 		applies++
 		if applies == 1 {
 			panic("first apply explodes")

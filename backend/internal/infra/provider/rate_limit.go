@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 var (
@@ -14,7 +16,6 @@ var (
 	rateLimitTeamPattern    = regexp.MustCompile(`(?i)\bteam\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
 	rateLimitModelPattern   = regexp.MustCompile(`(?i)\bmodel\s+["']?([A-Za-z0-9][A-Za-z0-9._:/-]*)`)
 	rateLimitModelTrimChars = ".,;"
-	rateLimitResetPattern   = regexp.MustCompile(`(?i)(\d+)\s*([dhms])`)
 )
 
 // ParseRateLimitMetadata extracts Team+Model RPS/RPM limit metadata from an upstream 429 body.
@@ -40,7 +41,7 @@ func RateLimitFromResponse(status int, header http.Header, body []byte) *RateLim
 	}
 	if header != nil {
 		if headerValue := header.Get("Retry-After"); headerValue != "" {
-			if retryAfter := parseRetryAfterHeader(headerValue, time.Now().UTC()); retryAfter > 0 {
+			if retryAfter := retryafter.Header(headerValue, time.Now().UTC()); retryAfter > 0 {
 				metadata.RetryAfter = retryAfter
 			}
 		} else if metadata.RetryAfter > 0 {
@@ -104,7 +105,7 @@ func parseRateLimitText(text string) *RateLimitMetadata {
 		scope = RateLimitScopeRPS
 		retryAfter = 2 * time.Second
 	}
-	if parsed := rateLimitResetAfter(text); parsed > 0 {
+	if parsed := retryafter.ResetText(text); parsed > 0 {
 		retryAfter = parsed
 		if scope == RateLimitScopeRPS && retryAfter < 2*time.Second {
 			retryAfter = 2 * time.Second
@@ -134,38 +135,4 @@ func rateLimitModel(text string) string {
 		return ""
 	}
 	return strings.TrimRight(match[1], rateLimitModelTrimChars)
-}
-
-func rateLimitResetAfter(body string) time.Duration {
-	index := strings.Index(strings.ToLower(body), "resets in:")
-	if index < 0 {
-		return 0
-	}
-	text := body[index+len("resets in:"):]
-	var total time.Duration
-	for _, match := range rateLimitResetPattern.FindAllStringSubmatch(text, -1) {
-		value, _ := strconv.Atoi(match[1])
-		switch strings.ToLower(match[2]) {
-		case "d":
-			total += time.Duration(value) * 24 * time.Hour
-		case "h":
-			total += time.Duration(value) * time.Hour
-		case "m":
-			total += time.Duration(value) * time.Minute
-		case "s":
-			total += time.Duration(value) * time.Second
-		}
-	}
-	return total
-}
-
-func parseRetryAfterHeader(value string, now time.Time) time.Duration {
-	value = strings.TrimSpace(value)
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
-		return time.Duration(seconds) * time.Second
-	}
-	if at, err := http.ParseTime(value); err == nil && at.After(now) {
-		return at.Sub(now)
-	}
-	return 0
 }

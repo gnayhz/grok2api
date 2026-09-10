@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 )
 
 var (
@@ -276,73 +278,12 @@ func (e *CredentialRefreshError) Unwrap() error {
 	return e.Cause
 }
 
-// IsPermanentCredentialRefreshErrorCode reports credential-specific terminal
-// failures. HTTP status alone is intentionally insufficient: OAuth gateways
-// also use 400/401 for temporary policy, client, and infrastructure errors.
-func IsPermanentCredentialRefreshErrorCode(code string) bool {
-	switch normalizeCredentialRefreshErrorCode(code) {
-	case "invalid_grant",
-		"invalid_refresh_token",
-		"refresh_token_invalid",
-		"refresh_token_expired",
-		"refresh_token_revoked",
-		"refresh_token_reused",
-		"refresh_token_reuse",
-		"token_reused",
-		"token_reuse_detected",
-		"expired_token",
-		"revoked_token",
-		"token_revoked",
-		"missing_refresh_token":
-		return true
-	default:
-		return false
-	}
-}
-
-// IsCredentialRefreshConfigurationErrorCode reports OAuth failures caused by
-// this gateway's client/request configuration rather than by one account's
-// refresh token. These errors should be retried conservatively and surfaced to
-// operators, but must not mark an individual account reauthRequired.
-func IsCredentialRefreshConfigurationErrorCode(code string) bool {
-	switch normalizeCredentialRefreshErrorCode(code) {
-	case "invalid_client", "unauthorized_client", "invalid_request", "invalid_scope", "unsupported_grant_type":
-		return true
-	default:
-		return false
-	}
-}
-
-// IsUnclassifiedCredentialAuthRejection reports a 400/401 response that is
-// neither a known terminal refresh-token error, a known client configuration
-// error, nor an explicitly retryable OAuth condition. Repeated occurrences can
-// eventually require operator reauthorization without claiming the refresh
-// token was definitively revoked.
-func IsUnclassifiedCredentialAuthRejection(status int, code string) bool {
-	if status != http.StatusBadRequest && status != http.StatusUnauthorized {
-		return false
-	}
-	if IsPermanentCredentialRefreshErrorCode(code) || IsCredentialRefreshConfigurationErrorCode(code) {
-		return false
-	}
-	switch normalizeCredentialRefreshErrorCode(code) {
-	case "authorization_pending", "slow_down", "temporarily_unavailable", "server_error",
-		"rate_limited", "rate_limit_exceeded", "too_many_requests", "oauth_timeout",
-		"oauth_transport_error", "oauth_unavailable":
-		return false
-	default:
-		return true
-	}
-}
-
-func normalizeCredentialRefreshErrorCode(code string) string {
-	normalized := strings.ToLower(strings.TrimSpace(code))
-	return strings.ReplaceAll(normalized, "-", "_")
-}
-
 // ResponseResourceRequest describes a common upstream request to a Responses resource endpoint.
 type ResponseResourceRequest struct {
-	Credential account.Credential
+	// ObserveImage reports actual generation for image models exposed through text protocols.
+	// The callback is cumulative within this invocation and precedes post-processing.
+	ObserveImage func(ImageGenerationObservation)
+	Credential   account.Credential
 	// Billing is used only to determine XAI eligibility in Build auto mode; nil means the account tier is unknown.
 	Billing        *account.Billing
 	Method         string
@@ -352,36 +293,61 @@ type ResponseResourceRequest struct {
 	PromptCacheKey string
 	// ReasoningReplayKey comes only from explicit client session identity; soft cache identity must not replay ciphertext.
 	ReasoningReplayKey string
-	// AllowClientToolCacheRoute allows the Build native cache route to supplement existing client tools.
-	// This is a protocol compatibility signal, not a client authentication result.
-	AllowClientToolCacheRoute bool
+	// PriorReasoningReplayKey is an ambiguous pre-encoding scope, for loss checks only.
+	PriorReasoningReplayKey string
+	// ToolCompatibilityPolicy is supplied by the logical request owner.
+	ToolCompatibilityPolicy inferencedomain.ToolCompatibilityPolicy
 	// GrokTurnIndex is the explicit Grok Shell client turn; it is validated before Build egress and never fabricated by the server.
 	GrokTurnIndex string
 	IdempotencyID string
 	Streaming     bool
 	NormalizeBody bool
 	Operation     string
+	// DeferOutputCommit keeps response-derived cache writes pending until the
+	// gateway confirms complete delivery. Rejected or interrupted attempts must
+	// have no such effects.
+	DeferOutputCommit bool
+	// DisableAutomaticReplay forbids internal fallbacks after an ambiguous attempt.
+	DisableAutomaticReplay bool
+	// HistoryControl owns permission for input preparation and rejection recovery.
+	HistoryControl HistoryController
 	// NormalizedMetadata receives non-sensitive metadata from the exact payload
 	// normalization used for the physical upstream request. The caller owns the
 	// value; adapters update it synchronously before network I/O.
 	NormalizedMetadata *NormalizedRequestMetadata
+	// OnNormalized runs synchronously before network I/O with the actual tool
+	// profile. It must be fast and may abort the request (e.g. exhausted budget).
+	OnNormalized func(NormalizedRequestMetadata) error
 }
 
 // NormalizedRequestMetadata contains safe request attributes that may be kept
 // in audit records. It must never contain request content or credentials.
 type NormalizedRequestMetadata struct {
-	ReasoningEffort string
+	// ImageOutputCount is the validated request count for reserving a budget.
+	// It is never evidence that any image was generated.
+	ImageOutputCount  int
+	ToolCompatibility *inferencedomain.ToolCompatibilityPlan
+	ReplayPolicy      *inferencedomain.ReplayPolicy
+	ReasoningEffort   string
 }
 
 // Response represents an upstream response that has not yet been written downstream.
 type Response struct {
-	StatusCode  int
-	Status      string
-	Header      http.Header
-	Body        io.ReadCloser
-	QuotaUnits  int
-	UpstreamURL string
-	Diagnostic  *DiagnosticResponse
+	// RequestValidation is set only by local parsing/compatibility checks before
+	// contacting upstream. It must never be inferred from an upstream HTTP body.
+	RequestValidation *inferencedomain.RequestValidationError
+	Attempt           attemptmeta.Identity
+	StatusCode        int
+	Status            string
+	Header            http.Header
+	Body              io.ReadCloser
+	QuotaUnits        int
+	UpstreamURL       string
+	Diagnostic        *DiagnosticResponse
+	// PolicyForbidden preserves a Provider-classified origin policy rejection.
+	// A generic egress retry cannot repair this rejection; it is distinct from
+	// local request validation and browser/clearance failures.
+	PolicyForbidden bool
 	// RecoveredPrimaryFailure records a primary-plane failure hidden by a successful Provider fallback.
 	RecoveredPrimaryFailure *DiagnosticResponse
 	RateLimit               *RateLimitMetadata
@@ -397,6 +363,23 @@ type Response struct {
 	// then convert. Converting first drops thinking into optional chat
 	// fields and makes usage.reasoning_tokens look like a finished answer.
 	ConvertJSON func([]byte) ([]byte, error)
+	// AcceptOutput permits deferred response-derived cache writes. It is safe
+	// to call after complete successful delivery and its required completion
+	// receipt, even if the original body has already closed. Nil has no effect.
+	AcceptOutput func()
+	// CommitOutput persists accepted history before client success termination.
+	CommitOutput func() error
+	// CommitResponseState acknowledges native continuation/resource state (Web)
+	// before success. Gateway owns the deadline and public completion boundary.
+	CommitResponseState  func(context.Context) error
+	HistoryOutcome       string
+	HistoryScopeHash     string
+	HistoryGeneration    int64
+	HistoryRestoredItems int
+	HistoryNormalizer    int
+	// DiscardOutput releases pending cache retention for a rejected attempt or
+	// interrupted delivery. Call it even when Body has already been closed.
+	DiscardOutput func()
 }
 
 const (
@@ -486,6 +469,7 @@ type QuotaGroupSnapshot struct {
 }
 
 type ImageGenerationRequest struct {
+	Observe        func(ImageGenerationObservation)
 	Credential     account.Credential
 	Model          string
 	Prompt         string
@@ -506,6 +490,7 @@ type ImageInput struct {
 }
 
 type ImageEditRequest struct {
+	Observe        func(ImageGenerationObservation)
 	Credential     account.Credential
 	Model          string
 	Prompt         string
@@ -518,6 +503,22 @@ type ImageEditRequest struct {
 	ResponseFormat string
 	Streaming      bool
 	PartialImages  int
+}
+
+// ImageGenerationObservation contains cumulative protocol facts for one
+// Adapter invocation. Counts describe confirmed final images before download
+// or storage; previews and requested n are not generated output. The callback
+// may run in a body producer, which Body.Close must join before returning.
+type ImageGenerationObservation struct {
+	Started, Completed, Failed bool
+	OutputImages, QuotaUnits   int
+	UpstreamStatus             int
+}
+
+func ObserveImageGeneration(observe func(ImageGenerationObservation), fact ImageGenerationObservation) {
+	if observe != nil {
+		observe(fact)
+	}
 }
 
 // VideoOperation selects the official xAI video endpoint family.
@@ -540,6 +541,9 @@ const (
 )
 
 type VideoRequest struct {
+	// Resume contains the acknowledged native checkpoint; Providers must not create again.
+	Resume     *VideoCheckpoint
+	Checkpoint func(VideoCheckpoint) error
 	Credential account.Credential
 	// Billing is used only to determine XAI eligibility in Build auto mode; nil means the account tier is unknown.
 	Billing *account.Billing
@@ -604,12 +608,14 @@ type TTSTimestamps struct {
 }
 
 type TTSResult struct {
-	Audio        []byte
-	ContentType  string
-	Duration     float64
-	Base64Audio  string
-	Timestamps   *TTSTimestamps
-	JSONEnvelope bool
+	// InputCharacters is the exact Unicode count sent upstream.
+	InputCharacters int
+	Audio           []byte
+	ContentType     string
+	Duration        float64
+	Base64Audio     string
+	Timestamps      *TTSTimestamps
+	JSONEnvelope    bool
 }
 
 type STTRequest struct {
@@ -645,12 +651,13 @@ type STTChannel struct {
 }
 
 type STTResult struct {
-	Text     string
-	Language string
-	Duration float64
-	Words    []STTWord
-	Channels []STTChannel
-	RawJSON  []byte
+	DurationReported bool
+	Text             string
+	Language         string
+	Duration         float64
+	Words            []STTWord
+	Channels         []STTChannel
+	RawJSON          []byte
 }
 
 type VoiceInfo struct {
@@ -844,11 +851,23 @@ type VoiceWebSocketRequest struct {
 	// Path is a v1-relative path such as /realtime or /stt.
 	Path  string
 	Model string
+	Query url.Values
+	// Observe publishes protocol facts before the transport forwards the frame.
+	// Persistence, delivery and accounting decisions remain with the caller.
+	Observe func(VoiceWebSocketObservation)
+}
+
+type VoiceWebSocketObservation struct {
+	Started, Completed, Partial, Failed bool
+	AudioDurationSeconds                float64
+	AudioDurationReported               bool
 }
 
 // VoiceWebSocketAdapter dials official voice websocket endpoints with account auth.
 type VoiceWebSocketAdapter interface {
 	Adapter
+	// Prepare validates/copies protocol options without credentials, I/O or side effects.
+	PrepareVoiceWebSocket(VoiceWebSocketRequest) (VoiceWebSocketRequest, error)
 	DialVoiceWebSocket(ctx context.Context, request VoiceWebSocketRequest) (VoiceWebSocketConn, func(), error)
 }
 
@@ -865,20 +884,6 @@ type QuotaTierOrderAdapter interface {
 	TierOrderForQuotaMode(upstreamModel, quotaMode string) []account.WebTier
 }
 
-// ModelAlias resolves a hidden compatibility model name to one public route and can fix reasoning effort.
-type ModelAlias struct {
-	Alias           string
-	PublicModel     string
-	Provider        account.Provider
-	UpstreamModel   string
-	ReasoningEffort string
-}
-
-type ModelAliasAdapter interface {
-	Adapter
-	ModelAliases() []ModelAlias
-}
-
 // PricingMetadataAdapter maps Provider-private model identifiers to public billing models.
 type PricingMetadataAdapter interface {
 	Adapter
@@ -889,7 +894,6 @@ type PricingMetadataAdapter interface {
 type Registry struct {
 	adapters    map[account.Provider]Adapter
 	definitions map[account.Provider]Definition
-	aliases     map[string]ModelAlias
 	issues      []error
 }
 
@@ -897,7 +901,6 @@ func NewRegistry(adapters ...Adapter) *Registry {
 	registry := &Registry{
 		adapters:    make(map[account.Provider]Adapter, len(adapters)),
 		definitions: make(map[account.Provider]Definition, len(adapters)),
-		aliases:     make(map[string]ModelAlias),
 	}
 	for _, adapter := range adapters {
 		if adapter == nil {
@@ -917,28 +920,6 @@ func NewRegistry(adapters ...Adapter) *Registry {
 		if source, ok := adapter.(DefinitionAdapter); ok {
 			registry.definitions[providerValue] = source.Definition().Clone()
 		}
-		if source, ok := adapter.(ModelAliasAdapter); ok {
-			for _, value := range source.ModelAliases() {
-				if value.Alias == "" || value.PublicModel == "" {
-					continue
-				}
-				if value.Provider != providerValue {
-					registry.issues = append(registry.issues, fmt.Errorf("Provider %s 的模型别名 %q 指向了 %s", providerValue, value.Alias, value.Provider))
-					continue
-				}
-				if !modeldomain.IsCanonicalPublicID(value.Provider, value.PublicModel) {
-					registry.issues = append(registry.issues, fmt.Errorf("Provider %s 的模型别名 %q 目标 %q 不是规范内部路由 ID", providerValue, value.Alias, value.PublicModel))
-					continue
-				}
-				if existing, exists := registry.aliases[value.Alias]; exists {
-					if existing != value {
-						registry.issues = append(registry.issues, fmt.Errorf("模型别名 %q 重复注册", value.Alias))
-					}
-					continue
-				}
-				registry.aliases[value.Alias] = value
-			}
-		}
 	}
 	return registry
 }
@@ -947,12 +928,6 @@ func NewRegistry(adapters ...Adapter) *Registry {
 func (r *Registry) Get(value account.Provider) (Adapter, bool) {
 	adapter, ok := r.adapters[value]
 	return adapter, ok
-}
-
-// ResolveModelAlias returns the canonical internal route for a hidden compatibility model name.
-func (r *Registry) ResolveModelAlias(value string) (ModelAlias, bool) {
-	result, ok := r.aliases[value]
-	return result, ok
 }
 
 // Definition returns the stable capability declaration from a production Adapter.
@@ -1062,6 +1037,26 @@ func (r *Registry) Validate() error {
 func (r *Registry) SupportsStoredResponses(value account.Provider) bool {
 	definition, ok := r.Definition(value)
 	return ok && definition.Conversation.StoredResponses
+}
+
+// StoredResponseModelAdapter narrows a provider-wide storage capability to the
+// model's actual protocol. Temporary compatibility response IDs carry no history.
+type StoredResponseModelAdapter interface {
+	SupportsStoredResponseModel(model string) bool
+}
+
+func (r *Registry) SupportsStoredResponseModel(value account.Provider, model string) bool {
+	if !r.SupportsStoredResponses(value) {
+		return false
+	}
+	adapter, ok := r.Responses(value)
+	if !ok {
+		return false
+	}
+	if modelAdapter, ok := adapter.(StoredResponseModelAdapter); ok {
+		return modelAdapter.SupportsStoredResponseModel(model)
+	}
+	return true
 }
 
 func (r *Registry) SupportsConversation(value account.Provider, operation string) bool {

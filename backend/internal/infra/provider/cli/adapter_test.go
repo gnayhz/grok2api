@@ -14,8 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
+	reasoningreplay "github.com/chenyme/grok2api/backend/internal/application/history"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
@@ -24,7 +23,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
+	"github.com/google/uuid"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -478,7 +477,7 @@ func TestForwardResponseKeepsReplayWhenWebSearchToolChoiceNone(t *testing.T) {
 	}
 }
 
-func TestReasoningReplayScopeSeparatesAccountAndPlane(t *testing.T) {
+func TestReasoningReplayScopePreservesBuildAccountSwitchAndSeparatesPlane(t *testing.T) {
 	adapter := NewAdapter(Config{
 		BaseURL:         "https://build.example/v1",
 		FallbackBaseURL: "https://xai.example/v1",
@@ -493,8 +492,8 @@ func TestReasoningReplayScopeSeparatesAccountAndPlane(t *testing.T) {
 	}
 	otherAccount := request
 	otherAccount.Credential.ID = 8
-	if got := adapter.scopedReasoningReplayKey(otherAccount, "https://build.example/v1"); got == buildKey {
-		t.Fatal("reasoning replay scope was shared across accounts")
+	if got := adapter.scopedReasoningReplayKey(otherAccount, "https://build.example/v1"); got != buildKey {
+		t.Fatal("Build reasoning history lost across account switch")
 	}
 	if got := adapter.scopedReasoningReplayKey(request, "https://xai.example/v1"); got == buildKey {
 		t.Fatal("reasoning replay scope was shared across Build and XAI")
@@ -1105,7 +1104,7 @@ func TestForwardResponseMapsClaudeCodeWebSearchEndToEnd(t *testing.T) {
 		Body: []byte(`{
 			"model":"public","max_tokens":256,
 			"messages":[{"role":"user","content":"Perform a web search for the query: rust tutorials"}],
-			"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8,"allowed_domains":["doc.rust-lang.org"]}],
+			"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["doc.rust-lang.org"]}],
 			"tool_choice":{"type":"tool","name":"web_search"}
 		}`),
 	})

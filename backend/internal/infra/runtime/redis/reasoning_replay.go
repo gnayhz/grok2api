@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	redisclient "github.com/redis/go-redis/v9"
 )
 
@@ -86,4 +87,46 @@ func cloneItems(items [][]byte) [][]byte {
 		cloned = append(cloned, append([]byte(nil), item...))
 	}
 	return cloned
+}
+
+// WATCH protects the merge across gateway instances, including concurrent
+// deletion/expiry. Read/decode failures must never overwrite existing history.
+func (s *ReasoningReplayStore) Update(ctx context.Context, model, sessionKey string, expiresAt time.Time, merge func([][]byte) [][]byte) error {
+	if s == nil || s.store == nil || model == "" || sessionKey == "" || merge == nil {
+		return nil
+	}
+	key := s.redisKey(model, sessionKey)
+	for attempt := 0; attempt < 32; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := s.store.client.Watch(ctx, func(tx *redisclient.Tx) error {
+			raw, err := tx.Get(ctx, key).Bytes()
+			var existing [][]byte
+			if err != nil && !errors.Is(err, redisclient.Nil) {
+				return err
+			}
+			if err == nil {
+				if err := json.Unmarshal(raw, &existing); err != nil {
+					return err
+				}
+			}
+			next := merge(existing)
+			ttl := time.Until(expiresAt)
+			if len(next) == 0 || ttl <= 0 {
+				return nil
+			}
+			encoded, err := json.Marshal(next)
+			if err != nil {
+				return err
+			}
+			_, err = tx.TxPipelined(ctx, func(pipe redisclient.Pipeliner) error { pipe.Set(ctx, key, encoded, ttl); return nil })
+			return err
+		}, key)
+		if !errors.Is(err, redisclient.TxFailedErr) {
+			return err
+		}
+		perfmetrics.Default.Inc("reasoning_replay_update_conflicts_total", perfmetrics.Labels{Subsystem: "reasoning_replay", Plane: "redis", Outcome: "retry"})
+	}
+	return redisclient.TxFailedErr
 }

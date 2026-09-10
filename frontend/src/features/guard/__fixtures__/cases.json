@@ -1,0 +1,1342 @@
+{
+ "items": [
+  {
+   "closed_at": "2026-09-03T15:00:14.527298126Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3068,
+    "exit": {
+     "epoch": 0,
+     "node": 113
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 49,
+   "opened_at": "2026-09-03T14:00:13.191719985Z",
+   "parties": [
+    {
+     "account_id": 3068,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 113,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:59:59.532303339Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3065,
+    "exit": {
+     "epoch": 0,
+     "node": 116
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 48,
+   "opened_at": "2026-09-03T13:59:58.191067479Z",
+   "parties": [
+    {
+     "account_id": 3065,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 116,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:59:44.528288155Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3064,
+    "exit": {
+     "epoch": 0,
+     "node": 115
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 47,
+   "opened_at": "2026-09-03T13:59:43.191087993Z",
+   "parties": [
+    {
+     "account_id": 3064,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 115,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:59:29.529154223Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3058,
+    "exit": {
+     "epoch": 0,
+     "node": 109
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 46,
+   "opened_at": "2026-09-03T13:59:28.191697847Z",
+   "parties": [
+    {
+     "account_id": 3058,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 109,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:14:29.613475921Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3061,
+    "exit": {
+     "epoch": 0,
+     "node": 110
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 45,
+   "opened_at": "2026-09-03T13:14:26.733376164Z",
+   "parties": [
+    {
+     "account_id": 3061,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 110,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 117,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 109,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 111,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:14:29.578934363Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3059,
+    "exit": {
+     "epoch": 0,
+     "node": 109
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 44,
+   "opened_at": "2026-09-03T13:14:26.733376164Z",
+   "parties": [
+    {
+     "account_id": 3059,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 109,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 111,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 110,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 117,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:14:29.544971775Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3063,
+    "exit": {
+     "epoch": 0,
+     "node": 111
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 43,
+   "opened_at": "2026-09-03T13:14:26.733376164Z",
+   "parties": [
+    {
+     "account_id": 3063,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 111,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 109,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 117,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 110,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T14:14:14.543647918Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3054,
+    "exit": {
+     "epoch": 0,
+     "node": 117
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 42,
+   "opened_at": "2026-09-03T13:14:11.732848693Z",
+   "parties": [
+    {
+     "account_id": 3054,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 117,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 111,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 109,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 110,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T13:48:39.368784644Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3055,
+    "exit": {
+     "epoch": 0,
+     "node": 113
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 41,
+   "opened_at": "2026-09-03T12:48:35.487705274Z",
+   "parties": [
+    {
+     "account_id": 3055,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 113,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T13:21:56.748943256Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3053,
+    "exit": {
+     "epoch": 0,
+     "node": 117
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 40,
+   "opened_at": "2026-09-03T12:21:46.636339675Z",
+   "parties": [
+    {
+     "account_id": 3053,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 117,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T13:21:41.763173098Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3032,
+    "exit": {
+     "epoch": 0,
+     "node": 111
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 39,
+   "opened_at": "2026-09-03T12:21:31.636510973Z",
+   "parties": [
+    {
+     "account_id": 3032,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 111,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T13:21:41.745988779Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3027,
+    "exit": {
+     "epoch": 45,
+     "node": 52
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 38,
+   "opened_at": "2026-09-03T12:21:31.636510973Z",
+   "parties": [
+    {
+     "account_id": 3027,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "withdrawn",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T13:21:11.759105701Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3023,
+    "exit": {
+     "epoch": 0,
+     "node": 114
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 37,
+   "opened_at": "2026-09-03T12:21:01.635557578Z",
+   "parties": [
+    {
+     "account_id": 3023,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 114,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:26:46.651900448Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3062,
+    "exit": {
+     "epoch": 0,
+     "node": 115
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 36,
+   "opened_at": "2026-09-03T11:26:39.61456542Z",
+   "parties": [
+    {
+     "account_id": 3062,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 115,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:25:31.651309954Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3060,
+    "exit": {
+     "epoch": 0,
+     "node": 113
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 35,
+   "opened_at": "2026-09-03T11:25:24.61463923Z",
+   "parties": [
+    {
+     "account_id": 3060,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 113,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:21:01.705112129Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3030,
+    "exit": {
+     "epoch": 0,
+     "node": 109
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 34,
+   "opened_at": "2026-09-03T11:20:54.614644779Z",
+   "parties": [
+    {
+     "account_id": 3030,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 109,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:21:01.68484711Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3029,
+    "exit": {
+     "epoch": 0,
+     "node": 116
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 33,
+   "opened_at": "2026-09-03T11:20:54.614644779Z",
+   "parties": [
+    {
+     "account_id": 3029,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 116,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:20:46.651374819Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3028,
+    "exit": {
+     "epoch": 0,
+     "node": 117
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 32,
+   "opened_at": "2026-09-03T11:20:39.614444149Z",
+   "parties": [
+    {
+     "account_id": 3028,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 117,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:18:46.667432877Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3025,
+    "exit": {
+     "epoch": 0,
+     "node": 110
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 31,
+   "opened_at": "2026-09-03T11:18:39.614914748Z",
+   "parties": [
+    {
+     "account_id": 3025,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 110,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:18:46.65055246Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3024,
+    "exit": {
+     "epoch": 0,
+     "node": 108
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 30,
+   "opened_at": "2026-09-03T11:18:39.614914748Z",
+   "parties": [
+    {
+     "account_id": 3024,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 108,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:11:15.197695556Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3022,
+    "exit": {
+     "epoch": 41,
+     "node": 52
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 29,
+   "opened_at": "2026-09-03T11:11:09.614243791Z",
+   "parties": [
+    {
+     "account_id": 3022,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "withdrawn",
+     "epoch": 41,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T11:08:47.596185676Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3059,
+    "exit": {
+     "epoch": 47,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 28,
+   "opened_at": "2026-09-03T10:05:16.041941663Z",
+   "parties": [
+    {
+     "account_id": 3059,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 47,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T11:08:47.57909522Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3058,
+    "exit": {
+     "epoch": 37,
+     "node": 52
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 27,
+   "opened_at": "2026-09-03T10:05:01.042179798Z",
+   "parties": [
+    {
+     "account_id": 3058,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "withdrawn",
+     "epoch": 37,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T11:08:47.56263334Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3063,
+    "exit": {
+     "epoch": 47,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 26,
+   "opened_at": "2026-09-03T09:51:26.467042049Z",
+   "parties": [
+    {
+     "account_id": 3063,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 47,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T11:08:47.545442351Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3057,
+    "exit": {
+     "epoch": 46,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 25,
+   "opened_at": "2026-09-03T09:40:56.466977471Z",
+   "parties": [
+    {
+     "account_id": 3057,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 46,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T11:52:39.634348558Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3056,
+    "exit": {
+     "epoch": 46,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 24,
+   "opened_at": "2026-09-03T09:28:28.106598784Z",
+   "parties": [
+    {
+     "account_id": 3056,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 46,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "exit",
+     "node_id": 112,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:18:01.716468106Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3055,
+    "exit": {
+     "epoch": 46,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 23,
+   "opened_at": "2026-09-03T09:26:58.107580268Z",
+   "parties": [
+    {
+     "account_id": 3055,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 46,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:18:01.69928863Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3053,
+    "exit": {
+     "epoch": 37,
+     "node": 52
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 22,
+   "opened_at": "2026-09-03T09:26:43.107565852Z",
+   "parties": [
+    {
+     "account_id": 3053,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "withdrawn",
+     "epoch": 37,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:18:01.686638583Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3054,
+    "exit": {
+     "epoch": 45,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 21,
+   "opened_at": "2026-09-03T09:11:25.472413416Z",
+   "parties": [
+    {
+     "account_id": 3054,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T12:18:01.668257331Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3032,
+    "exit": {
+     "epoch": 45,
+     "node": 107
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 20,
+   "opened_at": "2026-09-03T09:11:25.472413416Z",
+   "parties": [
+    {
+     "account_id": 3032,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 45,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "dismissed",
+     "epoch": 37,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  },
+  {
+   "closed_at": "2026-09-03T11:50:54.627893569Z",
+   "evidence": {
+    "account_est": {
+     "degraded_exits": 0,
+     "span_nodes": 0,
+     "witness_exits": 0
+    },
+    "defendant": 3031,
+    "exit": {
+     "epoch": 36,
+     "node": 52
+    },
+    "trigger": "traffic_degraded"
+   },
+   "id": 19,
+   "opened_at": "2026-09-03T09:11:10.471873294Z",
+   "parties": [
+    {
+     "account_id": 3031,
+     "disposition": "dismissed",
+     "epoch": 0,
+     "kind": "account",
+     "node_id": 0,
+     "role": "defendant"
+    },
+    {
+     "account_id": 0,
+     "disposition": "withdrawn",
+     "epoch": 36,
+     "kind": "exit",
+     "node_id": 52,
+     "role": "co_remanded"
+    },
+    {
+     "account_id": 0,
+     "disposition": "withdrawn",
+     "epoch": 51,
+     "kind": "exit",
+     "node_id": 107,
+     "role": "co_remanded"
+    }
+   ],
+   "status": "dismissed",
+   "verdict": "dismissed"
+  }
+ ]
+}

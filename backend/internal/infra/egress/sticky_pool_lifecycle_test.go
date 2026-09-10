@@ -85,6 +85,7 @@ func TestStickyAccountTemplatePoolMemberLifecycle(t *testing.T) {
 		{ID: 20, Name: "resin-b", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, cipher, templateB)},
 	}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	repo.nodes = repo.member[1]
 
 	acquire := func(accountCtx context.Context, affinity string) (*Lease, error) {

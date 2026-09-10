@@ -28,6 +28,7 @@ func TestDialWebSocketPoolModeRetriesBoundedOnSafeFailure(t *testing.T) {
 		EncryptedProxyURL: encryptedProxy(t, cipher, "socks5://127.0.0.1:1"),
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "acct")
 	if err != nil || lease == nil {
 		t.Fatalf("web pool lease: lease=%v err=%v", lease, err)

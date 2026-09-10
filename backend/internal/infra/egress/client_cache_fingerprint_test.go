@@ -14,14 +14,14 @@ import (
 // 传输层形态真实相关的分量(proxyURL/userAgent)变化仍必须换键。
 func TestClientCacheIgnoresCookieChangesInFingerprint(t *testing.T) {
 	manager, _ := newPoolTestManager(t)
-	manager.accountIsolated.Store(false)
+	manager.transport.accountIsolated.Store(false)
 
-	first, err := manager.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:1080", "UA/1.0", "cf_clearance=aaa", false, "shared", clientOptions{})
+	first, err := manager.transport.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:1080", "UA/1.0", "cf_clearance=aaa", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 同出口、同 UA、不同 cookies:必须复用同一客户端实例(连接池保留)。
-	second, err := manager.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:1080", "UA/1.0", "cf_clearance=bbb", false, "shared", clientOptions{})
+	second, err := manager.transport.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:1080", "UA/1.0", "cf_clearance=bbb", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestClientCacheIgnoresCookieChangesInFingerprint(t *testing.T) {
 	}
 
 	// 代理 URL 变化(传输层形态变化)仍必须换新客户端。
-	third, err := manager.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:2080", "UA/1.0", "cf_clearance=bbb", false, "shared", clientOptions{})
+	third, err := manager.transport.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:2080", "UA/1.0", "cf_clearance=bbb", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestClientCacheIgnoresCookieChangesInFingerprint(t *testing.T) {
 	}
 
 	// UA 变化(驱动 TLS profile)同样必须换新客户端。
-	fourth, err := manager.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:1080", "UA/2.0", "cf_clearance=bbb", false, "shared", clientOptions{})
+	fourth, err := manager.transport.clientForWithOptions(7, domain.ScopeWeb, "socks5://proxy:1080", "UA/2.0", "cf_clearance=bbb", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

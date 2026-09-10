@@ -56,6 +56,8 @@ func seedOperationsConfigRow(t *testing.T, repo *EgressRepository) egress.Operat
 			egress.ScopeBuild: {Mode: egress.RoutingTargetDirect},
 		},
 		UpdatedAt: time.Now().UTC(),
+	}, func(egress.Node) error {
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,13 +81,17 @@ func TestSaveEgressOperationsConfigIfCurrentRejectsStaleSnapshot(t *testing.T) {
 	admin := snapshot
 	admin.ProbeIntervalSeconds = 120
 	admin.UpdatedAt = time.Now().UTC()
-	if _, err := repo.SaveEgressOperationsConfig(ctx, admin); err != nil {
+	if _, err := repo.SaveEgressOperationsConfig(ctx, admin, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	stale := snapshot
 	delete(stale.ScopeTargets, egress.ScopeBuild)
-	_, err := repo.SaveEgressOperationsConfigIfCurrent(ctx, stale, snapshot.UpdatedAt)
+	_, err := repo.SaveEgressOperationsConfigIfCurrent(ctx, stale, snapshot.UpdatedAt, func(egress.Node) error {
+		return nil
+	})
 	if !errors.Is(err, repository.ErrEgressConfigStale) {
 		t.Fatalf("stale snapshot write must be rejected with ErrEgressConfigStale, got %v", err)
 	}
@@ -112,7 +118,9 @@ func TestSaveEgressOperationsConfigIfCurrentCommitsWhenCurrent(t *testing.T) {
 
 	current := snapshot
 	delete(current.ScopeTargets, egress.ScopeBuild)
-	saved, err := repo.SaveEgressOperationsConfigIfCurrent(ctx, current, snapshot.UpdatedAt)
+	saved, err := repo.SaveEgressOperationsConfigIfCurrent(ctx, current, snapshot.UpdatedAt, func(egress.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +130,9 @@ func TestSaveEgressOperationsConfigIfCurrentCommitsWhenCurrent(t *testing.T) {
 
 	retry := snapshot
 	retry.ProbeIntervalSeconds = 600
-	if _, err := repo.SaveEgressOperationsConfigIfCurrent(ctx, retry, snapshot.UpdatedAt); !errors.Is(err, repository.ErrEgressConfigStale) {
+	if _, err := repo.SaveEgressOperationsConfigIfCurrent(ctx, retry, snapshot.UpdatedAt, func(egress.Node) error {
+		return nil
+	}); !errors.Is(err, repository.ErrEgressConfigStale) {
 		t.Fatalf("post-commit write with the old snapshot timestamp must be stale, got %v", err)
 	}
 

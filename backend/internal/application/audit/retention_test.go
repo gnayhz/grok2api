@@ -49,12 +49,12 @@ func (r *retentionRepo) stats() (int, []time.Time, []int) {
 // 排空后循环等待（不忙轮询——用取消时序证明）。
 func TestRunRetentionSweepsUntilDrainedThenSleeps(t *testing.T) {
 	repo := &retentionRepo{perBatch: []int{500, 500, 137}} // 第三批 < 500 → 排空
-	service := NewService(repo, nil, 8, 4, time.Millisecond)
+	service := newTestService(t, repo, nil, 8, 4, time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	swept := make(chan struct{})
 	go func() {
-		_ = service.RunRetention(ctx, 24*time.Hour)
+		_ = service.RunRetention(ctx, retentionSource(24*time.Hour))
 		close(swept)
 	}()
 	// 排空三批应在一轮预算内完成；等待调用数稳定。
@@ -100,10 +100,10 @@ func TestRunRetentionErrorStopsSweepNotLoop(t *testing.T) {
 		perBatch: []int{500},
 		errAt:    map[int]error{1: errors.New("db busy")},
 	}
-	service := NewService(repo, nil, 8, 4, time.Millisecond)
+	service := newTestService(t, repo, nil, 8, 4, time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = service.RunRetention(ctx, 24*time.Hour) }()
+	go func() { _ = service.RunRetention(ctx, retentionSource(24*time.Hour)) }()
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -128,11 +128,11 @@ func TestRunRetentionErrorStopsSweepNotLoop(t *testing.T) {
 // TestRunRetentionZeroDisables 锁定 retention<=0 的防御路径：直接等待 ctx。
 func TestRunRetentionZeroDisables(t *testing.T) {
 	repo := &retentionRepo{}
-	service := NewService(repo, nil, 8, 4, time.Millisecond)
+	service := newTestService(t, repo, nil, 8, 4, time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		_ = service.RunRetention(ctx, 0)
+		_ = service.RunRetention(ctx, retentionSource(0))
 		close(done)
 	}()
 	time.Sleep(100 * time.Millisecond)
@@ -147,4 +147,63 @@ func TestRunRetentionZeroDisables(t *testing.T) {
 	}
 }
 
-var _ = auditdomain.Record{} // 保持 audit 导入（mock 接口完整性需要）
+type retentionSource time.Duration
+
+func (r retentionSource) AuditRetentionPolicy(context.Context) (auditdomain.RetentionPolicy, error) {
+	return auditdomain.RetentionPolicy{Period: time.Duration(r)}, nil
+}
+
+type retentionSourceFunc func(context.Context) (auditdomain.RetentionPolicy, error)
+
+func (f retentionSourceFunc) AuditRetentionPolicy(ctx context.Context) (auditdomain.RetentionPolicy, error) {
+	return f(ctx)
+}
+
+func TestRetentionSweepStopsOnPolicyFailureOrInvalidity(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		repo := &retentionRepo{perBatch: []int{500, 500}}
+		service := newTestService(t, repo, nil, 8, 4, time.Millisecond)
+		reads := 0
+		source := retentionSourceFunc(func(ctx context.Context) (auditdomain.RetentionPolicy, error) {
+			reads++
+			if reads == 1 {
+				return auditdomain.RetentionPolicy{Period: 24 * time.Hour}, nil
+			}
+			if invalid {
+				return auditdomain.RetentionPolicy{Period: -1}, nil
+			}
+			return auditdomain.RetentionPolicy{}, errors.New("policy store unavailable")
+		})
+		deleted, err := service.SweepRetention(context.Background(), source)
+		if err == nil || deleted != 500 {
+			t.Fatalf("deleted=%d err=%v", deleted, err)
+		}
+		if calls, _, _ := repo.stats(); calls != 1 {
+			t.Fatalf("continued stale deletion: %d", calls)
+		}
+	}
+}
+
+func TestRetentionSweepDeadlineAndCancellation(t *testing.T) {
+	repo := &retentionRepo{}
+	service := newTestService(t, repo, nil, 8, 4, time.Millisecond)
+	source := retentionSourceFunc(func(ctx context.Context) (auditdomain.RetentionPolicy, error) {
+		<-ctx.Done()
+		return auditdomain.RetentionPolicy{}, ctx.Err()
+	})
+	start := time.Now()
+	if _, err := service.sweepRetention(context.Background(), source, 20*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline err = %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("unbounded retention sweep")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := service.SweepRetention(ctx, source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel err = %v", err)
+	}
+	if calls, _, _ := repo.stats(); calls != 0 {
+		t.Fatalf("deletion after cancellation: %d", calls)
+	}
+}

@@ -58,7 +58,6 @@ import {
   resetAllAccountQuota,
   refreshAccountsTokens,
   refreshAccountToken,
-  checkAccountRisk,
   refreshAccountQuota,
   refreshAllAccountBilling,
   refreshAllAccountTokens,
@@ -204,21 +203,19 @@ export function AccountsPage() {
     clearCloudflareCookies: z.boolean(),
     buildSuperEntitled: z.boolean(),
     buildRouteMode: z.enum(["auto", "build", "xai"]),
-    riskFlagged: z.boolean(),
   });
   type AccountForm = z.infer<typeof accountSchema>;
   const form = useForm<AccountForm>({
     resolver: zodResolver(accountSchema),
     defaultValues: {
       name: "", enabled: true, priority: 1, maxConcurrent: 8, minimumRemaining: 0,
-      cloudflareCookies: "", clearCloudflareCookies: false, buildSuperEntitled: false, buildRouteMode: "auto", riskFlagged: false,
+      cloudflareCookies: "", clearCloudflareCookies: false, buildSuperEntitled: false, buildRouteMode: "auto",
     },
   });
   const accountEnabled = useWatch({ control: form.control, name: "enabled" });
   const clearCloudflareCookies = useWatch({ control: form.control, name: "clearCloudflareCookies" });
   const buildSuperEntitled = useWatch({ control: form.control, name: "buildSuperEntitled" });
   const buildRouteMode = useWatch({ control: form.control, name: "buildRouteMode" });
-  const riskFlagged = useWatch({ control: form.control, name: "riskFlagged" });
   const selected = selection.provider === provider ? selection.ids : new Set<string>();
   const selectedIdsKey = Array.from(selected).sort().join(",");
 
@@ -261,7 +258,8 @@ export function AccountsPage() {
         input.buildRouteMode = values.buildRouteMode;
         if (values.buildSuperEntitled !== editing.buildSuperEntitled) input.buildSuperEntitled = values.buildSuperEntitled;
       }
-      if (values.riskFlagged !== (editing.riskStatus === "rsc_denied")) input.riskStatus = values.riskFlagged ? "rsc_denied" : "";
+      // 手动风控打标已下线(架构基准 B5:质量语义归仲裁庭;账号启停归底座)。
+      // 遗留标记经列表徽章只读可见,不再经编辑表单改写。
       return updateAccount(editing.id, input);
     },
     onSuccess: (account, values) => {
@@ -439,15 +437,6 @@ export function AccountsPage() {
     onSuccess: () => {
       invalidateAccountData();
       toast.success(t("accounts.cooldownCleared"));
-    },
-    onError: showError,
-  });
-
-  const riskCheckMutation = useMutation({
-    mutationFn: checkAccountRisk,
-    onSuccess: (account) => {
-      invalidateAccountData();
-      toast.success(account.riskStatus === "rsc_denied" ? t("accounts.rscRisk") : t("accounts.statusActive"));
     },
     onError: showError,
   });
@@ -1013,7 +1002,7 @@ export function AccountsPage() {
       clearCloudflareCookies: false,
       buildSuperEntitled: account.buildSuperEntitled,
       buildRouteMode: account.buildRouteMode,
-      riskFlagged: account.riskStatus === "rsc_denied",
+
     });
   }
 
@@ -1668,25 +1657,6 @@ export function AccountsPage() {
               <div className="space-y-2"><Label htmlFor="account-concurrency">{t("accounts.maxConcurrent")}</Label><Input id="account-concurrency" type="number" min="1" max="256" {...form.register("maxConcurrent", { valueAsNumber: true })} /></div>
             </div>
             <div className="space-y-2"><Label htmlFor="account-minimum">{t("accounts.minimumRemaining")}</Label><Input id="account-minimum" type="number" min="0" step="0.01" {...form.register("minimumRemaining", { valueAsNumber: true })} /></div>
-            <div className="flex items-start justify-between gap-4 rounded-md border border-rose-200 bg-rose-50/60 p-3 dark:border-rose-900 dark:bg-rose-950/30">
-              <div className="space-y-1">
-                <Label htmlFor="account-risk-flagged">{t("accounts.rscRiskFlag.label")}</Label>
-                <p className="text-xs text-muted-foreground">{t("accounts.rscRiskFlag.description")}</p>
-                {editing?.riskTrigger ? (
-                  <p className="text-xs text-rose-700 dark:text-rose-300">
-                    {t(`accounts.rscRiskSource${editing.riskTrigger === "patrol" ? "Patrol" : editing.riskTrigger === "manual" ? "Manual" : "Degrade"}`)}
-                    {editing.riskCheckedAt ? ` · ${formatDateTime(editing.riskCheckedAt, i18n.language)}` : ""}
-                    {editing.riskDetail ? ` · ${editing.riskDetail}` : ""}
-                  </p>
-                ) : null}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <Button type="button" variant="outline" size="sm" disabled={!editing || riskCheckMutation.isPending} onClick={() => editing && riskCheckMutation.mutate(editing.id)}>
-                  {riskCheckMutation.isPending ? <Spinner /> : null}{t("settings.accountRisk.riskCheckNow")}
-                </Button>
-                <Switch id="account-risk-flagged" checked={riskFlagged} onCheckedChange={(checked) => form.setValue("riskFlagged", checked, { shouldDirty: true })} />
-              </div>
-            </div>
             {editing?.provider === "grok_build" ? (
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-4 rounded-md bg-muted/50 p-3">
@@ -2126,11 +2096,12 @@ function AccountStatus({ account }: { account: AccountDTO }) {
   }
   if (account.authStatus === "reauthRequired") {
     const refreshErrorDetails = formatAdditionalRefreshErrorDetails(account);
-    const hasRefreshError = Boolean(account.lastRefreshErrorStatus || account.lastRefreshErrorCode || account.lastRefreshErrorMessage || refreshErrorDetails);
+    const hasRefreshError = Boolean(account.authError || account.lastRefreshErrorStatus || account.lastRefreshErrorCode || account.lastRefreshErrorMessage || refreshErrorDetails);
     if (!hasRefreshError) return <Badge variant="destructive">{t("accounts.statusReauthRequired")}</Badge>;
     return (
       <StatusTooltip content={(
         <div className="grid w-72 max-w-[calc(100vw-2rem)] grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs font-normal leading-5">
+          {account.authError ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorMessage")}</span><span className="break-words">{account.authError}</span></> : null}
           {account.lastRefreshErrorStatus ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorStatus")}</span><span>{account.lastRefreshErrorStatus}</span></> : null}
           {account.lastRefreshErrorCode ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorCode")}</span><span className="break-all">{account.lastRefreshErrorCode}</span></> : null}
           {account.lastRefreshErrorMessage ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorMessage")}</span><span className="break-words">{account.lastRefreshErrorMessage}</span></> : null}
@@ -2146,7 +2117,7 @@ function AccountStatus({ account }: { account: AccountDTO }) {
     : undefined;
   if (consoleWindow) {
     const detail = consoleWindow.resetAt
-      ? t("accounts.quotaResetAt", { time: formatDateTime(consoleWindow.resetAt, i18n.language) })
+      ? t("console.recoveryProbeAt", { time: formatDateTime(consoleWindow.resetAt, i18n.language) })
       : t("accounts.quotaResetUnknown");
     return (
       <StatusTooltip content={detail}>

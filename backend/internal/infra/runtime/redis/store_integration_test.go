@@ -197,15 +197,18 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 	}
 
 	deviceStore := NewDeviceSessionStore(store)
-	session := account.DeviceSession{ID: "device", DeviceCode: "code", ExpiresAt: expiresAt}
+	session := account.DeviceSession{ID: "device", DeviceCode: "code", Interval: time.Second, ExpiresAt: expiresAt}
 	if err := deviceStore.Create(ctx, session); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := deviceStore.Get(ctx, session.ID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := deviceStore.Delete(ctx, session.ID); err != nil {
+	if _, err := deviceStore.ClaimPoll(ctx, session.ID, "test-claim", time.Now(), time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
+	}
+	if applied, err := deviceStore.FinishPoll(ctx, account.DevicePollReceipt{SessionID: session.ID, Token: "test-claim"}, account.DevicePollCompletion{Kind: account.DevicePollDenied, CompletedAt: time.Now()}); err != nil || !applied {
+		t.Fatalf("finish device poll: applied=%t err=%v", applied, err)
 	}
 
 	lock := NewLockStore(store)
@@ -257,18 +260,18 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 	}
 
 	firstGeneration, err := store.MarkQuotaRefreshDirty(ctx, 42, "fast", 200*time.Millisecond)
-	if err != nil || firstGeneration != 1 {
-		t.Fatalf("first quota refresh generation = %d, err = %v", firstGeneration, err)
+	if err != nil || firstGeneration.Generation != 1 {
+		t.Fatalf("first quota refresh generation = %+v, err = %v", firstGeneration, err)
 	}
 	if cleared, err := store.ClearQuotaRefreshDirty(ctx, 42, "fast", firstGeneration); err != nil || !cleared {
 		t.Fatalf("clear first quota refresh generation = %v, err = %v", cleared, err)
 	}
-	if generation, dirty, err := store.QuotaRefreshGeneration(ctx, 42, "fast"); err != nil || generation != firstGeneration || dirty {
-		t.Fatalf("cleared quota refresh state = generation %d, dirty %v, err %v", generation, dirty, err)
+	if generation, dirty, err := store.GetQuotaRefreshState(ctx, 42, "fast"); err != nil || generation != firstGeneration || dirty {
+		t.Fatalf("cleared quota refresh state = generation %+v, dirty %v, err %v", generation, dirty, err)
 	}
 	secondGeneration, err := store.MarkQuotaRefreshDirty(ctx, 42, "fast", 200*time.Millisecond)
-	if err != nil || secondGeneration != 2 {
-		t.Fatalf("second quota refresh generation = %d, err = %v", secondGeneration, err)
+	if err != nil || secondGeneration.Generation != 2 {
+		t.Fatalf("second quota refresh generation = %+v, err = %v", secondGeneration, err)
 	}
 	if cleared, err := store.ClearQuotaRefreshDirty(ctx, 42, "fast", firstGeneration); err != nil || cleared {
 		t.Fatalf("stale quota refresh clear = %v, err = %v", cleared, err)
@@ -282,8 +285,8 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond)
-	if generation, dirty, err := store.QuotaRefreshGeneration(ctx, 42, "fast"); err != nil || generation != 0 || dirty {
-		t.Fatalf("expired quota refresh state = generation %d, dirty %v, err %v", generation, dirty, err)
+	if generation, dirty, err := store.GetQuotaRefreshState(ctx, 42, "fast"); err != nil || generation.Generation != 0 || dirty {
+		t.Fatalf("expired quota refresh state = generation %+v, dirty %v, err %v", generation, dirty, err)
 	}
 	if exists, err := store.client.HExists(ctx, generationKey, member).Result(); err != nil || exists {
 		t.Fatalf("expired generation retained = %v, err = %v", exists, err)

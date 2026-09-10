@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,14 +26,19 @@ type subscriptionSyncRepositoryStub struct {
 	nodes map[uint64][]domain.Node
 }
 
-func (r *subscriptionSyncRepositoryStub) UpsertEgressNodesFromSource(_ context.Context, sourceID uint64, nodes []domain.Node) (int, error) {
+func (r *subscriptionSyncRepositoryStub) BeginEgressSourceSync(_ context.Context, source domain.SubscriptionSource) (domain.SourceSyncClaim, error) {
+	return domain.SourceSyncClaim{SourceID: source.ID, Revision: 1}, nil
+}
+
+func (r *subscriptionSyncRepositoryStub) CommitEgressSourceSync(_ context.Context, claim domain.SourceSyncClaim, nodes []domain.Node, _, _ time.Time) (int, error) {
+	sourceID := claim.SourceID
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.nodes[sourceID] = append([]domain.Node(nil), nodes...)
 	return len(nodes), nil
 }
 
-func (r *subscriptionSyncRepositoryStub) UpdateEgressSourceSync(context.Context, uint64, time.Time, time.Time, int, string) error {
+func (r *subscriptionSyncRepositoryStub) FailEgressSourceSync(context.Context, domain.SourceSyncClaim, time.Time, time.Time, string) error {
 	return nil
 }
 
@@ -39,7 +46,7 @@ func (r *subscriptionSyncRepositoryStub) GetEgressOperationsConfig(context.Conte
 	return domain.OperationsConfig{}, nil
 }
 
-func (r *subscriptionSyncRepositoryStub) SaveEgressOperationsConfig(_ context.Context, config domain.OperationsConfig) (domain.OperationsConfig, error) {
+func (r *subscriptionSyncRepositoryStub) SaveEgressOperationsConfig(_ context.Context, config domain.OperationsConfig, validate domain.FixedTargetValidator) (domain.OperationsConfig, error) {
 	return config, nil
 }
 
@@ -333,26 +340,65 @@ func TestValidatePublicSubscriptionTargetRejectsPrivateAddresses(t *testing.T) {
 	}
 }
 
-func TestSubscriptionProxyForwardDialerBoundsHandshakeConnection(t *testing.T) {
-	client, server := net.Pipe()
-	defer server.Close()
-	dialer := &subscriptionProxyForwardDialer{timeout: 20 * time.Millisecond}
-	connection, err := dialer.withDeadline(client, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Close()
-	started := time.Now()
-	buffer := make([]byte, 1)
-	_, err = connection.Read(buffer)
-	if err == nil {
-		t.Fatal("connection without peer data did not reach its handshake deadline")
-	}
-	if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
-		t.Fatalf("deadline error=%v", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("handshake deadline took %s", elapsed)
+func TestSubscriptionSOCKSCancellationClosesRealHandshakeSocket(t *testing.T) {
+	for _, scheme := range []string{"socks4a", "socks5"} {
+		t.Run(scheme, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			entered, closed := make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(closed)
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(time.Second))
+				var greeting [32]byte
+				if _, err = conn.Read(greeting[:]); err != nil {
+					return
+				}
+				close(entered)
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+			transport, err := subscriptionTransport(scheme + "://" + listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer transport.CloseIdleConnections()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				conn, err := transport.DialContext(ctx, "tcp", "example.com:443")
+				if conn != nil {
+					_ = conn.Close()
+				}
+				done <- err
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("handshake did not start")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel error: %v", err)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("SOCKS caller stayed blocked")
+			}
+			select {
+			case <-closed:
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("canceled SOCKS socket remains open")
+			}
+		})
 	}
 }
 

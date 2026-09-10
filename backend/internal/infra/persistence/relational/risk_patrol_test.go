@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"path/filepath"
 	"testing"
 	"time"
@@ -89,7 +90,7 @@ func TestListPatrolDueSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	disabled.Enabled = false
-	if _, err := accountRepo.Update(ctx, disabled); err != nil {
+	if _, err := accountRepo.UpdateAdministration(ctx, disabled.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &disabled.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 

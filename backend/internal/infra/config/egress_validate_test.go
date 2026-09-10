@@ -23,16 +23,9 @@ func TestEgressConfigValidateBounds(t *testing.T) {
 		mut    func(*EgressConfig)
 		substr string
 	}{
-		{"quarantineCooldown 过小", func(c *EgressConfig) { c.QualityGuard.QuarantineCooldown = Duration(24 * time.Nanosecond) }, "quarantineCooldown"},
-		{"quarantineCooldown 过大", func(c *EgressConfig) { c.QualityGuard.QuarantineCooldown = Duration(1000 * time.Hour) }, "quarantineCooldown"},
-		{"crossAccountThreshold 负数", func(c *EgressConfig) { c.QualityGuard.CrossAccountThreshold = -1 }, "crossAccountThreshold"},
-		{"softCooldownMax 小于 base", func(c *EgressConfig) {
-			c.QualityGuard.SoftCooldownBase = Duration(time.Hour)
-			c.QualityGuard.SoftCooldownMax = Duration(time.Minute)
-		}, "softCooldownMax"},
 		{"maxAttempts 过大", func(c *EgressConfig) { c.Rotation.MaxAttemptsPerQuarantine = 101 }, "maxAttemptsPerQuarantine"},
 		{"webhookTimeout 过小", func(c *EgressConfig) { c.Rotation.WebhookTimeout = Duration(time.Nanosecond) }, "webhookTimeout"},
-		{"canaryModelPublicID 过长", func(c *EgressConfig) { c.Rotation.CanaryModelPublicID = strings.Repeat("m", 129) }, "canaryModelPublicId"},
+		{"minNodeInterval 过小", func(c *EgressConfig) { c.Rotation.MinNodeInterval = Duration(time.Second) }, "minNodeInterval"},
 	}
 	for _, testCase := range cases {
 		value := DefaultEgressConfig()

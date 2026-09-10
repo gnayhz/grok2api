@@ -19,7 +19,7 @@ services:
       - grok2api-data:/app/data
     restart: unless-stopped
     init: true
-    stop_grace_period: 30s
+    stop_grace_period: 90s
     security_opt:
       - no-new-privileges:true
 

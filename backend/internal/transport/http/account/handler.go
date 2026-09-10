@@ -45,22 +45,46 @@ const (
 	accountEventWriteTimeout      = 30 * time.Second
 )
 
-type accountRiskChecker interface {
-	CheckAccount(ctx context.Context, id uint64) error
-}
-
 type Handler struct {
 	service *accountapp.Service
 	sync    accountSynchronizer
 	logger  *slog.Logger
-	risk    accountRiskChecker
+	// qualityStates 质量轴状态注入缝隙(依赖倒置,出口节点同款):
+	// 组合根注入质量层读函数;nil=质量层剥离态,账号响应不含质量字段。
+	qualityStates func() map[uint64]AccountQualityState
 }
 
-func (h *Handler) SetRiskChecker(checker accountRiskChecker) {
-	if h == nil {
+// AccountQualityState 是账号质量轴状态的投影(质量层提供;词汇为纯
+// 数据,底座不理解羁押/服刑语义,只透传展示)。
+type AccountQualityState struct {
+	State  string `json:"state"`                   // remanded | sentenced
+	CaseID uint64 `json:"caseId,omitempty,string"` // 关联案件号(可解释性)
+}
+
+// SetQualityStates 安装质量状态注入缝隙(nil 保持未设——剥离形态)。
+func (h *Handler) SetQualityStates(provider func() map[uint64]AccountQualityState) {
+	if provider == nil {
 		return
 	}
-	h.risk = checker
+	h.qualityStates = provider
+}
+
+// attachQualityStates 旁注质量轴状态(缝隙未注入时空转——剥离形态
+// 账号列表照常,只是没有质量徽章)。
+func (h *Handler) attachQualityStates(items []accountResponse) {
+	if h.qualityStates == nil {
+		return
+	}
+	states := h.qualityStates()
+	if len(states) == 0 {
+		return
+	}
+	for i := range items {
+		if state, ok := states[items[i].ID]; ok {
+			quality := state
+			items[i].Quality = &quality
+		}
+	}
 }
 
 type accountSyncPipeline struct {
@@ -197,7 +221,6 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/:id/refresh-token", h.refreshToken)
 	router.POST("/accounts/:id/refresh-billing", h.refreshBilling)
 	router.POST("/accounts/:id/refresh-quota", h.refreshWebQuota)
-	router.POST("/accounts/:id/risk-check", h.riskCheck)
 }
 
 type updateRequest struct {
@@ -334,6 +357,7 @@ type accountResponse struct {
 	TeamID                   string     `json:"teamId,omitempty"`
 	Enabled                  bool       `json:"enabled"`
 	AuthStatus               string     `json:"authStatus"`
+	AuthError                string     `json:"authError,omitempty"`
 	ExpiresAt                *time.Time `json:"expiresAt,omitempty"`
 	Refreshable              bool       `json:"refreshable"`
 	RefreshDueAt             *time.Time `json:"refreshDueAt,omitempty"`
@@ -375,6 +399,8 @@ type accountResponse struct {
 	Billing             *billingResponse      `json:"billing,omitempty"`
 	Quota               quotaResponse         `json:"quota"`
 	QuotaWindows        []quotaWindowResponse `json:"quotaWindows,omitempty"`
+	// Quality 质量轴(裁决亭)状态徽章;nil=未被裁决亭动过。
+	Quality *AccountQualityState `json:"quality,omitempty"`
 }
 
 type linkedAccountResponse struct {
@@ -475,6 +501,7 @@ func (h *Handler) list(c *gin.Context) {
 	for _, value := range values {
 		items = append(items, newAccountResponse(value))
 	}
+	h.attachQualityStates(items)
 	response.Success(c, http.StatusOK, gin.H{"items": items, "page": page, "pageSize": pageSize, "total": total})
 }
 
@@ -817,7 +844,9 @@ func (h *Handler) get(c *gin.Context) {
 		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "读取账号失败")
 		return
 	}
-	response.Success(c, http.StatusOK, newAccountResponse(value))
+	item := newAccountResponse(value)
+	h.attachQualityStates([]accountResponse{item})
+	response.Success(c, http.StatusOK, item)
 }
 
 func (h *Handler) startDevice(c *gin.Context) {
@@ -1456,27 +1485,6 @@ func (h *Handler) refreshToken(c *gin.Context) {
 	response.Success(c, http.StatusOK, newAccountResponse(value))
 }
 
-func (h *Handler) riskCheck(c *gin.Context) {
-	id, ok := pathID(c)
-	if !ok {
-		return
-	}
-	if h.risk == nil {
-		response.Error(c, http.StatusServiceUnavailable, "accountRiskUnavailable", "风险检测未初始化")
-		return
-	}
-	if err := h.risk.CheckAccount(c.Request.Context(), id); err != nil {
-		h.writeServiceError(c, "accountRiskCheckFailed", err, http.StatusBadGateway, "账号风险检测失败")
-		return
-	}
-	value, err := h.service.Get(c.Request.Context(), id)
-	if err != nil {
-		h.writeServiceError(c, "accountRiskCheckFailed", err, http.StatusInternalServerError, "读取账号失败")
-		return
-	}
-	response.Success(c, http.StatusOK, newAccountResponse(value))
-}
-
 // clearCooldownUnconditional 是 clear-cooldown 的兼容别名路由：两者共享
 // Service.ClearCooldown（保留 missing-thinking 打击标记，只清瞬态冷却），
 // 失效事件同样携带保留后的标记，路由覆盖层与数据库终态一致。
@@ -1595,7 +1603,7 @@ func newAccountResponse(value accountapp.View) accountResponse {
 	result := accountResponse{
 		ID: c.ID, Provider: string(c.Provider), AuthType: string(c.AuthType), WebTier: string(c.WebTier),
 		WebTierSyncedAt: c.WebTierSyncedAt, WebNSFWEnabledAt: c.WebNSFWEnabledAt, WebTermsAcceptedAt: c.WebTermsAcceptedAt, Name: c.Name, Email: c.Email, UserID: c.UserID, TeamID: c.TeamID,
-		Enabled: c.Enabled, AuthStatus: string(c.AuthStatus), Refreshable: c.EncryptedRefreshToken != "",
+		Enabled: c.Enabled, AuthStatus: string(c.AuthStatus), AuthError: c.AuthError, Refreshable: c.EncryptedRefreshToken != "",
 		RefreshDueAt: c.RefreshDueAt, LastRefreshAt: c.LastRefreshAt,
 		RefreshFailures: c.RefreshFailureCount, LastRefreshErrorStatus: c.LastRefreshErrorStatus, LastRefreshError: c.LastRefreshErrorCode, LastRefreshErrorMessage: c.LastRefreshErrorMessage, LastRefreshErrorResponse: c.LastRefreshErrorResponse,
 		Priority: c.Priority, MaxConcurrent: c.MaxConcurrent, MinimumRemaining: c.MinimumRemaining,

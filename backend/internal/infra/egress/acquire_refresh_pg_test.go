@@ -48,15 +48,16 @@ func TestAcquireRefreshLatencyDistributionOnPostgres(t *testing.T) {
 		}
 	}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	sample := func(refresh bool) []time.Duration {
 		const samples = 200
 		latencies := make([]time.Duration, 0, samples)
 		for i := 0; i < samples; i++ {
 			if refresh {
-				manager.nodeMu.Lock()
-				delete(manager.nodes, nodeSnapshotKey)
-				manager.nodeMu.Unlock()
+				manager.routing.nodeMu.Lock()
+				delete(manager.routing.nodes, nodeSnapshotKey)
+				manager.routing.nodeMu.Unlock()
 			}
 			started := time.Now()
 			lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, fmt.Sprintf("acct-%d", i%64))

@@ -15,6 +15,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -315,3 +317,176 @@ func TestOAuthScopeMatchesOfficialPersonalAccountContract(t *testing.T) {
 		}
 	}
 }
+
+// The old request has already sent its original RT when another connection
+// replaces local material. Exercise Provider parsing/encryption and M07/SQL.
+func TestOAuthInFlightCompletionKeepsImportedCredential(t *testing.T) {
+	for _, mode := range []string{"success_after_import", "failure_after_import", "new_generation_refresh", "cancel_after_response"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "inflight.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			if err := database.InitializeSchema(ctx); err != nil {
+				t.Fatal(err)
+			}
+			cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			encrypt := func(v string) string {
+				t.Helper()
+				s, err := cipher.Encrypt(v)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return s
+			}
+			repo := relational.NewAccountRepository(database)
+			original, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{Provider: accountdomain.ProviderBuild, AuthType: accountdomain.AuthTypeOAuth, Name: "inflight", SourceKey: "inflight", OIDCClientID: "custom-client", EncryptedAccessToken: encrypt("old-access"), EncryptedRefreshToken: encrypt("original-rt"), ExpiresAt: time.Now().Add(-time.Minute), Enabled: true, AuthStatus: accountdomain.AuthStatusActive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			finish := func() { releaseOnce.Do(func() { close(release) }) }
+			defer finish()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				if mode == "new_generation_refresh" && r.Form.Get("refresh_token") == "imported-refresh" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"access_token":"fresh-imported-access","refresh_token":"fresh-imported-refresh","expires_in":3600}`)
+					return
+				}
+				if r.Form.Get("refresh_token") != "original-rt" || r.Form.Get("client_id") != "custom-client" {
+					t.Error("wrong observed credential on wire")
+				}
+				close(entered)
+				<-release
+				w.Header().Set("Content-Type", "application/json")
+				if mode == "failure_after_import" || mode == "new_generation_refresh" {
+					w.WriteHeader(400)
+					_, _ = io.WriteString(w, `{"error":"invalid_grant","error_description":"old refresh rejected"}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"access_token":"fresh-access","refresh_token":"rotated-rt","expires_in":3600}`)
+			}))
+			defer func() { finish(); server.Close() }()
+			adapter := NewAdapter(Config{}, cipher)
+			adapter.oauth.tokenURL = server.URL
+			adapter.oauth.http = server.Client()
+			if mode == "cancel_after_response" {
+				adapter.oauth.http.Transport = cancelOAuthBodyTransport{base: server.Client().Transport, cancel: cancel}
+			}
+			service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			type outcome struct {
+				credential accountdomain.Credential
+				err        error
+			}
+			done := make(chan outcome, 1)
+			go func() { v, err := service.EnsureCredential(requestCtx, original, true); done <- outcome{v, err} }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("OAuth request did not start")
+			}
+			expectedGeneration := original.CredentialGeneration + 1
+			if mode != "cancel_after_response" {
+				replacement := original
+				replacement.EncryptedAccessToken, replacement.EncryptedRefreshToken = encrypt("imported-access"), encrypt("imported-refresh")
+				replacement.ExpiresAt = time.Now().Add(time.Hour)
+				if _, _, err := repo.UpsertByIdentity(ctx, replacement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "new_generation_refresh" {
+				current, err := repo.Get(ctx, original.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				newDone := make(chan outcome, 1)
+				go func() { v, err := service.EnsureCredential(ctx, current, true); newDone <- outcome{v, err} }()
+				select {
+				case next := <-newDone:
+					if next.err != nil || next.credential.CredentialGeneration != current.CredentialGeneration+1 {
+						t.Fatal("new generation did not perform its own refresh")
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("new generation joined old in-flight refresh")
+				}
+				expectedGeneration++
+			}
+			finish()
+			var result outcome
+			select {
+			case result = <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("OAuth completion did not return")
+			}
+			if mode == "failure_after_import" || mode == "new_generation_refresh" {
+				if result.err == nil {
+					t.Fatal("old operation lost its own error")
+				}
+			} else if result.err != nil {
+				t.Fatal(result.err)
+			}
+			stored, err := repo.Get(ctx, original.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			access, err := cipher.Decrypt(stored.EncryptedAccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refresh, err := cipher.Decrypt(stored.EncryptedRefreshToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAccess, wantRefresh := "imported-access", "imported-refresh"
+			if mode == "cancel_after_response" {
+				wantAccess, wantRefresh = "fresh-access", "rotated-rt"
+				if requestCtx.Err() == nil {
+					t.Fatal("request was not canceled before persistence")
+				}
+			}
+			wantRequests := int32(1)
+			if mode == "new_generation_refresh" {
+				wantAccess, wantRefresh, wantRequests = "fresh-imported-access", "fresh-imported-refresh", 2
+			}
+			if access != wantAccess || refresh != wantRefresh || stored.CredentialGeneration != expectedGeneration || stored.AuthStatus != accountdomain.AuthStatusActive || stored.RefreshPermanent || stored.RefreshFailureCount != 0 || requests.Load() != wantRequests {
+				t.Fatalf("completion damaged replacement: generation=%d auth=%s failures=%d", stored.CredentialGeneration, stored.AuthStatus, stored.RefreshFailureCount)
+			}
+			if mode == "success_after_import" && result.credential.CredentialGeneration != expectedGeneration {
+				t.Fatal("caller received obsolete success material")
+			}
+		})
+	}
+}
+
+type cancelOAuthBodyTransport struct {
+	base   http.RoundTripper
+	cancel context.CancelFunc
+}
+
+func (c cancelOAuthBodyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := c.base.RoundTrip(r)
+	if err == nil {
+		response.Body = &cancelOAuthBody{ReadCloser: response.Body, cancel: c.cancel}
+	}
+	return response, err
+}
+
+type cancelOAuthBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOAuthBody) Close() error { err := c.ReadCloser.Close(); c.cancel(); return err }

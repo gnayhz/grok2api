@@ -39,13 +39,15 @@ func TestUpdateEgressNodePreservesConcurrentRuntimeWrites(t *testing.T) {
 	}
 	until := time.Now().Add(2 * time.Hour).UTC()
 	degradedAt := time.Now().UTC()
-	if err := repo.UpdateEgressNodeQualityState(ctx, created.ID, 0.25, 4, &until, egress.LastErrorExitIPQuality, 2, &degradedAt); err != nil {
+	if err := seedLegacyEgressQuality(repo, ctx, created.ID, 0.25, 4, &until, egress.LastErrorExitIPQuality, 2, &degradedAt); err != nil {
 		t.Fatal(err)
 	}
 
 	// 管理端用拿到手的老快照(隔离前的健康状态)改名保存。
 	created.Name = "preserve-renamed"
-	updated, err := repo.UpdateEgressNode(ctx, created)
+	updated, err := repo.UpdateEgressNodeConfiguration(ctx, created, func(egress.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

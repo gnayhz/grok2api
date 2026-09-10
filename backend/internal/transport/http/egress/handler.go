@@ -19,8 +19,27 @@ import (
 )
 
 type Handler struct {
-	service *egressapp.Service
-	logger  *slog.Logger
+	runtimeStats func() infraegress.RuntimeStats
+	service      *egressapp.Service
+	logger       *slog.Logger
+	// qualityStates 质量轴状态注入缝隙(依赖倒置,B4 决议2 同款):
+	// 组合根注入质量层读函数;nil=质量层剥离态,节点响应不含质量字段。
+	qualityStates func() map[uint64]NodeQualityState
+}
+
+// NodeQualityState 是节点质量轴状态的投影(质量层提供;词汇为纯数据,
+// 底座不理解羁押语义,只透传展示)。
+type NodeQualityState struct {
+	State  string `json:"state"`                   // remanded | banned
+	CaseID uint64 `json:"caseId,omitempty,string"` // 关联案件号(可解释性,I25)
+}
+
+// SetQualityStates 安装质量状态注入缝隙(nil 保持未设——剥离形态)。
+func (h *Handler) SetQualityStates(provider func() map[uint64]NodeQualityState) {
+	if provider == nil {
+		return
+	}
+	h.qualityStates = provider
 }
 
 func NewHandler(service *egressapp.Service, logger ...*slog.Logger) *Handler {
@@ -71,6 +90,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-operations", h.operationsConfig)
 	router.PUT("/egress-operations", h.updateOperationsConfig)
 	router.GET("/egress-operations/routing-stats", h.routingStats)
+	router.GET("/egress-operations/runtime", h.runtimeStatus)
 	router.PUT("/egress-pools/:id/members/:nodeId/priority", h.setPoolMemberPriority)
 	router.GET("/egress-pools/:id/stats", h.poolStats)
 	router.DELETE("/egress-pools/:id/stats", h.resetPoolStats)
@@ -181,6 +201,7 @@ type nodeResponse struct {
 	ProxyDisplay       string              `json:"proxyDisplay,omitempty"`
 	ProxyFingerprint   string              `json:"proxyFingerprint,omitempty"`
 	ProxyPool          bool                `json:"proxyPool"`
+	RotatingEndpoint   bool                `json:"rotatingEndpoint"`
 	SourceID           uint64              `json:"sourceId,omitempty,string"`
 	SourceName         string              `json:"sourceName,omitempty"`
 	Pools              []nodePoolRef       `json:"pools,omitempty"`
@@ -204,6 +225,9 @@ type nodeResponse struct {
 	ProbeProvider      string              `json:"probeProvider,omitempty"`
 	IPv4Probe          probeFamilyResponse `json:"ipv4Probe"`
 	IPv6Probe          probeFamilyResponse `json:"ipv6Probe"`
+	// Quality 质量轴状态(remanded/banned;质量层注入时才有值——
+	// 缺席=AVAILABLE 或剥离形态)。
+	Quality *NodeQualityState `json:"quality,omitempty"`
 }
 
 type probeFamilyResponse struct {
@@ -280,6 +304,7 @@ func (h *Handler) list(c *gin.Context) {
 		for _, value := range values {
 			items = append(items, newNodeResponse(value))
 		}
+		h.attachQualityStates(items)
 		pageSize := len(items)
 		if pageSize == 0 {
 			pageSize = repository.DefaultPageSize
@@ -299,6 +324,7 @@ func (h *Handler) list(c *gin.Context) {
 	for _, value := range values {
 		items = append(items, newNodeResponse(value))
 	}
+	h.attachQualityStates(items)
 	response.Success(c, http.StatusOK, gin.H{"items": items, "page": page, "pageSize": pageSize, "total": total})
 }
 
@@ -410,11 +436,30 @@ func newNodePoolRefs(values []egressdomain.NodePoolRef) []nodePoolRef {
 	return refs
 }
 
+// attachQualityStates 旁注质量轴状态(缝隙未注入时空转——剥离形态
+// 节点列表照常,只是没有质量徽章)。
+func (h *Handler) attachQualityStates(items []nodeResponse) {
+	if h.qualityStates == nil {
+		return
+	}
+	states := h.qualityStates()
+	if len(states) == 0 {
+		return
+	}
+	for i := range items {
+		if state, ok := states[items[i].ID]; ok {
+			quality := state
+			items[i].Quality = &quality
+		}
+	}
+}
+
 func newNodeResponse(value egressdomain.PublicNode) nodeResponse {
 	return nodeResponse{
 		ID: value.ID, Name: value.Name, Enabled: value.Enabled,
 		ProxyConfigured: value.ProxyConfigured, ProxyDisplay: value.ProxyDisplay, ProxyFingerprint: value.ProxyFingerprint,
 		ProxyPool:          value.ProxyPool,
+		RotatingEndpoint:   value.RotatingEndpoint,
 		AccountBoundProxy:  value.AccountBoundProxy,
 		RotationConfigured: value.RotationConfigured, RotationEnabled: value.RotationEnabled, LastRotatedAt: value.LastRotatedAt,
 		RotationAttempts: value.RotationAttempts, LastRotationError: value.LastRotationError,
@@ -1116,7 +1161,10 @@ func parseOptionalNodeIDs(values []string) ([]uint64, error) {
 }
 
 func (h *Handler) writeError(c *gin.Context, err error) {
+	var probeExecutionErr *egressdomain.ProbeExecutionError
 	switch {
+	case errors.As(err, &probeExecutionErr):
+		response.Error(c, http.StatusServiceUnavailable, "egressProbeUnavailable", "代理探测未完成，节点健康状态未变，请稍后重试")
 	case errors.Is(err, egressapp.ErrInvalidInput):
 		response.Error(c, http.StatusBadRequest, "invalidEgressNode", err.Error())
 	case errors.Is(err, egressapp.ErrNotFound):
@@ -1152,4 +1200,15 @@ func pathID(c *gin.Context) (uint64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func (h *Handler) SetRuntimeStats(provider func() infraegress.RuntimeStats) {
+	h.runtimeStats = provider
+}
+func (h *Handler) runtimeStatus(c *gin.Context) {
+	if h.runtimeStats == nil {
+		response.Success(c, http.StatusOK, infraegress.RuntimeStats{})
+		return
+	}
+	response.Success(c, http.StatusOK, h.runtimeStats())
 }

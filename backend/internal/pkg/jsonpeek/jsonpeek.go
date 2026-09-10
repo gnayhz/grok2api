@@ -2,8 +2,85 @@ package jsonpeek
 
 import (
 	"bytes"
+	"encoding/json"
 	"strconv"
+	"unicode/utf8"
 )
+
+// Valid validates the entire JSON frame before borrowed fields become evidence.
+// Use the standard validator as the authority. Fast skip routines can accept
+// truncated literals or incomplete strings and cannot establish this contract.
+func Valid(data []byte) bool { return json.Valid(data) }
+
+// ObjectFields visits the immediate fields of a complete JSON object. Values
+// borrow data; callers must validate untrusted JSON before using them as
+// evidence. Returning false stops iteration. Nested keys are never visited.
+func ObjectFields(data []byte, visit func(key, value []byte) bool) {
+	data = skipJSONSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return
+	}
+	data = skipJSONSpace(data[1:])
+	for len(data) > 0 && data[0] == '"' {
+		end := matchJSONString(data)
+		if end < 2 {
+			return
+		}
+		key := UnquoteBytes(data[:end])
+		data = skipJSONSpace(data[end:])
+		if len(data) == 0 || data[0] != ':' {
+			return
+		}
+		data = skipJSONSpace(data[1:])
+		end = scanJSONValue(data)
+		if end <= 0 || !visit(key, data[:end]) {
+			return
+		}
+		data = skipJSONSpace(data[end:])
+		if len(data) == 0 || data[0] != ',' {
+			return
+		}
+		data = skipJSONSpace(data[1:])
+	}
+}
+
+// ArrayValues is the array counterpart of ObjectFields.
+func ArrayValues(data []byte, visit func(value []byte) bool) {
+	data = skipJSONSpace(data)
+	if len(data) == 0 || data[0] != '[' {
+		return
+	}
+	data = skipJSONSpace(data[1:])
+	for len(data) > 0 && data[0] != ']' {
+		end := scanJSONValue(data)
+		if end <= 0 || !visit(data[:end]) {
+			return
+		}
+		data = skipJSONSpace(data[end:])
+		if len(data) == 0 || data[0] != ',' {
+			return
+		}
+		data = skipJSONSpace(data[1:])
+	}
+}
+
+// UnquoteBytes borrows unescaped strings and decodes JSON escapes otherwise.
+// JSON strings differ from Go strings: escaped slashes and surrogate pairs
+// must be accepted, so strconv.Unquote is not a substitute for the decoder.
+func UnquoteBytes(raw []byte) []byte {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil
+	}
+	inner := raw[1 : len(raw)-1]
+	if bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		return inner
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	return []byte(value)
+}
 
 // StringField returns the first JSON string value for key without decoding the
 // rest of the document. It is for hot-path SSE frames where encoding/json would
@@ -154,105 +231,52 @@ func InternType(b []byte) string {
 	return string(b)
 }
 
-// RootStringFieldScan returns the root-level string value for key on a
-// COMPLETE JSON object of any size, walking past nested values of arbitrary
-// length without allocating. Unlike RootStringField it is key-order
-// independent on frames larger than any head window: callers that re-marshal
-// through map[string]any get alphabetically sorted keys, so a multi-KB
-// "response" object can precede "type" at the root. Returns "" when the
-// buffer truncates before the key's value completes.
+// RootStringFieldScan visits root fields of a complete JSON object. Whitespace,
+// escaped keys and duplicate fields follow JSON decoding semantics (last wins).
+// Unescaped values borrow input until the final string conversion.
 func RootStringFieldScan(data []byte, key string) string {
 	if len(data) == 0 || key == "" {
 		return ""
 	}
-	rest := skipJSONSpace(data)
-	if len(rest) == 0 || rest[0] != '{' {
-		return ""
-	}
-	rest = skipJSONSpace(rest[1:])
-	for len(rest) > 0 {
-		if rest[0] == '}' {
-			return ""
+	var found []byte
+	ObjectFields(data, func(field, value []byte) bool {
+		if bytesEqualString(field, key) {
+			found = UnquoteBytes(value)
 		}
-		if rest[0] != '"' {
-			return ""
-		}
-		end := matchJSONString(rest)
-		if end <= 1 {
-			return ""
-		}
-		field := rest[1 : end-1]
-		rest = skipJSONSpace(rest[end:])
-		if len(rest) == 0 || rest[0] != ':' {
-			return ""
-		}
-		rest = skipJSONSpace(rest[1:])
-		valueEnd := scanJSONValue(rest)
-		if valueEnd <= 0 {
-			// Truncated value: the target key, when present, sits past the
-			// buffer end. Callers wanting head-only semantics pass a prefix.
-			return ""
-		}
-		if bytesEqualString(field, key) && rest[0] == '"' {
-			return string(rest[1 : valueEnd-1])
-		}
-		rest = skipJSONSpace(rest[valueEnd:])
-		if len(rest) > 0 && rest[0] == ',' {
-			rest = rest[1:]
-		}
-	}
-	return ""
+		return true
+	})
+	return string(found)
 }
 
-// RootIntFieldScan returns the root-level integer value for key on a
-// COMPLETE JSON object of any size, with the same key-order independence
-// as RootStringFieldScan. Returns false when the key is absent, its value
-// is not an integer literal, or the buffer truncates before it completes.
-// 用于重排键序大帧上位于嵌套大对象之后的根层数值（如 sequence_number）。
+// RootIntFieldScan returns the last root integer for key. It does not validate
+// the whole frame; callers using it as evidence must first validate the input.
 func RootIntFieldScan(data []byte, key string) (int64, bool) {
 	if len(data) == 0 || key == "" {
 		return 0, false
 	}
-	rest := skipJSONSpace(data)
-	if len(rest) == 0 || rest[0] != '{' {
-		return 0, false
-	}
-	rest = skipJSONSpace(rest[1:])
-	for len(rest) > 0 {
-		if rest[0] == '}' {
-			return 0, false
+	var found int64
+	var valid bool
+	ObjectFields(data, func(field, raw []byte) bool {
+		if bytesEqualString(field, key) {
+			value, err := strconv.ParseInt(string(raw), 10, 64)
+			found, valid = value, err == nil
 		}
-		if rest[0] != '"' {
-			return 0, false
+		return true
+	})
+	return found, valid
+}
+
+// RootRawValue returns the last immediate field value, borrowing data. As with
+// ObjectFields, callers establish complete valid JSON before trusting it.
+func RootRawValue(data []byte, key string) []byte {
+	var found []byte
+	ObjectFields(data, func(field, value []byte) bool {
+		if bytesEqualString(field, key) {
+			found = value
 		}
-		end := matchJSONString(rest)
-		if end <= 1 {
-			return 0, false
-		}
-		field := rest[1 : end-1]
-		rest = skipJSONSpace(rest[end:])
-		if len(rest) == 0 || rest[0] != ':' {
-			return 0, false
-		}
-		rest = skipJSONSpace(rest[1:])
-		valueEnd := scanJSONValue(rest)
-		if valueEnd <= 0 {
-			return 0, false
-		}
-		if string(field) == key && rest[0] != '"' && rest[0] != '{' && rest[0] != '[' {
-			value, err := strconv.ParseInt(string(rest[:valueEnd]), 10, 64)
-			if err != nil {
-				// 布尔/null/浮点字面量：该键不是整数，与缺失同口径。
-				return 0, false
-			}
-			return value, true
-		}
-		rest = skipJSONSpace(rest[valueEnd:])
-		if len(rest) > 0 && rest[0] == ',' {
-			rest = rest[1:]
-		}
-	}
-	return 0, false
+		return true
+	})
+	return found
 }
 
 // scanJSONValue returns the exclusive end offset of the JSON value at the
@@ -410,6 +434,16 @@ type TokenUsage struct {
 	Found         bool
 }
 
+// TokenUsageObject reads only counters belonging to one complete usage object.
+// Unlike the fragment-compatible TokenUsageFrom, it never searches for a
+// nested usage field. Canonical protocol observers should use this boundary.
+func TokenUsageObject(data []byte) TokenUsage {
+	if !Valid(data) {
+		return TokenUsage{}
+	}
+	return tokenUsageObject(data)
+}
+
 // TokenUsageFrom reads usage counters from a JSON fragment, preferring a
 // nested "usage" object when present so ciphertext in the same buffer cannot
 // supply the first numeric match.
@@ -418,6 +452,12 @@ type TokenUsage struct {
 // the production contract; camelCase inputTokens/outputTokens/totalTokens are
 // kept as fallbacks to match the old inspector DTO.
 func TokenUsageFrom(data []byte) TokenUsage {
+	if raw := RawValue(data, "usage"); len(raw) > 0 && raw[0] == '{' && Valid(raw) {
+		return tokenUsageObject(raw)
+	}
+	if Valid(data) {
+		return tokenUsageObject(data)
+	}
 	if idx := bytes.Index(data, []byte(`"usage"`)); idx >= 0 {
 		data = data[idx:]
 	}
@@ -588,27 +628,15 @@ func extractJSONValue(data []byte) []byte {
 
 func matchJSONBrackets(data []byte) int {
 	depth := 0
-	inString := false
-	escape := false
 	for i := 0; i < len(data); i++ {
 		c := data[i]
-		if inString {
-			if escape {
-				escape = false
-				continue
-			}
-			if c == 92 {
-				escape = true
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			continue
-		}
 		switch c {
 		case '"':
-			inString = true
+			end := matchJSONString(data[i:])
+			if end < 0 {
+				return -1
+			}
+			i += end - 1
 		case '{', '[':
 			depth++
 		case '}', ']':
@@ -628,19 +656,68 @@ func matchJSONString(data []byte) int {
 	if len(data) == 0 || data[0] != '"' {
 		return -1
 	}
-	escape := false
-	for i := 1; i < len(data); i++ {
-		if escape {
-			escape = false
-			continue
+	for start := 1; start < len(data); {
+		end := bytes.IndexByte(data[start:], '"')
+		if end < 0 {
+			return -1
 		}
-		if data[i] == 92 {
-			escape = true
-			continue
+		end += start
+		// Only an odd run of backslashes escapes a quote. Skip long strings
+		// (notably ciphertext) with the optimized byte search, not a byte loop.
+		slashes := 0
+		for i := end - 1; i > 0 && data[i] == '\\'; i-- {
+			slashes++
 		}
-		if data[i] == '"' {
-			return i + 1
+		if slashes%2 == 0 {
+			return end + 1
 		}
+		start = end + 1
 	}
 	return -1
+}
+
+// tokenUsageObject keeps top-level usage separate from context and detail
+// counters. A nested context_details.input_tokens must never shadow prompt_tokens.
+func tokenUsageObject(data []byte) TokenUsage {
+	var usage TokenUsage
+	read := func(source []byte, keys ...string) int64 {
+		for _, key := range keys {
+			if value, ok := RootIntFieldScan(source, key); ok {
+				usage.Found = true
+				return value
+			}
+		}
+		return 0
+	}
+	usage.Input = read(data, "input_tokens", "prompt_tokens", "inputTokens")
+	usage.Output = read(data, "output_tokens", "completion_tokens", "outputTokens")
+	usage.Total = read(data, "total_tokens", "totalTokens")
+	usage.Reasoning = read(data, "reasoning_tokens", "thinking_tokens")
+	if usage.Reasoning == 0 {
+		for _, key := range []string{"output_tokens_details", "completion_tokens_details"} {
+			if raw := RootRawValue(data, key); len(raw) > 0 {
+				usage.Reasoning = read(raw, "reasoning_tokens", "thinking_tokens")
+				break
+			}
+		}
+	}
+	usage.Cached = read(data, "cache_read_input_tokens", "cached_tokens")
+	if usage.Cached == 0 {
+		for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
+			if raw := RootRawValue(data, key); len(raw) > 0 {
+				usage.Cached = read(raw, "cached_tokens")
+				break
+			}
+		}
+	}
+	usage.CacheCreation = read(data, "cache_creation_input_tokens")
+	usage.CostTicks = read(data, "cost_in_usd_ticks")
+	usage.Sources = read(data, "num_sources_used")
+	usage.ServerTools = read(data, "num_server_side_tools_used")
+	// Context detail presence alone does not establish billable token usage.
+	if raw := RootRawValue(data, "context_details"); len(raw) > 0 {
+		usage.ContextInput, _ = RootIntFieldScan(raw, "input_tokens")
+		usage.ContextOutput, _ = RootIntFieldScan(raw, "output_tokens")
+	}
+	return usage
 }

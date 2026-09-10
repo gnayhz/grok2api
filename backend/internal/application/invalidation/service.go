@@ -78,7 +78,11 @@ func (s *Service) RunPublisher(ctx context.Context) error {
 			for drained := 1; drained < maxCoalesceBatch; drained++ {
 				select {
 				case next := <-s.queue:
-					pending[eventKey(next)] = next
+					key := eventKey(next)
+					previous := pending[key]
+					if coalesceInvalidation(previous, next) {
+						pending[key] = next
+					}
 				default:
 					break drain
 				}
@@ -103,12 +107,15 @@ type invalidationKey struct {
 	provider    string
 	accountID   uint64
 	clientKeyID uint64
+	quotaMode   string
 }
 
 func eventKey(event repository.InvalidationEvent) invalidationKey {
 	key := invalidationKey{layer: event.Layer(), provider: string(event.Provider)}
 	if key.layer == repository.InvalidationLayerClientKey {
 		key.clientKeyID = event.ClientKeyID
+	} else if event.Quota != nil {
+		key.accountID, key.quotaMode = event.AccountID, event.Quota.Mode
 	} else if event.Kind == repository.InvalidationAccountHealthChanged {
 		// Health events are intentionally account-scoped. Coalescing different
 		// accounts would silently drop cooldown updates on multi-replica setups.
@@ -131,4 +138,16 @@ func (s *Service) RunSubscriber(ctx context.Context) error {
 		s.handler(event)
 		return nil
 	})
+}
+
+// Committed state revisions win over queue arrival order. Bus revisions are
+// assigned at publication and therefore cannot order SQL transactions.
+func coalesceInvalidation(previous, next repository.InvalidationEvent) bool {
+	if previous.Quota != nil && next.Quota != nil {
+		return previous.Quota.Revision <= next.Quota.Revision
+	}
+	if previous.Kind == repository.InvalidationAccountHealthChanged && next.Kind == repository.InvalidationAccountHealthChanged {
+		return previous.HealthRevision <= next.HealthRevision
+	}
+	return true
 }

@@ -53,11 +53,11 @@ func TestSelectorSkipsRiskFlaggedAccounts(t *testing.T) {
 	}
 	lease.Release()
 
-	// 解除风控后应恢复可选（高优先级）。Update 在生产环境会经 invalidation
+	// 解除风控后应恢复可选（高优先级）。UpdateAdministration 在生产环境会经 invalidation
 	// observer 触发同样的 Base 层失效；测试直接等价复放。
 	cleared := flagged
 	cleared.RiskStatus = ""
-	if _, err := accounts.Update(ctx, cleared); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, cleared.ID, repository.AccountAdminPatch{Risk: &repository.RiskAttribution{Status: cleared.RiskStatus}}); err != nil {
 		t.Fatal(err)
 	}
 	selector.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: account.ProviderBuild, AccountID: flagged.ID})
@@ -92,7 +92,7 @@ func TestAcquirePinnedSkipsRiskFlagged(t *testing.T) {
 		t.Fatal(err)
 	}
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	if _, err := selector.acquirePinned(ctx, account.ProviderBuild, flagged.ID, 0, "grok-test", "", true, false, clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeAll}); err == nil {
+	if _, err := selector.acquirePinned(ctx, account.ProviderBuild, flagged.ID, 0, "grok-test", "", true, false, false, clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeAll}); err == nil {
 		t.Fatal("pinned acquire of a risk-flagged account must fail, not serve the flagged identity")
 	}
 }

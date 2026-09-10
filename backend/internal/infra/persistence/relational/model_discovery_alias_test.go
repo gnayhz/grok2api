@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestUpsertDiscoveredAliasCollisionDropsWholeBatch(t *testing.T) {
 	models := NewModelRepository(database)
 
 	// A discovered route exists under its original public ID.
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
 		t.Fatal(err)
 	}
 	routes, _, err := models.List(ctx, repository.ModelListQuery{Page: repository.PageQuery{Limit: 100}})
@@ -54,13 +55,13 @@ func TestUpsertDiscoveredAliasCollisionDropsWholeBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing.PublicID = "Build/build-grok-4.5"
-	if _, err := models.Update(ctx, existing, nil); err != nil {
+	if _, err := models.Patch(ctx, existing.ID, model.RoutePatch{PublicID: &existing.PublicID}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Upstream now returns the old model plus a new one. The old model maps onto
 	// the alias and conflicts; the new model does not.
-	err = models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.5", "grok-4.6"})
+	err = testsupport.Discover(ctx, models, account.ProviderBuild, []string{"grok-4.5", "grok-4.6"})
 	t.Logf("UpsertDiscovered error = %v", err)
 
 	routes, _, listErr := models.List(ctx, repository.ModelListQuery{Page: repository.PageQuery{Limit: 100}})

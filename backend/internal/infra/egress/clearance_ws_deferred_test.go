@@ -34,10 +34,11 @@ func newWSForbiddenFixture(t *testing.T, statusCode int) (*Lease, *Manager, stri
 	}
 	t.Cleanup(browser.CloseIdleConnections)
 	manager := NewManager(&e2eRepo{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	key := "ws-deferred-test-key"
-	manager.clearanceMu.Lock()
-	manager.clearances[key] = clearanceState{cookies: "cf_clearance=x", userAgent: "ua", refreshedAt: time.Now().UTC(), used: true}
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	manager.clearance.clearances[key] = clearanceState{cookies: "cf_clearance=x", userAgent: "ua", refreshedAt: time.Now().UTC(), used: true}
+	manager.clearance.clearanceMu.Unlock()
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
 	lease := &Lease{browser: browser, clearanceManager: manager, clearanceKey: key}
 	return lease, manager, endpoint
@@ -45,9 +46,9 @@ func newWSForbiddenFixture(t *testing.T, statusCode int) (*Lease, *Manager, stri
 
 func wsInvalidated(t *testing.T, manager *Manager, key string) bool {
 	t.Helper()
-	manager.clearanceMu.Lock()
-	defer manager.clearanceMu.Unlock()
-	return manager.clearances[key].invalid
+	manager.clearance.clearanceMu.Lock()
+	defer manager.clearance.clearanceMu.Unlock()
+	return manager.clearance.clearances[key].invalid
 }
 
 // 延迟失效变体:403 握手响应不得在拨号内联失效 Clearance——分类权留给调用

@@ -95,7 +95,7 @@ func (s *Service) runWebAccountScript(ctx context.Context, id uint64, options We
 		}); err != nil {
 			return err
 		}
-		if err := s.recordWebTermsAccepted(ctx, credential.ID); err != nil {
+		if err := s.recordWebAccountState(ctx, credential.CredentialRef(), "服务协议", accountdomain.WebProfileObservation{Kind: accountdomain.WebProfileTermsAccepted, TermsVersion: accountdomain.CurrentWebTermsVersion}); err != nil {
 			return err
 		}
 	}
@@ -110,7 +110,7 @@ func (s *Service) runWebAccountScript(ctx context.Context, id uint64, options We
 		}); err != nil {
 			return err
 		}
-		if err := s.recordWebAccountState(ctx, credential.ID, "NSFW", s.accounts.MarkWebNSFWEnabled); err != nil {
+		if err := s.recordWebAccountState(ctx, credential.CredentialRef(), "NSFW", accountdomain.WebProfileObservation{Kind: accountdomain.WebProfileNSFWEnabled}); err != nil {
 			return err
 		}
 	}
@@ -134,16 +134,6 @@ func pendingWebAccountScriptOptions(credential accountdomain.Credential, options
 	return options
 }
 
-func (s *Service) recordWebTermsAccepted(ctx context.Context, id uint64) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webAccountStateWriteTimeout)
-	err := s.accounts.MarkWebTermsAccepted(writeCtx, id, accountdomain.CurrentWebTermsVersion, s.now().UTC())
-	cancel()
-	if err != nil {
-		return fmt.Errorf("记录服务协议状态: %w", mapRepositoryError(err))
-	}
-	return nil
-}
-
 func (s *Service) setRandomWebBirthDate(ctx context.Context, credential accountdomain.Credential, adapter provider.WebAccountSettingsAdapter) error {
 	birthDate, err := randomWebBirthDate(s.now().In(time.Local), cryptorand.Reader)
 	if err != nil {
@@ -155,15 +145,19 @@ func (s *Service) setRandomWebBirthDate(ctx context.Context, credential accountd
 	if err != nil && !errors.Is(err, provider.ErrBirthDateAlreadySet) {
 		return err
 	}
-	return s.recordWebAccountState(ctx, credential.ID, "生日", s.accounts.MarkWebBirthDateSet)
+	return s.recordWebAccountState(ctx, credential.CredentialRef(), "生日", accountdomain.WebProfileObservation{Kind: accountdomain.WebProfileBirthDateSet})
 }
 
-func (s *Service) recordWebAccountState(ctx context.Context, id uint64, state string, mark func(context.Context, uint64, time.Time) error) error {
+func (s *Service) recordWebAccountState(ctx context.Context, observed accountdomain.CredentialRef, state string, event accountdomain.WebProfileObservation) error {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webAccountStateWriteTimeout)
-	err := mark(writeCtx, id, s.now().UTC())
-	cancel()
+	defer cancel()
+	event.OccurredAt = s.now().UTC()
+	result, err := s.accounts.ApplyWebProfile(writeCtx, observed, event)
 	if err != nil {
 		return fmt.Errorf("记录%s状态: %w", state, mapRepositoryError(err))
+	}
+	if !result.Applied {
+		return fmt.Errorf("%w: 账号材料已更新，请重新执行%s操作", ErrConflict, state)
 	}
 	return nil
 }

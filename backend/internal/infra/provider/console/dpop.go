@@ -25,7 +25,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -54,11 +53,20 @@ type dpopSession struct {
 }
 
 type dpopSessionManager struct {
-	mu       sync.Mutex
-	sessions map[string]*dpopSessionEntry
-	lru      list.List
-	loads    singleflight.Group
-	now      func() time.Time
+	mu        sync.Mutex
+	sessions  map[string]*dpopSessionEntry
+	lru       list.List
+	refreshes map[string]*dpopSessionRefresh
+	now       func() time.Time
+}
+
+// Token exchange borrows its owner's egress lease and therefore runs on that
+// caller's stack. Other callers only share the result and wait independently.
+type dpopSessionRefresh struct {
+	done          chan struct{}
+	session       dpopSession
+	err           error
+	ownerCanceled bool
 }
 
 type dpopSessionEntry struct {
@@ -108,28 +116,63 @@ func (m *dpopSessionManager) get(
 	lease *infraegress.Lease,
 ) (dpopSession, string, error) {
 	key := dpopSessionCacheKey(adapter.config().BaseURL, credential, ssoToken, lease)
-	if session, ok := m.cached(key); ok {
-		return session, key, nil
-	}
-	value, err, _ := m.loads.Do(key, func() (any, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return dpopSession{}, key, err
+		}
 		if session, ok := m.cached(key); ok {
-			return session, nil
+			return session, key, nil
 		}
-		session, fetchErr := adapter.fetchDPoPSession(ctx, ssoToken, lease)
-		if fetchErr != nil {
-			return dpopSession{}, fetchErr
+		m.mu.Lock()
+		pending := m.refreshes[key]
+		if pending == nil {
+			pending = &dpopSessionRefresh{done: make(chan struct{})}
+			if m.refreshes == nil {
+				m.refreshes = make(map[string]*dpopSessionRefresh)
+			}
+			m.refreshes[key] = pending
+			m.mu.Unlock()
+			session, err := m.runRefresh(ctx, key, pending, adapter, ssoToken, lease)
+			return session, key, err
 		}
-		m.store(key, session)
-		return session, nil
-	})
-	if err != nil {
-		return dpopSession{}, key, err
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return dpopSession{}, key, ctx.Err()
+		case <-pending.done:
+			if err := ctx.Err(); err != nil {
+				return dpopSession{}, key, err
+			}
+			if pending.ownerCanceled {
+				continue
+			}
+			return pending.session, key, pending.err
+		}
 	}
-	session, ok := value.(dpopSession)
-	if !ok {
-		return dpopSession{}, key, errors.New("Console DPoP session 类型无效")
+}
+
+func (m *dpopSessionManager) runRefresh(ctx context.Context, key string, pending *dpopSessionRefresh, adapter *Adapter, ssoToken string, lease *infraegress.Lease) (dpopSession, error) {
+	completed := false
+	defer func() {
+		if !completed {
+			pending.err = errors.New("Console DPoP refresh interrupted")
+		}
+		pending.ownerCanceled = completed && pending.err != nil && ctx.Err() != nil
+		m.mu.Lock()
+		delete(m.refreshes, key)
+		close(pending.done)
+		m.mu.Unlock()
+	}()
+	if session, ok := m.cached(key); ok {
+		pending.session = session
+	} else {
+		pending.session, pending.err = adapter.fetchDPoPSession(ctx, ssoToken, lease)
+		if pending.err == nil {
+			m.store(key, pending.session)
+		}
 	}
-	return session, key, nil
+	completed = true
+	return pending.session, pending.err
 }
 
 func (m *dpopSessionManager) cached(key string) (dpopSession, bool) {
@@ -173,9 +216,8 @@ func (m *dpopSessionManager) invalidate(key, accessToken string) {
 		return
 	}
 	m.removeLocked(current)
-	// Do not call singleflight.Forget here. A concurrent refresh must remain
-	// coalesced; forgetting it can start a second token exchange for the same
-	// account and egress after an expired token produces a burst of 401s.
+	// Preserve any concurrent refresh here. Forgetting it can start a second
+	// token exchange for the same account and egress after an expired token produces a burst of 401s.
 }
 
 func (m *dpopSessionManager) removeLocked(entry *dpopSessionEntry) {
@@ -199,6 +241,7 @@ func dpopSessionCacheKey(baseURL string, credential account.Credential, ssoToken
 }
 
 func (a *Adapter) fetchDPoPSession(ctx context.Context, ssoToken string, lease *infraegress.Lease) (dpopSession, error) {
+	ctx = infraegress.WithPhysicalCallStage(ctx, "credential_prepare")
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return dpopSession{}, fmt.Errorf("生成 Console DPoP 密钥: %w", err)
@@ -243,6 +286,9 @@ func (a *Adapter) fetchDPoPSession(ctx context.Context, ssoToken string, lease *
 			body: data, bodyTruncated: truncated, request: response.Request,
 		}
 	}
+	if truncated {
+		return dpopSession{}, errors.New("Console DPoP token 响应超过 64 KiB")
+	}
 	var tokenResponse struct {
 		AccessToken string `json:"access_token"`
 		TokenType   string `json:"token_type"`
@@ -254,7 +300,7 @@ func (a *Adapter) fetchDPoPSession(ctx context.Context, ssoToken string, lease *
 	if strings.TrimSpace(tokenResponse.AccessToken) == "" || !strings.EqualFold(strings.TrimSpace(tokenResponse.TokenType), "DPoP") {
 		return dpopSession{}, errors.New("Console DPoP token 响应无效")
 	}
-	if tokenResponse.ExpiresIn <= 0 || time.Duration(tokenResponse.ExpiresIn)*time.Second > maxDPoPTokenLifetime {
+	if tokenResponse.ExpiresIn <= 0 || tokenResponse.ExpiresIn > int(maxDPoPTokenLifetime/time.Second) {
 		return dpopSession{}, errors.New("Console DPoP token 有效期无效")
 	}
 	thumbprint, err := dpopJWKThumbprint(publicJWK)

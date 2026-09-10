@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 const (
@@ -38,6 +40,9 @@ func replaceModel(body []byte, model string) ([]byte, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("解析 Responses 请求: %w", err)
 	}
+	if payload == nil {
+		return nil, fmt.Errorf("Responses 请求必须是 JSON 对象")
+	}
 	payload["model"] = mustJSON(model)
 	return json.Marshal(payload)
 }
@@ -69,7 +74,7 @@ func contentAsText(raw json.RawMessage) (string, error) {
 		return value, nil
 	}
 	var arbitrary any
-	if json.Unmarshal(raw, &arbitrary) != nil {
+	if jsonvalue.Unmarshal(raw, &arbitrary) != nil {
 		return "", errors.New("tool content 无效")
 	}
 	encoded, _ := json.Marshal(arbitrary)

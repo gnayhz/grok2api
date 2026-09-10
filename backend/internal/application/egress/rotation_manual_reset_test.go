@@ -14,10 +14,10 @@ import (
 // 管理端点击更换出口无任何效果)。
 func TestRotateNodeResetsExhaustedCycle(t *testing.T) {
 	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.10"}
-	service, repo, _, _, _ := newRotationTestService(t, domain.Node{
+	service, repo, _, _ := newRotationTestService(t, domain.Node{
 		ID: 77, Name: "warp", Enabled: true, Health: 1, ExitIP: "198.51.100.9",
 		RotationAttempts: 3, LastRotationError: "rotation attempts exhausted",
-	}, true, probe, EgressQualityProbeResult{Outcome: EgressQualityProbeClean})
+	}, true, probe)
 
 	if err := service.RotateNode(context.Background(), 77); err != nil {
 		t.Fatalf("manual rotate on exhausted node must reset and enqueue: %v", err)
@@ -35,9 +35,9 @@ func TestRotateNodeResetsExhaustedCycle(t *testing.T) {
 // 停用节点与无 webhook 的节点,操作者应立即看到原因而非假排队成功。
 func TestRotateNodeReportsSkipReasons(t *testing.T) {
 	probe := domain.ProbeResult{Status: domain.ProbeStatusHealthy}
-	service, repo, _, _, _ := newRotationTestService(t, domain.Node{
+	service, repo, _, _ := newRotationTestService(t, domain.Node{
 		ID: 78, Name: "warp-disabled", Enabled: false, Health: 1, // 停用节点
-	}, true, probe, EgressQualityProbeResult{Outcome: EgressQualityProbeClean})
+	}, true, probe)
 
 	if err := service.RotateNode(context.Background(), 78); err == nil || !strings.Contains(err.Error(), "停用") {
 		t.Fatalf("disabled node must surface real reason, got: %v", err)

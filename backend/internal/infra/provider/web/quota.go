@@ -64,6 +64,11 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 			windows = kept
 		}
 		if windows == nil {
+			// A full refresh replaces all windows. Without a weekly pool,
+			// both chat modes must succeed before publishing that snapshot.
+			if autoErr != nil || fastErr != nil {
+				return provider.QuotaSnapshot{}, errors.Join(autoErr, fastErr)
+			}
 			windows = append(chatWindows, imagineSnapshot.Windows...)
 		}
 		return provider.QuotaSnapshot{Tier: tier, Windows: windows, SyncedAt: time.Now().UTC()}, nil
@@ -105,7 +110,7 @@ func (a *Adapter) SyncQuotaGroup(ctx context.Context, credential account.Credent
 	}
 	defer lease.Release()
 	endpoint := cfg.BaseURL + "/rest/media/imagine/quota_info"
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.QuotaTimeoutSeconds)*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, cfg.QuotaTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -116,7 +121,7 @@ func (a *Adapter) SyncQuotaGroup(ctx context.Context, credential account.Credent
 	a.applySignedStatsig(requestCtx, request, token, lease)
 	response, err := lease.DoDeferredForbidden(request)
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return provider.QuotaGroupSnapshot{}, err
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -131,10 +136,10 @@ func (a *Adapter) SyncQuotaGroup(ctx context.Context, credential account.Credent
 		return provider.QuotaGroupSnapshot{}, fmt.Errorf("%w: account blocked", provider.ErrUnauthorized)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		return provider.QuotaGroupSnapshot{}, fmt.Errorf("Grok Web Imagine 配额接口返回 %d", response.StatusCode)
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	now := time.Now().UTC()
 	windows, err := decodeImagineQuotaSnapshot(body, credential.ID, now)
 	if err != nil {
@@ -334,7 +339,7 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 	}
 	defer lease.Release()
 	payload, _ := json.Marshal(map[string]string{"modelName": mode})
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.QuotaTimeoutSeconds)*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, cfg.QuotaTimeout)
 	defer cancel()
 	endpoint := cfg.BaseURL + "/rest/rate-limits"
 	var response *http.Response
@@ -349,7 +354,7 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 		a.applySignedStatsig(requestCtx, request, token, lease)
 		response, err = lease.DoDeferredForbidden(request)
 		if err != nil {
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+			lease.Observe(0, err)
 			return account.QuotaWindow{}, err
 		}
 		body, err = io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -376,10 +381,10 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 		if response.StatusCode == http.StatusForbidden && provider.IsDefinitiveAccountBlockBody(body) {
 			return account.QuotaWindow{}, fmt.Errorf("%w: account blocked", provider.ErrUnauthorized)
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 额度接口返回 %d", response.StatusCode)
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	var value struct {
 		WindowSizeSeconds int `json:"windowSizeSeconds"`
 		RemainingQueries  int `json:"remainingQueries"`
@@ -414,7 +419,7 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 	}
 	defer lease.Release()
 
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.QuotaTimeoutSeconds)*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, cfg.QuotaTimeout)
 	defer cancel()
 	endpoint := cfg.BaseURL + "/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader([]byte{0, 0, 0, 0, 0}))
@@ -429,7 +434,7 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 
 	response, err := lease.DoDeferredForbidden(request)
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return account.QuotaWindow{}, err
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -447,14 +452,14 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 		if response.StatusCode == http.StatusForbidden {
 			lease.InvalidateClearance()
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 周额度接口返回 %d", response.StatusCode)
 	}
 	window, err := parseWeeklyCreditsResponse(body, credential.ID, time.Now().UTC())
 	if err != nil {
 		return account.QuotaWindow{}, err
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	return window, nil
 }
 

@@ -34,6 +34,11 @@ func TestAccountLayerStaysDecoupledFromEgress(t *testing.T) {
 				t.Errorf("parse %s: %v", path, parseErr)
 				return nil
 			}
+			// External tests are a separate composition package. The implementation
+			// and all same-package fixtures retain this dependency restriction.
+			if strings.HasSuffix(path, "_test.go") && file.Name.Name == "account_test" {
+				return nil
+			}
 			for _, imported := range file.Imports {
 				importPath := strings.Trim(imported.Path.Value, `"`)
 				for _, banned := range forbidden {

@@ -1,4 +1,5 @@
-import { localizedErrorMessage } from "../../shared/api/client";
+import { currentSession } from "@/shared/auth/session";
+import { localizedErrorMessage } from "@/shared/api/client";
 
 // round 111: /v1/* 的 OpenAI 兼容错误码优先走 apiErrors 本地化查找——
 // 此前直接透传后端 message，英文界面会显示中文原文。
@@ -242,7 +243,7 @@ export type VoiceInfo = {
 };
 
 export type TTSResult = {
-  url: string;
+  source: string | Blob;
   contentType: string;
   duration?: number;
 };
@@ -285,6 +286,7 @@ export async function synthesizeSpeech(input: {
   speed?: number;
   signal?: AbortSignal;
 }): Promise<TTSResult> {
+  const requestSignal = sessionRequestSignal(input.signal);
   const response = await fetch("/v1/tts", {
     method: "POST",
     headers: new Headers({
@@ -299,32 +301,35 @@ export async function synthesizeSpeech(input: {
       language: input.language,
       ...(typeof input.speed === "number" ? { speed: input.speed } : {}),
     }),
-    signal: input.signal,
+    signal: requestSignal,
   });
+  requestSignal.throwIfAborted();
   const contentType = response.headers.get("content-type") || "";
   if (!response.ok) {
     const responseText = await response.text();
+    requestSignal.throwIfAborted();
     const payload = parseJSON(responseText);
     const error = readError(payload);
     throw new CreativeApiError(response.status, localizedCreativeMessage(error, responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
   }
   if (contentType.includes("application/json")) {
     const payload = await response.json();
+    requestSignal.throwIfAborted();
     if (!isRecord(payload) || typeof payload.audio !== "string") {
       throw new CreativeApiError(200, "The TTS response was invalid", "invalid_response");
     }
     const mime = typeof payload.content_type === "string" ? payload.content_type : "audio/mpeg";
-    const url = `data:${mime};base64,${payload.audio}`;
     return {
-      url,
+      source: `data:${mime};base64,${payload.audio}`,
       contentType: mime,
       duration: typeof payload.duration === "number" ? payload.duration : undefined,
     };
   }
   const buffer = await response.arrayBuffer();
+  requestSignal.throwIfAborted();
   const mime = contentType || "audio/mpeg";
   const blob = new Blob([buffer], { type: mime });
-  return { url: URL.createObjectURL(blob), contentType: mime };
+  return { source: blob, contentType: mime };
 }
 
 export async function transcribeSpeech(input: {
@@ -334,6 +339,7 @@ export async function transcribeSpeech(input: {
   language?: string;
   signal?: AbortSignal;
 }): Promise<STTResult> {
+  const requestSignal = sessionRequestSignal(input.signal);
   const form = new FormData();
   form.append("model", input.model);
   if (input.language) form.append("language", input.language);
@@ -343,9 +349,10 @@ export async function transcribeSpeech(input: {
     method: "POST",
     headers: new Headers({ Accept: "application/json", Authorization: `Bearer ${input.apiKey}` }),
     body: form,
-    signal: input.signal,
+    signal: requestSignal,
   });
   const responseText = await response.text();
+  requestSignal.throwIfAborted();
   const payload = parseJSON(responseText);
   if (!response.ok) {
     const error = readError(payload);
@@ -374,6 +381,7 @@ export async function transcribeSpeech(input: {
 }
 
 async function publicApiRequest(apiKey: string, path: string, options: RequestOptions): Promise<unknown> {
+  const requestSignal = sessionRequestSignal(options.signal);
   const headers = new Headers({ Accept: "application/json", Authorization: `Bearer ${apiKey}` });
   let body: string | undefined;
   if (options.body) {
@@ -384,9 +392,10 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
     method: options.method ?? "GET",
     headers,
     body,
-    signal: options.signal,
+    signal: requestSignal,
   });
   const responseText = await response.text();
+  requestSignal.throwIfAborted();
   let payload: unknown = null;
   if (responseText) {
     try {
@@ -405,20 +414,23 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
 }
 
 async function publicResponsesStream(apiKey: string, body: Record<string, unknown>, onUpdate?: (snapshot: ChatStreamSnapshot) => void, signal?: AbortSignal): Promise<ChatResponseResult> {
+  const requestSignal = sessionRequestSignal(signal);
   const response = await fetch("/v1/responses", {
     method: "POST",
     headers: new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }),
     body: JSON.stringify(body),
-    signal,
+    signal: requestSignal,
   });
   if (!response.ok) {
     const responseText = await response.text();
+    requestSignal.throwIfAborted();
     const payload = parseJSON(responseText);
     const error = readError(payload);
     throw new CreativeApiError(response.status, localizedCreativeMessage(error, responseText.trim() || response.statusText || `HTTP ${response.status}`), error.code);
   }
   if (!response.headers.get("content-type")?.includes("text/event-stream")) {
     const responseText = await response.text();
+    requestSignal.throwIfAborted();
     const payload = parseJSON(responseText);
     const text = readResponseText(payload);
     const reasoning = readResponseReasoning(payload);
@@ -435,7 +447,7 @@ async function publicResponsesStream(apiKey: string, body: Record<string, unknow
   let reasoning = "";
   const tools = new Map<string, ChatToolActivity>();
   const snapshot = (): ChatStreamSnapshot => ({ text, reasoning, tools: Array.from(tools.values()) });
-  const emit = () => onUpdate?.(snapshot());
+  const emit = () => { requestSignal.throwIfAborted(); onUpdate?.(snapshot()); };
   const applyEnvelope = (payload: unknown) => {
     const finalText = readResponseText(payload);
     const finalReasoning = readResponseReasoning(payload);
@@ -514,20 +526,30 @@ async function publicResponsesStream(apiKey: string, body: Record<string, unknow
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer = (buffer + decoder.decode(value, { stream: !done })).replaceAll("\r\n", "\n");
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      consume(buffer.slice(0, boundary));
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  requestSignal.addEventListener("abort", cancel, { once: true });
+  try {
+    requestSignal.throwIfAborted();
+    while (true) {
+      const { done, value } = await reader.read();
+      requestSignal.throwIfAborted();
+      buffer = (buffer + decoder.decode(value, { stream: !done })).replaceAll("\r\n", "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        consume(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
+      if (done) break;
     }
-    if (done) break;
+    if (buffer.trim()) consume(buffer);
+    if (!text.trim() && !reasoning.trim() && tools.size === 0) throw new CreativeApiError(response.status, "The Responses API did not return any displayable output", "invalid_response");
+    return snapshot();
+  } finally {
+    requestSignal.removeEventListener("abort", cancel);
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  if (buffer.trim()) consume(buffer);
-  if (!text.trim() && !reasoning.trim() && tools.size === 0) throw new CreativeApiError(response.status, "The Responses API did not return any displayable output", "invalid_response");
-  return snapshot();
 }
 
 function resolveMediaURL(value: string): string {
@@ -698,4 +720,12 @@ function isVideoStatus(value: unknown): value is VideoStatus["status"] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// This workbench is mounted inside the admin session. Its requests still use
+// the explicitly selected client key; ending the UI session only cancels their
+// local transport, without claiming to cancel an already accepted video job.
+function sessionRequestSignal(caller?: AbortSignal): AbortSignal {
+  const scope = currentSession().signal;
+  return caller ? AbortSignal.any([scope, caller]) : scope;
 }

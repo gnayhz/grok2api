@@ -22,7 +22,8 @@ import (
 func TestClearCooldownForceContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "clear-cooldown-force.db"))
+	databasePath := filepath.Join(t.TempDir(), "clear-cooldown-force.db")
+	database, err := relational.OpenSQLite(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestClearCooldownForceContract(t *testing.T) {
 	id := strconv.FormatUint(created.ID, 10)
 
 	until := time.Now().UTC().Add(time.Hour)
-	if err := repo.UpdateHealth(ctx, created.ID, accountdomain.ProviderBuild, 3, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
+	if err := seedHealthFixture(databasePath, ctx, created.ID, accountdomain.ProviderBuild, 3, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
 		t.Fatal(err)
 	}
 

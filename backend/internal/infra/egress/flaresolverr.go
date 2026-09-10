@@ -35,17 +35,20 @@ type ClearanceConfig struct {
 }
 
 type clearanceSolution struct {
-	Cookies   string
-	UserAgent string
+	generation uint64 // Assigned atomically when published to the runtime cache.
+	Cookies    string
+	UserAgent  string
 }
 
 type clearanceSolver interface {
 	Solve(context.Context, ClearanceConfig, string) (clearanceSolution, error)
 }
 
-type flaresolverrSolver struct{}
+type flaresolverrSolver struct {
+	manageTransport func(context.Context, *http.Transport) (http.RoundTripper, func(), error)
+}
 
-func (flaresolverrSolver) Solve(ctx context.Context, cfg ClearanceConfig, proxyURL string) (clearanceSolution, error) {
+func (s flaresolverrSolver) Solve(ctx context.Context, cfg ClearanceConfig, proxyURL string) (clearanceSolution, error) {
 	if parsedProxy, parseErr := url.Parse(proxyURL); parseErr == nil && tunnelproxy.IsSupportedScheme(parsedProxy.Scheme) {
 		return clearanceSolution{}, errors.New("FlareSolverr 暂不支持 Trojan、VLESS、SS 或 VMess 隧道代理")
 	}
@@ -79,6 +82,15 @@ func (flaresolverrSolver) Solve(ctx context.Context, cfg ClearanceConfig, proxyU
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return errors.New("FlareSolverr 响应不允许重定向")
 		},
+	}
+	if s.manageTransport != nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		managed, closeTransport, err := s.manageTransport(ctx, transport)
+		if err != nil {
+			return clearanceSolution{}, err
+		}
+		defer closeTransport()
+		client.Transport = managed
 	}
 	response, err := client.Do(request)
 	if err != nil {

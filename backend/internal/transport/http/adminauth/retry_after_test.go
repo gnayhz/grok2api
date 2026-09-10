@@ -2,7 +2,6 @@ package adminauth
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -44,28 +43,7 @@ func TestLoginRateLimitedResponseIncludesRetryAfter(t *testing.T) {
 	service.SetLoginRateLimiter(memory.NewRateLimiter())
 
 	router := gin.New()
-	router.POST("/auth/login", func(c *gin.Context) {
-		var request struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		_ = c.ShouldBindJSON(&request)
-		_, _, err := service.Login(c.Request.Context(), request.Username, request.Password, "127.0.0.1")
-		if err != nil {
-			var limited *adminapp.LoginRateLimitedError
-			if errors.As(err, &limited) && limited.RetryAfter > 0 {
-				seconds := max(int64(1), int64((limited.RetryAfter+time.Second-1)/time.Second))
-				c.Header("Retry-After", strconv.FormatInt(seconds, 10))
-			}
-			if errors.Is(err, adminapp.ErrLoginRateLimited) {
-				c.JSON(http.StatusTooManyRequests, gin.H{"error": gin.H{"code": "loginRateLimited"}})
-				return
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "invalidCredentials"}})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{})
-	})
+	NewHandler(service, false).RegisterPublic(router.Group(""))
 
 	// user limit = 12: 前 12 次凭据错误, 第 13 次必须 429 + Retry-After。
 	for i := 0; i < 12; i++ {

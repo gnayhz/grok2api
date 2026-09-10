@@ -4,22 +4,26 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 // responsesCompatState fills fields Grok CLI serde treats as required.
 type responsesCompatState struct {
-	responseID      string
-	createdAt       int64
-	model           string
-	itemSeq         int
-	itemIDs         map[int64]string
-	usedItemIDs     map[string]struct{}
-	pending         []byte
-	passingLongLine bool
+	responseID            string
+	nativeResponseID      string
+	nativeIdentityInvalid bool
+	createdAt             int64
+	model                 string
+	itemSeq               int
+	itemIDs               map[int64]string
+	usedItemIDs           map[string]struct{}
+	pending               []byte
+	passingLongLine       bool
 }
 
 func rewriteResponsesStreamChunk(chunk []byte, state *responsesCompatState) []byte {
@@ -81,7 +85,7 @@ func flushResponsesStreamTail(state *responsesCompatState) []byte {
 		return []byte("data: [DONE]\n\n")
 	}
 	var event map[string]any
-	if json.Unmarshal(payload, &event) != nil {
+	if jsonvalue.Unmarshal(payload, &event) != nil {
 		// Never turn a truncated JSON fragment into a dispatchable SSE event;
 		// the locally generated terminal event must remain parseable.
 		return nil
@@ -92,6 +96,18 @@ func flushResponsesStreamTail(state *responsesCompatState) []byte {
 		return nil
 	}
 	return append([]byte("data: "+string(encoded)), '\n', '\n')
+}
+
+func (s *responsesCompatState) observeNativeID(id string) {
+	if id == "" || s.nativeIdentityInvalid {
+		return
+	}
+	if s.nativeResponseID != "" && s.nativeResponseID != id {
+		s.nativeIdentityInvalid = true
+		s.nativeResponseID = ""
+		return
+	}
+	s.nativeResponseID = id
 }
 
 func (s *responsesCompatState) ensureID() string {
@@ -126,13 +142,22 @@ func rewriteResponsesDataLine(line []byte, state *responsesCompatState) []byte {
 	// 只跳过带 encrypted_content 的超大行。长文本 output_item.done/completed
 	// 仍要走 sanitize（补 annotations），否则 Grok CLI 会缺字段反序列化失败。
 	if len(payload) > maxParsedSSEJSONBytes && ssePayloadHasEncryptedContent(payload) {
+		// Item/delta frames do not carry a response identity. Avoid scanning
+		// their opaque payload; resource events still require a root lookup.
+		if responsesEventCarriesResponseID(sseEventType(payload)) {
+			if raw := jsonpeek.RootRawValue(payload, "response"); len(raw) > 0 {
+				state.observeNativeID(jsonpeek.RootStringFieldScan(raw, "id"))
+			} else {
+				state.observeNativeID(jsonpeek.RootStringFieldScan(payload, "id"))
+			}
+		}
 		return line
 	}
 	if responsesDeltaAlreadyAddressed(payload) {
 		return line
 	}
 	var event map[string]any
-	if json.Unmarshal(payload, &event) != nil {
+	if jsonvalue.Unmarshal(payload, &event) != nil {
 		return line
 	}
 	changed := sanitizeResponsesEvent(event, state)
@@ -153,6 +178,11 @@ func rewriteResponsesDataLine(line []byte, state *responsesCompatState) []byte {
 func sanitizeResponsesEvent(event map[string]any, state *responsesCompatState) bool {
 	changed := false
 	typ := stringAny(event["type"])
+	if resp, ok := event["response"].(map[string]any); ok {
+		state.observeNativeID(strings.TrimSpace(stringAny(resp["id"])))
+	} else if responsesEventCarriesResponseID(typ) {
+		state.observeNativeID(strings.TrimSpace(stringAny(event["id"])))
+	}
 	if responsesEventCarriesResponseID(typ) && state.responseID == "" {
 		if id := strings.TrimSpace(stringAny(event["id"])); id != "" {
 			state.responseID = id
@@ -368,12 +398,22 @@ func stringAny(value any) string {
 func asInt64(value any) (int64, bool) {
 	switch typed := value.(type) {
 	case float64:
+		if math.IsNaN(typed) || typed < math.MinInt64 || typed >= -float64(math.MinInt64) || math.Trunc(typed) != typed {
+			return 0, false
+		}
 		return int64(typed), true
 	case int64:
 		return typed, true
 	case json.Number:
 		n, err := typed.Int64()
-		return n, err == nil
+		if err == nil {
+			return n, true
+		}
+		f, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return asInt64(f)
 	default:
 		return 0, false
 	}

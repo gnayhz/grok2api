@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,7 +13,6 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -56,7 +54,7 @@ type Service struct {
 	billing  billingSynchronizer
 	quota    quotaSynchronizer
 	models   modelSynchronizer
-	syncs    singleflight.Group
+	syncs    accountapp.OperationGroup[uint64]
 	workers  atomic.Int64
 	bulkPool *batch.Pool
 }
@@ -140,7 +138,7 @@ func (s *Service) syncStream(ctx context.Context, accountIDs <-chan uint64, obse
 			defer workers.Done()
 			for accountID := range jobs {
 				err := s.bulkPool.Do(ctx, func(workCtx context.Context) error {
-					_, syncErr, _ := s.syncs.Do(strconv.FormatUint(accountID, 10), func() (any, error) {
+					_, syncErr := s.syncs.Do(workCtx, accountID, func() (any, error) {
 						return nil, s.syncAccount(workCtx, accountID)
 					})
 					return syncErr

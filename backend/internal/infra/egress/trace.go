@@ -12,9 +12,8 @@ import (
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 )
 
-// buildSessionContextKey 携带会话粘性标识。与账号亲和不同,会话标识的
-// 生命周期等于一次对话:出口层用它做「会话→出口节点」与「会话→专用连接」
-// 双重钉扎,保住按「连接→后端实例」亲和复用的上游提示缓存。
+// buildSessionContextKey carries a soft Build reuse hint. Pool strategy,
+// eligibility, account isolation and fresh connections remain network policy.
 type buildSessionContextKey struct{}
 
 // Selection is the egress snapshot actually selected for an upstream request. It contains only metadata safe for audit
@@ -27,7 +26,8 @@ type Selection struct {
 	// Pool marks a proxy-pool (rotating-endpoint) selection: consecutive
 	// requests through the same node leave through DIFFERENT exit IPs, which
 	// the Build risk probe relies on for its differential second attempt.
-	Pool bool
+	Pool       bool
+	Connection ConnectionPolicy
 }
 
 // Trace retains the most recent actual egress selection per scope. When a request retries egress, audit records the final attempt.
@@ -152,9 +152,9 @@ func accountFromContext(ctx context.Context) string {
 // provider transports while keeping the context key private.
 func AccountFromContext(ctx context.Context) string { return accountFromContext(ctx) }
 
-// WithBuildSession 把网关侧会话标识(提示缓存键)以不可逆摘要传入出口层。
-// 原始会话键可能含用户数据,这里只保留加盐 sha256 的前 12 字节十六进制,
-// 摘要不进入上游请求头或审计,仅存在于进程内的钉扎表与日志字段。
+// WithBuildSession supplies a soft network reuse hint, separate from history
+// identity and the upstream cache key. Only a domain-separated digest is kept
+// in process-local pins and diagnostics; it is never sent in request headers.
 func WithBuildSession(ctx context.Context, sessionKey string) context.Context {
 	if ctx == nil {
 		return ctx

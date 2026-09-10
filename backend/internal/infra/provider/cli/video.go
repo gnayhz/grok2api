@@ -16,12 +16,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
 const (
-	buildVideoModel = "grok-imagine-video-1.5"
+	buildVideoModel = modeldomain.BuildVideoModel
 	xaiVideoModel   = "grok-imagine-video-1.5-preview"
 	// Align with the gateway ceiling and official xAI video inputs:
 	// image = first frame; reference_images = style/content references (may be length 1).
@@ -165,6 +166,18 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	credential := request.Credential
+	if saved := request.Resume; saved != nil {
+		profile := buildVideoRequestProfile
+		if saved.Route == "xai" {
+			profile = xaiVideoRequestProfile
+		} else if saved.Route != "build" {
+			return provider.VideoResult{}, mediadomain.ErrInvalidVideoExecution
+		}
+		if saved.NativeJobID == "" || saved.Endpoint == "" {
+			return provider.VideoResult{}, mediadomain.ErrInvalidVideoExecution
+		}
+		return a.pollVideoJob(ctx, credential, accessToken, saved.Endpoint, saved.NativeJobID, saved.UploadAssetID, profile, request)
+	}
 	routeMode := normalizedBuildRouteMode(credential)
 	xaiEligible := account.IsBuildSuper(credential, request.Billing)
 	if routeMode == account.BuildRouteXAI || (routeMode == account.BuildRouteAuto && xaiEligible && a.CredentialMetadata(credential).BuildBotFlagged) {
@@ -180,16 +193,25 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitting, Route: "build", Endpoint: primaryBase}); err != nil {
+		return provider.VideoResult{}, err
+	}
 	createResp, createErr := a.doVideoJSON(ctx, credential, accessToken, http.MethodPost, primaryBase, "/videos/generations", body, buildVideoRequestProfile, true)
 	if createErr == nil {
 		jobID, parseErr := parseVideoCreateResponse(createResp)
 		if parseErr != nil {
 			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStageSubmitted, 0, parseErr)
 		}
+		if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitted, NativeJobID: jobID}); err != nil {
+			return provider.VideoResult{}, err
+		}
 		if request.Progress != nil {
 			request.Progress(1)
 		}
-		return a.pollVideoJob(ctx, credential, accessToken, primaryBase, jobID, "", buildVideoRequestProfile, request.Progress)
+		return a.pollVideoJob(ctx, credential, accessToken, primaryBase, jobID, "", buildVideoRequestProfile, request)
+	}
+	if err := provider.CheckpointVideoRejection(request, createErr); err != nil {
+		return provider.VideoResult{}, err
 	}
 	var upstream *videoUpstreamError
 	if !asVideoUpstreamError(createErr, &upstream) || !isHTTPForbidden(upstream.status) {
@@ -203,6 +225,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 }
 
 func (a *Adapter) generateVideoOnXAI(ctx context.Context, request provider.VideoRequest, credential account.Credential, accessToken string, recordFallback bool) (provider.VideoResult, error) {
+	if recordFallback {
+		ctx = infraegress.WithPhysicalCallStage(ctx, "plane_fallback")
+	}
 	issuer := a.uploadIssuerRef()
 	if issuer == nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("XAI 视频需要媒体上传接收服务"))
@@ -225,8 +250,14 @@ func (a *Adapter) generateVideoOnXAI(ctx context.Context, request provider.Video
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	base := a.fallbackBaseURL()
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitting, Route: "xai", Endpoint: base, UploadAssetID: assetID}); err != nil {
+		return provider.VideoResult{}, err
+	}
 	createResp, err := a.doVideoJSON(ctx, credential, accessToken, http.MethodPost, base, "/videos/generations", body, xaiVideoRequestProfile, true)
 	if err != nil {
+		if checkpointErr := provider.CheckpointVideoRejection(request, err); checkpointErr != nil {
+			return provider.VideoResult{}, checkpointErr
+		}
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
 	// 必须先解析到可用 job ID，再标记降级；畸形 2xx 不得激活或本地置位。
@@ -234,18 +265,22 @@ func (a *Adapter) generateVideoOnXAI(ctx context.Context, request provider.Video
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStageSubmitted, 0, err)
 	}
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitted, NativeJobID: jobID}); err != nil {
+		return provider.VideoResult{}, err
+	}
 	if recordFallback {
 		a.activateBuildAPIFallback(ctx, &credential)
 	}
 	if request.Progress != nil {
 		request.Progress(1)
 	}
-	return a.pollVideoJob(ctx, credential, accessToken, base, jobID, assetID, xaiVideoRequestProfile, request.Progress)
+	return a.pollVideoJob(ctx, credential, accessToken, base, jobID, assetID, xaiVideoRequestProfile, request)
 }
 
 // DownloadVideo 通过 Build egress 拉取已完成任务的公开 CDN URL。
 // 资源域不需要 OAuth；不得解密或转发 token 与客户端身份头。
 func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credential, rawURL string) (io.ReadCloser, string, int64, error) {
+	ctx = infraegress.WithPhysicalCallStage(ctx, "asset_download")
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !trustedBuildVideoAssetHost(parsed.Hostname()) {
 		return nil, "", 0, fmt.Errorf("视频内容 URL 不受信任")
@@ -360,7 +395,7 @@ func videoCreatePayload(request provider.VideoRequest, uploadURL string, profile
 	return payload, nil
 }
 
-func (a *Adapter) pollVideoJob(ctx context.Context, credential account.Credential, accessToken, base, jobID, assetID string, profile videoRequestProfile, progress func(int)) (provider.VideoResult, error) {
+func (a *Adapter) pollVideoJob(ctx context.Context, credential account.Credential, accessToken, base, jobID, assetID string, profile videoRequestProfile, request provider.VideoRequest) (provider.VideoResult, error) {
 	ticker := time.NewTicker(buildVideoPollEvery)
 	defer ticker.Stop()
 	for {
@@ -368,9 +403,17 @@ func (a *Adapter) pollVideoJob(ctx context.Context, credential account.Credentia
 		if err != nil {
 			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, err)
 		}
-		result, done, pollErr := parseVideoStatusResponse(statusBody, progress, assetID != "")
+		result, done, pollErr := parseVideoStatusResponse(statusBody, request.Progress, assetID != "")
+		if done {
+			if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionGenerated, Result: result}); err != nil {
+				return result, err
+			}
+		}
 		if pollErr != nil {
-			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, pollErr)
+			if err := provider.CheckpointVideoFailure(request, pollErr); err != nil {
+				return result, err
+			}
+			return result, provider.WrapVideoStage(provider.VideoStagePoll, 0, pollErr)
 		}
 		if done {
 			if assetID != "" {
@@ -402,6 +445,14 @@ func (a *Adapter) pollVideoJob(ctx context.Context, credential account.Credentia
 }
 
 func (a *Adapter) doVideoJSON(ctx context.Context, credential account.Credential, accessToken, method, base, path string, body []byte, profile videoRequestProfile, withTrace bool) ([]byte, error) {
+	plane := "build"
+	if profile == xaiVideoRequestProfile {
+		plane = "xai"
+	}
+	ctx = infraegress.WithPhysicalCallPlane(ctx, plane)
+	if method == http.MethodGet {
+		ctx = infraegress.WithPhysicalCallStage(ctx, "video_poll")
+	}
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
@@ -473,7 +524,7 @@ func parseVideoStatusResponse(body []byte, progress func(int), allowMissingURL b
 		return provider.VideoResult{}, false, fmt.Errorf("解析 Build 视频状态响应: %w", err)
 	}
 	if message := firstNestedString(root, "error", "message"); message != "" {
-		return provider.VideoResult{}, false, fmt.Errorf("Build 视频生成失败: %s", safeVideoDiagnosticMessage(message))
+		return provider.VideoResult{}, false, &provider.VideoGenerationFailure{Err: fmt.Errorf("Build 视频生成失败: %s", safeVideoDiagnosticMessage(message))}
 	}
 	statusSource := root
 	if data, ok := root["data"].(map[string]any); ok {
@@ -492,11 +543,11 @@ func parseVideoStatusResponse(body []byte, progress func(int), allowMissingURL b
 		if message == "" {
 			message = status
 		}
-		return provider.VideoResult{}, false, fmt.Errorf("Build 视频生成失败: %s", safeVideoDiagnosticMessage(message))
+		return provider.VideoResult{}, false, &provider.VideoGenerationFailure{Err: fmt.Errorf("Build 视频生成失败: %s", safeVideoDiagnosticMessage(message))}
 	case "completed", "succeeded", "success", "ready", "done":
 		videoURL := extractBuildVideoURL(root)
 		if videoURL == "" && !allowMissingURL {
-			return provider.VideoResult{}, false, fmt.Errorf("视频生成完成但没有返回内容 URL")
+			return provider.VideoResult{ContentType: "video/mp4"}, true, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, fmt.Errorf("视频生成完成但没有返回内容 URL"))
 		}
 		return provider.VideoResult{URL: videoURL, ContentType: "video/mp4"}, true, nil
 	default:

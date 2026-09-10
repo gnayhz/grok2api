@@ -62,7 +62,7 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.LinkWebToBuild(ctx, webAccount.ID, buildAccount.ID); err != nil {
+	if err := accounts.LinkWebToBuild(ctx, webAccount.CredentialRef(), buildAccount.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	var parseCalls atomic.Int64
@@ -373,7 +373,7 @@ func (r *webConsoleBatchRepository) ListProviderAccountBatch(_ context.Context, 
 	return values, int64(len(r.values)), nil
 }
 
-func (r *webConsoleBatchRepository) UpsertManyByIdentity(_ context.Context, values []accountdomain.Credential) ([]repository.AccountUpsertResult, error) {
+func (r *webConsoleBatchRepository) ImportAccounts(_ context.Context, values []repository.AccountImport) ([]repository.AccountUpsertResult, error) {
 	results := make([]repository.AccountUpsertResult, len(values))
 	for index := range values {
 		results[index] = repository.AccountUpsertResult{ID: 10_000 + r.nextID.Add(1), Created: true}

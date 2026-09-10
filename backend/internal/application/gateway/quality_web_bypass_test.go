@@ -16,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // webNoThinkingStreamAdapter 返回 Web 原生 chat 形态流：有正文、零思考
@@ -67,11 +68,11 @@ func TestWebProviderStreamBypassesQualityHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const model = "grok-web-bypass"
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderWeb, []string{model}); err != nil {
+	const model = "grok-chat-fast"
+	if err := testsupport.Discover(ctx, modelRepo, accountdomain.ProviderWeb, []string{model}); err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{model}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, credential.ID, []string{model}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	adapter := &webNoThinkingStreamAdapter{}
@@ -79,11 +80,11 @@ func TestWebProviderStreamBypassesQualityHold(t *testing.T) {
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, nil, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
 	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
-		RequestID: "req-web-bypass", ClientKey: clientkey.Key{ID: 1, Name: "web"}, PublicModel: model, Streaming: true,
+		RequestID: "req-web-bypass", ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "web"}, PublicModel: model, Streaming: true,
 		Body: []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hi"}],"stream":true}`),
 	})
 	if err != nil {
@@ -93,7 +94,7 @@ func TestWebProviderStreamBypassesQualityHold(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (guard must not engage for web provider)", result.StatusCode)
 	}
 	_, _ = io.ReadAll(result.Body)
-	result.Finalize(Usage{}, "", "")
+	finishTestResult(t, result, Usage{}, "", "")
 	_ = result.Body.Close()
 	if calls := adapter.calls.Load(); calls != 1 {
 		t.Fatalf("adapter calls = %d, want exactly 1 (no withhold retry)", calls)

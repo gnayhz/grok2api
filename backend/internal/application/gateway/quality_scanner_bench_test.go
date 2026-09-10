@@ -153,6 +153,6 @@ func BenchmarkSignals(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = classifyQualityHold(state.signals())
+		_ = classifyQualityHoldShadowed(state.signals())
 	}
 }

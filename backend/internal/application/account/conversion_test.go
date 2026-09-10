@@ -257,12 +257,18 @@ func (r *conversionBatchRepository) Get(_ context.Context, id uint64) (accountdo
 	}, nil
 }
 
-func (r *conversionBatchRepository) UpsertByIdentity(_ context.Context, value accountdomain.Credential) (accountdomain.Credential, bool, error) {
-	value.ID = 10_000 + r.nextBuildID.Add(1)
-	return value, true, nil
+func (r *conversionBatchRepository) ImportAccounts(_ context.Context, values []repository.AccountImport) ([]repository.AccountUpsertResult, error) {
+	results := make([]repository.AccountUpsertResult, len(values))
+	for i := range values {
+		id := 10_000 + r.nextBuildID.Add(1)
+		results[i] = repository.AccountUpsertResult{ID: id, Created: true, Material: accountdomain.CredentialRef{AccountID: id, Provider: accountdomain.ProviderBuild, Generation: 1}}
+	}
+	return results, nil
 }
 
-func (r *conversionBatchRepository) LinkWebToBuild(context.Context, uint64, uint64) error { return nil }
+func (r *conversionBatchRepository) LinkWebToBuild(context.Context, accountdomain.CredentialRef, accountdomain.CredentialRef) error {
+	return nil
+}
 
 type buildConversionAdapter struct{ calls atomic.Int64 }
 

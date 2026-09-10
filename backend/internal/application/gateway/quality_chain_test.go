@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -14,9 +15,12 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // qualityChainAdapter 按账号脚本化上游流：degradedID 收到无思考的降智
@@ -28,6 +32,7 @@ type qualityChainAdapter struct {
 	attempts    []uint64
 	degradedSSE string
 	cleanSSE    string
+	nodeID      uint64
 }
 
 func (a *qualityChainAdapter) Provider() account.Provider { return account.ProviderBuild }
@@ -37,7 +42,10 @@ func (a *qualityChainAdapter) Definition() provider.Definition {
 	return definition
 }
 
-func (a *qualityChainAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+func (a *qualityChainAdapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	if trace := infraegress.TraceFromContext(ctx); trace != nil && a.nodeID != 0 {
+		trace.Record(infraegress.Selection{NodeID: a.nodeID, Scope: domainegress.ScopeBuild})
+	}
 	a.mu.Lock()
 	a.attempts = append(a.attempts, request.Credential.ID)
 	degraded := request.Credential.ID == a.degradedID
@@ -48,7 +56,7 @@ func (a *qualityChainAdapter) ForwardResponse(_ context.Context, request provide
 	a.mu.Unlock()
 	header := make(http.Header)
 	header.Set("Content-Type", "text/event-stream")
-	return &provider.Response{StatusCode: 200, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+	return &provider.Response{Attempt: attemptmeta.FromContext(attemptmeta.Begin(ctx, attemptmeta.Path{NodeID: a.nodeID})), StatusCode: 200, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
 func (a *qualityChainAdapter) Attempts() []uint64 {
@@ -107,15 +115,15 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, account.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, accountID := range []uint64{degraded.ID, clean.ID} {
-		if err := modelRepo.ReplaceAccountCapabilities(ctx, accountID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+		if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, accountID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{Name: "q-key", Prefix: "q-prefix", SecretHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", EncryptedSecret: "enc", Enabled: true, RPMLimit: 120, MaxConcurrent: 8})
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll, Name: "q-key", Prefix: "q-prefix", SecretHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", EncryptedSecret: "enc", Enabled: true, RPMLimit: 120, MaxConcurrent: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,21 +142,23 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 		"data: [DONE]",
 	}, "\n\n") + "\n\n"
 
-	adapter := &qualityChainAdapter{degradedID: degraded.ID, degradedSSE: degradedSSE, cleanSSE: cleanSSE}
+	adapter := &qualityChainAdapter{degradedID: degraded.ID, degradedSSE: degradedSSE, cleanSSE: cleanSSE, nodeID: 1}
 	registry := provider.NewRegistry(adapter)
 	cipher := testCipher(t)
 	sticky := memory.NewStickyStore()
 	concurrency := memory.NewConcurrencyLimiter()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clientService := clientkeyapp.NewService(nil, nil, nil, 60, 4, nil)
+	clientService := clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil)
 	selector := NewSelector(accountRepo, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
 	service.UpdateQualityRetry(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: 3,
 		OnExhausted:     qualityRetryFailClosed,
 		EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond,
-		SameAccountRetry: false, AccountCooldown: 12 * time.Hour,
+		AccountCooldown: 12 * time.Hour,
 	})
+	incidentReporter := &recordingQualityObserver{}
+	service.SetQualityObserver(incidentReporter)
 
 	// 请求 1：降智账号（高优先级）→ 扣留 → 换 clean 账号交付。
 	first, err := service.CreateResponse(ctx, Input{
@@ -163,7 +173,7 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.MarkFirstToken()
-	first.Finalize(Usage{Reported: true, InputTokens: 10, OutputTokens: 40, ReasoningTokens: 10}, "resp_clean", "")
+	finishTestResult(t, first, Usage{Reported: true, InputTokens: 10, OutputTokens: 40, ReasoningTokens: 10}, "resp_clean", "")
 	_ = first.Body.Close()
 
 	if got := adapter.Attempts(); len(got) != 2 || got[0] != degraded.ID || got[1] != clean.ID {
@@ -172,6 +182,16 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 	if string(body) != cleanSSE {
 		t.Fatalf("客户端字节不纯：期望逐字节等于 clean 流（%d B），得到 %d B；含降智标记=%v",
 			len(cleanSSE), len(body), strings.Contains(string(body), "DEGRADED-LEAK-MARKER-A"))
+	}
+	observations := incidentReporter.events
+	var incidents []QualityObservation
+	for _, obs := range observations {
+		if obs.Outcome == QualityObservedDegraded {
+			incidents = append(incidents, obs)
+		}
+	}
+	if len(incidents) != 1 || incidents[0].AccountID != degraded.ID || incidents[0].NodeID != 1 {
+		t.Fatalf("each degraded physical attempt must be reported once: %+v", incidents)
 	}
 
 	// 请求 2：降智账号已因 missing-thinking 惩罚冷却，应直接命中 clean 账号。
@@ -187,7 +207,7 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	second.MarkFirstToken()
-	second.Finalize(Usage{Reported: true, InputTokens: 10, OutputTokens: 40, ReasoningTokens: 10}, "resp_clean", "")
+	finishTestResult(t, second, Usage{Reported: true, InputTokens: 10, OutputTokens: 40, ReasoningTokens: 10}, "resp_clean", "")
 	_ = second.Body.Close()
 
 	got := adapter.Attempts()

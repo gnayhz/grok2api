@@ -20,10 +20,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
@@ -32,8 +32,12 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
+	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -56,22 +60,23 @@ const (
 
 // Adapter implements the Grok Build CLI Responses, model, Billing, and OAuth protocols.
 type Adapter struct {
-	cfgMu          sync.RWMutex
-	cfg            Config
-	http           *http.Client
-	oauth          *oauthClient
-	cipher         security.Cryptor
-	base           *buildDirectTransport
-	agentID        string
-	modelsMu       sync.Mutex
-	modelsETags    map[uint64]string
-	fallbackMarker FallbackMarker
-	uploadIssuer   VideoUploadIssuer
-	replay         *reasoningreplay.ReasoningReplay
-	compaction     *gatewayCompactionCodec
-	turnsMu        sync.Mutex
-	turns          map[string]grokTurnState
-	logger         *slog.Logger
+	cfgMu                sync.RWMutex
+	cfg                  Config
+	http                 *http.Client
+	oauth                *oauthClient
+	cipher               security.Cryptor
+	base                 *buildDirectTransport
+	agentID              string
+	modelsMu             sync.Mutex
+	modelsETags          map[uint64]string
+	fallbackMarker       FallbackMarker
+	uploadIssuer         VideoUploadIssuer
+	replay               historydomain.Service
+	legacyReplayAccounts []uint64
+	compaction           *historydomain.CompactionCodec
+	turnsMu              sync.Mutex
+	turns                map[string]grokTurnState
+	logger               *slog.Logger
 }
 
 // grokTurnState 记录会话的官方客户端轮次计数(x-grok-turn-idx)。
@@ -98,7 +103,7 @@ func NewAdapter(cfg Config, cipher security.Cryptor) *Adapter {
 	agentID := uuid.NewString()
 	adapter := &Adapter{
 		cfg: cfg, http: httpClient, cipher: cipher, base: transport,
-		agentID: agentID, modelsETags: make(map[uint64]string), turns: make(map[string]grokTurnState), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
+		agentID: agentID, modelsETags: make(map[uint64]string), turns: make(map[string]grokTurnState), compaction: historydomain.NewCompactionCodec(cipher), logger: slog.Default(),
 	}
 	// 官方 CLI 的 shared_client 对包括 OAuth 在内的所有请求统一附加 grok-shell
 	// User-Agent;网关的 OAuth 平面(client_id/token/device)必须一致,否则 Go 默认
@@ -122,14 +127,16 @@ func (a *Adapter) SetLogger(logger *slog.Logger) {
 	}
 }
 
-func (a *Adapter) SetEgress(manager *infraegress.Manager) {
-	if manager != nil {
-		a.http.Transport = &egressTransport{manager: manager, fallback: a.base}
+// SetEgress injects the network owner's dialer during construction. Quality
+// decorators observe selected paths; route and transport decisions stay in M13.
+func (a *Adapter) SetEgress(dialer infraegress.Dialer) {
+	if dialer != nil {
+		a.http.Transport = &egressTransport{manager: dialer, fallback: a.base}
 	}
 }
 
-// SetReasoningReplay injects the optional server-side reasoning replay cache.
-func (a *Adapter) SetReasoningReplay(replay *reasoningreplay.ReasoningReplay) {
+// SetReasoningReplay injects M12's history preparation and capture service.
+func (a *Adapter) SetReasoningReplay(replay historydomain.Service) {
 	a.replay = replay
 }
 
@@ -212,7 +219,20 @@ func newBuildDirectTransport(responseHeaderTimeout time.Duration) *buildDirectTr
 }
 
 func (t *buildDirectTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	return t.current.Load().RoundTrip(request)
+	if attemptmeta.FromContext(request.Context()).ID == "" {
+		request = request.WithContext(attemptmeta.Begin(request.Context(), attemptmeta.Path{}))
+	}
+	if err := infraegress.BeginDirectPhysicalCall(request.Context()); err != nil {
+		if request.Body != nil {
+			_ = request.Body.Close()
+		}
+		return nil, err
+	}
+	response, err := t.current.Load().RoundTrip(request)
+	err = infraegress.MarkPhysicalExecutionError(request.Context(), err)
+	attemptmeta.Attach(response, request)
+	infraegress.RecordDirectPhysicalCall(request.Context(), response, err)
+	return response, err
 }
 
 func (t *buildDirectTransport) UpdateResponseHeaderTimeout(responseHeaderTimeout time.Duration) {
@@ -258,6 +278,8 @@ func (a *Adapter) config() Config {
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	ctx, finishTrace := upstreamtrace.Network(ctx, "build", request.Operation)
+	defer finishTrace()
 	if request.NormalizedMetadata != nil {
 		*request.NormalizedMetadata = provider.NormalizedRequestMetadata{}
 	}
@@ -276,19 +298,33 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			if err == nil && conversationOptions.ReasoningEffortSet && request.NormalizedMetadata != nil {
 				request.NormalizedMetadata.ReasoningEffort = conversationOptions.ReasoningEffort
 			}
-		} else {
-			var foreignCompactions, driftedCompactions int
-			body, foreignCompactions, driftedCompactions, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
-			if err != nil {
-				return invalidResponsesResponse(err), nil
+			if err == nil {
+				body, err = normalizeBuildRequestWithMetadata(body, request.Model, request.Operation, request.NormalizedMetadata)
 			}
+		} else {
+			preparation, prepareErr := a.compaction.Prepare(body, request.PromptCacheKey)
+			if prepareErr != nil {
+				return invalidResponsesResponse(prepareErr), nil
+			}
+			if preparation.Unavailable > 0 {
+				if request.HistoryControl == nil {
+					return invalidResponsesResponse(compactionPreparationError(historydomain.ErrCompactionLossNotAuthorized)), nil
+				}
+				if err := request.HistoryControl.PrepareInput(ctx, historydomain.InputPreparation{UnavailableCompactions: preparation.Unavailable}); err != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					return invalidResponsesResponse(compactionPreparationError(err)), nil
+				}
+			}
+			body = preparation.Body
 			body, toolCompatibility, err = normalizeResponsesRequestWithMetadata(body, request.Model, request.NormalizedMetadata)
 			if toolCompatibility != nil {
 				compactionRequested = toolCompatibility.compactionRequested
-				if foreignCompactions > 0 {
+				if preparation.Unavailable > 0 {
 					toolCompatibility.addWarning("foreign_compaction_omitted")
 				}
-				if driftedCompactions > 0 {
+				if preparation.SessionDrifted > 0 {
 					toolCompatibility.addWarning("compaction_session_drifted")
 				}
 			}
@@ -299,17 +335,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			}
 			return invalidResponsesResponse(err), nil
 		}
-		body, err = normalizeBuildRequestWithMetadata(body, request.Model, request.Operation, request.NormalizedMetadata)
-		if err != nil {
-			if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
-				return invalidConversationResponse(request.Operation, err), nil
-			}
-			return invalidResponsesResponse(err), nil
-		}
 	}
-	if request.Operation == conversation.OperationMessages && conversationOptions.AnthropicWebSearch {
-		request.ReasoningReplayKey = ""
+	continuity := historydomain.ReplayCompatibility{
+		TranslatedSearchHistory: request.Operation == conversation.OperationMessages && conversationOptions.AnthropicWebSearch,
 	}
+	request.ReasoningReplayKey = continuity.Seed(request.ReasoningReplayKey)
 	if compactionRequested {
 		body, err = prepareGatewayCompactionSample(body)
 		if err != nil {
@@ -318,8 +348,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	}
 	if len(body) > 0 && request.Method == http.MethodPost {
 		if !compactionRequested {
-			allowClientTools := request.AllowClientToolCacheRoute || (account.RoutingCandidate{Credential: request.Credential, Billing: request.Billing}).IsKnownFreeBuild()
-			body, cacheRoute, err = prepareBuildPromptCacheRoute(body, request.Operation, request.Model, request.PromptCacheKey, allowClientTools)
+			body, cacheRoute, err = prepareBuildPromptCacheRoute(body, request.Operation, request.Model, request.PromptCacheKey, request.ToolCompatibilityPolicy)
 			if err != nil {
 				err = fmt.Errorf("准备 Build prompt cache 路由: %w", err)
 				if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
@@ -327,14 +356,22 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				}
 				return invalidResponsesResponse(err), nil
 			}
-			body, err = injectPromptCacheKey(body, request.PromptCacheKey)
-			if err != nil {
-				err = fmt.Errorf("写入 prompt_cache_key: %w", err)
-				if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
-					return invalidConversationResponse(request.Operation, err), nil
-				}
-				return invalidResponsesResponse(err), nil
-			}
+		}
+	}
+	policy := inferencedomain.ReplayPolicyFromRequest(body)
+	ctx = attemptmeta.WithNormalizedProfile(ctx, "responses", policy.ReasoningEffort, policy.Tools, policy.Reason != "unrecognized_request")
+	request.DisableAutomaticReplay = request.DisableAutomaticReplay || !policy.Safe
+	if request.NormalizedMetadata != nil {
+		request.NormalizedMetadata.ReplayPolicy = &policy
+		request.NormalizedMetadata.ToolCompatibility = &cacheRoute.plan
+	}
+	if request.OnNormalized != nil {
+		metadata := provider.NormalizedRequestMetadata{ReplayPolicy: &policy, ToolCompatibility: &cacheRoute.plan}
+		if request.NormalizedMetadata != nil {
+			metadata = *request.NormalizedMetadata
+		}
+		if err := request.OnNormalized(metadata); err != nil {
+			return nil, err
 		}
 	}
 	if compactionRequested {
@@ -350,7 +387,16 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	// Cache affinity and reasoning replay use separate identities. Replay is also bound to the actual account and upstream plane,
 	// preventing opaque reasoning issued for one account or Build plane from reaching another scope.
 	replayBaseBody := body
-	body, replayKey := a.applyReasoningReplay(ctx, request, replayBaseBody, base)
+	body, replayKey, prepared, prepareErr := a.prepareReasoningReplay(ctx, request, replayBaseBody, base)
+	if prepareErr != nil {
+		return nil, prepareErr
+	}
+	historyHandedOff := false
+	defer func() {
+		if !historyHandedOff {
+			historydomain.Discard(prepared)
+		}
+	}()
 	resp, reqURL, err := a.doResponseRequest(ctx, request, accessToken, body, base)
 	if err != nil {
 		return nil, err
@@ -358,10 +404,14 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err := normalizeGzipResponse(resp); err != nil {
 		return nil, err
 	}
-	resp, reqURL, reasoningRecovery := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, replayKey, resp, reqURL)
+	resp, reqURL, reasoningRecovery := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, replayKey, resp, reqURL, prepared)
+	if reasoningRecovery.prepared != nil {
+		historydomain.Discard(prepared)
+		prepared = reasoningRecovery.prepared
+	}
 	var recoveredPrimaryFailure *provider.DiagnosticResponse
 	// Only eligible operations probe XAI with an equivalent request after the Build primary explicitly returns 403.
-	if strings.EqualFold(base, primaryBase) && shouldProbeXAIInferenceFallback(request.Credential, request.Billing, request.Method, request.Path, resp.StatusCode) {
+	if !request.DisableAutomaticReplay && strings.EqualFold(base, primaryBase) && shouldProbeXAIInferenceFallback(request.Credential, request.Billing, request.Method, request.Path, resp.StatusCode) {
 		// Buffer the primary 403 body and replay it unchanged if fallback fails; never issue a second primary POST.
 		primaryBody, primaryTruncated, readErr := provider.ReadDiagnosticBody(resp.Body)
 		_ = resp.Body.Close()
@@ -374,7 +424,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		} else {
 			fallbackBase := a.fallbackBaseURL()
 			if fallbackBase != "" && !strings.EqualFold(fallbackBase, base) {
-				fallbackBody, fallbackReplayKey := a.applyReasoningReplay(ctx, request, replayBaseBody, fallbackBase)
+				fallbackBody, fallbackReplayKey, fallbackPrepared, fallbackPrepareErr := a.prepareReasoningReplay(ctx, request, replayBaseBody, fallbackBase)
+				if fallbackPrepareErr != nil {
+					_ = primaryResp.Body.Close()
+					return nil, fallbackPrepareErr
+				}
 				fallbackCtx := infraegress.WithPhysicalCallStage(ctx, "plane_fallback")
 				fallbackResp, fallbackURL, fallbackErr := a.doResponseRequest(fallbackCtx, request, accessToken, fallbackBody, fallbackBase)
 				if fallbackErr == nil {
@@ -382,9 +436,15 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				}
 				fallbackRecovery := reasoningRecoveryOutcome{}
 				if fallbackErr == nil {
-					fallbackResp, fallbackURL, fallbackRecovery = a.recoverReasoningDecodeFailure(ctx, request, accessToken, fallbackBody, fallbackBase, fallbackReplayKey, fallbackResp, fallbackURL)
+					fallbackResp, fallbackURL, fallbackRecovery = a.recoverReasoningDecodeFailure(ctx, request, accessToken, fallbackBody, fallbackBase, fallbackReplayKey, fallbackResp, fallbackURL, fallbackPrepared)
+				}
+				if fallbackRecovery.prepared != nil {
+					historydomain.Discard(fallbackPrepared)
+					fallbackPrepared = fallbackRecovery.prepared
 				}
 				if fallbackErr == nil && isHTTPSuccess(fallbackResp.StatusCode) {
+					historydomain.Discard(prepared)
+					prepared = fallbackPrepared
 					recoveredPrimaryFailure = bufferedFailureDiagnostic(primaryResp, primaryBody, primaryTruncated)
 					a.activateBuildAPIFallback(ctx, &request.Credential)
 					// base/body 赋值死存（后续统一从 resp.Body 重读），staticcheck SA4006；仅保留被消费的槽位。
@@ -394,6 +454,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 					if fallbackErr == nil {
 						_ = fallbackResp.Body.Close()
 					}
+					historydomain.Discard(fallbackPrepared)
 					// Preserve the original primary 403 URL and buffered body without requesting the primary again.
 					resp = primaryResp
 				}
@@ -421,23 +482,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			}
 		}
 	}
-	if request.Streaming && isHTTPSuccess(resp.StatusCode) && resp.Body != nil {
-		resp.Body = wrapBuildSemanticIdle(resp.Body, a.config().StreamIdleTimeout)
-	}
 	modelCatalogChanged := a.modelCatalogChanged(request.Credential.ID, resp.Header.Get("x-models-etag"))
-	// Capture or clear reasoning replay in the upstream Responses shape before protocol conversion.
-	if a.shouldCaptureReplay(request, resp, replayKey) {
-		resp.Body = a.replay.CaptureBody(resp.Body, request.Model, replayKey, request.Streaming, isCompactPath(request.Path))
-	}
-	// Replay must read the raw upstream output. Hide xAI native search subcalls from downstream clients
-	// only after capture wrapping has completed.
-	if isHTTPSuccess(resp.StatusCode) {
-		if err := filterBuildPromptCacheResponse(resp, request.Streaming, cacheRoute); err != nil {
-			// 过滤失败也要归还连接:body 可能仍是被包装的裸上游流。
-			_ = resp.Body.Close()
-			return nil, err
-		}
-	}
 	responsesOperation := request.Operation == "" || request.Operation == conversation.OperationResponses || request.Operation == conversation.OperationCompaction
 	if responsesOperation && toolCompatibility != nil {
 		if warnings := toolCompatibility.warningHeader(); warnings != "" {
@@ -445,29 +490,6 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 	}
 	reasoningRecovery.appendWarnings(resp.Header)
-	if responsesOperation && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if request.Streaming {
-			resp.Body = toolCompatibility.normalizeResponseStream(resp.Body)
-			resp.Header.Del("Content-Length")
-			resp.Header.Set("Content-Type", "text/event-stream")
-		} else if toolCompatibility != nil {
-			data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCompatibleResponseBytes+1))
-			_ = resp.Body.Close()
-			if readErr != nil {
-				return nil, readErr
-			}
-			if len(data) > maxCompatibleResponseBytes {
-				return nil, fmt.Errorf("上游兼容 Responses 响应超过 128 MiB")
-			}
-			converted, convertErr := toolCompatibility.normalizeResponseJSON(data)
-			if convertErr != nil {
-				return nil, convertErr
-			}
-			resp.Body = io.NopCloser(bytes.NewReader(converted))
-			resp.Header.Set("Content-Length", strconv.Itoa(len(converted)))
-			resp.Header.Set("Content-Type", "application/json")
-		}
-	}
 	if traceDir, ok := upstreamtrace.Enabled(); ok {
 		upstreamtrace.DumpRequest(traceDir, request.Operation, request.Model, request.Streaming, body)
 		if request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -477,60 +499,66 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			resp.Body = upstreamtrace.TeeBody(traceDir, request.Operation, request.Model, resp.Body)
 		}
 	}
-	var convertStream func(io.ReadCloser) io.ReadCloser
-	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
-		if request.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			resp.Header.Del("Content-Length")
-			resp.Header.Set("Content-Type", "text/event-stream")
-			convertOp := request.Operation
-			convertOpts := conversationOptions
-			convertStream = func(raw io.ReadCloser) io.ReadCloser {
-				return conversation.ConvertResponseStreamWithOptions(raw, convertOp, convertOpts)
+	if request.Streaming && isHTTPSuccess(resp.StatusCode) && resp.Body != nil {
+		stream := newBuildResponseStream(ctx, resp.Body, a.config().StreamIdleTimeout)
+		physicalID := attemptmeta.FromResponse(resp).ID
+		stream.Observe(func(event *responseflow.Event) {
+			if event.HasData {
+				infraegress.ObservePhysicalPayload(ctx, physicalID, event.Data)
+				infraegress.ObservePhysicalGeneration(ctx, physicalID, responsecheck.EventGeneration(string(event.Kind), event.Data))
 			}
+		})
+		resp.Body = stream
+	} else if isHTTPSuccess(resp.StatusCode) && resp.Body != nil {
+		resp.Body = responsebuffer.AttachBudget(resp.Body, responsebuffer.FromContext(ctx))
+	}
+	// Capture or clear reasoning replay in the upstream Responses shape before protocol conversion.
+	var acceptOutput func()
+	var commitOutput func() error
+	var discardOutput func()
+	if a.shouldCaptureReplay(request, resp, replayKey) {
+		if prepared != nil {
+			resp.Body, commitOutput, discardOutput = prepared.Capture(resp.Body, request.Streaming)
+			historyHandedOff = true
+		} else if request.DeferOutputCommit {
+			resp.Body, acceptOutput = a.replay.CapturePendingBody(resp.Body, request.Model, replayKey, request.Streaming, isCompactPath(request.Path))
 		} else {
-			var data []byte
-			var readErr error
-			var diagnosticTruncated bool
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				data, readErr = io.ReadAll(io.LimitReader(resp.Body, (64<<20)+1))
-			} else {
-				data, diagnosticTruncated, readErr = provider.ReadDiagnosticBody(resp.Body)
-			}
-			_ = resp.Body.Close()
-			if readErr != nil {
-				return nil, readErr
-			}
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(data) > 64<<20 {
-				return nil, fmt.Errorf("上游对话响应超过 64 MiB")
-			}
-			var diagnostic *provider.DiagnosticResponse
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				diagnostic = &provider.DiagnosticResponse{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: data, BodyTruncated: diagnosticTruncated || rateLimitDiagnostic != nil}
-			}
-			if traceDir, ok := upstreamtrace.Enabled(); ok {
-				upstreamtrace.DumpBody(traceDir, request.Operation, request.Model, data)
-			}
-			if diagnostic != nil {
-				converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
-				if convertErr != nil {
-					return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: diagnostic.Header.Clone(), Body: io.NopCloser(bytes.NewReader(data)), UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
-				}
-				resp.Body = io.NopCloser(bytes.NewReader(converted))
-				resp.Header.Set("Content-Length", strconv.Itoa(len(converted)))
-				resp.Header.Set("Content-Type", "application/json")
-				return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
-			}
-			convertOp := request.Operation
-			convertOpts := conversationOptions
-			resp.Body = io.NopCloser(bytes.NewReader(data))
-			resp.Header.Del("Content-Length")
-			resp.Header.Set("Content-Type", "application/json")
-			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged, ConvertJSON: func(raw []byte) ([]byte, error) {
-				return conversation.ConvertResponseJSONWithOptions(raw, convertOp, convertOpts)
-			}}, nil
+			resp.Body = a.replay.CaptureBody(resp.Body, request.Model, replayKey, request.Streaming, isCompactPath(request.Path))
 		}
 	}
-	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged, ConvertStream: convertStream}, nil
+	if pending, ok := resp.Body.(interface{ DiscardOutput() }); ok {
+		discardOutput = pending.DiscardOutput
+	}
+	result := &provider.Response{Attempt: attemptmeta.FromResponse(resp), StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged, AcceptOutput: acceptOutput, CommitOutput: commitOutput, DiscardOutput: discardOutput}
+	if prepared != nil {
+		result.HistoryOutcome = prepared.Outcome()
+		result.HistoryScopeHash = prepared.ScopeHash()
+		result.HistoryGeneration = prepared.Generation()
+		result.HistoryRestoredItems = prepared.RestoredItems()
+		result.HistoryNormalizer = historydomain.JournalNormalizerVersion
+	}
+	if isHTTPSuccess(resp.StatusCode) {
+		// Return the unread, decompressed upstream body. All semantic rewriting
+		// belongs after gateway admission, including native Responses filtering.
+		prepareBuildClientConversion(result, request, cacheRoute, toolCompatibility, conversationOptions)
+		return result, nil
+	}
+	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
+		data, truncated, readErr := provider.ReadDiagnosticBody(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		result.Diagnostic = &provider.DiagnosticResponse{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: data, BodyTruncated: truncated || rateLimitDiagnostic != nil}
+		converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
+		if convertErr == nil {
+			data = converted
+			result.Header.Set("Content-Type", "application/json")
+		}
+		result.Body = io.NopCloser(bytes.NewReader(data))
+		result.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	}
+	return result, nil
 }
 
 func (a *Adapter) shouldCaptureReplay(request provider.ResponseResourceRequest, resp *http.Response, replayKey string) bool {
@@ -561,17 +589,15 @@ func (a *Adapter) applyReasoningReplay(ctx context.Context, request provider.Res
 	return a.replay.Apply(ctx, request.Model, key, body), key
 }
 
-func (a *Adapter) scopedReasoningReplayKey(request provider.ResponseResourceRequest, base string) string {
-	seed := strings.TrimSpace(request.ReasoningReplayKey)
-	if seed == "" || request.Credential.ID == 0 {
-		return ""
-	}
-	plane := "build"
+func (a *Adapter) replayPlane(base string) historydomain.ReplayPlane {
 	if fallback := a.fallbackBaseURL(); fallback != "" && strings.EqualFold(strings.TrimRight(base, "/"), fallback) {
-		plane = "xai"
+		return historydomain.ReplayPlaneXAI
 	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("grok2api:reasoning-replay:v2:%s:%d:%s", seed, request.Credential.ID, plane)))
-	return hex.EncodeToString(digest[:])
+	return historydomain.ReplayPlaneBuild
+}
+
+func (a *Adapter) scopedReasoningReplayKey(request provider.ResponseResourceRequest, base string) string {
+	return historydomain.ReplayScope(request.ReasoningReplayKey, request.Credential.ID, a.replayPlane(base))
 }
 
 func isCompactPath(path string) bool {
@@ -610,15 +636,9 @@ func (a *Adapter) nextGrokTurnIndex(key string) string {
 }
 
 func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (*http.Response, string, error) {
-	// 官方客户端按会话维护递增的轮次号并随请求发送;无状态 API 网关此前
-	// 一律不发该头。上游以会话+轮次定位提示缓存检查点,缺失时缓存归属
-	// 退化为按后端实例路由,中途换连接即冷启动。这里按(账号,会话)维护
-	// 单调递增计数,只补齐缺失值,客户端显式提供的轮次原样优先。
+	// Preserve client turn indices; otherwise maintain a local request sequence.
+	// This is CLI telemetry, not a documented cache checkpoint mechanism.
 	if request.GrokTurnIndex == "" && request.PromptCacheKey != "" && request.Credential.ID != 0 {
-		// 轮次号按会话(而非账号+会话)单调递增:上游以「会话+轮次」定位
-		// 缓存检查点,网关侧换号是调度内部行为,若随账号重置轮次号,同一
-		// 会话会回跳到小轮次、检查点失配,表现为整段缓存丢失。会话键本身
-		// 已含足够熵,且生命周期与对话一致。
 		request.GrokTurnIndex = a.nextGrokTurnIndex(request.PromptCacheKey)
 	}
 	var bodyReader io.Reader
@@ -626,10 +646,8 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		bodyReader = bytes.NewReader(body)
 	}
 	requestCtx := infraegress.WithCredential(ctx, request.Credential)
-	// 会话标识进入出口层:触发「会话→出口节点」与「会话→专用连接」双重
-	// 钉扎。上游提示缓存按连接亲和复用,出口节点漂移或共享连接池里的
-	// 连接轮换都会让进行中的会话缓存清零(表现为中途突然只剩公共头部
-	// 命中、耗时陡增)。
+	// Suggest network reuse within its pool/isolation/fresh policy. The hint
+	// cannot change historical identity or guarantee an upstream cache hit.
 	if request.PromptCacheKey != "" {
 		requestCtx = infraegress.WithBuildSession(requestCtx, request.PromptCacheKey)
 	}
@@ -638,6 +656,7 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		plane = "xai"
 	}
 	requestCtx = infraegress.WithPhysicalCallPlane(requestCtx, plane)
+	requestCtx = attemptmeta.Begin(requestCtx, attemptmeta.Path{})
 	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.urlWithBase(base, request.Path), bodyReader)
 	if err != nil {
 		return nil, "", err
@@ -661,6 +680,9 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return nil, "", err
+	}
+	if attemptmeta.FromResponse(resp).ID == "" {
+		attemptmeta.Attach(resp, req)
 	}
 	return resp, req.URL.String(), nil
 }
@@ -695,7 +717,7 @@ func normalizeGrokTurnIndex(value string) string {
 
 // invalidResponsesResponse converts local protocol validation errors to a standard OpenAI error response,
 // avoiding an upstream account retry.
-func invalidResponsesResponse(err error) *provider.Response {
+func localRequestValidation(err error) *inferencedomain.RequestValidationError {
 	code := "invalid_request"
 	param := ""
 	message := err.Error()
@@ -705,26 +727,35 @@ func invalidResponsesResponse(err error) *provider.Response {
 		param = requestErr.Param
 		message = requestErr.Message
 	}
+	return &inferencedomain.RequestValidationError{Code: code, Param: param, Message: message}
+}
+
+func invalidResponsesResponse(err error) *provider.Response {
+	validation := localRequestValidation(toolConstraintError(err))
+	code, param, message := validation.Code, validation.Param, validation.Message
 	errorBody := map[string]any{"type": "invalid_request_error", "message": message, "code": code}
 	if param != "" {
 		errorBody["param"] = param
 	}
 	data, _ := json.Marshal(map[string]any{"error": errorBody})
 	return &provider.Response{
-		StatusCode: http.StatusBadRequest, Status: "400 Bad Request",
+		RequestValidation: validation,
+		StatusCode:        http.StatusBadRequest, Status: "400 Bad Request",
 		Header: http.Header{"Content-Type": []string{"application/json"}, "Content-Length": []string{strconv.Itoa(len(data))}},
 		Body:   io.NopCloser(bytes.NewReader(data)),
 	}
 }
 
 func invalidConversationResponse(operation string, err error) *provider.Response {
+	validation := localRequestValidation(toolConstraintError(err))
 	var payload any = map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": err.Error()}}
 	if operation == conversation.OperationMessages {
 		payload = map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": err.Error()}}
 	}
 	data, _ := json.Marshal(payload)
 	return &provider.Response{
-		StatusCode: http.StatusBadRequest, Status: "400 Bad Request",
+		RequestValidation: validation,
+		StatusCode:        http.StatusBadRequest, Status: "400 Bad Request",
 		Header: http.Header{"Content-Type": []string{"application/json"}, "Content-Length": []string{strconv.Itoa(len(data))}},
 		Body:   io.NopCloser(bytes.NewReader(data)),
 	}
@@ -840,12 +871,15 @@ func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credentia
 		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, truncated, err := readControlDocument(resp.Body, 4<<20)
 	if err != nil {
 		return nil, 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode, nil
+	}
+	if truncated {
+		return nil, resp.StatusCode, fmt.Errorf("Build models 响应超过 4 MiB")
 	}
 	var payload struct {
 		Data []json.RawMessage `json:"data"`
@@ -1080,22 +1114,6 @@ func grokSessionID(promptCacheKey string) (string, error) {
 	return uuid.NewHash(sha256.New(), uuid.NameSpaceURL, []byte("grok2api:session:"+key), 8).String(), nil
 }
 
-func injectPromptCacheKey(body []byte, clientKey string) ([]byte, error) {
-	key := strings.TrimSpace(clientKey)
-	if key == "" {
-		return body, nil
-	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
-	}
-	if payload == nil {
-		payload = make(map[string]json.RawMessage)
-	}
-	payload["prompt_cache_key"] = mustJSON(key)
-	return json.Marshal(payload)
-}
-
 func randomHex(bytesLength int) (string, error) {
 	value := make([]byte, bytesLength)
 	if _, err := rand.Read(value); err != nil {
@@ -1159,12 +1177,15 @@ func (a *Adapter) getBilling(ctx context.Context, credential account.Credential,
 		return account.Billing{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	body, truncated, err := readControlDocument(resp.Body, 2<<20)
 	if err != nil {
 		return account.Billing{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return account.Billing{}, fmt.Errorf("上游 Billing 接口返回 %d", resp.StatusCode)
+	}
+	if truncated {
+		return account.Billing{}, fmt.Errorf("Build Billing 响应超过 2 MiB")
 	}
 	return parseBilling(body)
 }
@@ -1188,12 +1209,43 @@ func (a *Adapter) getSubscriptionTier(ctx context.Context, credential account.Cr
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, truncated, err := readControlDocument(resp.Body, 1<<20)
 	if err != nil {
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("上游订阅接口返回 %d", resp.StatusCode)
 	}
+	if truncated {
+		return "", fmt.Errorf("Build subscription 响应超过 1 MiB")
+	}
 	return parseSubscriptionTier(body)
+}
+
+func (a *Adapter) prepareReasoningReplay(ctx context.Context, request provider.ResponseResourceRequest, body []byte, base string) ([]byte, string, historydomain.Prepared, error) {
+	if a.replay == nil || request.Method != http.MethodPost {
+		next, key := a.applyReasoningReplay(ctx, request, body, base)
+		return next, key, nil, nil
+	}
+	key := a.scopedReasoningReplayKey(request, base)
+	next, prepared, err := a.replay.Prepare(ctx, request.Model, key, body, historydomain.ReplayPreparation{LegacyKeys: a.legacyReasoningReplayKeys(request, base), PriorKeys: a.priorReasoningReplayKeys(request, base), Authorizer: request.HistoryControl})
+	return next, key, prepared, err
+}
+
+// SetLegacyReplayAccounts is startup-only migration wiring, including retired accounts.
+func (a *Adapter) SetLegacyReplayAccounts(ids []uint64) {
+	a.legacyReplayAccounts = append([]uint64(nil), ids...)
+}
+
+func (a *Adapter) legacyReasoningReplayKeys(request provider.ResponseResourceRequest, base string) []string {
+	return historydomain.LegacyReplayScopes(request.ReasoningReplayKey, request.Credential.ID, a.replayPlane(base), a.legacyReplayAccounts)
+}
+
+func (a *Adapter) priorReasoningReplayKeys(request provider.ResponseResourceRequest, base string) []string {
+	if request.PriorReasoningReplayKey == "" {
+		return nil
+	}
+	plane := a.replayPlane(base)
+	keys := []string{historydomain.ReplayScope(request.PriorReasoningReplayKey, request.Credential.ID, plane)}
+	return append(keys, historydomain.LegacyReplayScopes(request.PriorReasoningReplayKey, request.Credential.ID, plane, a.legacyReplayAccounts)...)
 }

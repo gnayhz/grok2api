@@ -33,14 +33,14 @@ func TestRoutingProjectionLeavesSecretsAndLargeJSONOutOfCandidateLoad(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveBilling(ctx, account.Billing{
+	if err := saveBilling(database.db.WithContext(ctx), account.Billing{
 		AccountID: created.ID, PlanCode: "super", MonthlyLimit: 100, Used: 12, SyncedAt: now,
 		History: []account.BillingHistoryEntry{{Year: 2026, Month: 7, IncludedUsed: 12}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	resetAt := now.Add(time.Hour)
-	if err := accounts.SaveQuotaWindows(ctx, created.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(accounts, ctx, created.ID, account.WebTierSuper, now, []account.QuotaWindow{{
 		AccountID: created.ID, Mode: "weekly", Remaining: 10, Total: 20, UsagePercent: 50,
 		Breakdown:     []account.QuotaBreakdown{{ProductCode: account.QuotaProductChat, UsagePercent: 50}},
 		WindowSeconds: 3600, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream,
@@ -129,7 +129,7 @@ func TestRoutingProjectionMapsWebImageEditQuotaByTier(t *testing.T) {
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		if saveErr := accounts.SaveQuotaWindows(ctx, value.ID, tier, now, []account.QuotaWindow{
+		if saveErr := saveQuotaWindowsFixture(accounts, ctx, value.ID, tier, now, []account.QuotaWindow{
 			{AccountID: value.ID, Mode: "weekly", Remaining: 11, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 			{AccountID: value.ID, Mode: account.QuotaModeWebImagePro, Remaining: 3, SyncedAt: &now, Source: account.QuotaSourceUpstream},
 			{AccountID: value.ID, Mode: account.QuotaModeWebImageEdit, Remaining: 7, SyncedAt: &now, Source: account.QuotaSourceUpstream},
@@ -176,7 +176,7 @@ func TestRoutingProjectionFallsBackToWeeklyForPaidWebImagine(t *testing.T) {
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		if saveErr := accounts.SaveQuotaWindows(ctx, value.ID, tier, now, []account.QuotaWindow{{
+		if saveErr := saveQuotaWindowsFixture(accounts, ctx, value.ID, tier, now, []account.QuotaWindow{{
 			AccountID: value.ID, Mode: "weekly", Remaining: 9, Total: 10,
 			SyncedAt: &now, Source: account.QuotaSourceUpstream,
 		}}); saveErr != nil {

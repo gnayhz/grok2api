@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -23,7 +24,7 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codec := newGatewayCompactionCodec(cipher)
+	codec := historydomain.NewCompactionCodec(cipher)
 	rawSummary := healthyCompactionSummary()
 	upstream := compactionSampleSSE("resp_upstream", rawSummary)
 	sample, err := parseGatewayCompactionStream([]byte(upstream))
@@ -34,7 +35,7 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 	if !strings.HasPrefix(continuation, "This session is being continued") || strings.Contains(continuation, "<summary>") || !strings.Contains(continuation, "Summary:\n1. Primary") {
 		t.Fatalf("continuation = %q", continuation)
 	}
-	blob, err := codec.encode("session-1", continuation)
+	blob, err := codec.Encode("session-1", continuation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,14 +52,16 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 		t.Fatalf("content type = %q", contentType)
 	}
 	blob = compactionBlobFromSSE(t, stream)
-	expanded, foreign, drifted, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "session-1")
+	preparedCompaction, err := codec.Prepare([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), "session-1")
+	expanded, foreign, drifted := preparedCompaction.Body, preparedCompaction.Unavailable, preparedCompaction.SessionDrifted
 	if err != nil {
 		t.Fatal(err)
 	}
 	if foreign != 0 || drifted != 0 || !strings.Contains(string(expanded), "This session is being continued") || strings.Contains(string(expanded), `"type":"compaction"`) || !strings.Contains(string(expanded), `"role":"user"`) {
 		t.Fatalf("expanded = %s, foreign = %d, drifted = %d", expanded, foreign, drifted)
 	}
-	mismatched, unusable, drifted, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "other-session")
+	driftedCompaction, err := codec.Prepare([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), "other-session")
+	mismatched, unusable, drifted := driftedCompaction.Body, driftedCompaction.Unavailable, driftedCompaction.SessionDrifted
 	if err != nil || unusable != 0 || drifted != 1 || strings.Contains(string(mismatched), blob) || strings.Contains(string(mismatched), "could not be decoded") || !strings.Contains(string(mismatched), "This session is being continued") {
 		t.Fatalf("session mismatch expansion = %s, unusable = %d, drifted = %d, err = %v", mismatched, unusable, drifted, err)
 	}
@@ -66,7 +69,7 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 
 func TestForwardResponseRetainsSessionDriftedCompaction(t *testing.T) {
 	adapter, encrypted := newCompactionTestAdapter(t)
-	blob, err := adapter.compaction.encode("old-session", gatewayCompactionContinuation(healthyCompactionSummary()))
+	blob, err := adapter.compaction.Encode("old-session", gatewayCompactionContinuation(healthyCompactionSummary()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +103,8 @@ func TestUndecodableGatewayCompactionUsesBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expanded, foreign, drifted, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":"g2a_compact_v1.invalid"}]}`), newGatewayCompactionCodec(cipher), "session-1")
+	preparedCompaction, err := historydomain.NewCompactionCodec(cipher).Prepare([]byte(`{"input":[{"type":"compaction","encrypted_content":"g2a_compact_v1.invalid"}]}`), "session-1")
+	expanded, foreign, drifted := preparedCompaction.Body, preparedCompaction.Unavailable, preparedCompaction.SessionDrifted
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +287,8 @@ func TestForeignCompactionNeverReachesBuildModelInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expanded, foreign, drifted, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":"gAAAAABforeign-codex-replay"},{"role":"user","content":"continue"}]}`), newGatewayCompactionCodec(cipher), "session-1")
+	preparedCompaction, err := historydomain.NewCompactionCodec(cipher).Prepare([]byte(`{"input":[{"type":"compaction","encrypted_content":"gAAAAABforeign-codex-replay"},{"role":"user","content":"continue"}]}`), "session-1")
+	expanded, foreign, drifted := preparedCompaction.Body, preparedCompaction.Unavailable, preparedCompaction.SessionDrifted
 	if err != nil {
 		t.Fatal(err)
 	}

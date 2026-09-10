@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { defaultAccountRiskConfig, defaultEgressRotationConfig, defaultRequestRetryConfig, type SettingsConfigDTO } from "@/features/settings/settings-api";
+import { defaultEgressRotationConfig, type SettingsConfigDTO } from "@/features/settings/settings-api";
 
 export type DurationUnit = "s" | "m" | "h" | "d";
 export type DurationValue = { value: number; unit: DurationUnit };
@@ -160,7 +160,9 @@ export const settingsSchema = z.object({
     batchSize: positiveInteger.max(4_096),
     flushInterval: auditFlushDuration,
     commitDelayMS: positiveInteger.max(50),
-    retentionDays: z.number().int().min(0).max(365),
+    // Keep the original duration string: number/unit conversion can round
+    // fractional retention and silently shorten it on an unrelated save.
+    retentionPeriod: z.string().trim().min(1).max(64),
   })
     .refine((value) => value.batchSize <= value.bufferSize, { path: ["batchSize"] }),
   clientKeyDefaults: z.object({ rpmLimit: positiveInteger.max(100_000), maxConcurrent: positiveInteger.max(1_024) }),
@@ -185,67 +187,6 @@ export const settingsSchema = z.object({
     autoCleanIncludeDisabled: z.boolean(),
   }),
   // 实时路由守卫(质量扣留/截止预算)。边界与后端 validateRequestRetry 对齐。
-  requestRetry: z.object({
-    enabled: z.boolean(),
-    // 以下时长字段后端语义均为 0=默认:GET 可能回 "0s",必须允许 0,
-    // 否则表单加载即校验失败、保存被静默拦截(与 deniedTTL 同类)。
-    createdTimeout: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 1 && seconds <= 120);
-    }),
-    evidenceTimeout: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 1 && seconds <= 300);
-    }),
-    maxAttempts: z.number().int().min(1).max(3),
-    sameAccountRetry: z.boolean(),
-    onExhausted: z.enum(["fail_closed", "fail_open"]),
-    accountCooldown: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
-    }),
-    idleAccountCooldown: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 60 && seconds <= 168 * 3_600);
-    }),
-  }),
-  // 账号风险归因(RSC 检测/处置)。边界与后端 AccountRiskRSCConfig 校验对齐。
-  accountRisk: z.object({
-    enabled: z.boolean(),
-    // homepage 解析器已删除(恒读作 clean):字段仅为配置兼容保留,恒为 ssoProbe。
-    method: z.literal("ssoProbe"),
-    concurrency: z.number().int().min(1).max(8),
-    timeout: durationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds >= 5 && seconds <= 60;
-    }),
-    onDenied: z.enum(["flag", "disable", "markOnly"]),
-    patrolEnabled: z.boolean(),
-    patrolBucketDays: z.number().int().min(7).max(90),
-    patrolInterval: durationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds >= 60 && seconds <= 6 * 3600;
-    }),
-    patrolBatchSize: z.number().int().min(1).max(200),
-    buildProbeEnabled: z.boolean(),
-    probeProxyURL: z.string().max(256).refine((value) => {
-      const trimmed = value.trim();
-      if (!trimmed) return true; // 空 = 直连
-      try {
-        const parsed = new URL(trimmed);
-        return ["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol) && !!parsed.host;
-      } catch {
-        return false;
-      }
-    }, "仅支持 http/https/socks5 代理 URL,留空表示直连"),
-    deniedConfirmations: z.number().int().min(0).max(5),
-    // deniedTTL 0=默认(后端 24h):0 与 1h..720h 均合法,必须用非负
-    // schema,否则 GET 返回 "0s" 时表单加载即校验失败,保存被静默拦截。
-    deniedTTL: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 3600 && seconds <= 720 * 3600);
-    }),
-  }),
   // 出口换 IP 轮换调度。边界与后端 EgressRotationConfig 校验对齐。
   egressRotation: z.object({
     enabled: z.boolean(),
@@ -272,20 +213,13 @@ export const settingsSchema = z.object({
       const seconds = durationSeconds(value);
       return seconds === 0 || (seconds >= 1 && seconds <= 600);
     }),
-    canaryModelPublicId: z.string().trim().max(255),
-    canaryCreatedTimeout: nonNegativeDurationSchema.refine((value) => {
-      const seconds = durationSeconds(value);
-      return seconds === 0 || (seconds >= 1 && seconds <= 600);
-    }),
   }),
 });
 
 export type SettingsForm = z.infer<typeof settingsSchema>;
 
 export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
-  const requestRetry = config.requestRetry ?? defaultRequestRetryConfig();
   const egressRotation = config.egressRotation ?? defaultEgressRotationConfig();
-  const accountRisk = config.accountRisk ?? defaultAccountRiskConfig();
   return {
     server: config.server,
     providerBuild: { ...config.providerBuild, responseHeaderTimeout: parseDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: parseDuration(config.providerBuild.streamIdleTimeout) },
@@ -320,7 +254,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       batchSize: config.audit.batchSize,
       flushInterval: parseDuration(config.audit.flushInterval),
       commitDelayMS: config.audit.commitDelayMS,
-      retentionDays: config.audit.retentionDays ?? 7,
+      retentionPeriod: config.audit.retentionPeriod ?? `${(config.audit.retentionDays ?? 7) * 24}h`,
     },
     clientKeyDefaults: config.clientKeyDefaults,
     accounts: {
@@ -332,16 +266,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       autoCleanReauthMinAge: parseDuration(config.accounts.autoCleanReauthMinAge),
       autoCleanIncludeDisabled: config.accounts.autoCleanIncludeDisabled,
     },
-    requestRetry: {
-      enabled: requestRetry.enabled,
-      maxAttempts: requestRetry.maxAttempts,
-      onExhausted: requestRetry.onExhausted === "fail_open" ? "fail_open" : "fail_closed",
-      accountCooldown: parseDuration(requestRetry.accountCooldown),
-      sameAccountRetry: requestRetry.sameAccountRetry,
-      evidenceTimeout: parseDuration(requestRetry.evidenceTimeout),
-      createdTimeout: parseDuration(requestRetry.createdTimeout),
-      idleAccountCooldown: parseDuration(requestRetry.idleAccountCooldown),
-    },
+
     egressRotation: {
       enabled: egressRotation.enabled,
       maxAttemptsPerQuarantine: egressRotation.maxAttemptsPerQuarantine,
@@ -352,23 +277,6 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       settleDelay: parseDuration(egressRotation.settleDelay),
       probeTimeout: parseDuration(egressRotation.probeTimeout),
       probeInterval: parseDuration(egressRotation.probeInterval),
-      canaryModelPublicId: egressRotation.canaryModelPublicId,
-      canaryCreatedTimeout: parseDuration(egressRotation.canaryCreatedTimeout),
-    },
-    accountRisk: {
-      enabled: accountRisk.enabled,
-      method: "ssoProbe",
-      concurrency: accountRisk.concurrency,
-      timeout: parseDuration(accountRisk.timeout),
-      onDenied: accountRisk.onDenied === "disable" || accountRisk.onDenied === "markOnly" ? accountRisk.onDenied : "flag",
-      patrolEnabled: accountRisk.patrolEnabled,
-      patrolBucketDays: accountRisk.patrolBucketDays,
-      patrolInterval: parseDuration(accountRisk.patrolInterval || "15m"),
-      patrolBatchSize: accountRisk.patrolBatchSize || 50,
-      buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
-      probeProxyURL: accountRisk.probeProxyURL ?? "",
-      deniedConfirmations: accountRisk.deniedConfirmations ?? 2,
-      deniedTTL: parseDuration(accountRisk.deniedTTL || "24h"),
     },
   };
 }
@@ -407,7 +315,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       batchSize: config.audit.batchSize,
       flushInterval: formatDuration(config.audit.flushInterval),
       commitDelayMS: config.audit.commitDelayMS,
-      retentionDays: config.audit.retentionDays,
+      retentionPeriod: config.audit.retentionPeriod,
     },
     clientKeyDefaults: config.clientKeyDefaults,
     accounts: {
@@ -419,16 +327,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       autoCleanReauthMinAge: formatDuration(config.accounts.autoCleanReauthMinAge),
       autoCleanIncludeDisabled: config.accounts.autoCleanIncludeDisabled,
     },
-    requestRetry: {
-      enabled: config.requestRetry.enabled,
-      maxAttempts: config.requestRetry.maxAttempts,
-      onExhausted: config.requestRetry.onExhausted,
-      accountCooldown: formatNonNegativeDuration(config.requestRetry.accountCooldown),
-      sameAccountRetry: config.requestRetry.sameAccountRetry,
-      evidenceTimeout: formatNonNegativeDuration(config.requestRetry.evidenceTimeout),
-      createdTimeout: formatNonNegativeDuration(config.requestRetry.createdTimeout),
-      idleAccountCooldown: formatNonNegativeDuration(config.requestRetry.idleAccountCooldown),
-    },
+
     egressRotation: {
       enabled: config.egressRotation.enabled,
       maxAttemptsPerQuarantine: config.egressRotation.maxAttemptsPerQuarantine,
@@ -439,23 +338,6 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       settleDelay: formatNonNegativeDuration(config.egressRotation.settleDelay),
       probeTimeout: formatNonNegativeDuration(config.egressRotation.probeTimeout),
       probeInterval: formatNonNegativeDuration(config.egressRotation.probeInterval),
-      canaryModelPublicId: config.egressRotation.canaryModelPublicId.trim(),
-      canaryCreatedTimeout: formatNonNegativeDuration(config.egressRotation.canaryCreatedTimeout),
-    },
-    accountRisk: {
-      enabled: config.accountRisk.enabled,
-      method: config.accountRisk.method,
-      concurrency: config.accountRisk.concurrency,
-      timeout: formatDuration(config.accountRisk.timeout),
-      onDenied: config.accountRisk.onDenied,
-      patrolEnabled: config.accountRisk.patrolEnabled,
-      patrolBucketDays: config.accountRisk.patrolBucketDays,
-      patrolInterval: formatDuration(config.accountRisk.patrolInterval),
-      patrolBatchSize: config.accountRisk.patrolBatchSize,
-      buildProbeEnabled: config.accountRisk.buildProbeEnabled,
-      probeProxyURL: config.accountRisk.probeProxyURL,
-      deniedConfirmations: config.accountRisk.deniedConfirmations,
-      deniedTTL: formatNonNegativeDuration(config.accountRisk.deniedTTL),
     },
   };
 }
@@ -477,7 +359,7 @@ function parseByteSize(bytes: number): ByteSizeValue {
   return { value: bytes / 2 ** 20, unit: "MiB" };
 }
 
-function durationSeconds(value: DurationValue): number {
+export function durationSeconds(value: DurationValue): number {
   const factors: Record<DurationUnit, number> = { s: 1, m: 60, h: 3_600, d: 86_400 };
   return value.value * factors[value.unit];
 }
@@ -488,12 +370,12 @@ function formatDuration(value: DurationValue): string {
 }
 
 // 0 是有意义值(关闭/默认)的时长字段:0 必须序列化为 "0s" 而不是被抹掉。
-function formatNonNegativeDuration(value: DurationValue): string {
+export function formatNonNegativeDuration(value: DurationValue): string {
   if (durationSeconds(value) === 0) return "0s";
   return formatDuration(value);
 }
 
-function parseDuration(value: string): DurationValue {
+export function parseDuration(value: string): DurationValue {
   const simple = value.match(/^(\d+(?:\.\d+)?)(ms|s|m|h)$/);
   if (simple) {
     const amount = Number(simple[1]);

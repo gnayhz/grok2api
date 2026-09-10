@@ -14,11 +14,11 @@ export function Pagination({ page, pageSize, total, onPageChange, onPageSizeChan
   return (
     <div className={cn("flex w-full flex-wrap items-center justify-between gap-3", className)}>
       <div className="flex items-center gap-1">
-        <Button variant="ghost" size="icon" className="size-8" disabled={page <= 1} onClick={() => onPageChange(1)} aria-label={t("common.firstPage")}><ChevronsLeft /></Button>
-        <Button variant="ghost" size="icon" className="size-8" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={t("common.previousPage")}><ChevronLeft /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={page <= 1} onClick={() => onPageChange(1)} aria-label={t("common.firstPage")}><ChevronsLeft /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={t("common.previousPage")}><ChevronLeft /></Button>
         <span className="min-w-20 px-2 text-center text-xs text-muted-foreground">{t("common.pageOf", { page, pages })}</span>
-        <Button variant="ghost" size="icon" className="size-8" disabled={page >= pages} onClick={() => onPageChange(page + 1)} aria-label={t("common.nextPage")}><ChevronRight /></Button>
-        <Button variant="ghost" size="icon" className="size-8" disabled={page >= pages} onClick={() => onPageChange(pages)} aria-label={t("common.lastPage")}><ChevronsRight /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={page >= pages} onClick={() => onPageChange(page + 1)} aria-label={t("common.nextPage")}><ChevronRight /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={page >= pages} onClick={() => onPageChange(pages)} aria-label={t("common.lastPage")}><ChevronsRight /></Button>
       </div>
       {onPageSizeChange ? <PageSizeSelector pageSize={pageSize} options={pageSizeOptions} onChange={onPageSizeChange} /> : <span />}
     </div>
@@ -31,10 +31,10 @@ export function CursorPagination({ page, pageSize, hasMore, disabled = false, on
   return (
     <div className={cn("flex w-full flex-wrap items-center justify-between gap-3", className)}>
       <div className="flex items-center gap-1">
-        <Button variant="ghost" size="icon" className="size-8" disabled={disabled || page <= 1} onClick={onFirstPage} aria-label={t("common.firstPage")}><ChevronsLeft /></Button>
-        <Button variant="ghost" size="icon" className="size-8" disabled={disabled || page <= 1} onClick={onPreviousPage} aria-label={t("common.previousPage")}><ChevronLeft /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={disabled || page <= 1} onClick={onFirstPage} aria-label={t("common.firstPage")}><ChevronsLeft /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={disabled || page <= 1} onClick={onPreviousPage} aria-label={t("common.previousPage")}><ChevronLeft /></Button>
         <span className="min-w-20 px-2 text-center text-xs text-muted-foreground">{t("audits.cursorPage", { page })}</span>
-        <Button variant="ghost" size="icon" className="size-8" disabled={disabled || !hasMore} onClick={onNextPage} aria-label={t("common.nextPage")}><ChevronRight /></Button>
+        <Button type="button" variant="ghost" size="icon" className="size-8" disabled={disabled || !hasMore} onClick={onNextPage} aria-label={t("common.nextPage")}><ChevronRight /></Button>
       </div>
       <PageSizeSelector pageSize={pageSize} disabled={disabled} options={PAGE_SIZE_OPTIONS} onChange={onPageSizeChange} />
     </div>

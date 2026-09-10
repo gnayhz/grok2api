@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +17,48 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/gin-gonic/gin"
 )
+
+func TestAuditGenerationDetailContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "generation-handler.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repo := relational.NewAuditRepository(database)
+	value := auditdomain.Record{EventID: "evt_generation_http_0001", RequestID: "generation-contract", ClientKeyID: 1, ModelRouteID: 1, StatusCode: 200, InputTokens: 20, OutputTokens: 5, TotalTokens: 25, CostInUSDTicks: 55, CreatedAt: time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC), GenerationUsages: []auditdomain.GenerationUsage{
+		{PhysicalID: "generation-contract/1", Ordinal: 1, AccountID: 11, AccountName: "first", Model: "grok-4.5", Outcome: "completed", UsageSource: auditdomain.UsageSourceUpstream, InputTokens: 100, OutputTokens: 15, TotalTokens: 115, CachedInputTokens: 30, CacheCreationTokens: 2, ContextInputTokens: 120, ContextOutputTokens: 15, ReasoningTokens: 4, CostInUSDTicks: 12345, EstimatedCostInUSDTicks: 12000, PricingModel: "grok-4.5", PricingVersion: "2026-09-08"},
+		{PhysicalID: "generation-contract/2", Ordinal: 2, AccountID: 36028797018963969, AccountName: "selected", Model: "grok-4.5", Selected: true, Outcome: "completed", UsageSource: auditdomain.UsageSourceUpstream, InputTokens: 20, OutputTokens: 5, TotalTokens: 25, CostInUSDTicks: 55},
+	}}
+	if err := repo.Create(ctx, value); err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	NewHandler(auditapp.NewService(repo, newTestAuditJournal(t, 8), slog.Default(), 4, time.Second)).Register(router.Group("/api/admin/v1"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/v1/request-audits/1", nil))
+	if w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Data auditDetailResponse `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Data.GenerationUsages) != 2 || payload.Data.GenerationUsages[1].AccountID != "36028797018963969" || payload.Data.Audit.InputTokens != 20 {
+		t.Fatalf("detail changed counters or identity: %+v", payload.Data)
+	}
+	if path := os.Getenv("GROK_TEST_AUDIT_DETAIL_FIXTURE"); path != "" {
+		if err := os.WriteFile(path, w.Body.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestAuditDetailReturnsCompleteTextAndBinaryBodies(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -40,7 +83,7 @@ func TestAuditDetailReturnsCompleteTextAndBinaryBodies(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	service := auditapp.NewService(repository, slog.Default(), 8, 4, time.Second)
+	service := auditapp.NewService(repository, newTestAuditJournal(t, 8), slog.Default(), 4, time.Second)
 	router := gin.New()
 	NewHandler(service).Register(router.Group("/api/admin/v1"))
 

@@ -20,18 +20,18 @@ func TestQualityIdleCooldownDoesNotLoseConcurrentFailureCount(t *testing.T) {
 	id := accountModelIDs(rows)[0]
 
 	// 调用方持有的快照：failure_count=2（读发生在并发递增之前）。
-	if err := repo.UpdateHealth(ctx, id, account.ProviderBuild, 2, nil, "", false); err != nil {
+	if err := seedHealthFixture(repo, ctx, id, account.ProviderBuild, 2, nil, "", false); err != nil {
 		t.Fatal(err)
 	}
 	// 并发泛型失败先落地：计数 2 -> 3，附带 504 冷却。
 	genericUntil := time.Now().UTC().Add(5 * time.Minute)
-	if err := repo.UpdateHealth(ctx, id, account.ProviderBuild, 3, &genericUntil, "upstream status 504", false); err != nil {
+	if err := seedHealthFixture(repo, ctx, id, account.ProviderBuild, 3, &genericUntil, "upstream status 504", false); err != nil {
 		t.Fatal(err)
 	}
 
 	// 迟到的 idle 定向写（旧实现会以快照 2 走 UpdateHealth 回滚计数）。
 	idleUntil := time.Now().UTC().Add(2 * time.Minute)
-	if err := repo.UpdateQualityIdleCooldown(ctx, id, account.ProviderBuild, idleUntil); err != nil {
+	if _, err := repo.ApplyHealth(ctx, id, account.ProviderBuild, account.HealthEvent{Kind: account.HealthQualityIdle, RetryAfter: time.Until(idleUntil)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -45,7 +45,7 @@ func TestQualityIdleCooldownDoesNotLoseConcurrentFailureCount(t *testing.T) {
 	if after.LastError != account.LastErrorQualityIdle {
 		t.Fatalf("last_error = %q, want %q (idle marker owns the write)", after.LastError, account.LastErrorQualityIdle)
 	}
-	if after.CooldownUntil == nil || !after.CooldownUntil.Equal(idleUntil) {
+	if after.CooldownUntil == nil || after.CooldownUntil.Sub(idleUntil).Abs() > time.Second {
 		t.Fatalf("cooldown_until = %v, want the idle cooldown %v", after.CooldownUntil, idleUntil)
 	}
 }

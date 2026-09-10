@@ -27,7 +27,8 @@ func TestPaidQuotaCreatesPeriodProbeAndClearsAfterRecovery(t *testing.T) {
 	}
 
 	adapter.billing = accountdomain.Billing{MonthlyLimit: 100, Used: 0, BillingPeriodEnd: now.Add(31 * 24 * time.Hour).Format(time.RFC3339)}
-	recovered, err := service.ProbePaidQuota(context.Background(), credential)
+	credential, ref := claimPaidQuotaFixture(t, service, credential)
+	_, recovered, err := service.ProbePaidQuota(context.Background(), credential, ref)
 	if err != nil || !recovered {
 		t.Fatalf("recovered = %v, err = %v", recovered, err)
 	}
@@ -43,7 +44,8 @@ func TestPaidQuotaStillExhaustedBacksOffAfterDueProbe(t *testing.T) {
 	now := time.Now().UTC()
 	service, credential, adapter := newCredentialRefreshTestService(t, now)
 	adapter.billing = accountdomain.Billing{MonthlyLimit: 100, Used: 100, BillingPeriodEnd: now.Add(-time.Minute).Format(time.RFC3339)}
-	recovered, err := service.ProbePaidQuota(context.Background(), credential)
+	credential, ref := claimPaidQuotaFixture(t, service, credential)
+	_, recovered, err := service.ProbePaidQuota(context.Background(), credential, ref)
 	if err != nil || recovered {
 		t.Fatalf("recovered = %v, err = %v", recovered, err)
 	}
@@ -54,4 +56,31 @@ func TestPaidQuotaStillExhaustedBacksOffAfterDueProbe(t *testing.T) {
 	if recovery.NextProbeAt == nil || recovery.NextProbeAt.Before(time.Now().UTC().Add(14*time.Minute)) {
 		t.Fatalf("next probe should be backed off, recovery = %#v", recovery)
 	}
+}
+
+func claimPaidQuotaFixture(t *testing.T, s *Service, value accountdomain.Credential) (accountdomain.Credential, accountdomain.QuotaRecoveryRef) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := s.accounts.Get(ctx, value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := s.accounts.GetQuotaRecovery(ctx, value.ID)
+	if errors.Is(err, repository.ErrNotFound) {
+		billing := accountdomain.Billing{AccountID: value.ID, MonthlyLimit: 100, Used: 100, BillingPeriodEnd: time.Now().Add(-time.Minute).Format(time.RFC3339)}
+		result, applyErr := s.accounts.ApplyQuotaRecovery(ctx, current.QuotaRecoveryRef(), accountdomain.RecoveryEvent{Kind: accountdomain.RecoveryBillingObserved, Billing: &billing})
+		if applyErr != nil || !result.Applied {
+			t.Fatalf("seed: %+v %v", result, applyErr)
+		}
+		current.QuotaRecoveryRevision = result.Ref.Revision
+		recovery = *result.Recovery
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.accounts.ApplyQuotaRecovery(ctx, current.QuotaRecoveryRef(), accountdomain.RecoveryEvent{Kind: accountdomain.RecoveryProbeClaimed, OccurredAt: *recovery.NextProbeAt})
+	if err != nil || !result.Applied {
+		t.Fatalf("claim: %+v %v", result, err)
+	}
+	current.QuotaRecoveryRevision = result.Ref.Revision
+	return current, result.Ref
 }

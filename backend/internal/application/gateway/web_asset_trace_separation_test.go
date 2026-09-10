@@ -82,11 +82,14 @@ func TestWebAssetEgressDoesNotOverwriteInferenceTrace(t *testing.T) {
 	config.ScopeTargets = map[egressdomain.Scope]egressdomain.RoutingTarget{
 		egressdomain.ScopeWeb: {Mode: egressdomain.RoutingTargetPool, PoolID: pool.ID},
 	}
-	if _, err := repo.SaveEgressOperationsConfig(ctx, config); err != nil {
+	if _, err := repo.SaveEgressOperationsConfig(ctx, config, func(egressdomain.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	manager := infraegress.NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	traceCtx, trace := infraegress.WithTrace(ctx)
 
 	acquireAndDo := func(scope egressdomain.Scope, affinity string) uint64 {

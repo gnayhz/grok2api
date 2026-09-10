@@ -91,6 +91,7 @@ func newAdminForceFixture(t *testing.T, switchAfter int64, lock repository.Distr
 		EncryptedCloudflareCookie:   staleCookie, UserAgent: "ua-old",
 	})
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.SetClearanceLock(lock)
 	manager.UpdateClearanceConfig(cfg)
 	return manager, solves
@@ -129,9 +130,9 @@ func TestAdminForceRefreshWaitsForPeerNewGeneration(t *testing.T) {
 	if solves.Load() != 0 {
 		t.Fatalf("peer's newer generation must be reused without a local solve: %d solves", solves.Load())
 	}
-	manager.clearanceMu.Lock()
-	state, ok := manager.clearances[clearanceCacheKey(1, "http://10.0.0.1:8080", false)]
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	state, ok := manager.clearance.clearances[clearanceCacheKey(1, "http://10.0.0.1:8080", false)]
+	manager.clearance.clearanceMu.Unlock()
 	if !ok || !strings.Contains(state.cookies, "peer-fresh-generation") {
 		t.Fatalf("cached clearance must be the peer's fresh generation: ok=%v cookies=%q", ok, state.cookies)
 	}
@@ -165,9 +166,9 @@ func TestAdminForceRefreshWithLockReusesNewerInterimGeneration(t *testing.T) {
 	if solves.Load() != 0 {
 		t.Fatalf("newer interim generation must be reused without solving: solves=%d", solves.Load())
 	}
-	manager.clearanceMu.Lock()
-	state, ok := manager.clearances[clearanceCacheKey(1, "http://10.0.0.1:8080", false)]
-	manager.clearanceMu.Unlock()
+	manager.clearance.clearanceMu.Lock()
+	state, ok := manager.clearance.clearances[clearanceCacheKey(1, "http://10.0.0.1:8080", false)]
+	manager.clearance.clearanceMu.Unlock()
 	if !ok || !strings.Contains(state.cookies, "peer-fresh-generation") {
 		t.Fatalf("cached clearance must be the interim fresh generation: ok=%v cookies=%q", ok, state.cookies)
 	}

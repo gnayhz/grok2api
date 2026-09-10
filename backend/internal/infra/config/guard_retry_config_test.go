@@ -25,32 +25,34 @@ func TestDefaultRequestRetryBudgetDefaults(t *testing.T) {
 	if got := cfg.RequestRetry.CreatedTimeout.Value(); got != 5*time.Second {
 		t.Fatalf("CreatedTimeout default = %v, want 5s", got)
 	}
-	if !cfg.RequestRetry.SameAccountRetry {
-		t.Fatal("SameAccountRetry default must stay true (comment + example document it)")
-	}
 	if cfg.RequestRetry.OnExhausted != "fail_closed" {
 		t.Fatalf("OnExhausted default = %q, want fail_closed", cfg.RequestRetry.OnExhausted)
 	}
 	if len(cfg.RequestRetry.GuardedModels) != 0 {
-		t.Fatalf("GuardedModels default = %#v, want empty (all models gated)", cfg.RequestRetry.GuardedModels)
+		t.Fatalf("GuardedModels default = %#v, want empty (bootstrap domain defaults)", cfg.RequestRetry.GuardedModels)
 	}
 }
 
-// TestRequestRetryBudgetCap 锁定预算上限（蓝图 §3.2 安全属性）：上限 3
-// = 默认 2 + 一档旋转池同号重试余量；历史上限 6 会重建零延迟拦截前的
-// 90-120s 串行换号黑洞性时延。
+// The file and management surfaces share the domain budget, while request
+// execution separately enforces total attempts and admission deadlines.
 func TestRequestRetryBudgetCap(t *testing.T) {
 	base := defaultConfig()
 	base.Secrets.JWTSecret = strings.Repeat("k", 32)
 	base.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	base.RequestRetry.Enabled = true
-	base.RequestRetry.MaxAttempts = 3
-	if err := base.Validate(); err != nil {
-		t.Fatalf("maxAttempts=3 must validate: %v", err)
-	}
-	base.RequestRetry.MaxAttempts = 4
-	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "1 到 3") {
-		t.Fatalf("maxAttempts=4 must be rejected with the budget-cap error, got %v", err)
+	for _, enabled := range []bool{true, false} {
+		base.RequestRetry.Enabled = enabled
+		for _, value := range []int{0, 1, 4, 6, 100} {
+			base.RequestRetry.MaxAttempts = value
+			if err := base.Validate(); err != nil {
+				t.Fatalf("maxAttempts=%d enabled=%v: %v", value, enabled, err)
+			}
+		}
+		for _, value := range []int{-1, 101} {
+			base.RequestRetry.MaxAttempts = value
+			if err := base.Validate(); err == nil {
+				t.Fatalf("invalid budget %d enabled=%v accepted", value, enabled)
+			}
+		}
 	}
 }
 
@@ -58,12 +60,9 @@ func TestRequestRetryBudgetCap(t *testing.T) {
 func TestUnmarshalRequestRetryFields(t *testing.T) {
 	var section RequestRetryConfig
 	nl := string(rune(10))
-	yamlText := "enabled: true" + nl + "sameAccountRetry: false" + nl + "evidenceTimeout: 4s" + nl + "maxAttempts: 2" + nl + "createdTimeout: 8s" + nl + "onExhausted: fail_closed" + nl + "accountCooldown: 12h" + nl + "guardedModels: [\"grok-4.5\", \"grok-4.6\"]" + nl
+	yamlText := "enabled: true" + nl + nl + "evidenceTimeout: 4s" + nl + "maxAttempts: 2" + nl + "createdTimeout: 8s" + nl + "onExhausted: fail_closed" + nl + "accountCooldown: 12h" + nl + "guardedModels: [\"grok-4.5\", \"grok-4.6\"]" + nl
 	if err := yaml.NewDecoder(bytes.NewReader([]byte(yamlText))).Decode(&section); err != nil {
 		t.Fatal(err)
-	}
-	if section.SameAccountRetry {
-		t.Fatal("explicit sameAccountRetry:false must load as false")
 	}
 	if section.EvidenceTimeout.Value() != 4*time.Second {
 		t.Fatalf("evidenceTimeout = %s, want 4s", section.EvidenceTimeout.Value())
@@ -115,12 +114,12 @@ func TestValidateRequestRetryIdleAccountCooldown(t *testing.T) {
 	base := func(d time.Duration) RequestRetryConfig {
 		return RequestRetryConfig{Enabled: true, IdleAccountCooldown: Duration(d)}
 	}
-	for _, invalid := range []time.Duration{59 * time.Second, 169 * time.Hour} {
+	for _, invalid := range []time.Duration{-time.Nanosecond, 169 * time.Hour} {
 		if err := validateRequestRetry(base(invalid)); err == nil || !strings.Contains(err.Error(), "idleAccountCooldown") {
 			t.Fatalf("idle cooldown %v should be rejected, got %v", invalid, err)
 		}
 	}
-	for _, valid := range []time.Duration{0, time.Minute, 24 * time.Hour, 168 * time.Hour} {
+	for _, valid := range []time.Duration{0, time.Millisecond, 59 * time.Second, time.Minute, 24 * time.Hour, 168 * time.Hour} {
 		if err := validateRequestRetry(base(valid)); err != nil {
 			t.Fatalf("idle cooldown %v should be accepted, got %v", valid, err)
 		}

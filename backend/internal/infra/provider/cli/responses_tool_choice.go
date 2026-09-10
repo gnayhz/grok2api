@@ -4,20 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
 )
 
 func (c *responsesToolCompatibility) normalizeToolChoice(payload map[string]json.RawMessage, normalizedTools []any) error {
 	raw := payload["tool_choice"]
 	if isEmptyJSON(raw) {
-		return nil
-	}
-	if len(normalizedTools) == 0 {
-		delete(payload, "tool_choice")
-		c.changed = true
-		c.addWarning("tool_choice_without_tools_ignored")
-		if c.serverSearchEager {
-			c.addWarning("server_tool_search_choice_downgraded")
-		}
 		return nil
 	}
 	var choice any
@@ -26,28 +19,11 @@ func (c *responsesToolCompatibility) normalizeToolChoice(payload map[string]json
 	}
 	object, ok := choice.(map[string]any)
 	if !ok {
-		if value, isString := choice.(string); isString && (value == "auto" || value == "required") && c.webSearchDisabled && len(normalizedTools) == 0 {
-			payload["tool_choice"] = mustJSON("none")
-			c.changed = true
-			c.addWarning("web_search_tool_choice_disabled")
-		}
-		return nil
+		return c.normalizeNativeChoice(payload, choice, normalizedTools)
 	}
 	kind := stringField(object, "type")
-	if c.webSearchDisabled && normalizeHostedToolChoiceKind(kind) == "web_search" && !hasToolType(normalizedTools, "web_search") {
-		payload["tool_choice"] = mustJSON("none")
-		c.changed = true
-		c.addWarning("web_search_tool_choice_disabled")
-		return nil
-	}
 	if kind == "tool_search" {
 		if c.clientSearchTool == nil {
-			if c.serverSearchEager {
-				payload["tool_choice"] = mustJSON("auto")
-				c.changed = true
-				c.addWarning("server_tool_search_choice_downgraded")
-				return nil
-			}
 			return &responsesRequestError{Message: "tool_choice 引用了未声明的 tool_search", Param: "tool_choice", Code: "invalid_parameter"}
 		}
 		object = map[string]any{
@@ -86,19 +62,8 @@ func (c *responsesToolCompatibility) normalizeToolChoice(payload map[string]json
 		c.changed = true
 		return nil
 	}
-	if normalizedKind := normalizeHostedToolChoiceKind(kind); normalizedKind != "" {
-		matching := toolsOfType(normalizedTools, normalizedKind)
-		if len(matching) == 0 {
-			return &responsesRequestError{Message: "tool_choice 引用了未声明的 hosted tool", Param: "tool_choice", Code: "invalid_parameter"}
-		}
-		if len(matching) != len(normalizedTools) {
-			// 上游只支持 required，收窄本轮可见工具即可保持“指定该类工具”的语义。
-			payload["tools"] = mustJSON(matching)
-			c.addWarning("hosted_tool_choice_tools_narrowed")
-		}
-		payload["tool_choice"] = mustJSON("required")
-		c.changed = true
-		return nil
+	if xaitools.HostedKind(kind) != "" {
+		return c.normalizeNativeChoice(payload, object, normalizedTools)
 	}
 	if kind != "function" {
 		return &responsesRequestError{Message: fmt.Sprintf("Grok Build 不支持 tool_choice.type=%q", kind), Param: "tool_choice.type", Code: "unsupported_parameter"}
@@ -119,10 +84,10 @@ func (c *responsesToolCompatibility) normalizeToolChoice(payload map[string]json
 			c.changed = true
 			payload["tool_choice"] = mustJSON(object)
 		}
-		return nil
+		return c.normalizeNativeChoice(payload, object, normalizedTools)
 	}
 	if name == "" || namespace == "" {
-		return nil
+		return c.normalizeNativeChoice(payload, object, normalizedTools)
 	}
 	identity := responsesToolIdentity{Kind: responsesFunctionTool, Namespace: namespace, Name: name}
 	alias, exists := c.identityAliases[identity.key()]
@@ -136,13 +101,16 @@ func (c *responsesToolCompatibility) normalizeToolChoice(payload map[string]json
 	return nil
 }
 
-func toolsOfType(tools []any, kind string) []any {
-	matching := make([]any, 0)
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if ok && stringField(tool, "type") == kind {
-			matching = append(matching, rawTool)
-		}
+func (c *responsesToolCompatibility) normalizeNativeChoice(payload map[string]json.RawMessage, choice any, tools []any) error {
+	normalized, selected, err := xaitools.Choice(choice, tools)
+	if err != nil {
+		return toolConstraintError(err)
 	}
-	return matching
+	if len(selected) != len(tools) {
+		payload["tools"] = mustJSON(selected)
+		c.addWarning("hosted_tool_choice_tools_narrowed")
+	}
+	payload["tool_choice"] = mustJSON(normalized)
+	c.changed = true
+	return nil
 }

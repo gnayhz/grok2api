@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -22,7 +23,7 @@ var (
 	ErrInvalidFilter        = errors.New("出口代理筛选条件无效")
 	ErrInvalidSort          = errors.New("代理节点排序条件无效")
 	ErrNotFound             = errors.New("代理节点不存在")
-	ErrProbeStale           = errors.New("代理配置在探测期间已更新，请重新测试")
+	ErrProbeStale           = errors.New("代理配置或探测版本已更新，本次结果已过期，请重新测试")
 	ErrClearanceUnavailable = errors.New("Clearance 刷新不可用")
 )
 
@@ -57,33 +58,53 @@ type ListFilter struct {
 type ServiceRepository interface {
 	repository.EgressRepository
 	repository.EgressNodePageRepository
+	repository.EgressNodeWriter
 }
 
 type Service struct {
-	repository      ServiceRepository
-	operations      OperationsRepository
-	cipher          security.Cryptor
-	mu              sync.RWMutex
-	clearance       ClearanceManager
-	prober          NodeProber
-	operationsCache OperationsConfigInvalidator
-	poolCache       PoolCacheInvalidator
+	httpOwner               HTTPTransportOwner
+	backgroundOnce          sync.Once
+	backgroundWork          *backgroundWork
+	subscriptionMaintenance sync.Mutex
+	probeMaintenance        sync.Mutex
+	repository              ServiceRepository
+	operations              OperationsRepository
+	cipher                  security.Cryptor
+	mu                      sync.RWMutex
+	clearance               ClearanceManager
+	prober                  NodeProber
+	operationsCache         OperationsConfigInvalidator
+	poolCache               PoolCacheInvalidator
 
-	// Exit-IP quality guard state (quality.go / rotation.go).
+	// 死出口传输冷却/probe-dead 状态(probe_dead.go / quality.go)。
+	// 旧质量隔离/软冷却/跨账号证据状态已随旧质量链删除(切换手册第2步)。
 	qualityQuarantiner QualityQuarantiner
-	qualityGuard       QualityGuardConfig
 	qualityLogger      *slog.Logger
-	qualityProber      EgressQualityProber
-	qualityMu          sync.Mutex
-	qualityEvidence    map[uint64][]degradeObservation
-
 	// 死出口确认状态(probe_dead.go): 连续双族探活失败的观测计数。
 	probeDeadMu sync.Mutex
 	probeDead   map[uint64]probeDeadObservation
 
+	rotationLock   repository.DistributedLock
+	rotationRate   repository.RollingRateLimiter
 	rotationCfg    RotationConfig
 	rotation       *rotationScheduler
 	rotationLogger *slog.Logger
+}
+
+type HTTPTransportOwner interface {
+	ManageHTTPTransport(context.Context, *http.Transport) (http.RoundTripper, func(), error)
+}
+
+func (s *Service) SetHTTPTransportOwner(owner HTTPTransportOwner) {
+	s.mu.Lock()
+	s.httpOwner = owner
+	s.mu.Unlock()
+}
+
+func (s *Service) httpTransportOwner() HTTPTransportOwner {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.httpOwner
 }
 
 type UnhealthyCleanupPreview struct {
@@ -111,9 +132,7 @@ type BatchClearanceManager interface {
 }
 
 func NewService(storage ServiceRepository, cipher security.Cryptor) *Service {
-	// qualityEvidence 必须在构造时初始化:OnEgressDegraded 首次写入时 map 为
-	// nil 会 panic, 生产(app.go)与测试直构 Service 字面量的行为从此一致。
-	service := &Service{repository: storage, cipher: cipher, qualityEvidence: map[uint64][]degradeObservation{}}
+	service := &Service{repository: storage, cipher: cipher}
 	if operations, ok := storage.(OperationsRepository); ok {
 		service.operations = operations
 	}
@@ -208,10 +227,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.Pu
 	if err != nil {
 		return domain.PublicNode{}, err
 	}
-	if err := s.validateRoutingTargetNodeUpdate(ctx, value); err != nil {
-		return domain.PublicNode{}, err
+	updated, err := s.repository.UpdateEgressNodeConfiguration(ctx, value, s.validateFixedTargetNode)
+	if errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
+		return domain.PublicNode{}, fmt.Errorf("%w: 固定出口目标必须保持启用且已配置代理地址", ErrInvalidInput)
 	}
-	updated, err := s.repository.UpdateEgressNode(ctx, value)
+	if errors.Is(err, repository.ErrNotFound) {
+		return domain.PublicNode{}, ErrNotFound
+	}
 	if err == nil {
 		s.forgetClearance(updated.ID)
 	}
@@ -256,46 +278,6 @@ func (s *Service) RotationURL(ctx context.Context, id uint64) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(rotationURL), nil
-}
-
-// validateRoutingTargetNodeUpdate keeps a node serving as a fixed routing
-// target schedulable for that role after an edit. Disabling it or clearing
-// its proxy would otherwise silently degrade the routing decision to the
-// automatic schedule with no administrator-visible error.
-func (s *Service) validateRoutingTargetNodeUpdate(ctx context.Context, node domain.Node) error {
-	if s.operations == nil {
-		return nil
-	}
-	config, err := s.operations.GetEgressOperationsConfig(ctx)
-	if err != nil {
-		return err
-	}
-	references := func(target domain.RoutingTarget) bool {
-		return target.Mode.Normalized() == domain.RoutingTargetNode && target.NodeID == node.ID
-	}
-	if references(config.DefaultTarget) {
-		if err := s.validateFixedTargetNode(node); err != nil {
-			return fmt.Errorf("节点已是总出口的固定目标，无法应用当前修改: %w", err)
-		}
-		return nil
-	}
-	for scope, target := range config.ScopeTargets {
-		if references(target) {
-			if err := s.validateFixedTargetNode(node); err != nil {
-				return fmt.Errorf("节点已是 %s 作用域出口的固定目标，无法应用当前修改: %w", scope, err)
-			}
-			return nil
-		}
-	}
-	for class, target := range config.ClassTargets {
-		if references(target) {
-			if err := s.validateFixedTargetNode(node); err != nil {
-				return fmt.Errorf("节点已是 %s 流量类别出口的固定目标，无法应用当前修改: %w", class, err)
-			}
-			return nil
-		}
-	}
-	return nil
 }
 
 // validateFixedTargetNode reports whether the node can keep serving as a
@@ -346,12 +328,7 @@ func (s *Service) UpdateManyEnabled(ctx context.Context, nodeIDs []uint64, enabl
 			continue
 		}
 		node.Enabled = enabled
-		if !enabled {
-			if err := s.validateRoutingTargetNodeUpdate(ctx, node); err != nil {
-				return updated, err
-			}
-		}
-		if _, err := s.repository.UpdateEgressNode(ctx, node); err != nil {
+		if _, err := s.repository.UpdateEgressNodeConfiguration(ctx, node, s.validateFixedTargetNode); err != nil {
 			return updated, err
 		}
 		s.forgetClearance(id)
@@ -383,9 +360,7 @@ func (s *Service) DeleteMany(ctx context.Context, nodeIDs []uint64) (int, error)
 		if err != nil {
 			return 0, err
 		}
-		for _, id := range ids {
-			s.forgetClearance(id)
-		}
+		s.forgetClearances(ids)
 		s.invalidateOperationsConfig()
 		return deleted, nil
 	}
@@ -433,9 +408,7 @@ func (s *Service) DeleteUnhealthy(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		for _, id := range ids {
-			s.forgetClearance(id)
-		}
+		s.forgetClearances(ids)
 		if len(ids) > 0 {
 			s.invalidateOperationsConfig()
 		}
@@ -573,6 +546,12 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	if value.EncryptedRotationURL == "" {
 		value.RotationEnabled = false
 	}
+	// 互斥:外部代理池(出口由服务商自动更换)与换 IP Webhook(自建 WARP 出口
+	// 的强制切换)是两种节点类型,不得同时配置。历史缺陷:固定 IP 被误勾
+	// "代理池"曾靠运行时判定兜底,现改为保存时直接拒绝。
+	if value.ProxyPool && value.EncryptedRotationURL != "" {
+		return domain.Node{}, fmt.Errorf("%w: 代理池节点与换 IP Webhook 互斥——Webhook 仅用于自建 WARP 出口", ErrInvalidInput)
+	}
 	if configurationChanged {
 		value.Health = 1
 		value.FailureCount = 0
@@ -597,15 +576,16 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 
 func (s *Service) publicNode(value domain.Node, poolNames map[uint64]string) domain.PublicNode {
 	proxyDisplay, proxyFingerprint, accountTemplate := s.proxyMetadata(value.EncryptedProxyURL)
-	proxyPool := (value.ProxyPool && value.RotationEnabled) || accountTemplate
+	rotatingEndpoint := value.ProxyPool || accountTemplate
 	health, failureCount, cooldownUntil, lastError := value.Health, value.FailureCount, value.CooldownUntil, value.LastError
-	if proxyPool {
+	if rotatingEndpoint {
 		health, failureCount, cooldownUntil, lastError = 1, 0, nil, ""
 	}
 	return domain.PublicNode{
 		ID: value.ID, Name: value.Name, Enabled: value.Enabled,
 		ProxyConfigured: value.EncryptedProxyURL != "", ProxyDisplay: proxyDisplay, ProxyFingerprint: proxyFingerprint,
-		ProxyPool:          proxyPool,
+		ProxyPool:          value.ProxyPool,
+		RotatingEndpoint:   rotatingEndpoint,
 		RotationConfigured: value.EncryptedRotationURL != "", RotationEnabled: value.EncryptedRotationURL != "" && value.RotationEnabled, LastRotatedAt: value.LastRotatedAt,
 		RotationAttempts: value.RotationAttempts, LastRotationError: value.LastRotationError,
 		DegradeCount: value.DegradeCount, LastDegradedAt: value.LastDegradedAt,

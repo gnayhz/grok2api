@@ -1,5 +1,5 @@
 import { apiRequest } from "@/shared/api/client";
-import { createValidatedDecoder, hasShape, isArrayOf, isNumber, isObject, isOptional, isString } from "@/shared/api/decoder";
+import { createValidatedDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOptional, isString } from "@/shared/api/decoder";
 
 // 守卫特征统计:进程内累计,重启归零。与后端 GuardStatsSnapshot 对应。
 export type GuardSignalStat = {
@@ -19,17 +19,23 @@ export type GuardExemptStat = {
   lastSeen?: string;
 };
 
+// 守卫当前生效配置投影:热更即时反映。面板据此回答"守卫现在是否在场"。
+export type GuardEffective = {
+  enabled: boolean;
+  maxAttempts: number;
+  onExhausted: string;
+  guardedModels?: string[];
+  updatedAt: string;
+};
+
 export type GuardStats = {
   signals: GuardSignalStat[];
   exempts?: GuardExemptStat[];
   retrial: {
-    sameAccountRetryUsed: number;
-    sameAccountRetryRescued: number;
-    exhaustedDeliverLast: number;
     exhaustedRejected: number;
   };
-  canary: Record<string, number>;
   since?: string;
+  effective?: GuardEffective;
 };
 
 const statsValidator = hasShape({
@@ -47,13 +53,16 @@ const statsValidator = hasShape({
     lastSeen: isOptional(isString),
   }))),
   retrial: hasShape({
-    sameAccountRetryUsed: isNumber,
-    sameAccountRetryRescued: isNumber,
-    exhaustedDeliverLast: isNumber,
     exhaustedRejected: isNumber,
   }),
-  canary: isObject,
   since: isOptional(isString),
+  effective: isOptional(hasShape({
+    enabled: isBoolean,
+    maxAttempts: isNumber,
+    onExhausted: isString,
+    guardedModels: isOptional(isArrayOf(isString)),
+    updatedAt: isString,
+  })),
 });
 
 const decoder = createValidatedDecoder<GuardStats>("guard stats", statsValidator);

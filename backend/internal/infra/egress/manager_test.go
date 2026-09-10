@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptrace"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,58 +35,60 @@ func (responseHeaderTimeoutError) Temporary() bool { return true }
 
 func TestForgetClearancesEvictsSelectedNodesInOneBatch(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	first := &scriptedRequestClient{}
 	second := &scriptedRequestClient{}
 	untouched := &scriptedRequestClient{}
-	manager.clients[clientCacheKey{nodeID: 1, scope: domain.ScopeBuild}] = cachedClient{client: first}
-	manager.clients[clientCacheKey{nodeID: 2, scope: domain.ScopeWeb}] = cachedClient{client: second}
-	manager.clients[clientCacheKey{nodeID: 3, scope: domain.ScopeConsole}] = cachedClient{client: untouched}
-	manager.clearances["node:1"] = clearanceState{cookies: "one"}
-	manager.clearances["node:2:sticky"] = clearanceState{cookies: "two"}
-	manager.clearances["node:3"] = clearanceState{cookies: "three"}
-	manager.nodes[nodeSnapshotKey] = cachedNodeSnapshot{values: []domain.Node{{ID: 1}}}
-	manager.healthyNodes[1] = time.Now().UTC()
+	manager.transport.clients[clientCacheKey{nodeID: 1, scope: domain.ScopeBuild}] = cachedClient{client: first}
+	manager.transport.clients[clientCacheKey{nodeID: 2, scope: domain.ScopeWeb}] = cachedClient{client: second}
+	manager.transport.clients[clientCacheKey{nodeID: 3, scope: domain.ScopeConsole}] = cachedClient{client: untouched}
+	manager.clearance.clearances["node:1"] = clearanceState{cookies: "one"}
+	manager.clearance.clearances["node:2:sticky"] = clearanceState{cookies: "two"}
+	manager.clearance.clearances["node:3"] = clearanceState{cookies: "three"}
+	manager.routing.nodes[nodeSnapshotKey] = cachedNodeSnapshot{values: []domain.Node{{ID: 1}}}
+	manager.routing.healthyNodes[1] = time.Now().UTC()
 
 	manager.ForgetClearances([]uint64{1, 2, 1})
 
-	if _, exists := manager.clearances["node:1"]; exists {
+	if _, exists := manager.clearance.clearances["node:1"]; exists {
 		t.Fatal("node 1 clearance was retained")
 	}
-	if _, exists := manager.clearances["node:2:sticky"]; exists {
+	if _, exists := manager.clearance.clearances["node:2:sticky"]; exists {
 		t.Fatal("node 2 clearance was retained")
 	}
-	if _, exists := manager.clearances["node:3"]; !exists {
+	if _, exists := manager.clearance.clearances["node:3"]; !exists {
 		t.Fatal("unselected clearance was removed")
 	}
-	if len(manager.clients) != 1 || first.closedIdle != 1 || second.closedIdle != 1 || untouched.closedIdle != 0 {
-		t.Fatalf("clients=%d closed=(%d,%d,%d)", len(manager.clients), first.closedIdle, second.closedIdle, untouched.closedIdle)
+	if len(manager.transport.clients) != 1 || first.closedIdle != 1 || second.closedIdle != 1 || untouched.closedIdle != 0 {
+		t.Fatalf("clients=%d closed=(%d,%d,%d)", len(manager.transport.clients), first.closedIdle, second.closedIdle, untouched.closedIdle)
 	}
-	if len(manager.nodes) != 0 || len(manager.healthyNodes) != 0 {
-		t.Fatalf("node snapshots were not invalidated: nodes=%d healthy=%d", len(manager.nodes), len(manager.healthyNodes))
+	if len(manager.routing.nodes) != 0 || len(manager.routing.healthyNodes) != 0 {
+		t.Fatalf("node snapshots were not invalidated: nodes=%d healthy=%d", len(manager.routing.nodes), len(manager.routing.healthyNodes))
 	}
-	if manager.clientVersions[1] != 1 || manager.clientVersions[2] != 1 || manager.clientVersions[3] != 0 {
-		t.Fatalf("client versions = %#v", manager.clientVersions)
+	if manager.transport.clientVersions[1] != 1 || manager.transport.clientVersions[2] != 1 || manager.transport.clientVersions[3] != 0 {
+		t.Fatalf("client versions = %#v", manager.transport.clientVersions)
 	}
 }
 
 func TestBuildResponseHeaderTimeoutHotUpdateRebuildsCachedClients(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	var observed []time.Duration
 	var clients []*scriptedRequestClient
-	manager.newBuildClient = func(_ string, timeout time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(_ string, timeout time.Duration) (requestClient, error) {
 		client := &scriptedRequestClient{}
 		observed = append(observed, timeout)
 		clients = append(clients, client)
 		return client, nil
 	}
-	if _, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
+	if _, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
 		t.Fatal(err)
 	}
 	manager.UpdateBuildResponseHeaderTimeout(7 * time.Minute)
 	if len(clients) != 1 || clients[0].closedIdle != 1 {
 		t.Fatalf("old clients=%d closed=%d", len(clients), clients[0].closedIdle)
 	}
-	if _, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
+	if _, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(observed) != 2 || observed[0] != 5*time.Minute || observed[1] != 7*time.Minute {
@@ -96,24 +99,35 @@ func TestBuildResponseHeaderTimeoutHotUpdateRebuildsCachedClients(t *testing.T) 
 func TestResponseHeaderTimeoutDoesNotPenalizeEgress(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "fixed", Enabled: true, Health: 1}}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, responseHeaderTimeoutError{})
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 0 || repository.node.Health != 1 || repository.node.CooldownUntil != nil {
 		t.Fatalf("response-header timeout changed node health: updates=%d node=%#v", repository.updates, repository.node)
 	}
 	key := clientCacheKey{nodeID: 0, scope: domain.ScopeBuild, fingerprint: "direct"}
-	manager.clients[key] = cachedClient{client: &scriptedRequestClient{}}
+	manager.transport.clients[key] = cachedClient{client: &scriptedRequestClient{}}
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 0, 0, responseHeaderTimeoutError{})
-	if _, exists := manager.clients[key]; !exists {
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manager.transport.clients[key]; !exists {
 		t.Fatal("response-header timeout invalidated the direct Build client")
 	}
 }
 
 func TestResponseHeaderTimeoutRetainsWebEgressFeedback(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	key := clientCacheKey{nodeID: 0, scope: domain.ScopeWeb, fingerprint: "direct"}
-	manager.clients[key] = cachedClient{client: &scriptedRequestClient{}}
+	manager.transport.clients[key] = cachedClient{client: &scriptedRequestClient{}}
 	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 0, 0, responseHeaderTimeoutError{})
-	if _, exists := manager.clients[key]; exists {
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manager.transport.clients[key]; exists {
 		t.Fatal("Build-specific timeout policy suppressed Web egress feedback")
 	}
 }
@@ -132,7 +146,11 @@ func TestCanceledRequestDoesNotPenalizeEgress(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "fixed", Enabled: true, Health: 1}}
 			manager := NewManager(repository, nil)
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
 			manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, test.status, test.transportErr)
+			if err := manager.FlushFeedback(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 			if repository.updates != 0 || repository.node.Health != 1 || repository.node.FailureCount != 0 || repository.node.CooldownUntil != nil {
 				t.Fatalf("canceled request changed node health: updates=%d node=%#v", repository.updates, repository.node)
 			}
@@ -152,10 +170,14 @@ func TestCanceledRequestDoesNotInvalidateDirectClient(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			manager := NewManager(egressRepositoryTestStub{}, nil)
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
 			key := clientCacheKey{nodeID: 0, scope: domain.ScopeBuild, fingerprint: "direct"}
-			manager.clients[key] = cachedClient{client: &scriptedRequestClient{}}
+			manager.transport.clients[key] = cachedClient{client: &scriptedRequestClient{}}
 			manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 0, test.status, test.transportErr)
-			if _, exists := manager.clients[key]; !exists {
+			if err := manager.FlushFeedback(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := manager.transport.clients[key]; !exists {
 				t.Fatal("canceled request invalidated the direct Build client")
 			}
 		})
@@ -165,7 +187,11 @@ func TestCanceledRequestDoesNotInvalidateDirectClient(t *testing.T) {
 func TestConsoleAssetForbiddenDoesNotPenalizeProxy(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "console", Enabled: true, Health: 1}}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.FeedbackForScope(context.Background(), domain.ScopeConsoleAsset, 1, http.StatusForbidden, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 0 || repository.node.Health != 1 || repository.node.CooldownUntil != nil {
 		t.Fatalf("Console asset object rejection changed proxy health: updates=%d node=%#v", repository.updates, repository.node)
 	}
@@ -182,7 +208,8 @@ func TestProbeEgressNodeLogsSuccessWithoutProxyCredentials(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 42, Name: "web-us", EncryptedProxyURL: encryptedProxy}}
 	manager := NewManager(repository, cipher)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ip":"203.0.113.8"}`))}, nil
 		}}, nil
@@ -216,7 +243,8 @@ func TestProbeEgressNodeLogsSanitizedFailureStage(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 7, Name: "web-jp", EncryptedProxyURL: encryptedProxy}}
 	manager := NewManager(repository, cipher)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 			trace := httptrace.ContextClientTrace(request.Context())
 			trace.ConnectStart("tcp", "proxy.example:1080")
@@ -244,7 +272,8 @@ func TestProbeEgressNodeLogsSanitizedFailureStage(t *testing.T) {
 
 func TestProbeEgressNodeClassifiesTLSFailure(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 			trace := httptrace.ContextClientTrace(request.Context())
 			trace.ConnectStart("tcp", "proxy.example:1080")
@@ -271,7 +300,8 @@ func TestProbeEgressNodeClassifiesTLSFailure(t *testing.T) {
 
 func TestProbeEgressNodeClassifiesFirstByteFailure(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 			trace := httptrace.ContextClientTrace(request.Context())
 			trace.ConnectStart("tcp", "proxy.example:1080")
@@ -298,7 +328,8 @@ func TestProbeEgressNodeClassifiesFirstByteFailure(t *testing.T) {
 
 func TestProbeEgressNodeKeepsUntracedFailureAtExecuteRequest(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, _ *http.Request) (*http.Response, error) {
 			return nil, errors.New("request execution failed")
 		}}, nil
@@ -328,7 +359,8 @@ func TestProbeEgressNodeKeepsIPv4AndIPv6ResultsSeparate(t *testing.T) {
 	}
 	node := domain.Node{ID: 9, Name: "dual", EncryptedProxyURL: encryptedProxy}
 	manager := NewManager(&mutableEgressRepository{node: node}, cipher)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 			payload := `{"ip":"198.51.100.9"}`
 			if request.URL.Hostname() == "2606:4700:4700::1111" {
@@ -358,7 +390,8 @@ func TestProbeEgressNodeIsHealthyWhenOnlyIPv4Works(t *testing.T) {
 	}
 	node := domain.Node{ID: 10, Name: "v4-only", EncryptedProxyURL: encryptedProxy}
 	manager := NewManager(&mutableEgressRepository{node: node}, cipher)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 			if request.URL.Hostname() == "2606:4700:4700::1111" {
 				return nil, errors.New("network is unreachable")
@@ -393,8 +426,9 @@ func TestProbeEgressNodeUsesConfiguredCloudflareEndpoints(t *testing.T) {
 		config:                   config,
 	}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	var requested sync.Map
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 			requested.Store(request.URL.String(), true)
 			exitIP := "198.51.100.11"
@@ -440,9 +474,14 @@ func TestDecodeProbeIPSupportsJSONAndCloudflareTrace(t *testing.T) {
 }
 
 func TestDirectFallbackRebuildsClientAfterAntiBotRejection(t *testing.T) {
-	manager := &Manager{clients: map[clientCacheKey]cachedClient{{nodeID: 0, scope: domain.ScopeWeb, fingerprint: "web"}: {}}}
+	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.clients = map[clientCacheKey]cachedClient{{nodeID: 0, scope: domain.ScopeWeb, fingerprint: "web"}: {}}
 	manager.Feedback(context.Background(), 0, http.StatusForbidden, nil)
-	if len(manager.clients) != 0 {
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.transport.clients) != 0 {
 		t.Fatal("direct fallback client was not invalidated after anti-bot rejection")
 	}
 }
@@ -453,59 +492,62 @@ func TestClientCacheEvictsIdleEntriesAndEnforcesCapacity(t *testing.T) {
 	freshClient := &scriptedRequestClient{}
 	idleKey := clientCacheKey{nodeID: 1, scope: domain.ScopeWeb, fingerprint: "idle"}
 	freshKey := clientCacheKey{nodeID: 1, scope: domain.ScopeWeb, fingerprint: "fresh"}
-	manager := &Manager{clients: map[clientCacheKey]cachedClient{
+	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager.transport.clients = map[clientCacheKey]cachedClient{
 		idleKey:  {client: idleClient, lastUsed: now.Add(-clientCacheIdleTTL)},
 		freshKey: {client: freshClient, lastUsed: now},
-	}}
-	closeRequestClients(manager.cleanupClientCacheLocked(now))
-	if _, exists := manager.clients[idleKey]; exists || idleClient.closedIdle != 1 {
+	}
+	manager.transport.closeRequestClients(manager.transport.cleanupClientCacheLocked(now))
+	if _, exists := manager.transport.clients[idleKey]; exists || idleClient.closedIdle != 1 {
 		t.Fatalf("idle client exists=%v closed=%d", exists, idleClient.closedIdle)
 	}
-	if _, exists := manager.clients[freshKey]; !exists || freshClient.closedIdle != 0 {
+	if _, exists := manager.transport.clients[freshKey]; !exists || freshClient.closedIdle != 0 {
 		t.Fatalf("fresh client exists=%v closed=%d", exists, freshClient.closedIdle)
 	}
 
 	oldestClient := &scriptedRequestClient{}
 	oldestKey := clientCacheKey{nodeID: 2, scope: domain.ScopeBuild, fingerprint: "oldest"}
-	manager.clients = make(map[clientCacheKey]cachedClient, maxCachedClients)
-	manager.clients[oldestKey] = cachedClient{client: oldestClient, lastUsed: now.Add(-time.Hour)}
+	manager.transport.clients = make(map[clientCacheKey]cachedClient, maxCachedClients)
+	manager.transport.clients[oldestKey] = cachedClient{client: oldestClient, lastUsed: now.Add(-time.Hour)}
 	for index := 1; index < maxCachedClients; index++ {
 		key := clientCacheKey{nodeID: uint64(index + 2), scope: domain.ScopeBuild, fingerprint: "cached"}
-		manager.clients[key] = cachedClient{lastUsed: now}
+		manager.transport.clients[key] = cachedClient{lastUsed: now}
 	}
-	closeRequestClients(manager.ensureClientCacheCapacityLocked())
-	if len(manager.clients) != maxCachedClients-1 || oldestClient.closedIdle != 1 {
-		t.Fatalf("cache size=%d oldest closed=%d", len(manager.clients), oldestClient.closedIdle)
+	manager.transport.closeRequestClients(manager.transport.ensureClientCacheCapacityLocked())
+	if len(manager.transport.clients) != maxCachedClients-1 || oldestClient.closedIdle != 1 {
+		t.Fatalf("cache size=%d oldest closed=%d", len(manager.transport.clients), oldestClient.closedIdle)
 	}
 }
 
 func TestClientVersionTombstonesRemainBounded(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	manager.clientMu.Lock()
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.clientMu.Lock()
 	for nodeID := uint64(1); nodeID <= maxClientVersionEntries+256; nodeID++ {
-		manager.invalidateClientVersionLocked(nodeID)
+		manager.transport.invalidateClientVersionLocked(nodeID)
 	}
-	manager.clientMu.Unlock()
-	if len(manager.clientVersions) > maxClientVersionEntries {
-		t.Fatalf("client version tombstones = %d, limit = %d", len(manager.clientVersions), maxClientVersionEntries)
+	manager.transport.clientMu.Unlock()
+	if len(manager.transport.clientVersions) > maxClientVersionEntries {
+		t.Fatalf("client version tombstones = %d, limit = %d", len(manager.transport.clientVersions), maxClientVersionEntries)
 	}
-	if manager.clientGeneration == 0 {
+	if manager.transport.clientGeneration == 0 {
 		t.Fatal("bounded version reset did not advance the invalidation generation")
 	}
 }
 
 func TestClientCreationDoesNotHoldManagerLock(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	started := make(chan struct{})
 	release := make(chan struct{})
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		close(started)
 		<-release
 		return &scriptedRequestClient{}, nil
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, "")
+		_, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, "")
 		result <- err
 	}()
 	<-started
@@ -528,6 +570,7 @@ func TestClientCreationDoesNotHoldManagerLock(t *testing.T) {
 
 func TestSelectNodeUsesAtomicInflightCounters(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	nodes := []domain.Node{{ID: 1, Health: 1}, {ID: 2, Health: 1}}
 	manager.incrementInflight(1)
 	if selected := manager.selectNode(nodes, ""); selected.ID != 2 {
@@ -541,6 +584,7 @@ func TestSelectNodeUsesAtomicInflightCounters(t *testing.T) {
 
 func TestInflightCountersRemainBalancedConcurrently(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	const workers = 64
 	const iterations = 1000
 	var wait sync.WaitGroup
@@ -562,46 +606,47 @@ func TestInflightCountersRemainBalancedConcurrently(t *testing.T) {
 
 func TestClientCacheCoalescesLastUsedWrites(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	client := &scriptedRequestClient{}
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) { return client, nil }
-	if _, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) { return client, nil }
+	if _, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
 		t.Fatal(err)
 	}
 
 	base := time.Now().UTC()
 	var key clientCacheKey
-	manager.clientMu.Lock()
-	for candidate, value := range manager.clients {
+	manager.transport.clientMu.Lock()
+	for candidate, value := range manager.transport.clients {
 		key = candidate
 		value.lastUsed = base
-		manager.clients[candidate] = value
+		manager.transport.clients[candidate] = value
 	}
-	manager.lastClientCleanup = base
-	manager.clientMu.Unlock()
+	manager.transport.lastClientCleanup = base
+	manager.transport.clientMu.Unlock()
 
-	if _, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
+	if _, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
 		t.Fatal(err)
 	}
-	manager.clientMu.RLock()
-	untouched := manager.clients[key].lastUsed
-	manager.clientMu.RUnlock()
+	manager.transport.clientMu.RLock()
+	untouched := manager.transport.clients[key].lastUsed
+	manager.transport.clientMu.RUnlock()
 	if !untouched.Equal(base) {
 		t.Fatalf("fresh cache hit rewrote lastUsed: got %s want %s", untouched, base)
 	}
 
 	stale := base.Add(-clientCacheTouchInterval - time.Second)
-	manager.clientMu.Lock()
-	value := manager.clients[key]
+	manager.transport.clientMu.Lock()
+	value := manager.transport.clients[key]
 	value.lastUsed = stale
-	manager.clients[key] = value
-	manager.lastClientCleanup = time.Now().UTC()
-	manager.clientMu.Unlock()
-	if _, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
+	manager.transport.clients[key] = value
+	manager.transport.lastClientCleanup = time.Now().UTC()
+	manager.transport.clientMu.Unlock()
+	if _, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, ""); err != nil {
 		t.Fatal(err)
 	}
-	manager.clientMu.RLock()
-	refreshed := manager.clients[key].lastUsed
-	manager.clientMu.RUnlock()
+	manager.transport.clientMu.RLock()
+	refreshed := manager.transport.clients[key].lastUsed
+	manager.transport.clientMu.RUnlock()
 	if !refreshed.After(stale) {
 		t.Fatalf("stale cache hit did not refresh lastUsed: got %s, stale %s", refreshed, stale)
 	}
@@ -609,12 +654,13 @@ func TestClientCacheCoalescesLastUsedWrites(t *testing.T) {
 
 func TestClientCreationDiscardsInvalidatedResult(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	first := &scriptedRequestClient{}
 	second := &scriptedRequestClient{}
 	var calls atomic.Int32
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		if calls.Add(1) == 1 {
 			close(firstStarted)
 			<-releaseFirst
@@ -625,7 +671,7 @@ func TestClientCreationDiscardsInvalidatedResult(t *testing.T) {
 	result := make(chan cachedClient, 1)
 	errorsCh := make(chan error, 1)
 	go func() {
-		value, err := manager.clientFor(1, domain.ScopeBuild, "", "", "", false, "")
+		value, err := manager.transport.clientFor(1, domain.ScopeBuild, "", "", "", false, "")
 		if err != nil {
 			errorsCh <- err
 			return
@@ -649,28 +695,28 @@ func TestClientCreationDiscardsInvalidatedResult(t *testing.T) {
 
 func TestClearanceCacheEvictsIdleEntriesAndEnforcesCapacity(t *testing.T) {
 	now := time.Now().UTC()
-	manager := &Manager{clearances: map[string]clearanceState{
+	manager := &Manager{clearance: &clearanceRuntime{clearances: map[string]clearanceState{
 		"idle":  {cookies: "cf_clearance=idle", lastUsedAt: now.Add(-clearanceCacheMinIdleTTL)},
 		"fresh": {cookies: "cf_clearance=fresh", lastUsedAt: now},
-	}}
-	manager.cleanupClearanceCacheLocked(now, time.Minute)
-	if _, exists := manager.clearances["idle"]; exists {
+	}}}
+	manager.clearance.cleanupClearanceCacheLocked(now, time.Minute)
+	if _, exists := manager.clearance.clearances["idle"]; exists {
 		t.Fatal("idle Clearance entry was not evicted")
 	}
-	if _, exists := manager.clearances["fresh"]; !exists {
+	if _, exists := manager.clearance.clearances["fresh"]; !exists {
 		t.Fatal("fresh Clearance entry was evicted")
 	}
 
-	manager.clearances = make(map[string]clearanceState, maxCachedClearances)
-	manager.clearances["oldest"] = clearanceState{lastUsedAt: now.Add(-time.Hour)}
+	manager.clearance.clearances = make(map[string]clearanceState, maxCachedClearances)
+	manager.clearance.clearances["oldest"] = clearanceState{lastUsedAt: now.Add(-time.Hour)}
 	for index := 1; index < maxCachedClearances; index++ {
-		manager.clearances[fmt.Sprintf("cached-%d", index)] = clearanceState{lastUsedAt: now}
+		manager.clearance.clearances[fmt.Sprintf("cached-%d", index)] = clearanceState{lastUsedAt: now}
 	}
-	manager.ensureClearanceCacheCapacityLocked()
-	if len(manager.clearances) != maxCachedClearances-clearanceCacheEvictionBatch {
-		t.Fatalf("Clearance cache size = %d", len(manager.clearances))
+	manager.clearance.ensureClearanceCacheCapacityLocked()
+	if len(manager.clearance.clearances) != maxCachedClearances-clearanceCacheEvictionBatch {
+		t.Fatalf("Clearance cache size = %d", len(manager.clearance.clearances))
 	}
-	if _, exists := manager.clearances["oldest"]; exists {
+	if _, exists := manager.clearance.clearances["oldest"]; exists {
 		t.Fatal("oldest Clearance entry was not evicted")
 	}
 }
@@ -681,6 +727,7 @@ func TestDirectBuildAndWebClientsDoNotEvictEachOther(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	buildFirst, err := manager.Acquire(context.Background(), domain.ScopeBuild, "")
 	if err != nil {
 		t.Fatal(err)
@@ -700,17 +747,20 @@ func TestDirectBuildAndWebClientsDoNotEvictEachOther(t *testing.T) {
 	if buildFirst.client != buildSecond.client {
 		t.Fatal("Web direct traffic evicted the reusable Build connection pool")
 	}
-	if buildFirst.client == web.client || len(manager.clients) != 2 {
-		t.Fatalf("direct clients were not isolated: build=%T web=%T cached=%d", buildFirst.client, web.client, len(manager.clients))
+	if buildFirst.client == web.client || len(manager.transport.clients) != 2 {
+		t.Fatalf("direct clients were not isolated: build=%T web=%T cached=%d", buildFirst.client, web.client, len(manager.transport.clients))
 	}
 	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 0, http.StatusForbidden, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	buildAfterWebFailure, err := manager.Acquire(context.Background(), domain.ScopeBuild, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer buildAfterWebFailure.Release()
-	if buildAfterWebFailure.client != buildFirst.client || len(manager.clients) != 1 {
-		t.Fatalf("Web failure evicted Build direct client: reused=%v cached=%d", buildAfterWebFailure.client == buildFirst.client, len(manager.clients))
+	if buildAfterWebFailure.client != buildFirst.client || len(manager.transport.clients) != 1 {
+		t.Fatalf("Web failure evicted Build direct client: reused=%v cached=%d", buildAfterWebFailure.client == buildFirst.client, len(manager.transport.clients))
 	}
 }
 
@@ -748,6 +798,7 @@ func TestConfiguredCoolingAppNodesNeverFallBackToDirect(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 1, Name: "proxy", Enabled: true, CooldownUntil: &until,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
 		t.Fatal("cooling configured node unexpectedly fell back to direct")
 	}
@@ -768,6 +819,7 @@ func TestRoutingTargetDirectBypassesCoolingNodes(t *testing.T) {
 		}}},
 		config: config,
 	}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx, trace := WithTrace(context.Background())
 	lease, err := manager.Acquire(ctx, domain.ScopeWeb, "account")
 	if err != nil {
@@ -798,6 +850,7 @@ func TestRoutingTargetDirectAppliesWithoutAllowDirect(t *testing.T) {
 		}}},
 		config: config,
 	}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "account")
 	if err != nil || !configured || lease == nil {
 		t.Fatalf("direct routing lease=%#v configured=%v err=%v", lease, configured, err)
@@ -827,6 +880,7 @@ func TestPoolMembersParticipateInAutomaticSchedule(t *testing.T) {
 		{ID: 1, Name: "primary", Enabled: true, Health: 1, EncryptedProxyURL: primaryURL},
 		{ID: 2, Name: "pooled", Enabled: true, Health: 1, EncryptedProxyURL: poolURL, PoolIDs: []uint64{9}},
 	}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	seen := map[uint64]bool{}
 	for affinity := 0; affinity < 8; affinity++ {
 		lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, fmt.Sprintf("account-%d", affinity))
@@ -848,6 +902,7 @@ func TestDisabledConfiguredNodesAllowDirectFallback(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 1, Name: "disabled-proxy", Enabled: false, Health: 1,
 	}}}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil || configured || lease != nil {
 		t.Fatalf("disabled proxy fallback: lease=%#v configured=%v err=%v", lease, configured, err)
@@ -860,6 +915,7 @@ func TestAcquireIfConfiguredDoesNotChangeBuildDirectTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx, trace := WithTrace(context.Background())
 	lease, configured, err := manager.AcquireIfConfigured(ctx, domain.ScopeBuild, "")
 	if err != nil || configured || lease != nil {
@@ -883,6 +939,7 @@ func TestTraceRecordsConfiguredProxyWithoutCredentials(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 42, Name: "primary-proxy", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx, trace := WithTrace(context.Background())
 	lease, configured, err := manager.AcquireIfConfigured(ctx, domain.ScopeBuild, "")
 	if err != nil || !configured || lease == nil {
@@ -907,6 +964,7 @@ func TestConfiguredBuildNodeDoesNotOverrideProviderUserAgent(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 1, Name: "build", Enabled: true, Health: 1, UserAgent: "legacy-build-agent", EncryptedProxyURL: encryptedProxy,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil {
 		t.Fatal(err)
@@ -934,6 +992,7 @@ func TestConfiguredWebNodeKeepsChromeBrowserTransport(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 1, Name: "web", Enabled: true, Health: 1,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
 		t.Fatal(err)
@@ -965,6 +1024,7 @@ func TestAcquireCredentialRendersResinAccountAndOverridesNodeCookie(t *testing.T
 		ID: 1, Name: "resin", Enabled: true, Health: 1,
 		EncryptedProxyURL: proxyURL, EncryptedCloudflareCookie: nodeCookie,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	first, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
 		ID: 42, Provider: accountdomain.ProviderWeb, EncryptedCloudflareCookie: accountCookie,
 	})
@@ -994,8 +1054,8 @@ func TestAcquireCredentialRendersResinAccountAndOverridesNodeCookie(t *testing.T
 	if first.client == second.client {
 		t.Fatal("different Resin accounts unexpectedly shared one connection pool")
 	}
-	if len(manager.clients) != 2 {
-		t.Fatalf("cached Resin account pools = %d, want 2", len(manager.clients))
+	if len(manager.transport.clients) != 2 {
+		t.Fatalf("cached Resin account pools = %d, want 2", len(manager.transport.clients))
 	}
 }
 
@@ -1013,6 +1073,7 @@ func TestAcquireHonorsPinnedNode(t *testing.T) {
 		{ID: 1, Name: "auto-node", Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 		{ID: 2, Name: "pinned-node", Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 	}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.Acquire(WithPinnedNode(context.Background(), 2), domain.ScopeBuild, "canary")
 	if err != nil {
 		t.Fatal(err)
@@ -1046,6 +1107,7 @@ func TestConsoleAssetCredentialPrefersDedicatedNodeWithoutCookies(t *testing.T) 
 		}},
 		config: config,
 	}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeConsoleAsset, accountdomain.Credential{
 		ID: 42, Provider: accountdomain.ProviderConsole, EncryptedCloudflareCookie: "damaged-account-cookie",
 	})
@@ -1077,6 +1139,7 @@ func TestConsoleAssetClientDoesNotEvictPrimaryConsoleClient(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 2, Name: "console", Enabled: true, Health: 1, EncryptedProxyURL: proxyURL,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	credential := accountdomain.Credential{
 		ID: 42, Provider: accountdomain.ProviderConsole, EncryptedCloudflareCookie: cookie,
 	}
@@ -1098,8 +1161,8 @@ func TestConsoleAssetClientDoesNotEvictPrimaryConsoleClient(t *testing.T) {
 	if primary.client != primaryAgain.client {
 		t.Fatal("Console asset download evicted the primary Console connection pool")
 	}
-	if primary.client == asset.client || len(manager.clients) != 2 {
-		t.Fatalf("primary and anonymous asset clients were not isolated: cached=%d", len(manager.clients))
+	if primary.client == asset.client || len(manager.transport.clients) != 2 {
+		t.Fatalf("primary and anonymous asset clients were not isolated: cached=%d", len(manager.transport.clients))
 	}
 }
 
@@ -1126,6 +1189,7 @@ func TestRoutingTargetNodeServesConfiguredNode(t *testing.T) {
 		}},
 		config: config,
 	}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeBuild, accountdomain.Credential{
 		ID: 42, Provider: accountdomain.ProviderBuild,
 	})
@@ -1152,7 +1216,8 @@ func TestFlareSolverrModeIgnoresCredentialCookie(t *testing.T) {
 		ID: 1, Name: "web", Enabled: true, Health: 1,
 	}}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
 	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
@@ -1178,7 +1243,8 @@ func TestFlareSolverrModeRecoversFromDamagedStoredCookies(t *testing.T) {
 		EncryptedCloudflareCookie: "damaged-node-ciphertext",
 	}}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
 	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
@@ -1208,6 +1274,7 @@ func TestLinkedProvidersSharePersistedResinIdentity(t *testing.T) {
 		{ID: 1, Name: "web", Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 		{ID: 2, Name: "build", Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 	}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	const identity = "sso_persisted_identity"
 	web, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
 		ID: 11, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
@@ -1256,6 +1323,7 @@ func TestConsoleFallsBackToWebAndSharesSSOResinIdentity(t *testing.T) {
 		ID: 7, Name: "shared-web", Enabled: true, Health: 1,
 		EncryptedProxyURL: proxyURL,
 	}}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	web, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
 		ID: 11, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
 		EncryptedAccessToken: encryptedToken,
@@ -1288,12 +1356,16 @@ func TestBuildForbiddenDoesNotPoisonEgressNode(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "build", Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, _, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	lease.Release()
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, http.StatusForbidden, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 0 || repository.node.Health != 1 || repository.node.LastError != "" {
 		t.Fatalf("build 403 poisoned node: updates=%d node=%#v", repository.updates, repository.node)
 	}
@@ -1309,7 +1381,11 @@ func TestUpstreamServerErrorDoesNotPoisonFixedEgressNode(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "build", Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, http.StatusBadGateway, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 0 || repository.node.Health != 1 || repository.node.CooldownUntil != nil {
 		t.Fatalf("upstream 502 poisoned fixed node: updates=%d node=%#v", repository.updates, repository.node)
 	}
@@ -1322,6 +1398,7 @@ func TestHealthySuccessFeedbackSkipsRepositoryReadAndWrite(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "healthy", Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil || !configured || lease == nil {
 		t.Fatalf("lease = %#v, configured = %v, err = %v", lease, configured, err)
@@ -1329,6 +1406,10 @@ func TestHealthySuccessFeedbackSkipsRepositoryReadAndWrite(t *testing.T) {
 	lease.Release()
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, http.StatusOK, nil)
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.reads != 0 || repository.updates != 0 {
 		t.Fatalf("healthy success performed repository I/O: reads=%d updates=%d", repository.reads, repository.updates)
 	}
@@ -1341,6 +1422,7 @@ func TestRecoveringSuccessFeedbackPersistsHealthTransition(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "recovering", Enabled: true, Health: 0.8, FailureCount: 1, LastError: "transport error"}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil || !configured || lease == nil {
 		t.Fatalf("lease = %#v, configured = %v, err = %v", lease, configured, err)
@@ -1348,6 +1430,10 @@ func TestRecoveringSuccessFeedbackPersistsHealthTransition(t *testing.T) {
 	lease.Release()
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, http.StatusOK, nil)
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.reads != 1 || repository.updates != 1 {
 		t.Fatalf("recovery I/O: reads=%d updates=%d", repository.reads, repository.updates)
 	}
@@ -1359,15 +1445,20 @@ func TestRecoveringSuccessFeedbackPersistsHealthTransition(t *testing.T) {
 func TestExpiredHealthySnapshotRechecksRepositoryOnSuccess(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "healthy", Enabled: true, Health: 1}}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	if _, err := manager.listNodes(context.Background(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	manager.nodeMu.Lock()
-	manager.healthyNodes[1] = time.Now().UTC().Add(-time.Second)
-	manager.nodeMu.Unlock()
+	manager.routing.nodeMu.Lock()
+	manager.routing.healthyNodes[1] = time.Now().UTC().Add(-time.Second)
+	manager.routing.nodeMu.Unlock()
 	repository.node = domain.Node{ID: 1, Name: "recovering", Enabled: true, Health: 0.8, FailureCount: 1, LastError: "transport error"}
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, http.StatusOK, nil)
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.reads != 1 || repository.updates != 1 {
 		t.Fatalf("expired health state did not recheck repository: reads=%d updates=%d", repository.reads, repository.updates)
 	}
@@ -1376,6 +1467,7 @@ func TestExpiredHealthySnapshotRechecksRepositoryOnSuccess(t *testing.T) {
 func TestNodeSnapshotReplacementRemovesRetiredHealthState(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "first", Enabled: true, Health: 1}}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	now := time.Now().UTC()
 	if _, err := manager.listNodes(context.Background(), now); err != nil {
 		t.Fatal(err)
@@ -1384,11 +1476,11 @@ func TestNodeSnapshotReplacementRemovesRetiredHealthState(t *testing.T) {
 		t.Fatal("initial node was not cached as healthy")
 	}
 	repository.node = domain.Node{ID: 2, Name: "replacement", Enabled: true, Health: 1}
-	manager.nodeMu.Lock()
-	snapshot := manager.nodes[nodeSnapshotKey]
+	manager.routing.nodeMu.Lock()
+	snapshot := manager.routing.nodes[nodeSnapshotKey]
 	snapshot.expiresAt = now.Add(-time.Second)
-	manager.nodes[nodeSnapshotKey] = snapshot
-	manager.nodeMu.Unlock()
+	manager.routing.nodes[nodeSnapshotKey] = snapshot
+	manager.routing.nodeMu.Unlock()
 	if _, err := manager.listNodes(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
@@ -1407,6 +1499,7 @@ func TestConcurrentFailurePreventsStaleHealthySnapshotInstall(t *testing.T) {
 		listRelease: make(chan struct{}),
 	}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	loaded := make(chan []domain.Node, 1)
 	loadErrors := make(chan error, 1)
 	go func() {
@@ -1419,6 +1512,9 @@ func TestConcurrentFailurePreventsStaleHealthySnapshotInstall(t *testing.T) {
 	}()
 	<-repository.listStarted
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("proxy timeout"))
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	close(repository.listRelease)
 	select {
 	case err := <-loadErrors:
@@ -1449,6 +1545,7 @@ func TestForgetClearancePreventsStaleNodeSnapshotInstall(t *testing.T) {
 		listRelease: make(chan struct{}),
 	}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	loaded := make(chan []domain.Node, 1)
 	loadErrors := make(chan error, 1)
 	go func() {
@@ -1460,7 +1557,9 @@ func TestForgetClearancePreventsStaleNodeSnapshotInstall(t *testing.T) {
 		loaded <- values
 	}()
 	<-repository.listStarted
-	if _, err := repository.UpdateEgressNode(context.Background(), domain.Node{ID: 2, Name: "after", Enabled: true, Health: 1}); err != nil {
+	if _, err := repository.UpdateEgressNodeConfiguration(context.Background(), domain.Node{ID: 2, Name: "after", Enabled: true, Health: 1}, func(domain.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	manager.ForgetClearance(1)
@@ -1477,11 +1576,11 @@ func TestForgetClearancePreventsStaleNodeSnapshotInstall(t *testing.T) {
 		t.Fatal("node list did not complete")
 	}
 
-	manager.nodeMu.RLock()
-	snapshot := manager.nodes[nodeSnapshotKey]
-	_, staleHealthy := manager.healthyNodes[1]
-	_, currentHealthy := manager.healthyNodes[2]
-	manager.nodeMu.RUnlock()
+	manager.routing.nodeMu.RLock()
+	snapshot := manager.routing.nodes[nodeSnapshotKey]
+	_, staleHealthy := manager.routing.healthyNodes[1]
+	_, currentHealthy := manager.routing.healthyNodes[2]
+	manager.routing.nodeMu.RUnlock()
 	if len(snapshot.values) != 1 || snapshot.values[0].Name != "after" || staleHealthy || !currentHealthy {
 		t.Fatalf("runtime node state was not replaced cleanly: snapshot=%#v staleHealthy=%v currentHealthy=%v", snapshot, staleHealthy, currentHealthy)
 	}
@@ -1498,15 +1597,19 @@ func TestProxyPoolTransportFailureDoesNotCreateGlobalCooldown(t *testing.T) {
 		Health: 0.2, FailureCount: 3, CooldownUntil: &cooldown, LastError: "old failure",
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil || !configured || lease == nil {
 		t.Fatalf("pool lease blocked by stale cooldown: configured=%v lease=%#v err=%v", configured, lease, err)
 	}
-	if !lease.freshTunnel {
+	if !lease.ConnectionPolicy().Fresh {
 		t.Fatal("rotating pool lease must request a fresh Build tunnel")
 	}
 	lease.Release()
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 0 || repository.node.FailureCount != 3 || repository.node.CooldownUntil == nil {
 		t.Fatalf("pool transport failure changed global state: updates=%d node=%#v", repository.updates, repository.node)
 	}
@@ -1522,32 +1625,45 @@ func TestFixedProxyTransportFailureStillCreatesCooldown(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "fixed", Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 1 || repository.node.FailureCount != 1 || repository.node.CooldownUntil == nil || repository.node.LastError != "transport error" {
 		t.Fatalf("fixed transport failure did not create cooldown: updates=%d node=%#v", repository.updates, repository.node)
 	}
 }
 
-func TestFalsePoolFlagTransportFailureCreatesCooldown(t *testing.T) {
+// TestExternalPoolTransportFailureSkipsCooldown 外部代理池节点(ProxyPool
+// 标志)的单次传输失败不落冷却:每次请求出口 IP 由服务商更换,一次连接
+// 拒绝只是单个坏 IP,不代表端点坏(与 probe_dead 应用层的 ProxyPool 跳过
+// 口径一致——曾要求 ProxyPool && RotationEnabled 才算池,导致无 Webhook
+// 的真代理池被按固定出口落冷却)。固定/WARP 出口的传输失败才进探测-冷却链。
+func TestExternalPoolTransportFailureSkipsCooldown(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
 	repository := &mutableEgressRepository{node: domain.Node{
-		ID: 1, Name: "false-pool", Enabled: true, ProxyPool: true, Health: 1,
+		ID: 1, Name: "external-pool", Enabled: true, ProxyPool: true, Health: 1,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 	if err != nil || !configured || lease == nil {
 		t.Fatalf("acquire: configured=%v lease=%#v err=%v", configured, lease, err)
 	}
-	if lease.freshTunnel || lease.proxyPool {
-		t.Fatalf("pool flag without rotation must not look like a rotating pool: freshTunnel=%v proxyPool=%v", lease.freshTunnel, lease.proxyPool)
+	if !lease.ConnectionPolicy().Fresh || !lease.proxyPool {
+		t.Fatalf("external pool must look like a rotating pool: freshTunnel=%v proxyPool=%v", lease.ConnectionPolicy().Fresh, lease.proxyPool)
 	}
 	lease.Release()
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
-	if repository.updates != 1 || repository.node.FailureCount != 1 || repository.node.CooldownUntil == nil {
-		t.Fatalf("false-pool transport failure did not create cooldown: updates=%d node=%#v", repository.updates, repository.node)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repository.node.CooldownUntil != nil {
+		t.Fatalf("external pool transport failure must not create a cooldown: node=%#v", repository.node)
 	}
 }
 
@@ -1558,6 +1674,7 @@ func TestFixedProxyTransportFailureCoalescesRunningProbe(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "fixed", Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	called := make(chan uint64, 1)
 	release := make(chan struct{})
 	manager.SetFailureProber(func(_ context.Context, id uint64) (domain.ProbeResult, error) {
@@ -1567,6 +1684,10 @@ func TestFixedProxyTransportFailureCoalescesRunningProbe(t *testing.T) {
 	})
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case id := <-called:
 		if id != 1 {
@@ -1577,6 +1698,10 @@ func TestFixedProxyTransportFailureCoalescesRunningProbe(t *testing.T) {
 	}
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection reset"))
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-called:
 		t.Fatal("concurrent transport failures scheduled duplicate probes")
@@ -1603,6 +1728,7 @@ func TestBoundFixedProxyWaitsForHealthyFailureProbe(t *testing.T) {
 		ID: 1, Name: "fixed", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	probeStarted := make(chan struct{})
 	probeRelease := make(chan struct{})
 	manager.SetFailureProber(func(_ context.Context, _ uint64) (domain.ProbeResult, error) {
@@ -1612,6 +1738,9 @@ func TestBoundFixedProxyWaitsForHealthyFailureProbe(t *testing.T) {
 		return domain.ProbeResult{Status: domain.ProbeStatusHealthy}, nil
 	})
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("unexpected EOF"))
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-probeStarted:
 	case <-time.After(time.Second):
@@ -1661,6 +1790,7 @@ func TestBoundFixedProxyKeepsCooldownAfterUnhealthyFailureProbe(t *testing.T) {
 		ID: 1, Name: "fixed", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	probeStarted := make(chan struct{})
 	probeRelease := make(chan struct{})
 	manager.SetFailureProber(func(_ context.Context, _ uint64) (domain.ProbeResult, error) {
@@ -1669,6 +1799,9 @@ func TestBoundFixedProxyKeepsCooldownAfterUnhealthyFailureProbe(t *testing.T) {
 		return domain.ProbeResult{Status: domain.ProbeStatusUnhealthy}, nil
 	})
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-probeStarted:
 	case <-time.After(time.Second):
@@ -1712,6 +1845,7 @@ func TestBoundFixedProxyProbeWaitHonorsRequestCancellation(t *testing.T) {
 		ID: 1, Name: "fixed", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	probeStarted := make(chan struct{})
 	probeRelease := make(chan struct{})
 	manager.SetFailureProber(func(_ context.Context, _ uint64) (domain.ProbeResult, error) {
@@ -1720,6 +1854,9 @@ func TestBoundFixedProxyProbeWaitHonorsRequestCancellation(t *testing.T) {
 		return domain.ProbeResult{Status: domain.ProbeStatusUnhealthy}, nil
 	})
 	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("connection refused"))
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-probeStarted:
 	case <-time.After(time.Second):
@@ -1764,13 +1901,14 @@ func TestAccountTemplateIsAnEffectiveProxyPool(t *testing.T) {
 		EncryptedProxyURL: encryptedProxy, CooldownUntil: &cooldown,
 	}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, configured, err := manager.AcquireIfConfigured(WithAccountIdentity(context.Background(), "account-1"), domain.ScopeBuild, "")
 	if err != nil || !configured || lease == nil {
 		t.Fatalf("account-template lease blocked by stale cooldown: configured=%v lease=%#v err=%v", configured, lease, err)
 	}
 	defer lease.Release()
-	if !lease.sticky || !lease.proxyPool || lease.freshTunnel {
-		t.Fatalf("account-template lease flags: sticky=%v proxyPool=%v freshTunnel=%v", lease.sticky, lease.proxyPool, lease.freshTunnel)
+	if !lease.sticky || !lease.proxyPool || lease.ConnectionPolicy().Fresh {
+		t.Fatalf("account-template lease flags: sticky=%v proxyPool=%v freshTunnel=%v", lease.sticky, lease.proxyPool, lease.ConnectionPolicy().Fresh)
 	}
 }
 
@@ -1781,12 +1919,16 @@ func TestWebForbiddenStillRebuildsBrowserSession(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
 		t.Fatal(err)
 	}
 	lease.Release()
 	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 1 || repository.node.Health >= 1 || repository.node.LastError != "anti-bot rejection" {
 		t.Fatalf("web 403 feedback = updates=%d node=%#v", repository.updates, repository.node)
 	}
@@ -1810,7 +1952,8 @@ func TestOnDemandClearanceRefreshesOnlyAfterRejection(t *testing.T) {
 	}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "on_demand", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
 	first, err := manager.Acquire(context.Background(), domain.ScopeConsole, "account")
@@ -1845,7 +1988,8 @@ func TestOnDemandClearanceSkipsBackgroundRefresh(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "console", Enabled: true, Health: 1}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "on_demand", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Nanosecond})
 
 	if err := manager.RefreshDueClearances(context.Background(), false); err != nil {
@@ -1863,7 +2007,8 @@ func TestOnDemandClearanceKeepsLastSuccessfulDirectSolutionPastRefreshInterval(t
 	}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{
 		Mode: "on_demand", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com",
 		Timeout: time.Second, RefreshInterval: time.Nanosecond,
@@ -1922,11 +2067,13 @@ func TestOnDemandClearanceReusesPeerRefreshAfterDistributedLock(t *testing.T) {
 	}}
 	solver := &clearanceSolverStub{}
 	firstManager := NewManager(repository, cipher)
-	firstManager.solver = solver
+	t.Cleanup(func() { _ = firstManager.Close(context.Background()) })
+	firstManager.clearance.solver = solver
 	firstManager.SetClearanceLock(alwaysAcquiredDistributedLock{})
 	firstManager.UpdateClearanceConfig(config)
 	secondManager := NewManager(repository, cipher)
-	secondManager.solver = solver
+	t.Cleanup(func() { _ = secondManager.Close(context.Background()) })
+	secondManager.clearance.solver = solver
 	secondManager.SetClearanceLock(alwaysAcquiredDistributedLock{})
 	secondManager.UpdateClearanceConfig(config)
 
@@ -1966,7 +2113,8 @@ func TestFlareSolverrRefreshesRejectedNodeBeforeNextLease(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
 	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
@@ -1978,6 +2126,9 @@ func TestFlareSolverrRefreshesRejectedNodeBeforeNextLease(t *testing.T) {
 	}
 	first.Release()
 	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	second, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
 		t.Fatal(err)
@@ -1999,7 +2150,8 @@ func TestFlareSolverrSupportsDirectWebEgress(t *testing.T) {
 	}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
@@ -2018,7 +2170,8 @@ func TestFlareSolverrPrewarmsDirectWebEgressWhenNoNodesExist(t *testing.T) {
 	}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 	if err := manager.RefreshDueClearances(context.Background(), true); err != nil {
 		t.Fatal(err)
@@ -2044,12 +2197,16 @@ func TestStickyProxyForbiddenDoesNotCooldownSharedNode(t *testing.T) {
 	}
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "resin", Enabled: true, Health: 1, EncryptedProxyURL: proxy}}
 	manager := NewManager(repository, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 42, Provider: accountdomain.ProviderWeb})
 	if err != nil {
 		t.Fatal(err)
 	}
 	lease.Release()
 	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if repository.updates != 0 || repository.node.Health != 1 || repository.node.LastError != "" {
 		t.Fatalf("sticky proxy 403 changed shared node: updates=%d node=%#v", repository.updates, repository.node)
 	}
@@ -2069,7 +2226,8 @@ func TestFlareSolverrIsolatesResinClearancePerAccount(t *testing.T) {
 	}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
 	first, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 42, Provider: accountdomain.ProviderWeb})
@@ -2104,7 +2262,8 @@ func TestClearanceRefreshFailureUsesLastKnownGoodUntilRejected(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Nanosecond})
 
 	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
@@ -2133,7 +2292,8 @@ func TestClearanceFallbackSurvivesSolverAddressChangeOnly(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	base := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver-a", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
 	manager.UpdateClearanceConfig(base)
 	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
@@ -2163,7 +2323,8 @@ func TestNodeEditForgetsRuntimeStateButKeepsBoundFallback(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
@@ -2204,7 +2365,8 @@ func TestClearanceFallbackRejectsDifferentBinding(t *testing.T) {
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1, EncryptedProxyURL: proxyA}}
 	solver := &clearanceSolverStub{}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	config := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
 	manager.UpdateClearanceConfig(config)
 	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
@@ -2242,7 +2404,8 @@ func TestClearanceBackgroundRefreshSkipsResinTemplate(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
 		ID: 1, Name: "resin", Enabled: true, Health: 1, EncryptedProxyURL: proxy,
 	}}}, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 	if err := manager.RefreshDueClearances(context.Background(), true); err != nil {
 		t.Fatal(err)
@@ -2261,7 +2424,8 @@ func TestPersistedClearancePreventsDuplicateInstanceRefresh(t *testing.T) {
 	solver := &clearanceSolverStub{}
 	config := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
 	firstManager := NewManager(repository, cipher)
-	firstManager.solver = solver
+	t.Cleanup(func() { _ = firstManager.Close(context.Background()) })
+	firstManager.clearance.solver = solver
 	firstManager.UpdateClearanceConfig(config)
 	first, err := firstManager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
@@ -2270,7 +2434,8 @@ func TestPersistedClearancePreventsDuplicateInstanceRefresh(t *testing.T) {
 	first.Release()
 
 	secondManager := NewManager(repository, cipher)
-	secondManager.solver = solver
+	t.Cleanup(func() { _ = secondManager.Close(context.Background()) })
+	secondManager.clearance.solver = solver
 	secondManager.UpdateClearanceConfig(config)
 	second, err := secondManager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
@@ -2291,7 +2456,8 @@ func TestNoChallengeClearanceDoesNotBlockOrRefreshRepeatedly(t *testing.T) {
 	solver := &clearanceSolverStub{noCookies: true}
 	config := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
 	firstManager := NewManager(repository, cipher)
-	firstManager.solver = solver
+	t.Cleanup(func() { _ = firstManager.Close(context.Background()) })
+	firstManager.clearance.solver = solver
 	firstManager.UpdateClearanceConfig(config)
 	for range 2 {
 		lease, acquireErr := firstManager.Acquire(context.Background(), domain.ScopeWeb, "account")
@@ -2305,7 +2471,8 @@ func TestNoChallengeClearanceDoesNotBlockOrRefreshRepeatedly(t *testing.T) {
 	}
 
 	secondManager := NewManager(repository, cipher)
-	secondManager.solver = solver
+	t.Cleanup(func() { _ = secondManager.Close(context.Background()) })
+	secondManager.clearance.solver = solver
 	secondManager.UpdateClearanceConfig(config)
 	lease, err := secondManager.Acquire(context.Background(), domain.ScopeWeb, "account")
 	if err != nil {
@@ -2325,7 +2492,8 @@ func TestRejectedNoChallengeClearanceForcesRefreshWithDistributedLock(t *testing
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1}}
 	solver := &clearanceSolverStub{noCookies: true}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.SetClearanceLock(alwaysAcquiredDistributedLock{})
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
@@ -2358,7 +2526,8 @@ func TestBackgroundRefreshDoesNotReuseRejectedNoChallengeClearance(t *testing.T)
 	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy}}
 	solver := &clearanceSolverStub{noCookies: true}
 	manager := NewManager(repository, cipher)
-	manager.solver = solver
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.clearance.solver = solver
 	manager.SetClearanceLock(alwaysAcquiredDistributedLock{})
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
 
@@ -2397,6 +2566,7 @@ func TestWebAssetCredentialFallsBackToWebWithSameResinIdentity(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
 		{ID: 2, Name: "web", Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 	}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	credential := accountdomain.Credential{
 		ID: 42, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
 		EncryptedAccessToken: encryptedToken, EncryptedCloudflareCookie: accountCookie,
@@ -2429,6 +2599,7 @@ func TestWebAssetCredentialFallsBackToWebWithSameResinIdentity(t *testing.T) {
 func TestEgressNodeSnapshotAvoidsRepeatedRepositoryReads(t *testing.T) {
 	repository := &countingEgressRepository{egressRepositoryTestStub: egressRepositoryTestStub{nodes: []domain.Node{{ID: 1, Enabled: true}}}}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	now := time.Now().UTC()
 	for range 2 {
 		values, err := manager.listNodes(context.Background(), now)
@@ -2444,6 +2615,7 @@ func TestEgressNodeSnapshotAvoidsRepeatedRepositoryReads(t *testing.T) {
 func TestOperationsConfigSnapshotAvoidsRepeatedRepositoryReads(t *testing.T) {
 	repository := &countingFallbackRepository{config: domain.DefaultOperationsConfig()}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	for range 2 {
 		lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
 		if err != nil || configured || lease != nil {
@@ -2458,6 +2630,7 @@ func TestOperationsConfigSnapshotAvoidsRepeatedRepositoryReads(t *testing.T) {
 func TestOperationsConfigSnapshotCanBeInvalidated(t *testing.T) {
 	repository := &countingFallbackRepository{config: domain.DefaultOperationsConfig()}
 	manager := NewManager(repository, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	first, _, err := manager.loadOperationsConfig(context.Background(), time.Now().UTC())
 	if err != nil || first.DefaultTarget.Mode != domain.RoutingTargetAuto {
 		t.Fatalf("first config=%#v err=%v", first, err)
@@ -2499,10 +2672,73 @@ func (r fallbackEgressRepository) GetEgressOperationsConfig(context.Context) (do
 	return r.config, nil
 }
 
+// TestKnownNodeExitAddrsFromNodeSnapshot 锚定差分排除集的数据面:按族
+// 出口地址索引返回每节点的 v4/v6 已知地址(探活维护,可能过期),两族
+// 都未知的节点略去——调用方按族判等,必须能区分"该族未知"与"该族相同"。
+func TestKnownNodeExitAddrsFromNodeSnapshot(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&egressRepositoryTestStub{nodes: []domain.Node{
+		{ID: 108, IPv4Probe: domain.ProbeFamilyResult{ExitIP: "198.51.100.10"}, IPv6Probe: domain.ProbeFamilyResult{ExitIP: "2001:db8::108"}},
+		{ID: 109, IPv4Probe: domain.ProbeFamilyResult{ExitIP: "198.51.100.10"}, IPv6Probe: domain.ProbeFamilyResult{ExitIP: "2001:db8::109"}},
+		{ID: 52, IPv4Probe: domain.ProbeFamilyResult{ExitIP: "203.0.113.7"}},
+		{ID: 110},
+	}}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	addrs, err := manager.KnownNodeExitAddrs(context.Background())
+	if err != nil {
+		t.Fatalf("已知出口地址索引: %v", err)
+	}
+	want := map[uint64]domain.ExitAddresses{
+		108: {IPv4: "198.51.100.10", IPv6: "2001:db8::108"},
+		109: {IPv4: "198.51.100.10", IPv6: "2001:db8::109"},
+		52:  {IPv4: "203.0.113.7"},
+	}
+	if !reflect.DeepEqual(addrs, want) {
+		t.Fatalf("索引必须按族返回已知地址且略去两族皆未知节点: got %v want %v", addrs, want)
+	}
+}
+
+// TestProbeNodeExitAddrsReturnsBothFamilies 活体出口解析必须按族返回:
+// WARP 类出口 v4 是共享 CGNAT,身份在 v6——塌缩成单串会让差分把
+// v6 不同的出口误判成同路。
+func TestProbeNodeExitAddrsReturnsBothFamilies(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedProxy, err := cipher.Encrypt("http://proxy.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := domain.Node{ID: 11, Name: "warp", EncryptedProxyURL: encryptedProxy}
+	manager := NewManager(&mutableEgressRepository{node: node}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
+		return &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
+			payload := `{"ip":"198.51.100.11"}`
+			if request.URL.Hostname() == "2606:4700:4700::1111" {
+				payload = `{"ip":"2001:db8::11"}`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(payload))}, nil
+		}}, nil
+	}
+
+	addrs, err := manager.ProbeNodeExitAddrs(context.Background(), node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addrs.IPv4 != "198.51.100.11" || addrs.IPv6 != "2001:db8::11" {
+		t.Fatalf("按族出口解析: got %+v", addrs)
+	}
+}
+
 func managerHasClientForNode(manager *Manager, nodeID uint64) bool {
-	manager.clientMu.Lock()
-	defer manager.clientMu.Unlock()
-	for key := range manager.clients {
+	manager.transport.clientMu.Lock()
+	defer manager.transport.clientMu.Unlock()
+	for key := range manager.transport.clients {
 		if key.nodeID == nodeID {
 			return true
 		}
@@ -2578,7 +2814,7 @@ func (r *mutableEgressRepository) CreateEgressNode(_ context.Context, value doma
 	return value, nil
 }
 
-func (r *mutableEgressRepository) UpdateEgressNode(_ context.Context, value domain.Node) (domain.Node, error) {
+func (r *mutableEgressRepository) UpdateEgressNodeConfiguration(_ context.Context, value domain.Node, validate domain.FixedTargetValidator) (domain.Node, error) {
 	r.node = value
 	r.updates++
 	return value, nil
@@ -2607,7 +2843,7 @@ func (r *synchronizedEgressRepository) GetEgressNode(_ context.Context, id uint6
 	return r.node, nil
 }
 
-func (r *synchronizedEgressRepository) UpdateEgressNode(_ context.Context, value domain.Node) (domain.Node, error) {
+func (r *synchronizedEgressRepository) UpdateEgressNodeConfiguration(_ context.Context, value domain.Node, validate domain.FixedTargetValidator) (domain.Node, error) {
 	r.mu.Lock()
 	r.node = value
 	r.mu.Unlock()
@@ -2643,7 +2879,7 @@ func (r *blockingEgressRepository) GetEgressNode(_ context.Context, id uint64) (
 	return r.node, nil
 }
 
-func (r *blockingEgressRepository) UpdateEgressNode(_ context.Context, value domain.Node) (domain.Node, error) {
+func (r *blockingEgressRepository) UpdateEgressNodeConfiguration(_ context.Context, value domain.Node, validate domain.FixedTargetValidator) (domain.Node, error) {
 	r.mu.Lock()
 	r.node = value
 	r.mu.Unlock()
@@ -2674,7 +2910,8 @@ func BenchmarkManagerAcquireCachedBuild(b *testing.B) {
 	}
 	node := domain.Node{ID: 1, Name: "build", Enabled: true, Health: 1}
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{node}}, cipher)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	b.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		}}, nil
@@ -2684,9 +2921,9 @@ func BenchmarkManagerAcquireCachedBuild(b *testing.B) {
 		b.Fatal(err)
 	}
 	lease.Release()
-	manager.nodeMu.Lock()
-	manager.nodes[nodeSnapshotKey] = cachedNodeSnapshot{values: []domain.Node{node}, expiresAt: time.Now().Add(time.Hour)}
-	manager.nodeMu.Unlock()
+	manager.routing.nodeMu.Lock()
+	manager.routing.nodes[nodeSnapshotKey] = cachedNodeSnapshot{values: []domain.Node{node}, expiresAt: time.Now().Add(time.Hour)}
+	manager.routing.nodeMu.Unlock()
 
 	b.ReportAllocs()
 	b.RunParallel(func(worker *testing.PB) {
@@ -2703,7 +2940,7 @@ func BenchmarkManagerAcquireCachedBuild(b *testing.B) {
 func (egressRepositoryTestStub) CreateEgressNode(context.Context, domain.Node) (domain.Node, error) {
 	return domain.Node{}, errors.New("unsupported")
 }
-func (egressRepositoryTestStub) UpdateEgressNode(context.Context, domain.Node) (domain.Node, error) {
+func (egressRepositoryTestStub) UpdateEgressNodeConfiguration(context.Context, domain.Node, domain.FixedTargetValidator) (domain.Node, error) {
 	return domain.Node{}, errors.New("unsupported")
 }
 func (egressRepositoryTestStub) DeleteEgressNode(context.Context, uint64) error {
@@ -2716,6 +2953,7 @@ func TestAccountIsolatedConnectionsSeparatesDirectClientsByAccount(t *testing.T)
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateAccountIsolatedConnections(true)
 
 	firstCtx := WithAccountIdentity(context.Background(), "grok_web_1")
@@ -2758,6 +2996,7 @@ func TestAccountIsolatedConnectionsDisabledKeepsSharedDirectPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateAccountIsolatedConnections(false)
 
 	first, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
@@ -2785,13 +3024,14 @@ func TestAccountIsolatedBuildEnvironmentDirectUsesDedicatedFactoryAndPools(t *te
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateAccountIsolatedConnections(true)
 	var regularCalls, environmentCalls int
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		regularCalls++
 		return &scriptedRequestClient{}, nil
 	}
-	manager.newBuildEnvClient = func(time.Duration) (requestClient, error) {
+	manager.transport.newBuildEnvClient = func(time.Duration) (requestClient, error) {
 		environmentCalls++
 		return &scriptedRequestClient{}, nil
 	}
@@ -2823,8 +3063,9 @@ func TestAccountIsolatedBuildEnvironmentDirectUsesDedicatedFactoryAndPools(t *te
 
 func TestBuildEnvironmentDirectKeepsFallbackWhenIsolationDisabled(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	factoryCalls := 0
-	manager.newBuildEnvClient = func(time.Duration) (requestClient, error) {
+	manager.transport.newBuildEnvClient = func(time.Duration) (requestClient, error) {
 		factoryCalls++
 		return &scriptedRequestClient{}, nil
 	}
@@ -2842,9 +3083,10 @@ func TestBuildEnvironmentDirectKeepsFallbackWhenIsolationDisabled(t *testing.T) 
 
 func TestCreateAndCacheClientRejectsStaleIsolationMode(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateAccountIsolatedConnections(true)
 	factoryCalls := 0
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		factoryCalls++
 		return &scriptedRequestClient{}, nil
 	}
@@ -2852,12 +3094,14 @@ func TestCreateAndCacheClientRejectsStaleIsolationMode(t *testing.T) {
 	// An empty identity represents a cache key derived before isolation was
 	// enabled. It must not be accepted after the mode transition, even when it
 	// reaches creation after the transition's generation bump.
-	_, err := manager.createAndCacheClient(
-		clientCacheKey{nodeID: 0, scope: domain.ScopeBuild, fingerprint: "stale-shared"},
-		0, domain.ScopeBuild, "", "", false, settingsdomain.DefaultBuildResponseHeaderTimeout, clientOptions{},
-	)
-	if !errors.Is(err, errClientCacheInvalidated) {
-		t.Fatalf("stale isolation mode error = %v", err)
+	for _, session := range []string{"", "session"} {
+		_, err := manager.transport.createAndCacheClient(
+			clientCacheKey{nodeID: 0, scope: domain.ScopeBuild, fingerprint: "stale-shared", sessionKey: session},
+			0, domain.ScopeBuild, "", "", false, settingsdomain.DefaultBuildResponseHeaderTimeout, clientOptions{sessionKey: session},
+		)
+		if !errors.Is(err, errClientCacheInvalidated) {
+			t.Fatalf("stale isolation mode session=%q error = %v", session, err)
+		}
 	}
 	if factoryCalls != 0 {
 		t.Fatalf("stale cache key created %d clients", factoryCalls)
@@ -2866,19 +3110,20 @@ func TestCreateAndCacheClientRejectsStaleIsolationMode(t *testing.T) {
 
 func TestAccountIsolationIdentitySurvivesEnableBoundary(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	created := 0
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		created++
 		return &scriptedRequestClient{}, nil
 	}
 	firstIdentity := isolationAccountIdentity(WithAccountIdentity(context.Background(), "account-1"), domain.ScopeBuild, "1")
 	secondIdentity := isolationAccountIdentity(WithAccountIdentity(context.Background(), "account-2"), domain.ScopeBuild, "2")
 	manager.UpdateAccountIsolatedConnections(true)
-	first, err := manager.clientFor(0, domain.ScopeBuild, "", "", "", false, firstIdentity)
+	first, err := manager.transport.clientFor(0, domain.ScopeBuild, "", "", "", false, firstIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.clientFor(0, domain.ScopeBuild, "", "", "", false, secondIdentity)
+	second, err := manager.transport.clientFor(0, domain.ScopeBuild, "", "", "", false, secondIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2889,15 +3134,16 @@ func TestAccountIsolationIdentitySurvivesEnableBoundary(t *testing.T) {
 
 func TestAccountIsolationHotUpdateEvictsOldPools(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateAccountIsolatedConnections(true)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{}, nil
 	}
-	first, err := manager.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-1")
+	first, err := manager.transport.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-2")
+	second, err := manager.transport.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2905,18 +3151,18 @@ func TestAccountIsolationHotUpdateEvictsOldPools(t *testing.T) {
 	if first.client.(*scriptedRequestClient).closedIdle != 1 || second.client.(*scriptedRequestClient).closedIdle != 1 {
 		t.Fatal("hot update did not close both isolated idle pools")
 	}
-	manager.clientMu.RLock()
-	remaining := len(manager.clients)
-	manager.clientMu.RUnlock()
+	manager.transport.clientMu.RLock()
+	remaining := len(manager.transport.clients)
+	manager.transport.clientMu.RUnlock()
 	if remaining != 0 {
 		t.Fatalf("stale isolated pools remain after hot update: %d", remaining)
 	}
 
-	sharedFirst, err := manager.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-1")
+	sharedFirst, err := manager.transport.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sharedSecond, err := manager.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-2")
+	sharedSecond, err := manager.transport.clientFor(0, domain.ScopeBuild, "", "", "", false, "account-2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2932,17 +3178,22 @@ func TestForbiddenFeedbackInvalidatesStickyClearance(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
 		{ID: 1, Name: "web-node", Enabled: true, Health: 1},
 	}}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr"})
 
 	nodeKey := clearanceCacheKey(1, "http://proxy.example:8080", false)
 	stickyKey := clearanceCacheKey(1, "http://proxy.example:8080?account=web_acct", true)
-	manager.clearances[nodeKey] = clearanceState{cookies: "node-cookie"}
-	manager.clearances[stickyKey] = clearanceState{cookies: "sticky-cookie"}
+	manager.clearance.clearances[nodeKey] = clearanceState{cookies: "node-cookie"}
+	manager.clearance.clearances[stickyKey] = clearanceState{cookies: "sticky-cookie"}
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 1, http.StatusForbidden, nil)
 
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, key := range []string{nodeKey, stickyKey} {
-		state, ok := manager.clearances[key]
+		state, ok := manager.clearance.clearances[key]
 		if !ok {
 			t.Fatalf("clearance entry %q evicted; want marked invalid, not removed", key)
 		}
@@ -2968,6 +3219,7 @@ func TestIsProxyPoolNodeMatchesDomainRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	for _, tc := range []struct {
 		name string
 		node domain.Node

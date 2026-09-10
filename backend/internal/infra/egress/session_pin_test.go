@@ -66,6 +66,7 @@ func TestSessionNodePinStabilizesAcrossAvailabilityChanges(t *testing.T) {
 	repo := &sessionPinRepo{}
 	repo.setNodes(sessionTestNodes(1, 2, 3)...)
 	manager := NewManager(repo, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	acquire := func() uint64 {
 		t.Helper()
 		lease, _, err := manager.AcquireIfConfigured(WithBuildSession(context.Background(), "sess-stable"), domain.ScopeBuild, "acct-1")
@@ -114,6 +115,7 @@ func TestSessionNodePinHonorsNodeExclusions(t *testing.T) {
 	repo := &sessionPinRepo{}
 	repo.setNodes(sessionTestNodes(1, 2)...)
 	manager := NewManager(repo, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	sessionCtx := WithBuildSession(context.Background(), "sess-exclude")
 
 	lease, _, err := manager.AcquireIfConfigured(sessionCtx, domain.ScopeBuild, "acct-1")
@@ -135,64 +137,73 @@ func TestSessionNodePinHonorsNodeExclusions(t *testing.T) {
 	}
 }
 
-func TestSessionClientSeparatePoolPerSessionAndAccountIndependence(t *testing.T) {
+func TestSessionClientReuseRespectsAccountIsolation(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	first, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	first, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatalf("会话客户端创建失败: %v", err)
 	}
-	// 同一会话换账号:必须复用同一连接池(缓存跟连接走,不跟账号走)。
-	afterSwitch, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
+	// Reuse across accounts is allowed while isolation is disabled.
+	afterSwitch, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatalf("换号后获取失败: %v", err)
 	}
 	if first.client != afterSwitch.client {
 		t.Fatalf("同会话换账号拿到了不同连接池,会话缓存会被无辜切断")
 	}
-	// 隔离开关翻转不得让会话客户端走失效重试循环。
+	// Enabling isolation retires the shared session pool.
 	manager.UpdateAccountIsolatedConnections(true)
-	afterToggle, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
+	afterToggle, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatalf("隔离开启后获取失败: %v", err)
 	}
-	if first.client != afterToggle.client {
-		t.Fatalf("隔离开关翻转切断了会话连接池")
+	if first.client == afterToggle.client {
+		t.Fatal("开启隔离后仍使用原共享会话连接池")
+	}
+	isolatedOther, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isolatedOther.client == afterToggle.client {
+		t.Fatal("隔离模式下两个账号共享会话连接池")
 	}
 	// 不同会话必须拿到不同连接池。
-	other, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-2"})
+	other, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-2"})
 	if err != nil {
 		t.Fatalf("第二会话客户端创建失败: %v", err)
 	}
-	if first.client == other.client {
+	if afterToggle.client == other.client {
 		t.Fatalf("两个会话共享了连接池,单连接钉扎失效")
 	}
 	sessions := 0
-	manager.clientMu.Lock()
-	for key := range manager.clients {
+	manager.transport.clientMu.Lock()
+	for key := range manager.transport.clients {
 		if key.sessionKey == "sess-1" {
 			sessions++
 		}
 	}
-	manager.clientMu.Unlock()
-	if sessions != 1 {
-		t.Fatalf("sess-1 应只对应一个缓存条目,实际 %d", sessions)
+	manager.transport.clientMu.Unlock()
+	if sessions != 2 {
+		t.Fatalf("隔离模式下 sess-1 应分别对应两个账号条目,实际 %d", sessions)
 	}
 }
 
 func TestSessionClientEvictionExemptions(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	if _, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{}); err != nil {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if _, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{}); err != nil {
 		t.Fatalf("共享池创建失败: %v", err)
 	}
 	// 会话客户端的出现不得逐出同节点共享池。
-	if _, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-keep"}); err != nil {
+	if _, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-keep"}); err != nil {
 		t.Fatalf("会话客户端创建失败: %v", err)
 	}
 	if !managerHasClientForKey(manager, clientCacheKey{nodeID: 7, scope: domain.ScopeBuild, fingerprint: sharedFingerprint(t, manager, 7)}) {
 		t.Fatalf("会话客户端出现后共享池被逐出")
 	}
 	// 共享池的节点切换清理不得回收会话客户端。
-	if _, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{}); err != nil {
 		t.Fatalf("第二共享池创建失败: %v", err)
 	}
 	if !managerHasClientForSession(manager, "sess-keep") {
@@ -203,9 +214,9 @@ func TestSessionClientEvictionExemptions(t *testing.T) {
 // sharedFingerprint 找回共享池条目的指纹,避免测试重复实现键派生。
 func sharedFingerprint(t *testing.T, manager *Manager, nodeID uint64) string {
 	t.Helper()
-	manager.clientMu.Lock()
-	defer manager.clientMu.Unlock()
-	for key := range manager.clients {
+	manager.transport.clientMu.Lock()
+	defer manager.transport.clientMu.Unlock()
+	for key := range manager.transport.clients {
 		if key.nodeID == nodeID && key.sessionKey == "" && key.accountIdentity == "" {
 			return key.fingerprint
 		}
@@ -215,16 +226,16 @@ func sharedFingerprint(t *testing.T, manager *Manager, nodeID uint64) string {
 }
 
 func managerHasClientForKey(manager *Manager, key clientCacheKey) bool {
-	manager.clientMu.Lock()
-	defer manager.clientMu.Unlock()
-	_, ok := manager.clients[key]
+	manager.transport.clientMu.Lock()
+	defer manager.transport.clientMu.Unlock()
+	_, ok := manager.transport.clients[key]
 	return ok
 }
 
 func managerHasClientForSession(manager *Manager, sessionKey string) bool {
-	manager.clientMu.Lock()
-	defer manager.clientMu.Unlock()
-	for key := range manager.clients {
+	manager.transport.clientMu.Lock()
+	defer manager.transport.clientMu.Unlock()
+	for key := range manager.transport.clients {
 		if key.sessionKey == sessionKey {
 			return true
 		}
@@ -242,24 +253,25 @@ func (noopRequestClient) CloseIdleConnections() {}
 
 func TestSessionClientCapacityBudgetSeparation(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{}, nil)
-	shared, err := manager.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	shared, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{})
 	if err != nil {
 		t.Fatalf("共享池创建失败: %v", err)
 	}
 	sharedFp := sharedFingerprint(t, manager, 7)
 
 	base := time.Now().UTC().Add(-time.Hour)
-	manager.clientMu.Lock()
+	manager.transport.clientMu.Lock()
 	for i := 0; i < maxSessionCachedClients; i++ {
-		manager.clients[clientCacheKey{
+		manager.transport.clients[clientCacheKey{
 			nodeID:      uint64(100 + i%8),
 			scope:       domain.ScopeBuild,
 			fingerprint: fmt.Sprintf("session-fp-%d", i),
 			sessionKey:  fmt.Sprintf("sess-%d", i),
 		}] = cachedClient{client: noopRequestClient{}, lastUsed: base.Add(time.Duration(i) * time.Second)}
 	}
-	stale := manager.ensureClientCacheCapacityLocked()
-	manager.clientMu.Unlock()
+	stale := manager.transport.ensureClientCacheCapacityLocked()
+	manager.transport.clientMu.Unlock()
 	for _, client := range stale {
 		client.CloseIdleConnections()
 	}
@@ -268,20 +280,20 @@ func TestSessionClientCapacityBudgetSeparation(t *testing.T) {
 		t.Fatalf("会话条目满额时把共享池挤出了容量预算")
 	}
 	sessionCount := 0
-	manager.clientMu.Lock()
-	for key := range manager.clients {
+	manager.transport.clientMu.Lock()
+	for key := range manager.transport.clients {
 		if key.sessionKey != "" {
 			sessionCount++
 		}
 	}
-	manager.clientMu.Unlock()
+	manager.transport.clientMu.Unlock()
 	if sessionCount != maxSessionCachedClients-1 {
 		t.Fatalf("会话预算应淘汰到 %d 条,实际 %d", maxSessionCachedClients-1, sessionCount)
 	}
 	_ = shared
 }
 
-func TestLeaseFreshTunnelKeepsSessionConnection(t *testing.T) {
+func TestLeaseFreshTunnelPreservesCallerRequest(t *testing.T) {
 	newRequest := func() *http.Request {
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://upstream.example/path", nil)
 		if err != nil {
@@ -289,21 +301,29 @@ func TestLeaseFreshTunnelKeepsSessionConnection(t *testing.T) {
 		}
 		return req
 	}
-	plain := &Lease{Scope: domain.ScopeBuild, freshTunnel: true, client: noopRequestClient{}}
+	observedClose := false
+	client := &scriptedRequestClient{do: func(_ int, req *http.Request) (*http.Response, error) {
+		observedClose = req.Close
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}}
+	plain := &Lease{Scope: domain.ScopeBuild, connectionPolicy: ConnectionPolicy{Fresh: true}, client: client}
 	reqPlain := newRequest()
 	if _, err := plain.doRequest(reqPlain, false); err != nil {
 		t.Fatalf("普通旋转池请求失败: %v", err)
 	}
-	if !reqPlain.Close {
+	if !observedClose {
 		t.Fatalf("无会话的旋转池请求应强制新隧道(Connection close)")
 	}
+	if reqPlain.Close {
+		t.Fatal("lease modified caller-owned request")
+	}
 
-	pinned := &Lease{Scope: domain.ScopeBuild, freshTunnel: true, sessionKey: "sess-tunnel", client: noopRequestClient{}}
+	pinned := &Lease{Scope: domain.ScopeBuild, connectionPolicy: ConnectionPolicy{Fresh: true, SessionReuse: SessionReuseFresh}, client: client}
 	reqSession := newRequest()
 	if _, err := pinned.doRequest(reqSession, false); err != nil {
 		t.Fatalf("会话请求失败: %v", err)
 	}
-	if reqSession.Close {
-		t.Fatalf("会话钉扎的请求不应关闭连接:保连接即保提示缓存")
+	if !observedClose || reqSession.Close {
+		t.Fatal("fresh 规则必须适用于会话请求且不改写调用方的请求对象")
 	}
 }

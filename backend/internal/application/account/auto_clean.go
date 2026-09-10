@@ -255,9 +255,6 @@ func (s *Service) clearDeletedAccountRuntimeState(ctx context.Context, ids []uin
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), autoCleanRuntimeWriteLimit)
 	defer cancel()
 	failures, firstErr := s.deleteStickyAccounts(cleanupCtx, ids)
-	for _, id := range ids {
-		s.clearRefreshState(id)
-	}
 	if failures == 0 {
 		return 0, nil
 	}

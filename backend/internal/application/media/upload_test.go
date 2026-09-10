@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
@@ -70,6 +71,22 @@ func TestSaveVideoArchivesProviderResultWithoutUploadTicket(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 	binding := &bindingTicketRepository{MediaUploadTicketRepository: tickets}
+	key, err := relational.NewClientKeyRepository(database).Create(ctx, clientkeydomain.Key{
+		Name: "archive-source", Prefix: "archive-source", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "encrypted-secret",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := relational.NewMediaJobRepository(database).CreateMediaJob(ctx, mediadomain.Job{
+		ID: "video_job_direct", RequestID: "request-video-source", ClientKeyID: key.ID, ClientKeyName: key.Name,
+		Provider: "grok_web", Model: "grok-imagine-video", ModelRouteID: 1, UpstreamModel: "grok-imagine-video-upstream",
+		Prompt: "archive source", Seconds: 8, Size: "16:9", Quality: "720p", Status: mediadomain.StatusInProgress,
+		InputJSON: "{}", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	service := NewServiceWithTickets(
 		relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), binding, objects, nil,
 		Config{PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute},
@@ -132,7 +149,7 @@ type bindingTicketRepository struct {
 	assetID string
 }
 
-func (r *bindingTicketRepository) BindJobResultAsset(_ context.Context, jobID, assetID string) error {
+func (r *bindingTicketRepository) BindLegacyJobResultAsset(_ context.Context, jobID, assetID string) error {
 	r.jobID, r.assetID = jobID, assetID
 	return nil
 }
@@ -315,7 +332,7 @@ func TestIssueVideoUploadRequiresHTTPSPublicBase(t *testing.T) {
 	}
 }
 
-// bindFailTicketRepo 在 BindJobResultAsset 注入非 NotFound 失败，用于签发失败闭环。
+// bindFailTicketRepo 在 BindLegacyJobResultAsset 注入非 NotFound 失败，用于签发失败闭环。
 type bindFailTicketRepo struct {
 	repository.MediaUploadTicketRepository
 	bindErr     error
@@ -329,11 +346,11 @@ func (r *bindFailTicketRepo) CreateUploadTicket(ctx context.Context, ticket repo
 	return r.MediaUploadTicketRepository.CreateUploadTicket(ctx, ticket)
 }
 
-func (r *bindFailTicketRepo) BindJobResultAsset(ctx context.Context, jobID, assetID string) error {
+func (r *bindFailTicketRepo) BindLegacyJobResultAsset(ctx context.Context, jobID, assetID string) error {
 	if r.bindErr != nil {
 		return r.bindErr
 	}
-	return r.MediaUploadTicketRepository.BindJobResultAsset(ctx, jobID, assetID)
+	return r.MediaUploadTicketRepository.BindLegacyJobResultAsset(ctx, jobID, assetID)
 }
 
 func (r *bindFailTicketRepo) DeleteUploadTicketByHash(ctx context.Context, tokenHash string) error {
@@ -450,19 +467,29 @@ type countingObjectStore struct {
 func (s *countingObjectStore) SaveImage(ctx context.Context, id, mimeType string, data []byte) (string, error) {
 	return s.inner.SaveImage(ctx, id, mimeType, data)
 }
-func (s *countingObjectStore) SaveVideo(ctx context.Context, id, mimeType string, data []byte) (string, error) {
-	return s.inner.SaveVideo(ctx, id, mimeType, data)
-}
-func (s *countingObjectStore) BeginVideoUpload(ctx context.Context, id, mimeType string) (string, string, error) {
+func (s *countingObjectStore) BeginVideoUpload(ctx context.Context, id, mimeType string) (repository.MediaVideoUpload, error) {
 	s.beginCalls.Add(1)
-	return s.inner.BeginVideoUpload(ctx, id, mimeType)
+	upload, err := s.inner.BeginVideoUpload(ctx, id, mimeType)
+	if err != nil {
+		return nil, err
+	}
+	return &observedVideoUpload{MediaVideoUpload: upload, beforeCommit: func(context.Context) error {
+		s.commitCalls.Add(1)
+		return nil
+	}}, nil
 }
-func (s *countingObjectStore) CommitVideoUpload(ctx context.Context, tempPath, storageKey string) error {
-	s.commitCalls.Add(1)
-	return s.inner.CommitVideoUpload(ctx, tempPath, storageKey)
+
+// Wrap the real staged handle, so failures still exercise its Abort lifecycle.
+type observedVideoUpload struct {
+	repository.MediaVideoUpload
+	beforeCommit func(context.Context) error
 }
-func (s *countingObjectStore) AbortVideoUpload(ctx context.Context, tempPath string) error {
-	return s.inner.AbortVideoUpload(ctx, tempPath)
+
+func (u *observedVideoUpload) Commit(ctx context.Context) (string, error) {
+	if err := u.beforeCommit(ctx); err != nil {
+		return "", err
+	}
+	return u.MediaVideoUpload.Commit(ctx)
 }
 func (s *countingObjectStore) Open(ctx context.Context, storageKey string) (io.ReadCloser, error) {
 	return s.inner.Open(ctx, storageKey)
@@ -536,7 +563,7 @@ func TestReceiveVideoUploadAssetLookupFailureNoWriteOrConsume(t *testing.T) {
 	}
 }
 
-// failingCommitStore 首次 CommitVideoUpload 失败，后续委托真实存储，用于验证票据释放与重试。
+// failingCommitStore 首次 Commit 失败，后续委托真实存储，用于验证票据释放与重试。
 type failingCommitStore struct {
 	inner         repository.MediaObjectStorage
 	failRemaining atomic.Int32
@@ -546,21 +573,18 @@ type failingCommitStore struct {
 func (s *failingCommitStore) SaveImage(ctx context.Context, id, mimeType string, data []byte) (string, error) {
 	return s.inner.SaveImage(ctx, id, mimeType, data)
 }
-func (s *failingCommitStore) SaveVideo(ctx context.Context, id, mimeType string, data []byte) (string, error) {
-	return s.inner.SaveVideo(ctx, id, mimeType, data)
-}
-func (s *failingCommitStore) BeginVideoUpload(ctx context.Context, id, mimeType string) (string, string, error) {
-	return s.inner.BeginVideoUpload(ctx, id, mimeType)
-}
-func (s *failingCommitStore) CommitVideoUpload(ctx context.Context, tempPath, storageKey string) error {
-	s.commitCalls.Add(1)
-	if s.failRemaining.Add(-1) >= 0 {
-		return errors.New("injected commit failure")
+func (s *failingCommitStore) BeginVideoUpload(ctx context.Context, id, mimeType string) (repository.MediaVideoUpload, error) {
+	upload, err := s.inner.BeginVideoUpload(ctx, id, mimeType)
+	if err != nil {
+		return nil, err
 	}
-	return s.inner.CommitVideoUpload(ctx, tempPath, storageKey)
-}
-func (s *failingCommitStore) AbortVideoUpload(ctx context.Context, tempPath string) error {
-	return s.inner.AbortVideoUpload(ctx, tempPath)
+	return &observedVideoUpload{MediaVideoUpload: upload, beforeCommit: func(context.Context) error {
+		s.commitCalls.Add(1)
+		if s.failRemaining.Add(-1) >= 0 {
+			return errors.New("injected commit failure")
+		}
+		return nil
+	}}, nil
 }
 func (s *failingCommitStore) Open(ctx context.Context, storageKey string) (io.ReadCloser, error) {
 	return s.inner.Open(ctx, storageKey)

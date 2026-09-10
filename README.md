@@ -60,6 +60,8 @@ Grok2API is a Go gateway with a built-in React admin console. It manages indepen
 
 ### Architecture
 
+See the [architecture and module boundaries](ARCHITECTURE.md), [development and customization guide](DEVELOPMENT.md) (Chinese), and [AI contributor instructions](AGENTS.md) for feature locations, extension contracts, validation, migrations, and repository privacy requirements.
+
 ```mermaid
 flowchart LR
     %% Color definitions
@@ -323,7 +325,14 @@ Authorization: Bearer g2a_xxx_xxx
 | `GET` | `/v1/stt`, `/v1/realtime` | Proxy voice WebSocket sessions |
 | `GET` | `/v1/media/images/{asset_id}`, `/v1/media/videos/{asset_id}` | Read archived media |
 
-Stored responses and compact depend on the selected Provider. The signed-in admin console provides live examples at `/docs`; Swagger is available only when `server.swaggerEnabled: true`.
+Streaming STT preserves audio configuration query parameters and repeated `keyterm` values. For example, connect to `/v1/stt?model=grok-stt&encoding=pcm&sample_rate=48000&multichannel=true&channels=2`. Invalid or unsupported options return HTTP 400 before an upstream connection is attempted; each configured channel must report completion before the request is recorded as fully generated.
+
+
+Stored responses and compact depend on the selected Provider and model. The signed-in admin console provides live examples at `/docs`; Swagger is available only when `server.swaggerEnabled: true`.
+
+For Responses, explicit `store:false` makes the new response ID unavailable through `GET/DELETE` and `previous_response_id`. The request can still use an existing stored parent. Web text Responses save resources when `store` is omitted, `null`, or `true`; Build forwards an explicit storage choice upstream, and Console remains stateless. Usage/audit records and the separately configured Build conversation history follow their own retention settings.
+
+Web image models can return generated images through Responses, Chat Completions, and Messages. Their response IDs are temporary: Responses returns `store:false`, and `GET/DELETE` or `previous_response_id` cannot recover a conversation from them. Explicit `store:true` is rejected before generation. The `image_config` extension (for example, `{"n":2,"response_format":"b64_json"}`) is preserved across these protocols. Budget-limited keys reserve the requested image cost before generation and settle from confirmed images, including when a later download or client delivery fails.
 
 Continuing a stored response via `previous_response_id` can be rejected by the upstream organization (HTTP 404, `upstream_server_error_not_found`) — some Grok organizations disallow cross-request conversation reuse. The gateway pins the original account and forwards the session correctly; a 404 here reflects the upstream policy, not lost state. `GET/DELETE /v1/responses/{id}` still work for gateway-stored responses.
 
@@ -358,105 +367,40 @@ Egress nodes are pure proxy resources - no scope, no account binding. The admin 
 
 Hysteria and TUIC are not supported yet. FlareSolverr accepts only HTTP/SOCKS proxy URLs, so automatic clearance refresh cannot use a tunnel share URL directly.
 
-The real-time routing guard (`requestRetry`) is a top-level `config.yaml` section and is off by default:
+The real-time response guard uses `requestRetry` in `config.yaml` as its initial baseline. After the first administration save, the versioned `quality_guard` record is authoritative. The Go baseline is disabled; the example configuration enables it:
 
 ```yaml
 requestRetry:
-  enabled: true             # production-recommended (Go built-in default stays off)
-  maxAttempts: 2            # global request budget: initial attempt + at most one retry (hard cap 3)
-  guardedModels: []          # guard whitelist (empty = all reasoning models, e.g. ["grok-4.5","grok-4.6"]); outside models exempt
-  createdTimeout: 5s        # first-event deadline: abort before any SSE data event arrives
-  evidenceTimeout: 3.5s     # zero-evidence deadline: anti-deadlock backstop (no thinking evidence AND no output)
-  onExhausted: fail_closed # fail_open | fail_closed (fail_closed returns 503 upstream_degraded)
-  sameAccountRetry: true   # pool egress only - force-disabled under direct/fixed exits
-  accountCooldown: 12h     # missing-thinking conviction cooldown
-  idleAccountCooldown: 15m # empty/silent-stream cooldown (independent)
+  enabled: true
+  maxAttempts: 2
+  guardedModels: ["grok-4.5", "grok-4.6"]
+  createdTimeout: 5s
+  evidenceTimeout: 3.5s
+  onExhausted: fail_closed
+  accountCooldown: 2m
+  idleAccountCooldown: 15m
 ```
 
-Both deadlines **scale by request class** (the evidence-backed regime table
-`qualityLivenessSchedule`, from the 2026-08 full-chain trace survey): requests
-carrying server-side search tools (`web_search`/`x_search`) get NO guard
-deadline - queueing/executing/thinking silences are all legitimate work, and
-dead connections are bounded by the transport stream-idle timeout (Build
-default 2m); `high`/`xhigh` reasoning requests get a 30s first-event budget
-(upstream queueing silence measured >5s); everything else uses the defaults
-above. A deadline firing only bounds queueing - it is never evidence of
-degradation; that judgment always belongs to the evidence rules (the
-ciphertext-item-closed-without-deltas signature et al).
+Select the actual public model names in the guard page. An empty bootstrap list uses the default grok-4.5/grok-4.6 selection; saving an enabled guard requires at least one model. Settings saves include a revision and reject stale edits. Each request keeps one immutable snapshot of scope, rules and budgets. Configuration or kernel failures are explicit errors.
 
-When enabled, every thinking-model response (streaming and non-streaming) is judged by the zero-delay state machine: visible thinking deltas deliver instantly (the guard then steps out of the way); a reasoning item that closes without any thinking delta - the ciphertext degrade signature - withholds in 0 ms; visible output racing ahead of thinking withholds immediately regardless of length; a terminal event with neither is a defensive withhold; zero-content streams short-circuit to the idle path (short cooldown + RSC attribution + retry) instead of a missing-thinking conviction. Purely semantic output (tool calls) delivers. Exempt paths (non-reasoning operations/models, explicitly disabled reasoning, compaction) are counted per reason in guard-stats instead of passing silently. Under `fail_closed` an exhausted budget returns `503 upstream_degraded`. This section is hot-reloadable through the admin runtime-settings surface (guard page); `config.yaml` provides the boot defaults.
+Visible thinking satisfies admission. A closed reasoning stage without visible thinking, or visible answer/refusal text arriving first, is withheld. Ciphertext and usage counters cannot provide thinking evidence. Unknown protocols, resource exhaustion, timeouts, empty streams and cancellation have separate outcomes. Chat supports one choice with index 0; guarded `n > 1` requests are rejected before generation. Exhausted quality retries return `503 upstream_degraded`.
 
-Every guard behavior is observable in the admin Quality Guard page: the signal-hits panel tracks the four signals (first-event deadline, zero-evidence deadline, empty stream, missing thinking) with triggered/rescued/failed counts; the exempt ledger counts requests the guard did NOT engage, by reason - the first place to look when degraded output slips through; same-account retry and both exhaustion outcomes (deliver-last/reject) summarize below, with canary verdicts in their own table. Request-audit details carry the per-attempt guard trail (quality_hold/quality_idle stages with timing), the terminal_burst class makes the whole-output-burst signature visible where the throughput column is empty, fail-open delivered rows carry a dedicated delivery marker; the audit error-code filter offers one-click presets for all four guard codes (quality degraded / zero-evidence timeout / first-event timeout / empty stream). The dashboard resource cards total cooling accounts, risk-flagged accounts, and degraded withholds in period.
+Admission has a total deadline across account selection, response headers, inspection, conversion and retries: 30 seconds by default, or 3 minutes when tools are present. Search and heavy reasoning can relax individual silence deadlines while remaining subject to the total deadline. Client delivery commits before response headers are sent; complete delivery is recorded separately. Conversation output is committed only after successful delivery and the required durable completion receipt. A stream interrupted after its first thinking delta cannot count as a successful rescue.
 
-### Risk attribution (RSC)
+Build and Console SSE consumers share one event assembler. Buffer allocation and parser/converter state reserve request and process capacity before processing: 96 MiB per request and 512 MiB per process by default, with separate prefix, event and JSON limits. These are accounted response capacities, not an RSS limit. Capacity failure returns `response_resource_exhausted` without a quality vote or account rotation. Automatic replay requires a safe tool policy; unknown server-side tool effects block regeneration.
 
-A withheld stream does not by itself prove the account is degraded - the exit
-IP may be the culprit. When `accountRisk.rscCheck` is enabled, a withhold triggers
-an async registration-risk check against grok.com through the linked Web SSO
-identity. The check runs the SSO thinking probe (the legacy homepage payload
-parse was removed with this refactor - it read every account as clean after
-the grok.com redesign; rollback-to-no-attribution is the `enabled` switch):
+Admission, completion and physical HTTP exchanges are separate durable facts. Each transport attempt retains its original account, route epoch, policy revision and rule version, including internal retries. Physical usage distinguishes unreported counters from reported zero. Temporary restrictions are owned by their source events or cases; releasing one does not release another. A degradation event initially holds an account for 2 minutes without changing its manual enabled state. Durable receipt failure stops retries and leaves bounded local protection. The outbox defaults to 10,000 pending events, and `/guard-stats` exposes backlog and resource capacity.
 
-- **ssoProbe (default, priority)**: opens one tiny temporary `fast` conversation with the
-  SSO cookie (no persisted chat, no memory writes). A notetaker/thinking channel in
-  the first stream means the account is healthy; answer text arriving with no
-  thinking at all means the account is risk-controlled. grok.com stopped
-  delivering botFlag fields through the homepage RSC payload, so this is the only
-  surviving account-level signal (independent of exit-IP quality). Each check
-  consumes one message of the account's rolling quota; rate limits, challenges,
-  and stream errors always classify as error (retried later), never as risk.
-- **buildProbe (Build-channel degrade, linked or not)**: a Build grok-4.5/4.6
-  withhold is classified by a tiny same-channel reasoning request through that
-  account's own credential — not by the grok.com `fast` SSO probe, which is a
-  different product surface and the large-pool misjudgment path. IP pollution is
-  the built-in confound, so a degraded first attempt triggers a **differential
-  second attempt** (pool node = re-roll for a new exit IP, fixed node = excluded
-  and rerouted, direct-only = inconclusive error, never a denial). A
-  double-degraded verdict additionally requires a recent build-probe clean
-  witness, otherwise it is suppressed to error and retried. Without any
-  reasoning Build model the probe stays disabled (behavioral penalties only).
-  SSO remains for Web/Console degrade and patrol.
+See the [response guard architecture](backend/internal/quality/guard/README.md) for protocol rules, resource limits, migration and validation commands.
 
-- **denied/flagged**: a confirmed verdict stays trusted for `deniedTTL` (default 24h)
-  and requires `deniedConfirmations` consecutive denials (default 2) before flagging.
-  Request-path attribution is **channel-scoped** — only the account that actually
-  degraded gets `rsc_denied` / disabled (flag by default; disable / markOnly
-  available); a Build degrade does not cascade onto SSO. **Exception: an SSO-identity
-  denial** (periodic patrol, or a Web-channel degrade whose probe returns denied) fans
-  out to the whole identity group (Web/Build/Console), because a flagged SSO identity
-  can no longer run the probe that later Build/Console degrades need, leaving those
-  channels stuck in cooldown. Flagged accounts stay enabled but are excluded from
-  scheduling until an operator clears the flag, or until `deniedTTL` expires and
-  patrol re-probes clean (which clears the flag, including the SSO identity group).
-  The probe carries a channel-vocabulary breaker: a denied streak with zero clean
-  witnesses is suppressed and self-heals by re-probing the most recent clean identity,
-  so a grok.com protocol change cannot mass-flag the pool and a genuinely
-  risk-controlled pool cannot deadlock the breaker.
-- **clean**: the degrade was exit-IP scoped; quality cooldowns (missing-thinking,
-  empty-stream idle) are lifted so the account stays schedulable, and any
-  `rsc_denied` flag on that account is cleared. Generic 5xx failures are never
-  cleared by a clean verdict.
-- A patrol loop re-checks clean/error verdicts after `patrol.bucketDays`,
-  unconfirmed denials after the error-retry window, and confirmed denials after
-  `deniedTTL`. Every field in this section is editable in the
-  admin UI (Guard → Risk attribution) and applies immediately after save
-  (detection method, denied action, concurrency, patrol toggles included); editing
-  config.yaml directly still requires a restart, and once saved in the UI the runtime
-  settings take precedence.
+### Quality attribution and exit handling
 
-### Exit-IP quality guard and automatic rotation
+A withheld response starts temporary protection and a controlled comparison investigation. It does not identify the account or exit as the cause. Build investigations compare other accounts on the incident exit, the incident account on other verified paths, and matching healthy controls. Missing results and transport failures do not become degradation votes. Conclusions distinguish account quality, account availability, exit/IP issues and insufficient evidence.
 
-See [EXIT-IP-GUARD.md](EXIT-IP-GUARD.md) for full deployment steps (multi-instance servers, batch webhook templating, end-to-end verification).
-When RSC attribution returns **clean**, the exit IP is the suspect. The exit-IP quality guard (`egress` config section) closes the loop:
+Investigations have fixed sample budgets and deadlines. Restrictions belong to their cases and exit epochs; unrelated cases and manual account state remain independent. The administration page shows supporting evidence, counterevidence, path verification and manual review. A probe must observe successful completion within its budget before it can provide a clean result. A single clean probe on another product surface is not an attribution verdict.
 
-- A degraded attempt excludes its egress node for the rest of that request, so the retry immediately lands on a different fixed exit IP.
-- Attribution clean → the node is quarantined (default 24h), and its per-node rotation webhook is POSTed (e.g. restart MicroWARP to obtain a new exit IP).
-- After a settle delay the node is probed; the exit IP must have changed. A one-shot canary (a tiny streaming inference request: first SSE event within budget and thinking evidence present) decides re-admission.
-- Canary pass → quarantine released and the node rejoins the pool. Fail → rotate again, up to `maxAttemptsPerQuarantine` (default 3) per quarantine cycle, then stay quarantined with a warning.
-- With RSC attribution disabled or unlinked accounts, cross-account confirmation is the fallback: two distinct accounts degrading on the same node inside the window quarantine it.
-- Only fixed (non-pool) nodes participate in quality quarantine and rotation; proxy-pool (rotating-endpoint) members are exempt from both, keeping only per-request exclusion. Rate guards: ≥10 minutes between rotations per node, ≤6 rotations per hour globally.
+See the [controlled comparison protocol](backend/internal/quality/README.md) for the decision rules and operating limits. The current investigation worker assumes one investigation process per database. Exit routing and rotation remain separate operational mechanisms; the node editor accepts rotation webhooks and `scripts/rotate-server/` contains the server implementation.
 
-Configure each MicroWARP endpoint as its own fixed node and set its rotation webhook (token-checked POST endpoint that restarts the tunnel service) in the node editor; see EXIT-IP-GUARD.md for a complete rotate-server deployment guide.
 ### Request audits
 
 
@@ -471,14 +415,20 @@ Two observability columns answer "how much did the client actually receive":
   row now states exactly what reached the client; both fields are exposed in the
   admin request-audits API and the audits page performance summary.
 
-Retention: `audit.retention` (default 0 = keep forever; non-zero 24h-8760h)
-deletes aged audit rows and their attempt details in hourly batched sweeps
-(500 rows/batch, 30s budget per sweep). The task starts only when retention is
-non-zero - the default is byte-identical to upstream behavior. Changes require a
-process restart. Independently, runtime setting `audit.retentionDays` (default
-7; 0 disables) purges rows older than that many days — when both are active the
-effective window is the shorter of the two, and day-scale purges above the
-duration window log `audit_retention_days_purged` on every deletion sweep.
+Retention uses one setting, `audit.retentionPeriod`: default `168h` (7 days),
+`0` keeps records indefinitely, and non-zero values must be between `24h` and
+`8760h`. One worker deletes aged audits and attempt details hourly, with at most
+500 records per transaction and a 30-second sweep budget. It reads durable
+settings before every batch; a saved change applies to the next batch even when
+an instance misses a notification. An already started transaction may finish
+under its previous policy. A policy read or delete failure stops the sweep.
+
+The loader accepts legacy `retention` / `retentionDays` files and merges their
+enabled windows. Persisted legacy online days take precedence, including zero.
+Do not mix those file keys with the new key. The management page shows effective
+and file baseline sources, and preserves fractional days without rounding.
+See [audit retention compatibility](DEVELOPMENT.md#审计保留的兼容要求)
+for precedence, old client compatibility, and rollout constraints.
 
 
 ### Verification matrix
@@ -567,14 +517,20 @@ Admin tokens are opaque and validated against the session store on **every reque
 
 ### Graceful shutdown
 
-On `SIGTERM`/`SIGINT` the listener closes immediately — new connections are refused — while in-flight requests get a **15 s drain window**. Requests still running at the deadline (long SSE streams, video jobs) are cut, a `server_shutdown_drain_timeout` WARN is logged, and the process still exits with code **0**: an operator-initiated stop is a normal outcome and must not pollute failure-rate statistics. A non-zero exit always indicates a real failure.
+On `SIGTERM`/`SIGINT`, the application stops accepting requests and gives existing HTTP and WebSocket handlers a **15 s drain window**. Their network dependencies remain available so an accepted request can finish its remaining upstream steps. At the deadline, the application cancels request contexts, closes remaining connections (including upgraded WebSockets), and waits up to 10 s for handler completion. Known generation usage and billing still pass through their completion paths. Accepted video jobs retain their durable recovery state.
 
-After the drain, the audit ledger gets up to 10 s to flush queued records, then the database closes. The worst case (~26 s) fits the `stop_grace_period: 30s` in `docker-compose.yml`. A second `SIGTERM` during the drain is ignored; orchestrators escalate to `SIGKILL` after the grace period.
+The application then joins its background tasks, stops quality and network workers, closes the observation recorder and audit writer, and finally closes runtime and database connections. The whole observation queue gets one 5 s drain budget; unpersisted observations contribute to the existing drop counter. Accepted billing facts remain in the durable audit journal for recovery when SQL is unavailable.
+
+An expired HTTP drain window alone is a normal stop. A handler or worker that has not actually stopped is a shutdown error: its dependencies remain open for completion, and the CLI reports the error. `Application.Close` also supports stopping an active `Run`, concurrent callers, and retry after an incomplete close. Successful construction must always be paired with `Close`, including when `Run` fails.
+
+The Compose example allows **90 s** for the complete sequence. This replaces the old 26 s worst-case claim, which omitted several workers and did not wait for long-stream completion. The limit gives cooperative cleanup room; a process killed by its orchestrator cannot finish an unacknowledged external operation. Other deployment managers should allow a comparable grace period. This repository change does not modify running deployments.
 
 Shutdown-related logs:
 
-- `server_started` / `server_stopped` (with `uptime_ms`, `drain_ms`) — the pairing distinguishes a clean stop from a crash that died silently.
-- `server_shutdown_drain_timeout` — the drain deadline was hit and long streams were cut by design.
+- `server_started`, `server_stopping` (`uptime_ms`), and `server_stopped` (`drain_ms`) describe the HTTP lifecycle.
+- `server_shutdown_drain_timeout` records forced cancellation after the HTTP grace period.
+- `quality_observations_stopped_with_drops` reports the recorder's cumulative drop count when nonzero.
+- `application_closed` confirms successful worker and dependency cleanup.
 
 ### Client IPs behind a reverse proxy
 
@@ -619,7 +575,10 @@ If Cloudflare is in front of Nginx, configure Nginx's real-IP module with `CF-Co
 
 Important optional settings:
 
-- `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
+- `audit.journalDirectory`: persistent local directory for accepted audit records awaiting SQL settlement. Keep the directory and deployment instance identity stable across restarts; each instance owns a separate file. SQLite WAL requires local storage, not a network filesystem.
+- `audit.journalMaxBytes` and `audit.bufferSize`: bound retained payload bytes and pending record count. They include records awaiting repair, never evict accepted facts, and require restart to change. Budget additional disk space for SQLite indexes and WAL.
+- `audit.ledgerMode`: `observe` reports recoverable ledger backlog; `enforce` pauses new inference after the configured grace. Both modes block after unaccepted facts or retained invalid records. SQL recovery safely replays accepted records; invalid records are retained and retried once at startup after repair.
+- Billing reservations retain their deployment instance owner. Only that instance can expire its inactive reservations after restoring its journal; another instance can still settle a real event. Legacy reservations with unknown owners remain reserved until a real settlement or explicit request cancellation. Keep stable instance identities and persistent volumes, and stop old cleanup processes before upgrading. Client-key management shows pending reservations separately from billed usage.
 - `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
 - `routing.segmentedSelectorEnabled`: enabled by default for pools with at least 3,000 eligible accounts; bounds dynamic concurrency reads while retaining quota/tier priorities, sticky sessions, full-planner fallback, and atomic guards.
 - Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
@@ -662,18 +621,13 @@ Restore by stopping the instance, replacing the database and media files, keepin
 
 Runtime metrics are emitted as structured JSON log lines (`msg="performance_metric"`, one per metric family) every minute — there is no HTTP `/metrics` scrape endpoint. Ship container stdout to your log pipeline and alert on `level":"WARN"` task failures plus `upstream_*`/`egress_*` metric anomalies.
 
-## Upstream Shape Survey Tooling
+## Private protocol diagnostics
 
-```bash
-GROK2API_ADMIN_PASSWORD=... sh scripts/survey_report.sh 8003
-python3 scripts/survey_harvest.py upstream-traces/unique
-cd backend && GROK2API_TRACE_REPLAY_DIR=$PWD/../upstream-traces/unique go test ./internal/application/gateway/ -run TestCorpusReplay -v
-python3 scripts/trace_census.py && python3 scripts/trace_census_timeline.py
-```
-
-Capture side is `internal/pkg/upstreamtrace` (env-gated, zero cost by default).
+Optional capture in `internal/pkg/upstreamtrace` is disabled by default and enabled through `GROK2API_UPSTREAM_TRACE_DIR`. Captures can contain conversation content and identifying metadata: use a private directory outside the repository. Never commit captures or include them in a source archive, image, public issue, or CI output. Optional corpus replay tests accept `GROK2API_TRACE_REPLAY_DIR`; maintained regression tests use minimal synthetic inputs.
 
 ## Development
+
+Start with the [development guide](DEVELOPMENT.md) and [module map](ARCHITECTURE.md). Run `python3 scripts/check-repository.py --staged` before committing; the check inspects the Git index, not just the working copy.
 
 ```bash
 cd backend

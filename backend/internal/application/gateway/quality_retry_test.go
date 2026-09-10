@@ -22,31 +22,32 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestClassifyQualityHold(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		sig  qualityStreamSignals
+		sig  QualityStreamSignals
 		want QualityVerdict
 	}{
-		{name: "thinking delivers", sig: qualityStreamSignals{HasThinking: true, VisibleTokens: 10}, want: QualityDeliver},
+		{name: "thinking delivers", sig: QualityStreamSignals{HasThinking: true, VisibleTokens: 10}, want: QualityDeliver},
 		// ReasoningTokens without HasThinking is a usage claim, not stream
 		// evidence: degraded streams report large counts and must withhold.
-		{name: "usage reasoning claim still withholds", sig: qualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityWithhold},
-		{name: "visible 32 no think withhold", sig: qualityStreamSignals{VisibleTokens: 32, Terminal: true}, want: QualityWithhold},
-		{name: "output 40 no think withhold", sig: qualityStreamSignals{OutputTokens: 40, Terminal: true}, want: QualityWithhold},
-		{name: "short no think withholds (reasoning models always think)", sig: qualityStreamSignals{VisibleTokens: 10, Terminal: true}, want: QualityWithhold},
-		{name: "empty terminal withholds defensively (empty-stream path owns it)", sig: qualityStreamSignals{Terminal: true}, want: QualityWithhold},
-		{name: "midstream enough content withhold", sig: qualityStreamSignals{VisibleTokens: 64}, want: QualityWithhold},
-		{name: "any visible output without thinking withholds (body outrun)", sig: qualityStreamSignals{VisibleTokens: 8}, want: QualityWithhold},
+		{name: "usage reasoning claim still withholds", sig: QualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityWithhold},
+		{name: "visible 32 no think withhold", sig: QualityStreamSignals{VisibleTokens: 32, Terminal: true}, want: QualityWithhold},
+		{name: "output 40 no think withhold", sig: QualityStreamSignals{OutputTokens: 40, Terminal: true}, want: QualityWithhold},
+		{name: "short no think withholds (reasoning models always think)", sig: QualityStreamSignals{VisibleTokens: 10, Terminal: true}, want: QualityWithhold},
+		{name: "empty terminal withholds defensively (empty-stream path owns it)", sig: QualityStreamSignals{Terminal: true}, want: QualityWithhold},
+		{name: "midstream enough content withhold", sig: QualityStreamSignals{VisibleTokens: 64}, want: QualityWithhold},
+		{name: "any visible output without thinking withholds (body outrun)", sig: QualityStreamSignals{VisibleTokens: 8}, want: QualityWithhold},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if got := classifyQualityHold(test.sig); got != test.want {
-				t.Fatalf("classifyQualityHold() = %s, want %s", got, test.want)
+			if got := classifyQualityHoldShadowed(test.sig); got != test.want {
+				t.Fatalf("classifyQualityHoldShadowed() = %s, want %s", got, test.want)
 			}
 		})
 	}
@@ -54,23 +55,21 @@ func TestClassifyQualityHold(t *testing.T) {
 
 func TestDecideQualityRetry(t *testing.T) {
 	t.Parallel()
-	if got := decideQualityRetry(QualityDeliver, 0, 2, qualityRetryFailOpen); got != QualityActionDeliver {
+	if got := decideQualityRetry(QualityDeliver, 0, 2); got != QualityActionDeliver {
 		t.Fatalf("deliver verdict: %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 0, 2, qualityRetryFailOpen); got != QualityActionRetry {
+	if got := decideQualityRetry(QualityWithhold, 0, 2); got != QualityActionRetry {
 		t.Fatalf("first withhold: %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 1, 2, qualityRetryFailOpen); got != QualityActionDeliverLast {
-		t.Fatalf("last fail-open: %s", got)
+	// G12:耗尽策略只剩 fail_closed——扣留预算耗尽即 Reject,绝无 DeliverLast。
+	if got := decideQualityRetry(QualityWithhold, 1, 2); got != QualityActionReject {
+		t.Fatalf("last withhold must reject (fail-closed only): %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 1, 2, qualityRetryFailClosed); got != QualityActionReject {
-		t.Fatalf("last fail-closed: %s", got)
+	if got := decideQualityRetry(QualityWithhold, 0, 1); got != QualityActionReject {
+		t.Fatalf("max 1 must reject: %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 0, 1, qualityRetryFailOpen); got != QualityActionDeliverLast {
-		t.Fatalf("max 1 fail-open: %s", got)
-	}
-	if got := decideQualityRetry(QualityWithhold, 5, 0, ""); got != QualityActionReject {
-		t.Fatalf("zero-value policy must use fail-closed default: %s", got)
+	if got := decideQualityRetry(QualityWithhold, 5, 0); got != QualityActionReject {
+		t.Fatalf("zero-value config must fail closed: %s", got)
 	}
 }
 
@@ -78,14 +77,11 @@ func TestDecideQualityRetryLastWithholdIsMaxAttemptsMinusOne(t *testing.T) {
 	t.Parallel()
 	for _, maxAttempts := range []int{1, 2, 3, 6} {
 		last := maxAttempts - 1
-		if got := decideQualityRetry(QualityWithhold, last, maxAttempts, qualityRetryFailOpen); got != QualityActionDeliverLast {
-			t.Fatalf("fail-open last withhold max=%d index=%d got %s", maxAttempts, last, got)
-		}
-		if got := decideQualityRetry(QualityWithhold, last, maxAttempts, qualityRetryFailClosed); got != QualityActionReject {
-			t.Fatalf("fail-closed last withhold max=%d index=%d got %s", maxAttempts, last, got)
+		if got := decideQualityRetry(QualityWithhold, last, maxAttempts); got != QualityActionReject {
+			t.Fatalf("last withhold must reject max=%d index=%d got %s", maxAttempts, last, got)
 		}
 		if last > 0 {
-			if got := decideQualityRetry(QualityWithhold, last-1, maxAttempts, qualityRetryFailOpen); got != QualityActionRetry {
+			if got := decideQualityRetry(QualityWithhold, last-1, maxAttempts); got != QualityActionRetry {
 				t.Fatalf("pre-last should retry max=%d index=%d got %s", maxAttempts, last-1, got)
 			}
 		}
@@ -100,51 +96,45 @@ func TestCommitQualityHold(t *testing.T) {
 		qualityAttempt int
 		maxAttempts    int
 		hasNext        bool
-		onExhausted    string
 		wantAction     QualityRetryAction
 		wantAudit      bool
 		wantKeep       bool
 	}{
 		{
 			name:    "first withhold + hasNext → Retry+Audit",
-			verdict: QualityWithhold, qualityAttempt: 0, maxAttempts: 2, hasNext: true, onExhausted: qualityRetryFailOpen,
+			verdict: QualityWithhold, qualityAttempt: 0, maxAttempts: 2, hasNext: true,
 			wantAction: QualityActionRetry, wantAudit: true, wantKeep: false,
 		},
 		{
-			name:    "last withhold fail-open → DeliverLast+KeepBody",
-			verdict: QualityWithhold, qualityAttempt: 1, maxAttempts: 2, hasNext: true, onExhausted: qualityRetryFailOpen,
-			wantAction: QualityActionDeliverLast, wantAudit: false, wantKeep: true,
-		},
-		{
-			name:    "last withhold fail-closed → Reject+Audit",
-			verdict: QualityWithhold, qualityAttempt: 1, maxAttempts: 2, hasNext: true, onExhausted: qualityRetryFailClosed,
+			name:    "last withhold → Reject+Audit (fail-closed only, G12)",
+			verdict: QualityWithhold, qualityAttempt: 1, maxAttempts: 2, hasNext: true,
 			wantAction: QualityActionReject, wantAudit: true, wantKeep: false,
 		},
 		{
-			name:    "routing exhausted even at qualityAttempt=0 → not Retry",
-			verdict: QualityWithhold, qualityAttempt: 0, maxAttempts: 2, hasNext: false, onExhausted: qualityRetryFailOpen,
-			wantAction: QualityActionDeliverLast, wantAudit: false, wantKeep: true,
+			name:    "routing exhausted even at qualityAttempt=0 → Reject, never Retry",
+			verdict: QualityWithhold, qualityAttempt: 0, maxAttempts: 2, hasNext: false,
+			wantAction: QualityActionReject, wantAudit: true, wantKeep: false,
 		},
 		{
 			name:    "thinking delivers keep body",
-			verdict: QualityDeliver, qualityAttempt: 0, maxAttempts: 2, hasNext: true, onExhausted: qualityRetryFailOpen,
+			verdict: QualityDeliver, qualityAttempt: 0, maxAttempts: 2, hasNext: true,
 			wantAction: QualityActionDeliver, wantAudit: false, wantKeep: true,
 		},
 		{
 			name:    "switch 5 times: attempt 4 of 6 still retries",
-			verdict: QualityWithhold, qualityAttempt: 4, maxAttempts: 6, hasNext: true, onExhausted: qualityRetryFailClosed,
+			verdict: QualityWithhold, qualityAttempt: 4, maxAttempts: 6, hasNext: true,
 			wantAction: QualityActionRetry, wantAudit: true, wantKeep: false,
 		},
 		{
-			name:    "switch 5 times: attempt 5 of 6 fail-closed rejects no body",
-			verdict: QualityWithhold, qualityAttempt: 5, maxAttempts: 6, hasNext: true, onExhausted: qualityRetryFailClosed,
+			name:    "switch 5 times: attempt 5 of 6 rejects no body",
+			verdict: QualityWithhold, qualityAttempt: 5, maxAttempts: 6, hasNext: true,
 			wantAction: QualityActionReject, wantAudit: true, wantKeep: false,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			got := commitQualityHold(test.verdict, test.qualityAttempt, test.maxAttempts, test.hasNext, test.onExhausted)
+			got := commitQualityHold(test.verdict, test.qualityAttempt, test.maxAttempts, test.hasNext)
 			if got.Action != test.wantAction || got.Audit != test.wantAudit || got.KeepBody != test.wantKeep {
 				t.Fatalf("commitQualityHold() = %+v, want action=%s audit=%t keep=%t", got, test.wantAction, test.wantAudit, test.wantKeep)
 			}
@@ -157,17 +147,14 @@ func TestCommitQualityHold(t *testing.T) {
 
 func TestBoundQualityRetryWhenRoutingExhausted(t *testing.T) {
 	t.Parallel()
-	if got := boundQualityRetry(QualityActionRetry, true, qualityRetryFailOpen); got != QualityActionRetry {
+	if got := boundQualityRetry(QualityActionRetry, true); got != QualityActionRetry {
 		t.Fatalf("has next: %s", got)
 	}
-	if got := boundQualityRetry(QualityActionRetry, false, qualityRetryFailOpen); got != QualityActionDeliverLast {
-		t.Fatalf("no next fail-open: %s", got)
+	if got := boundQualityRetry(QualityActionRetry, false); got != QualityActionReject {
+		t.Fatalf("no next must reject (fail-closed only): %s", got)
 	}
-	if got := boundQualityRetry(QualityActionRetry, false, qualityRetryFailClosed); got != QualityActionReject {
-		t.Fatalf("no next fail-closed: %s", got)
-	}
-	if got := boundQualityRetry(QualityActionDeliverLast, false, qualityRetryFailOpen); got != QualityActionDeliverLast {
-		t.Fatalf("already last: %s", got)
+	if got := boundQualityRetry(QualityActionDeliver, false); got != QualityActionDeliver {
+		t.Fatalf("non-retry passthrough: %s", got)
 	}
 }
 
@@ -224,7 +211,7 @@ func TestObserveQualityChunkThinkingChat(t *testing.T) {
 	if !sig.HasThinking || !sig.Terminal || sig.ReasoningTokens != 40 {
 		t.Fatalf("thinking fixture signals = %#v", sig)
 	}
-	if classifyQualityHold(sig) != QualityDeliver {
+	if classifyQualityHoldShadowed(sig) != QualityDeliver {
 		t.Fatalf("thinking fixture withheld")
 	}
 }
@@ -247,8 +234,8 @@ func TestObserveOutputWithoutThinkingWithholdsAnyLength(t *testing.T) {
 	if sig.HasThinking || !sig.Terminal || sig.VisibleTokens < 32 {
 		t.Fatalf("no-think fixture signals = %#v", sig)
 	}
-	if classifyQualityHold(sig) != QualityWithhold {
-		t.Fatalf("no-think output must withhold, got %s (%#v)", classifyQualityHold(sig), sig)
+	if classifyQualityHoldShadowed(sig) != QualityWithhold {
+		t.Fatalf("no-think output must withhold, got %s (%#v)", classifyQualityHoldShadowed(sig), sig)
 	}
 	// Even a 1-token answer normally carries reasoning: no thinking at
 	// terminal is degraded regardless of length and must withhold.
@@ -257,8 +244,8 @@ func TestObserveOutputWithoutThinkingWithholdsAnyLength(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"ok"}}]}`,
 		"data: [DONE]",
 	)))
-	if classifyQualityHold(short.signals()) != QualityWithhold {
-		t.Fatalf("short no-think must withhold, got %s", classifyQualityHold(short.signals()))
+	if classifyQualityHoldShadowed(short.signals()) != QualityWithhold {
+		t.Fatalf("short no-think must withhold, got %s", classifyQualityHoldShadowed(short.signals()))
 	}
 }
 
@@ -272,7 +259,7 @@ func TestObserveQualityChunkResponsesReasoningItem(t *testing.T) {
 		`data: {"type":"response.output_text.delta","delta":"hello"}`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":90,"output_tokens_details":{"reasoning_tokens":60}}}}`,
 	)))
-	if classifyQualityHold(state.signals()) != QualityWithhold {
+	if classifyQualityHoldShadowed(state.signals()) != QualityWithhold {
 		t.Fatalf("responses reasoning item header alone must withhold: %#v", state.signals())
 	}
 }
@@ -286,7 +273,7 @@ func TestObserveQualityChunkResponsesReasoningDeltaDelivers(t *testing.T) {
 		`data: {"type":"response.output_text.delta","delta":"hello"}`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"output_tokens":90,"output_tokens_details":{"reasoning_tokens":60}}}}`,
 	)))
-	if classifyQualityHold(state.signals()) != QualityDeliver {
+	if classifyQualityHoldShadowed(state.signals()) != QualityDeliver {
 		t.Fatalf("responses reasoning text delta should deliver: %#v", state.signals())
 	}
 }
@@ -330,8 +317,8 @@ func TestPeekWithholdsOutputWithoutThinkingAnyLength(t *testing.T) {
 	if verdict != QualityWithhold {
 		t.Fatalf("verdict=%s usage=%#v", verdict, usage)
 	}
-	if usage.ReasoningTokens != 0 || usage.OutputTokens < 32 {
-		t.Fatalf("usage=%#v", usage)
+	if usage.Reported {
+		t.Fatalf("the later usage frame must not delay interception: %#v", usage)
 	}
 	// 2-rune 答案同样必须扣留：无思考的正文不论长短都是降智形态。
 	short := io.NopCloser(strings.NewReader(sse(
@@ -356,7 +343,7 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 		`data: {"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":0}}}`,
 		"data: [DONE]",
 	)
-	cfg := QualityRetryRuntime{MaxAttempts: 2, OnExhausted: qualityRetryFailOpen}
+	cfg := QualityRetryRuntime{MaxAttempts: 2, OnExhausted: qualityRetryFailClosed}
 
 	replay, verdict, usage, err := peekQualityStream(context.Background(), io.NopCloser(strings.NewReader(fixture)), qualityProtocolChat, cfg)
 	if err != nil {
@@ -366,7 +353,7 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	if verdict != QualityWithhold {
 		t.Fatalf("first peek verdict=%s usage=%#v", verdict, usage)
 	}
-	if got := decideQualityRetry(verdict, 0, cfg.MaxAttempts, cfg.OnExhausted); got != QualityActionRetry {
+	if got := decideQualityRetry(verdict, 0, cfg.MaxAttempts); got != QualityActionRetry {
 		t.Fatalf("first withhold action=%s", got)
 	}
 
@@ -378,18 +365,19 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	if verdict2 != QualityWithhold {
 		t.Fatalf("second peek verdict=%s", verdict2)
 	}
-	action2 := decideQualityRetry(verdict2, 1, cfg.MaxAttempts, cfg.OnExhausted)
-	action2 = boundQualityRetry(action2, false, cfg.OnExhausted)
-	if action2 != QualityActionDeliverLast {
-		t.Fatalf("second withhold fail-open action=%s", action2)
+	// G12:耗尽即 Reject——无下一跳时同样 Reject,绝无 DeliverLast 兜底。
+	action2 := decideQualityRetry(verdict2, 1, cfg.MaxAttempts)
+	action2 = boundQualityRetry(action2, false)
+	if action2 != QualityActionReject {
+		t.Fatalf("second withhold exhausted action=%s", action2)
 	}
 	got, _ := io.ReadAll(replay2)
 	if !strings.Contains(string(got), content) {
-		t.Fatalf("fail-open must still deliver the last body, got %q", got)
+		t.Fatalf("replay body must still be readable for audit, got %q", got)
 	}
 }
 
-func TestPeekWithholdInterruptsBlockedReadAndPreservesRemainder(t *testing.T) {
+func TestPeekWithholdClosesUpstreamImmediately(t *testing.T) {
 	t.Parallel()
 	reader, writer := io.Pipe()
 	first := sse(`data: {"choices":[{"delta":{"content":"hi"}}]}`)
@@ -433,11 +421,11 @@ func TestPeekWithholdInterruptsBlockedReadAndPreservesRemainder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := <-writeErr; err != nil {
-		t.Fatal(err)
+	if err := <-writeErr; !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("withhold must abort the producer before returning: %v", err)
 	}
-	if got := string(body); !strings.Contains(got, "hi") || !strings.Contains(got, "after timeout") {
-		t.Fatalf("replay lost streamed bytes: %q", got)
+	if got := string(body); !strings.Contains(got, "hi") || strings.Contains(got, "after timeout") {
+		t.Fatalf("withheld replay should contain only the observed prefix: %q", got)
 	}
 }
 
@@ -532,41 +520,41 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 	cfg := QualityRetryRuntime{Enabled: true, MaxAttempts: 2}
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6", PublicID: "grok-4.6"}
 	input := Input{Streaming: true, PublicModel: "grok-4.6"}
-	if !shouldHoldQualityStream(input, nil, route, audit.OperationChat, cfg) {
+	if !shouldHoldQualityStream(input, nil, route, audit.OperationChat, cfg, nil) {
 		t.Fatal("expected hold on thinking build chat")
 	}
 	nonStreamChat := input
 	nonStreamChat.Streaming = false
-	if !shouldHoldQualityStream(nonStreamChat, nil, route, audit.OperationChat, cfg) {
+	if !shouldHoldQualityStream(nonStreamChat, nil, route, audit.OperationChat, cfg, nil) {
 		t.Fatal("non-stream chat must hold")
 	}
 	off := cfg
 	off.Enabled = false
-	if shouldHoldQualityStream(input, nil, route, audit.OperationChat, off) {
+	if shouldHoldQualityStream(input, nil, route, audit.OperationChat, off, nil) {
 		t.Fatal("disabled must not hold")
 	}
 	owned := inferencedomain.ResponseOwnership{ResponseID: "r1", AccountID: 1}
-	if !shouldHoldQualityStream(input, &owned, route, audit.OperationChat, cfg) {
+	if !shouldHoldQualityStream(input, &owned, route, audit.OperationChat, cfg, nil) {
 		t.Fatal("pinned previous_response_id must still hold")
 	}
 	// 非推理操作族全部走同一豁免分支——逐一钉住，防止未来有人在门里
 	// 加操作白名单时漏掉某个媒体操作（video/media/tts/embedding）。
 	for _, operation := range []audit.Operation{audit.OperationImage, audit.OperationImageEdit, audit.OperationVideo, audit.OperationTTS, audit.OperationSTT, audit.OperationRealtime, audit.OperationVoice} {
-		if shouldHoldQualityStream(input, nil, route, operation, cfg) {
+		if shouldHoldQualityStream(input, nil, route, operation, cfg, nil) {
 			t.Fatalf("%s must not hold", operation)
 		}
 	}
-	if shouldHoldQualityStream(input, nil, route, audit.OperationCompaction, cfg) {
+	if shouldHoldQualityStream(input, nil, route, audit.OperationCompaction, cfg, nil) {
 		t.Fatal("codex compaction operation must not hold")
 	}
 	classified := input
 	classified.skipQualityHold = true
-	if shouldHoldQualityStream(classified, nil, route, audit.OperationResponses, cfg) {
+	if shouldHoldQualityStream(classified, nil, route, audit.OperationResponses, cfg, nil) {
 		t.Fatal("gateway-classified compaction must not hold")
 	}
 	tui := input
 	tui.Body = []byte(`{"input":[{"role":"user","content":"` + tuiCompactionPrompt + `"}]}`)
-	if shouldHoldQualityStream(tui, nil, route, audit.OperationResponses, cfg) {
+	if shouldHoldQualityStream(tui, nil, route, audit.OperationResponses, cfg, nil) {
 		t.Fatal("tui compaction prompt must not hold even when tagged responses")
 	}
 	// reasoning_disabled 豁免已删除：守卫白名单内的模型
@@ -586,7 +574,7 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
-			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg, nil) {
 				t.Fatal("explicit disable on none-incapable model must stay gated (exemption removed)")
 			}
 		})
@@ -612,7 +600,7 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
-			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg, nil) {
 				t.Fatal("tools schema declaration alone must still hold so TUI thinking turns are classified")
 			}
 		})
@@ -632,15 +620,15 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
-			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
+			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg, nil) {
 				t.Fatal("tool results in context must not exempt the hold (stream-characteristic verdict)")
 			}
 		})
 	}
 	toolCache := input
 	toolCache.Body = []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	toolCache.AllowClientToolCacheRoute = true
-	if !shouldHoldQualityStream(toolCache, nil, route, audit.OperationChat, cfg) {
+	toolCache.PromptCacheKey = "client-cache-identity"
+	if !shouldHoldQualityStream(toolCache, nil, route, audit.OperationChat, cfg, nil) {
 		t.Fatal("client identity/cache compatibility alone must not disable the hold")
 	}
 }
@@ -653,7 +641,7 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	auditRepo := relational.NewAuditRepository(database)
 	responseRepo := relational.NewResponseRepository(database)
 	keyRepo := relational.NewClientKeyRepository(database)
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll,
 		Name: "quality-loop-key", Prefix: "qhold", SecretHash: strings.Repeat("f", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
 	})
@@ -681,8 +669,8 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailOpen})
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailClosed})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-hold", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
@@ -695,7 +683,7 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 		t.Fatalf("status = %d", result.StatusCode)
 	}
 	body, _ := io.ReadAll(result.Body)
-	result.Finalize(Usage{Reported: true, OutputTokens: 80, ReasoningTokens: 40}, "chat-ok", "")
+	finishTestResult(t, result, Usage{Reported: true, OutputTokens: 80, ReasoningTokens: 40}, "chat-ok", "")
 	_ = result.Body.Close()
 	if !strings.Contains(string(body), "good game after retry") || !strings.Contains(string(body), "thinking_content") {
 		t.Fatalf("client must receive the second attempt body, got %s", body)
@@ -724,12 +712,13 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !noThinkingAccount.Enabled || noThinkingAccount.LastError != lastErrorMissingThinking || noThinkingAccount.CooldownUntil == nil {
-		t.Fatalf("missing-thinking account was not cooled: %#v", noThinkingAccount)
+	if !noThinkingAccount.Enabled || noThinkingAccount.LastError != "" || noThinkingAccount.CooldownUntil != nil {
+		t.Fatalf("quality hold changed manual or health state: %#v", noThinkingAccount)
 	}
-	if remaining := time.Until(*noThinkingAccount.CooldownUntil); remaining < 11*time.Hour || remaining > 12*time.Hour+time.Minute {
-		t.Fatalf("missing-thinking cooldown = %s, want about 12h", remaining)
+	if selector.localQualityAllowed(noThinkingAccount.ID, time.Now()) {
+		t.Fatal("rejected account missing temporary hold")
 	}
+
 	logs, total, err := auditRepo.List(ctx, 0, 20)
 	if err != nil {
 		t.Fatal(err)
@@ -770,7 +759,7 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	}
 }
 
-func TestAttemptLoopQualityHoldFailOpenKeepsSingleAccountBody(t *testing.T) {
+func TestAttemptLoopQualityHoldSingleAccountRejectsWhenExhausted(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "quality-hold-single.db"))
 	if err != nil {
@@ -795,13 +784,13 @@ func TestAttemptLoopQualityHoldFailOpenKeepsSingleAccountBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll,
 		Name: "quality-single-key", Prefix: "qsingle", SecretHash: strings.Repeat("e", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
 	})
@@ -822,26 +811,22 @@ func TestAttemptLoopQualityHoldFailOpenKeepsSingleAccountBody(t *testing.T) {
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailOpen,
+		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailClosed,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-single", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
 		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"write a game"}],"stream":true}`),
 	})
-	if err != nil {
-		t.Fatalf("fail-open should deliver the only account body, err=%v", err)
+	// G12:唯一账号扣留且无下一跳 ⇒ Reject(503),绝无 fail-open 交付。
+	if err == nil {
+		_ = result.Body.Close()
+		t.Fatal("exhausted withhold must reject, got a delivered response")
 	}
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result.Finalize(Usage{Reported: true, OutputTokens: 40}, "chat-single", "")
-	_ = result.Body.Close()
-	if !strings.Contains(string(body), content) {
-		t.Fatalf("fail-open lost the held body: %s", body)
+	if !errors.Is(err, errQualityDegraded) {
+		t.Fatalf("reject cause must be quality degraded: %v", err)
 	}
 	if attempts := adapter.Attempts(); len(attempts) != 1 || attempts[0] != credential.ID {
 		t.Fatalf("single-account pool must not enter a fake retry, attempts=%#v", attempts)
@@ -850,12 +835,15 @@ func TestAttemptLoopQualityHoldFailOpenKeepsSingleAccountBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cooled.Enabled || cooled.LastError != lastErrorMissingThinking || cooled.CooldownUntil == nil {
-		t.Fatalf("delivered fail-open response must still cool the no-thinking account: %#v", cooled)
+	if !cooled.Enabled || cooled.LastError != "" || cooled.CooldownUntil != nil {
+		t.Fatalf("quality hold changed manual or health state: %#v", cooled)
+	}
+	if selector.localQualityAllowed(cooled.ID, time.Now()) {
+		t.Fatal("rejected account missing temporary hold")
 	}
 }
 
-func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
+func TestAttemptLoopQualityRejectAndTotalAttemptCap(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "quality-hold-fallback.db"))
 	if err != nil {
@@ -885,15 +873,15 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 		}
 		credentials = append(credentials, credential)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, credential := range credentials {
-		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+		if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll,
 		Name: "quality-fallback-key", Prefix: "qfallback", SecretHash: strings.Repeat("d", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
 	})
@@ -916,37 +904,40 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailOpen,
+		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailClosed,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-fallback", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
 		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"write a game"}],"stream":true}`),
 	})
-	if err != nil {
-		t.Fatalf("fail-open should return the retained response after later failures: %v", err)
-	}
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result.Finalize(Usage{Reported: true, OutputTokens: 48}, "chat-fallback", "")
-	_ = result.Body.Close()
-	if !strings.Contains(string(body), content) {
-		t.Fatalf("retained fail-open response was lost: %s", body)
+	// G12:首个扣留即 Reject(无 DeliverLast 兜底);后续账号的传输失败照常
+	// 占满 attempt 预算,请求以最终失败收场,不再保留任何降智响应。
+	if err == nil {
+		_ = result.Body.Close()
+		t.Fatal("exhausted withhold must reject, got a delivered response")
 	}
 	if attempts := adapter.Attempts(); len(attempts) != 6 || attempts[0] != credentials[0].ID {
 		t.Fatalf("requestRetry must cap real account attempts at 6, attempts=%#v", attempts)
+	}
+	// I5:同一脏路径重试恢复率≈0——降智触发的重试必须换号,
+	// 6 次尝试全部落在不同账号上(同号重试已废除 G14)。
+	seen := map[uint64]bool{}
+	for _, id := range adapter.Attempts() {
+		if seen[id] {
+			t.Fatalf("withhold retry must rotate accounts, revisited %d in %#v", id, adapter.Attempts())
+		}
+		seen[id] = true
 	}
 	logs, _, err := auditRepo.List(ctx, 0, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range logs {
-		if record.ErrorCode == ErrorQualityDegraded && record.AccountID != nil && *record.AccountID == credentials[0].ID {
-			t.Fatal("the delivered fallback must not be audited as a discarded quality attempt")
+		if record.StatusCode == http.StatusOK && record.AccountID != nil && *record.AccountID == credentials[0].ID {
+			t.Fatal("the withheld degraded attempt must not be delivered or audited as success")
 		}
 	}
 }
@@ -954,7 +945,7 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 func TestNormalizeQualityRetryDefaults(t *testing.T) {
 	t.Parallel()
 	got := normalizeQualityRetry(QualityRetryRuntime{Enabled: true})
-	if !got.Enabled || got.MaxAttempts != 2 || got.OnExhausted != qualityRetryFailClosed || got.AccountCooldown != 12*time.Hour || got.IdleAccountCooldown != 15*time.Minute {
+	if !got.Enabled || got.MaxAttempts != 2 || got.OnExhausted != qualityRetryFailClosed || got.AccountCooldown != 2*time.Minute || got.IdleAccountCooldown != 15*time.Minute {
 		t.Fatalf("defaults = %#v", got)
 	}
 	if got.EvidenceTimeout != 3500*time.Millisecond {

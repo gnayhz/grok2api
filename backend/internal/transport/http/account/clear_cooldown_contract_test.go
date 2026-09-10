@@ -20,7 +20,8 @@ import (
 func TestClearCooldownContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "clear-cooldown-contract.db"))
+	databasePath := filepath.Join(t.TempDir(), "clear-cooldown-contract.db")
+	database, err := relational.OpenSQLite(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +46,7 @@ func TestClearCooldownContract(t *testing.T) {
 
 	// 制造一个带打击标记的冷却（模拟 missing-thinking 一次打击后的状态）。
 	until := time.Now().UTC().Add(time.Hour)
-	if err := repo.UpdateHealth(ctx, created.ID, accountdomain.ProviderBuild, 2, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
+	if err := seedHealthFixture(databasePath, ctx, created.ID, accountdomain.ProviderBuild, 2, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
 		t.Fatal(err)
 	}
 

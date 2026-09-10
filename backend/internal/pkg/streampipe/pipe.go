@@ -10,7 +10,58 @@ import (
 	"fmt"
 	"io"
 	"runtime/debug"
+	"sync"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 )
+
+// Transform owns both ends of a stream conversion. Closing the returned body
+// interrupts upstream reads as well as downstream writes, including through
+// nested transformations. The producer closes the source once on completion.
+func Transform(source io.ReadCloser, transform func(io.Reader, io.Writer) error) io.ReadCloser {
+	return Produce(source, func(writer io.Writer) error { return transform(source, writer) })
+}
+
+// Produce adapts a producer whose input is message-oriented (for example a
+// WebSocket). Closing the body closes its source and waits for final facts and
+// resource release, with the same panic boundary as byte-stream transforms.
+func Produce(source io.Closer, produce func(io.Writer) error) io.ReadCloser {
+	reader, writer := io.Pipe()
+	stream := &transformReader{PipeReader: reader, source: source, done: make(chan struct{})}
+	go func() {
+		defer close(stream.done)
+		defer stream.closeSource()
+		Run(writer, func() error { return produce(writer) })
+	}()
+	return stream
+}
+
+type transformReader struct {
+	*io.PipeReader
+	source    io.Closer
+	closeOnce sync.Once
+	closeErr  error
+	done      chan struct{}
+}
+
+func (r *transformReader) ResponseBudget() *responsebuffer.Budget {
+	return responsebuffer.BudgetOf(r.source)
+}
+
+func (r *transformReader) Close() error {
+	readerErr := r.PipeReader.Close()
+	sourceErr := r.closeSource()
+	<-r.done
+	if readerErr != nil {
+		return readerErr
+	}
+	return sourceErr
+}
+
+func (r *transformReader) closeSource() error {
+	r.closeOnce.Do(func() { r.closeErr = r.source.Close() })
+	return r.closeErr
+}
 
 // PanicError 表示流管道写端发生 panic;堆栈仅供服务端日志,不返回客户端。
 type PanicError struct {

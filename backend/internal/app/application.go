@@ -2,17 +2,18 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	"github.com/chenyme/grok2api/backend/internal/application/account/risk"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
@@ -20,6 +21,7 @@ import (
 	dashboardapp "github.com/chenyme/grok2api/backend/internal/application/dashboard"
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
 	invalidationapp "github.com/chenyme/grok2api/backend/internal/application/invalidation"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
@@ -31,67 +33,101 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
+	"github.com/chenyme/grok2api/backend/internal/infra/mediafetch"
 	"github.com/chenyme/grok2api/backend/internal/infra/observability"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
-	"github.com/chenyme/grok2api/backend/internal/infra/rsc"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
-	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
+	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
+	qualityenforcement "github.com/chenyme/grok2api/backend/internal/quality/enforcement"
+	"github.com/chenyme/grok2api/backend/internal/quality/events"
+	qualityevidence "github.com/chenyme/grok2api/backend/internal/quality/evidence"
+	qualityguard "github.com/chenyme/grok2api/backend/internal/quality/guard"
+	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
+	"github.com/chenyme/grok2api/backend/internal/quality/journal"
+	qualitymanagement "github.com/chenyme/grok2api/backend/internal/quality/management"
+	qualityproxy "github.com/chenyme/grok2api/backend/internal/quality/proxy"
+	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
 	httpmiddleware "github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
-)
-
-const (
-	responseOwnershipCleanupBatchSize = 1000
-	webResponseStateCleanupBatchSize  = 50
-	responseCleanupMaxBatches         = 100
-	responseCleanupInterval           = 5 * time.Minute
-	responseCleanupBudget             = 30 * time.Second
-	responseCleanupLockTTL            = 2 * time.Minute
+	qualityhttp "github.com/chenyme/grok2api/backend/internal/transport/http/quality"
 )
 
 // Application 管理后端进程生命周期和本地后台任务。
 type Application struct {
-	logger          *slog.Logger
-	database        *relational.Database
-	server          *http.Server
-	audits          *auditapp.Service
-	auditRetention  time.Duration
-	responses       repository.ResponseRepository
-	cleanupLock     repository.DistributedLock
-	runtime         io.Closer
-	settingsBus     repository.SettingsChangeBus
-	invalidationBus repository.InvalidationBus
-	settings        *settingsapp.Service
-	gateway         *gateway.Service
-	media           *mediaapp.Service
-	updateCheck     bool
-	quotaRecovery   *quotarecoveryapp.Service
-	accounts        *accountapp.Service
-	models          *modelapp.Service
-	clientKeys      *clientkeyapp.Service
-	updates         *updatecheckapp.Service
-	invalidations   *invalidationapp.Service
-	accountRepo     repository.AccountRepository
-	modelRepo       repository.ModelRepository
-	providers       *provider.Registry
-	web             *webprovider.Adapter
-	egress          *infraegress.Manager
-	egressOps       *egressapp.Service
-	accountRisk     *risk.Service
-	startup         *startupState
+	lifecycleMu        sync.Mutex
+	closeMu            sync.Mutex
+	closing            bool
+	closed             bool
+	runCancel          context.CancelFunc
+	runDone            chan struct{}
+	backgroundDone     chan struct{}
+	serverDone         chan struct{}
+	requests           *httpRequests
+	httpDrainTimeout   time.Duration
+	shutdownJoinBudget time.Duration
+	logger             *slog.Logger
+	database           *relational.Database
+	server             *http.Server
+	audits             *auditapp.Service
+	auditJournal       *relational.AuditJournal
+	historyRetention   *historyapp.Retention
+	runtime            io.Closer
+	qualityTunables    *qualitymanagement.Service
+	settingsBus        repository.SettingsChangeBus
+	invalidationBus    repository.InvalidationBus
+	settings           *settingsapp.Service
+	gateway            *gateway.Service
+	media              *mediaapp.Service
+	updateCheck        bool
+	quotaRecovery      *quotarecoveryapp.Service
+	accounts           *accountapp.Service
+	models             *modelapp.Service
+	clientKeys         *clientkeyapp.Service
+	updates            *updatecheckapp.Service
+	invalidations      *invalidationapp.Service
+	accountRepo        repository.AccountRepository
+	modelRepo          repository.ModelRepository
+	providers          *provider.Registry
+	web                *webprovider.Adapter
+	egress             *infraegress.Manager
+	egressOps          *egressapp.Service
+	startup            *startupState
+	// Quality owns durable evidence and restrictions; request receipts reach
+	// it through the leased incident outbox.
+	quality         *qualityregistry.Registry
+	qualityEvidence *qualityevidence.Store
+	// qualityCourt/qualityInvestigator 是有限仲裁闭环与调查任务队列。
+	qualityCourt        *qualitycourt.Service
+	qualityInvestigator *qualityinvestigator.Service
+	// qualityEnforcement 执行所(重写批4):IP-epoch 检测循环+台账+
+	// 人工解禁/批量轮换(API 入口在批5)。
+	qualityEnforcement *qualityenforcement.Service
+	// qualityProbeExec 调查局真实探针执行器(批6 第4步):
+	// 差分/陪审员取证经网关质量探针的 bypass 通道。
+	qualityProbeExec qualityinvestigator.Executor
+	qualityEvents    *events.Service
+	qualityJournal   *journal.Store
+	qualityGuard     *qualityguard.Service
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
-func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Application, error) {
+func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Application, resultErr error) {
+	owned := &Application{logger: logger}
+	constructed := false
+	defer func() {
+		if !constructed {
+			resultErr = errors.Join(resultErr, owned.Close())
+		}
+	}()
 	var database *relational.Database
 	var err error
 	switch cfg.Database.Driver {
@@ -105,15 +141,23 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	if err != nil {
 		return nil, err
 	}
+	owned.database = database
 	if err := database.InitializeSchema(ctx); err != nil {
-		database.Close()
 		return nil, err
 	}
+	// Open the quality state pool and reconstruct evidence/identity projections.
+	qualityRegistry, qualityEvidenceStore, err := bootstrapQualityLayer(ctx, cfg, logger, relational.NewAccountRepository(database))
+	if err != nil {
+		return nil, err
+	}
+	owned.quality = qualityRegistry
+	logger.Info("quality_registry_ready",
+		"accounts_tracked", qualityRegistry.AccountsTracked(),
+		"exits_tracked", qualityRegistry.ExitsTracked())
 	// VersionedCipher：轮换 credentialEncryptionKey 后把旧密钥配置进
 	// secrets.legacyCredentialEncryptionKeys，存量凭据经回退继续可解。
 	cipher, err := security.NewVersionedCipher(cfg.Secrets.CredentialEncryptionKey, cfg.Secrets.LegacyEncryptionKeys)
 	if err != nil {
-		database.Close()
 		return nil, err
 	}
 
@@ -132,19 +176,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	mediaUploadTicketRepo := relational.NewMediaUploadTicketRepository(database)
 	// 文件基线在持久化覆盖前留存，供设置「恢复文件默认」使用。
 	fileCfg := cfg
+	if err := settingsapp.MigrateLegacyQualityRotation(ctx, cfg, runtimeSettingsRepo); err != nil {
+		return nil, fmt.Errorf("migrate quality rotation capacity: %w", err)
+	}
 	loadedConfig, settingsUpdatedAt, settingsRevision, err := settingsapp.LoadPersisted(ctx, cfg, runtimeSettingsRepo)
 	if err != nil {
-		database.Close()
 		return nil, err
 	}
 	cfg = loadedConfig
+	identity := sha256.Sum256([]byte(cfg.Deployment.ClusterID + "\x00" + cfg.Deployment.InstanceID))
+	auditJournal, err := relational.OpenAuditJournal(ctx, filepath.Join(cfg.Audit.JournalDirectory, fmt.Sprintf("pending-%x.db", identity[:16])), relational.AuditJournalOptions{MaxRecords: cfg.Audit.BufferSize, MaxBytes: cfg.Audit.JournalMaxBytes})
+	if err != nil {
+		return nil, fmt.Errorf("open audit journal: %w", err)
+	}
+	owned.auditJournal = auditJournal
 	localMediaStore, err := inframedia.NewLocalStore(cfg.Media.Local.Path)
 	if err != nil {
-		database.Close()
 		return nil, err
 	}
 	if err := preflightDeployment(cfg); err != nil {
-		database.Close()
 		return nil, err
 	}
 	var rateLimiter repository.RateLimiter
@@ -169,10 +219,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			ConcurrencyLease: cfg.Server.RequestTimeout.Value() + time.Minute,
 		})
 		if openErr != nil {
-			database.Close()
 			return nil, openErr
 		}
 		runtimeStore = redisStore
+		owned.runtime = redisStore
 		invalidationBus = redisStore
 		runtimeHealth = redisStore.Ping
 		rateLimiter = redisStore
@@ -195,19 +245,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		quotaQueue = memory.NewQuotaRecoveryQueue()
 		quotaRefreshState = memory.NewQuotaRefreshCoordinator()
 	default:
-		database.Close()
 		return nil, fmt.Errorf("不支持的运行态驱动: %s", cfg.RuntimeStore.Driver)
 	}
 	logger.Info("deployment_topology", "replicas", cfg.Deployment.Replicas, "instance_id", cfg.Deployment.InstanceID, "cluster_id", cfg.Deployment.ClusterID, "database", cfg.Database.Driver, "runtime_store", cfg.RuntimeStore.Driver, "media_driver", cfg.Media.Driver, "shared_media", cfg.Deployment.SharedMedia)
 	if cfg.Deployment.Replicas > 1 {
-		// L2 软冷却/跨账号降智证据/轮换队列为进程内状态:多副本下跨账号确认
-		// 阈值实际按副本放大(需 threshold×N 个账号落在同一副本), 运维按单副本
-		// 语义配置会得到不符预期的隔离灵敏度。
-		logger.Warn("deployment_topology_guard_state_replica_local", "replicas", cfg.Deployment.Replicas, "hint", "qualityGuard cross-account evidence and soft cooldowns are per-replica")
+		logger.Info("deployment_topology_shared_quality", "replicas", cfg.Deployment.Replicas, "state", "database_authoritative", "probe_limit", "shared_runtime")
 	}
 	mediaService := mediaapp.NewServiceWithTickets(mediaAssetRepo, mediaJobRepo, mediaUploadTicketRepo, localMediaStore, refreshLock, mediaConfig(cfg))
+	mediaImporter := mediaapp.NewImageInputImporter(mediaService, mediafetch.NewImageSource())
 
-	egressManager := infraegress.NewManager(egressRepo, cipher)
+	egressManager := infraegress.NewManagerWithLimits(egressRepo, cipher, cfg.Egress.Runtime.LimitsValue())
+	owned.egress = egressManager
 	egressManager.SetLogger(logger)
 	egressManager.SetClearanceLock(refreshLock)
 	egressManager.UpdateClearanceConfig(clearanceConfig(cfg))
@@ -221,31 +269,33 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		StreamIdleTimeout:     cfg.Provider.Build.StreamIdleTimeout.Value(),
 	}, cipher)
 	cliAdapter.SetLogger(logger)
-	cliAdapter.SetEgress(egressManager)
+	// Manager owns Build route selection and transport. The adapter records
+	// already-selected paths for the quality management distribution view.
+	qualityDialerPolicy := qualityproxy.NewDialerPolicy()
+	cliAdapter.SetEgress(qualityProxyDialer{manager: egressManager, policy: qualityDialerPolicy})
 	cliAdapter.SetVideoUploadIssuer(mediaService)
-	reasoningReplay := reasoningreplay.New(reasoningReplayStore, reasoningreplay.Config{
+	reasoningReplay := historyapp.New(reasoningReplayStore, historyapp.Config{
 		Enabled: cfg.Routing.ReasoningReplayEnabled,
 		TTL:     cfg.Routing.ReasoningReplayTTL.Value(),
 	}, logger)
+	conversationJournal := relational.NewConversationJournal(database, cipher, cfg.Routing.ConversationHistoryMaxBytes).WithHotCache(reasoningReplayStore, cfg.Routing.ReasoningReplayTTL.Value())
+	legacyReplayAccounts, err := conversationJournal.LegacyBuildAccountIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取历史账号迁移索引: %w", err)
+	}
+	cliAdapter.SetLegacyReplayAccounts(legacyReplayAccounts)
+	reasoningReplay.UseJournal(conversationJournal, cfg.Routing.ConversationHistoryRetention.Value(), 30*time.Minute)
 	cliAdapter.SetReasoningReplay(reasoningReplay)
-	webAdapter := webprovider.NewAdapter(webProviderConfig(cfg), egressManager, cipher, responseRepo, mediaService)
+	webAdapter := webprovider.NewAdapter(webProviderConfig(cfg), egressManager, cipher, historyapp.NewResponseResources(responseRepo), mediaService)
 	webAdapter.SetLogger(logger)
 	consoleAdapter := consoleprovider.NewAdapter(consoleProviderConfig(cfg), egressManager, cipher, mediaService)
 	providers := provider.NewRegistry(cliAdapter, webAdapter, consoleAdapter)
 	if err := providers.Validate(); err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
 		return nil, fmt.Errorf("校验 Provider 注册表: %w", err)
 	}
 	adminService := adminauth.NewService(adminRepo, sessionRepo, security.NewTokenService(cfg.Secrets.JWTSecret), cfg.Auth.AccessTokenTTL.Value(), cfg.Auth.RefreshTokenTTL.Value())
 	adminService.SetLoginRateLimiter(rateLimiter)
 	if err := adminService.Bootstrap(ctx, cfg.BootstrapAdmin.Username, cfg.BootstrapAdmin.Password); err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
 		return nil, err
 	}
 	bulkPool := batch.NewSharedPool(maxBatchConcurrency(cfg.Batch), concurrency, "bulk:upstream")
@@ -269,73 +319,52 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
 	accountService.SetDetectPool(detectPool)
 	if err := accountService.RebuildBuildBotFlagIndex(ctx); err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
 		return nil, fmt.Errorf("重建 Build 风控路由索引: %w", err)
 	}
 	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
 	if err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
 		return nil, fmt.Errorf("加载 Web 额度恢复事件: %w", err)
 	}
 	for _, window := range windows {
 		if window.ResetAt != nil {
 			if err := quotaQueue.ScheduleQuotaRecovery(ctx, account.QuotaRecoveryEvent{AccountID: window.AccountID, Mode: window.Mode, DueAt: *window.ResetAt}); err != nil {
-				if runtimeStore != nil {
-					_ = runtimeStore.Close()
-				}
-				database.Close()
 				return nil, fmt.Errorf("恢复 Web 额度事件: %w", err)
 			}
 		}
 	}
 	modelService := modelapp.NewService(modelRepo, accountRepo, accountService, providers)
+	owned.models = modelService
 	modelService.SetBulkPool(syncPool)
 	modelService.SetLogger(logger)
-	if err := modelRepo.ReplaceProviderRoutes(ctx, account.ProviderWeb, webprovider.Routes()); err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
-		return nil, fmt.Errorf("初始化 Grok Web 模型目录: %w", err)
-	}
-	if err := modelRepo.ReplaceProviderRoutes(ctx, account.ProviderConsole, consoleprovider.Routes()); err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
-		}
-		database.Close()
-		return nil, fmt.Errorf("初始化 Grok Console 模型目录: %w", err)
+	if err := modelService.PublishCatalogs(ctx); err != nil {
+		return nil, err
 	}
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
 	accountSyncService.SetBulkPool(importPool)
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
 	egressService := egressapp.NewService(egressRepo, cipher)
+	owned.egressOps = egressService
+	egressService.SetHTTPTransportOwner(egressManager)
+	egressService.SetRotationCoordination(refreshLock, rateLimiter.(repository.RollingRateLimiter))
 	egressService.SetClearanceManager(egressManager)
 	egressService.SetNodeProber(egressManager)
 	egressService.SetOperationsConfigInvalidator(egressManager)
 	egressService.SetPoolCacheInvalidator(egressManager)
 	egressManager.SetFailureProber(egressService.TestNode)
-	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
+	clientKeyService := clientkeyapp.NewService(fmt.Sprintf("%x", identity[:16]), clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
+	owned.clientKeys = clientKeyService
 	// 媒体作业预检/清理：删除 key 前处置 media_jobs 的 RESTRICT 外键引用
+	// qualityQuarantiner 现仅承载死出口传输冷却(probe_dead),质量隔离态已删。
 	egressService.SetQualityQuarantiner(egressManager)
-	egressService.SetQualityGuardConfig(egressQualityGuardConfig(cfg))
-	// L2 软冷却时长接通配置:此前字段已文档化但从未接线, 取值被静默忽略。
-	egressManager.SetDegradeEvidenceCooldowns(cfg.Egress.QualityGuard.SoftCooldownBase.Value(), cfg.Egress.QualityGuard.SoftCooldownMax.Value())
 	egressService.SetQualityLogger(logger)
 	egressService.SetRotationConfig(egressRotationConfig(cfg))
 	egressService.SetRotationLogger(logger)
 	//（round 51：失败视频作业曾使 key 不可删并落裸 500）。
-	clientKeyService.SetMediaJobRepository(mediaJobRepo)
-	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
+	auditService := auditapp.NewService(auditRepo, auditJournal, logger, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
+	owned.audits = auditService
 	auditService.UpdateWriterConfig(cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value(), cfg.Audit.CommitDelay.Value())
 	auditService.UpdateLedgerConfig(auditLedgerConfig(cfg.Audit))
-	auditService.SetCommitObserver(clientKeyService.CompleteBillingBatch)
-	auditService.SetDropObserver(clientKeyService.ReleaseBillingProtectionBatch)
+	auditService.SetBillingObserver(clientKeyService)
 	dashboardService := dashboardapp.NewService(dashboardRepo)
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
 	selector.SetLogger(logger)
@@ -349,31 +378,64 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		clientKeyService.ApplyInvalidation(event)
 	}, logger)
 	accountRepo.SetInvalidationObserver(invalidationService.Notify)
+	if err := accountRepo.MigrateLegacyQualityHolds(ctx, time.Now().UTC()); err != nil {
+		return nil, fmt.Errorf("migrate guard restrictions: %w", err)
+	}
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
-	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.RequestRetry))
-	// 账号风险归因服务始终构建(含关闭状态)：全部运行入口按 Enabled() 门控，
-	// enabled/patrol.enabled 属运行时设置面，可在管理端即时翻转无需重启。
-	riskService := newAccountRiskService(ctx, cfg, database, accountService, logger, egressManager)
-	gatewayService.UpdateAccountRisk(riskService)
-	// RSC 归因 clean → 出口 IP 嫌疑：交给 egress 服务隔离+换 IP。
-	riskService.SetEgressQuarantiner(egressService)
-	// 未关联 SSO 的 Build 走网关差分探针兜底(有关联时 SSO 探针优先)。
-	riskService.SetBuildProber(buildProberAdapter{Gateway: gatewayService})
-	// 人工解除风险标记时级联删除身份组 verdict(否则被对账/降智回滚)。
-	accountService.SetRiskVerdictClearer(riskService)
-	// 当前探针构建键(method+timeout)：设置回调仅在键变化时重建探针，
-	// 避免无关保存重置 SSO 探针的通道活力熔断窗口。
-	currentRSCProxyURL := ""
-	if egressManager != nil {
-		currentRSCProxyURL = egressManager.ProbeProxyURL(ctx)
+	// This synthetic scanner diagnostic has no instance configuration. Actual
+	// requests receive the kernel and policy from the guard snapshot below.
+	if err := gateway.GuardSelfCheck(); err != nil {
+		logger.Error("guard_self_check_failed", "error", err.Error())
+	} else {
+		logger.Info("guard_self_check", "outcome", "ok")
 	}
-	currentRSCCheckerKey := rscCheckerBuildKey(cfg.AccountRisk.RSCCheck, currentRSCProxyURL)
-	// 出口降级观测（跨账号确认兜底）+ canary 验证都由 gateway 提供。
-	gatewayService.UpdateEgressGuard(egressService)
-	gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(cfg))
-	egressService.SetEgressQualityProber(gatewayService)
+	// Quality supplies eligibility facts; final admission checks persistent
+	// restrictions. Request receipts enter its durable Journal through events.
+	qualityJournal := journal.New(qualityRegistry.DB())
+	gatewayService.SetAccountQualityEligibility(qualityAccountEligibility{registry: qualityRegistry, journal: qualityJournal})
+	egressManager.SetExitEligibility(qualityExitEligibility{registry: qualityRegistry})
+	// 审判系:有限仲裁评估+调查局任务队列。立案即冻结状态并派发
+	// 一轮差分/陪审探针。
+	qualityCourtService, qualityInvestigatorService := bootstrapJudicialLayer(qualityRegistry, qualityEvidenceStore, logger)
+	owned.qualityCourt = qualityCourtService
+	qualityCourtService.SetProbeAccounts(gatewayService)
+	qualityCourtService.SetNodes(baseNodeSource{egress: egressService})
+	// 被告存活缝:账号删除后法院销案,杜绝差分探针对不存在账号的
+	// 无限重派(批9 事故根因:load account 永远失败被统一术语掩盖)。
+	qualityCourtService.SetAccountExists(func(ctx context.Context, accountID uint64) bool {
+		_, err := accountService.Get(ctx, accountID)
+		return !errors.Is(err, accountapp.ErrNotFound)
+	})
+	qualityEvents := events.New(qualityJournal, qualityEvidenceStore, qualityCourtService)
+	gatewayService.SetQualityEventRecorder(&qualityEventSink{Service: qualityEvents})
+	// 执行所(重写批4):epoch 检测+台账;台账接仲裁庭立案(G8)。
+	qualityEnforcementService := bootstrapEnforcementLayer(qualityRegistry, egressService)
+	owned.qualityEnforcement = qualityEnforcementService
+	qualityCourtService.SetLedgerSink(qualityEnforcementService)
+	// 调查局真实探针执行器:网关质量探针 + 出口 IP 取证面。
+	gatewayService.SetNodeExitIPResolver(managerExitIPResolver{Manager: egressManager})
+	qualityProbeExecutorService := qualityinvestigator.NewProbeExecutor(qualityRegistry, gatewayService, logger)
+	// 守卫配置面(重写批5:G13 管辖勾选+I4 自检可见)+探针队列视图。
+	// requestRetry 的文件启停/预算是底座基线;管辖清单若有显式条目则
+	// 继承，否则沿用质量守卫的默认主力模型清单，避免空切片被误当成
+	// “无管辖”而让服务启动后静默失效。
+	qualityGuardService := bootstrapGuardService(ctx, relational.NewSettingsDocumentRepository(database, qualityguard.SettingsKey), logger,
+		qualityGuardConfig(cfg.RequestRetry), qualityGuardConfig(fileCfg.RequestRetry))
+	guardSource := qualityGuardSnapshotSource{service: qualityGuardService, registry: qualityRegistry}
+	gatewayService.SetGuardSnapshotSource(guardSource)
+	installedGuard, guardErr := qualityGuardService.Snapshot()
+	guardOrigin := "bootstrap"
+	if installedGuard.Revision > 0 {
+		guardOrigin = "quality_guard"
+	}
+	logger.Info("quality_guard_effective", "source", guardOrigin,
+		"revision", installedGuard.Revision, "ready", guardErr == nil,
+		"enabled", installedGuard.Enabled, "max_attempts", installedGuard.MaxAttempts,
+		"on_exhausted", installedGuard.ExhaustionPolicy(), "guarded_models", strings.Join(installedGuard.GuardedModels, ","))
+
+	qualityProbeStore := qualityregistry.NewProbeTaskStore(qualityRegistry)
 	gatewayService.UpdateVideoMaxAttempts(cfg.Routing.VideoMaxAttempts)
 	gatewayService.UpdateMarkBuildChatDeniedAsReauth(cfg.Routing.MarkBuildChatDeniedAsReauth)
 	gatewayService.SetLogger(logger)
@@ -385,7 +447,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	quotaRecoveryService.SetBulkPool(syncPool)
 	inferenceConcurrency := httpmiddleware.NewConcurrencyGate(cfg.Server.MaxConcurrentRequests)
 	var notifySettings func(context.Context)
+	var publishSettings func(context.Context) error
 	if settingsBus != nil {
+		publishSettings = settingsBus.PublishSettingsChanged
 		notifySettings = func(notifyCtx context.Context) {
 			publishCtx, cancel := context.WithTimeout(context.WithoutCancel(notifyCtx), 3*time.Second)
 			defer cancel()
@@ -394,83 +458,141 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			}
 		}
 	}
-	settingsService := settingsapp.NewService(cfg, settingsUpdatedAt, settingsRevision, runtimeSettingsRepo, notifySettings, func(next config.Config) {
-		inferenceConcurrency.UpdateLimit(next.Server.MaxConcurrentRequests)
-		bulkPool.UpdateLimit(maxBatchConcurrency(next.Batch))
-		importPool.UpdateLimit(next.Batch.ImportConcurrency)
-		conversionPool.UpdateLimit(next.Batch.ConversionConcurrency)
-		syncPool.UpdateLimit(next.Batch.SyncConcurrency)
-		refreshPool.UpdateLimit(next.Batch.RefreshConcurrency)
-		detectPool.UpdateLimit(32)
-		for _, pool := range []*batch.Pool{importPool, conversionPool, syncPool, refreshPool, detectPool} {
-			pool.UpdateJitter(next.Batch.RandomDelay.Value())
-		}
-		cliAdapter.UpdateConfig(cliprovider.Config{
-			BaseURL: next.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(next.Provider.Build.FallbackBaseURL),
-			ClientVersion: next.Provider.Build.ClientVersion, ClientIdentifier: next.Provider.Build.ClientIdentifier,
-			TokenAuth: next.Provider.Build.TokenAuth, UserAgent: next.Provider.Build.UserAgent,
-			ResponseHeaderTimeout: next.Provider.Build.ResponseHeaderTimeout.Value(),
-			StreamIdleTimeout:     next.Provider.Build.StreamIdleTimeout.Value(),
-		})
-		egressManager.UpdateBuildResponseHeaderTimeout(next.Provider.Build.ResponseHeaderTimeout.Value())
-		egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
-		webAdapter.UpdateConfig(webProviderConfig(next))
-		egressManager.UpdateClearanceConfig(clearanceConfig(next))
-		consoleAdapter.UpdateConfig(consoleProviderConfig(next))
-		mediaService.UpdateConfig(mediaConfig(next))
-		quotaRecoveryService.UpdateConfig(next.Provider.Web.RecoveryBackoffBase.Value(), next.Provider.Web.RecoveryBackoffMax.Value())
-		accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
-		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
-		selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
-		selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
-		egressService.SetQualityGuardConfig(egressQualityGuardConfig(next))
-		egressManager.SetDegradeEvidenceCooldowns(next.Egress.QualityGuard.SoftCooldownBase.Value(), next.Egress.QualityGuard.SoftCooldownMax.Value())
-		egressService.SetRotationConfig(egressRotationConfig(next))
-		gatewayService.UpdateEgressCanary(gatewayEgressCanaryConfig(next))
-		// 账号风险归因热更：enabled/并发/onDenied/巡检即时生效；
-		// method/timeout 变化时按构建键重建探针。
-		riskService.UpdateConfig(accountRiskRuntime(next))
-		// 探针出口重新解析（路由表变更时 probe 类目标可能变化）。
-		nextRSCProxyURL := ""
-		if egressManager != nil {
-			nextRSCProxyURL = egressManager.ProbeProxyURL(context.WithoutCancel(ctx))
-		}
-		if key := rscCheckerBuildKey(next.AccountRisk.RSCCheck, nextRSCProxyURL); key != currentRSCCheckerKey {
-			currentRSCCheckerKey = key
-			tag := rscCheckerSourceTag(next.AccountRisk.RSCCheck)
-			riskService.UpdateChecker(rscCheckerAdapter{Checker: buildRSCChecker(context.WithoutCancel(ctx), next.AccountRisk.RSCCheck, egressManager), Source: tag}, tag)
-			// 方法切换：旧方法的 clean 缓存立即失效（一次性清理，双向生效）。
-			riskService.InvalidateStaleCleanVerdicts(context.WithoutCancel(ctx))
-		}
-		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
-		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
-		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
-		reasoningReplay.UpdateConfig(reasoningreplay.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
-		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
-		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.RequestRetry))
-		gatewayService.UpdateVideoMaxAttempts(next.Routing.VideoMaxAttempts)
-		gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
-		gatewayService.UpdateBuildForbiddenReauthPolicy(next.Accounts.MarkBuildForbiddenReauth, next.Accounts.BuildForbiddenReauthCodes)
-		auditService.UpdateWriterConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value(), next.Audit.CommitDelay.Value())
-		auditService.UpdateLedgerConfig(auditLedgerConfig(next.Audit))
-		clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
-		accountService.UpdateAutoCleanConfig(accountAutoCleanConfig(next.Accounts))
+	settingsService := settingsapp.NewService(cfg, settingsUpdatedAt, settingsRevision, runtimeSettingsRepo, publishSettings, []settingsapp.ApplyTarget{
+		{Name: "inference_capacity", Apply: func(_ context.Context, next config.Config) error {
+			inferenceConcurrency.UpdateLimit(next.Server.MaxConcurrentRequests)
+			return nil
+		}},
+		{Name: "batch", Apply: func(_ context.Context, next config.Config) error {
+			bulkPool.UpdateLimit(maxBatchConcurrency(next.Batch))
+			importPool.UpdateLimit(next.Batch.ImportConcurrency)
+			conversionPool.UpdateLimit(next.Batch.ConversionConcurrency)
+			syncPool.UpdateLimit(next.Batch.SyncConcurrency)
+			refreshPool.UpdateLimit(next.Batch.RefreshConcurrency)
+			detectPool.UpdateLimit(32)
+			for _, pool := range []*batch.Pool{importPool, conversionPool, syncPool, refreshPool, detectPool} {
+				pool.UpdateJitter(next.Batch.RandomDelay.Value())
+			}
+			return nil
+		}},
+		{Name: "provider_build", Apply: func(_ context.Context, next config.Config) error {
+			cliAdapter.UpdateConfig(cliprovider.Config{
+				BaseURL: next.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(next.Provider.Build.FallbackBaseURL),
+				ClientVersion: next.Provider.Build.ClientVersion, ClientIdentifier: next.Provider.Build.ClientIdentifier,
+				TokenAuth: next.Provider.Build.TokenAuth, UserAgent: next.Provider.Build.UserAgent,
+				ResponseHeaderTimeout: next.Provider.Build.ResponseHeaderTimeout.Value(),
+				StreamIdleTimeout:     next.Provider.Build.StreamIdleTimeout.Value(),
+			})
+			return nil
+		}},
+		{Name: "network", Apply: func(_ context.Context, next config.Config) error {
+			egressManager.UpdateBuildResponseHeaderTimeout(next.Provider.Build.ResponseHeaderTimeout.Value())
+			egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
+			egressManager.UpdateClearanceConfig(clearanceConfig(next))
+			egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
+			return nil
+		}},
+		{Name: "provider_web", Apply: func(_ context.Context, next config.Config) error {
+			webAdapter.UpdateConfig(webProviderConfig(next))
+			return nil
+		}},
+		{Name: "provider_console", Apply: func(_ context.Context, next config.Config) error {
+			consoleAdapter.UpdateConfig(consoleProviderConfig(next))
+			return nil
+		}},
+		{Name: "media", Apply: func(_ context.Context, next config.Config) error {
+			mediaService.UpdateConfig(mediaConfig(next))
+			return nil
+		}},
+		{Name: "quota_recovery", Apply: func(_ context.Context, next config.Config) error {
+			quotaRecoveryService.UpdateConfig(next.Provider.Web.RecoveryBackoffBase.Value(), next.Provider.Web.RecoveryBackoffMax.Value())
+			return nil
+		}},
+		{Name: "account_sync", Apply: func(_ context.Context, next config.Config) error {
+			accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
+			return nil
+		}},
+		{Name: "selector", Apply: func(_ context.Context, next config.Config) error {
+			selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
+			selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
+			selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
+			selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+			return nil
+		}},
+		{Name: "egress_rotation", Apply: func(_ context.Context, next config.Config) error {
+			egressService.SetRotationConfig(egressRotationConfig(next))
+			return nil
+		}},
+		{Name: "accounts", Apply: func(_ context.Context, next config.Config) error {
+			accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+			accountService.UpdateAutoCleanConfig(accountAutoCleanConfig(next.Accounts))
+			return nil
+		}},
+		{Name: "conversation", Apply: func(_ context.Context, next config.Config) error {
+			reasoningReplay.UpdateConfig(historyapp.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
+			return nil
+		}},
+		{Name: "gateway", Apply: func(_ context.Context, next config.Config) error {
+			gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
+			gatewayService.UpdateVideoMaxAttempts(next.Routing.VideoMaxAttempts)
+			gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
+			gatewayService.UpdateBuildForbiddenReauthPolicy(next.Accounts.MarkBuildForbiddenReauth, next.Accounts.BuildForbiddenReauthCodes)
+			return nil
+		}},
+		{Name: "audit", Apply: func(_ context.Context, next config.Config) error {
+			auditService.UpdateWriterConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value(), next.Audit.CommitDelay.Value())
+			auditService.UpdateLedgerConfig(auditLedgerConfig(next.Audit))
+			return nil
+		}},
+		{Name: "client_keys", Apply: func(_ context.Context, next config.Config) error {
+			clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
+			return nil
+		}},
+	})
+	settingsService.SetRequestRetryProjection(func() config.RequestRetryConfig {
+		current := qualityGuardService.Config()
+		return config.RequestRetryConfig{Enabled: current.Enabled, MaxAttempts: current.MaxAttempts,
+			OnExhausted: "fail_closed", GuardedModels: current.GuardedModels,
+			EvidenceTimeout: config.Duration(current.EvidenceTimeout), CreatedTimeout: config.Duration(current.CreatedTimeout),
+			AccountCooldown: config.Duration(current.AccountCooldown), IdleAccountCooldown: config.Duration(current.IdleAccountCooldown)}
 	})
 	settingsService.SetFileConfig(fileCfg)
 	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
+	// Quality owns parameter policy; composition supplies persistence, apply and notification ports.
+	qualityTunables := qualitymanagement.New(
+		relational.NewSettingsDocumentRepository(database, qualitymanagement.SettingsKey),
+		(qualitymanagement.Runtime{Court: qualityCourtService, Investigator: qualityInvestigatorService, Evidence: qualityEvidenceStore}).Apply,
+		notifySettings,
+	)
+	if err := qualityTunables.ReloadPersisted(ctx); err != nil {
+		logger.Error("quality_tunables_startup_pending", "error", err)
+	}
+
+	qualityQueries := qualitymanagement.NewQueries(qualitymanagement.QueryDependencies{
+		Registry: qualityRegistry, Probes: qualityProbeStore, Court: qualityCourtService,
+		Evidence: qualityEvidenceStore, Guard: qualityGuardService,
+		Nodes: baseNodeSource{egress: egressService},
+		// Preserve the old DTO field; production receipts use the durable queue.
+		ObservationDrops: func() int64 { return 0 },
+	})
 
 	startup := newStartupState(len(windows))
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService, AccountRisk: riskHTTPAdapter{risk: riskService, accounts: accountService, db: database, logger: logger}})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, MediaImporter: mediaImporter, Settings: settingsService, Egress: egressService, EgressRuntimeStats: egressManager.RuntimeStats, Updates: updateService, Quality: &qualityhttp.Deps{Queries: qualityQueries, Court: qualityCourtService, Enforcement: qualityEnforcementService, Guard: qualityGuardService, DialerDistribution: qualityDialerPolicy.SelectionDistribution, Tunables: qualityTunables, RotationCapacity: func() int { return egressService.RotationConfig().MaxGlobalPerHour }}, EgressQualityStates: egressQualityStatesProvider{registry: qualityRegistry}.states, AccountQualityStates: accountQualityStatesProvider{registry: qualityRegistry}.states})
 	logSecureCookiesHint(logger, cfg)
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
+	constructed = true
 	return &Application{
 		logger: logger, database: database, server: server,
-		audits: auditService, auditRetention: cfg.Audit.Retention.Value(), responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
-		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService, updateCheck: serverUpdateCheckEnabled(cfg),
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup, accountRisk: riskService,
+		audits: auditService, auditJournal: auditJournal, historyRetention: historyapp.NewRetention(responseRepo, conversationJournal, refreshLock, logger), runtime: runtimeStore,
+		qualityTunables: qualityTunables, settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService, updateCheck: serverUpdateCheckEnabled(cfg),
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
+		quality: qualityRegistry, qualityEvidence: qualityEvidenceStore,
+		qualityCourt: qualityCourtService, qualityInvestigator: qualityInvestigatorService,
+		qualityEnforcement: qualityEnforcementService, qualityProbeExec: qualityProbeExecutorService,
+		qualityEvents: qualityEvents, qualityJournal: qualityJournal, qualityGuard: qualityGuardService,
 	}, nil
 }
 
@@ -489,15 +611,26 @@ func invalidationSourceInstance(cfg config.Config) string {
 	return fmt.Sprintf("process-%d", time.Now().UnixNano())
 }
 
-// newAccountRiskService builds the RSC attribution service when enabled in
-// egressQualityGuardConfig maps file config onto the egress quality guard.
-func egressQualityGuardConfig(cfg config.Config) egressapp.QualityGuardConfig {
-	return egressapp.QualityGuardConfig{
-		QuarantineCooldown:       cfg.Egress.QualityGuard.QuarantineCooldown.Value(),
-		CrossAccountThreshold:    cfg.Egress.QualityGuard.CrossAccountThreshold,
-		CrossAccountWindow:       cfg.Egress.QualityGuard.CrossAccountWindow.Value(),
-		TentativeReleaseCooldown: cfg.Egress.QualityGuard.TentativeReleaseCooldown.Value(),
+// bootstrapQualityLayer 构建新质量层地基(重写批1:羁押登记处+证据局)
+// 与底座同库、自带连接池。请求观测由durable events队列接收。
+func bootstrapQualityLayer(ctx context.Context, cfg config.Config, logger *slog.Logger, links qualityregistry.AccountLinks) (*qualityregistry.Registry, *qualityevidence.Store, error) {
+	opts := qualityregistry.Options{Logger: logger, AccountLinks: links}
+	switch cfg.Database.Driver {
+	case "postgres":
+		opts.Driver, opts.PostgresDSN = "postgres", cfg.Database.Postgres.DSN
+	default:
+		opts.Driver, opts.SQLitePath = "sqlite", cfg.Database.SQLite.Path
 	}
+	registry, err := qualityregistry.Open(ctx, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	evidenceStore, err := qualityevidence.New(ctx, registry.DB(), qualityevidence.DefaultConfig())
+	if err != nil {
+		_ = registry.Close()
+		return nil, nil, err
+	}
+	return registry, evidenceStore, nil
 }
 
 // egressRotationConfig maps file config onto the rotation scheduler.
@@ -515,238 +648,18 @@ func egressRotationConfig(cfg config.Config) egressapp.RotationConfig {
 	}
 }
 
-// gatewayEgressCanaryConfig maps file config onto the gateway canary.
-func gatewayEgressCanaryConfig(cfg config.Config) gateway.EgressCanaryRuntime {
-	return gateway.EgressCanaryRuntime{
-		ModelPublicID:  cfg.Egress.Rotation.CanaryModelPublicID,
-		CreatedTimeout: cfg.Egress.Rotation.CanaryCreatedTimeout.Value(),
-	}
-}
-
-// config; nil means attribution stays off and the gateway relies on its
-// escalating behavioral penalties alone.
-func newAccountRiskService(ctx context.Context, cfg config.Config, database *relational.Database, accounts *accountapp.Service, logger *slog.Logger, egressManager *infraegress.Manager) *risk.Service {
-	store := riskRelationalStore{Repo: relational.NewRiskRepository(database)}
-	tag := rscCheckerSourceTag(cfg.AccountRisk.RSCCheck)
-	adapter := rscCheckerAdapter{Checker: buildRSCChecker(ctx, cfg.AccountRisk.RSCCheck, egressManager), Source: tag}
-	service := risk.New(accountRiskRuntime(cfg), accounts, store, adapter, logger)
-	// 播种探针溯源标记：freshness 按方法匹配的闸门依赖它。
-	service.UpdateChecker(adapter, tag)
-	return service
-}
-
-// accountRiskRuntime maps the merged (file + persisted runtime) settings onto
-// the risk service configuration. Called at boot and on every settings apply.
-func accountRiskRuntime(cfg config.Config) risk.Config {
-	rscCfg := cfg.AccountRisk.RSCCheck
-	return risk.Config{
-		Enabled:         rscCfg.Enabled,
-		Concurrency:     rscCfg.Concurrency,
-		Timeout:         rscCfg.Timeout.Value(),
-		OnDenied:        rscCfg.OnDenied,
-		PatrolEnabled:   rscCfg.Patrol.Enabled,
-		PatrolInterval:  time.Duration(rscCfg.Patrol.BucketDays) * 24 * time.Hour,
-		PatrolTickEvery: rscCfg.Patrol.Interval.Value(),
-		PatrolBatchSize: rscCfg.Patrol.BatchSize,
-		ErrorRetry:      time.Hour,
-		// denied 定罪需连续确认(默认 2)且 verdict 有 TTL,单次误读不再永久定罪。
-		DeniedConfirmations: rscCfg.DeniedConfirmations,
-		DeniedTTL:           rscCfg.DeniedTTL.Value(),
-		BuildProbeEnabled:   rscCfg.BuildProbeEnabled(),
-	}
-}
-
-// buildRSCChecker builds the SSO thinking probe (the sole transport since
-// the homepage parser was removed — grok.com stopped delivering RSC botFlag
-// payload fields, so the homepage method read every account as clean).
-// The probe exit resolves in priority order:
-//  1. egress routing table's "probe" class (node/pool target) — configured
-//     in the same routing UI as other traffic classes, inherits health checks
-//     and pool selection. This is the recommended path.
-//  2. accountRisk.rscCheck.probeProxyURL — raw proxy URL fallback for
-//     deployments without the egress routing table.
-//  3. direct connection (empty) — last resort; dirty server IPs will
-//     contaminate verdicts (incident).
-func buildRSCChecker(ctx context.Context, rscCfg config.AccountRiskRSCConfig, egressManager *infraegress.Manager) rsc.Probe {
-	probe := rsc.NewSSOProbeChecker(rscCfg.Timeout.Value())
-	// 优先从路由表解析（probe 类的出口目标）。
-	if egressManager != nil {
-		if routed := egressManager.ProbeProxyURL(ctx); routed != "" {
-			probe.ProxyURL = routed
-			return probe
-		}
-	}
-	// 回退到手填 URL。
-	probe.ProxyURL = rscCfg.ProbeProxyURL
-	return probe
-}
-
-// rscCheckerSourceTag names the probe for verdict provenance. Legacy rows
-// written by the removed homepage method keep their "rsc" source and are
-// invalidated by the tag mismatch on read.
-func rscCheckerSourceTag(rscCfg config.AccountRiskRSCConfig) string {
-	return "sso_probe"
-}
-
-// rscCheckerBuildKey identifies the built checker (method + timeout); the
-// settings apply chain rebuilds the probe only when this key changes so
-// unrelated saves never reset the SSO probe's channel-vitality breaker.
-func rscCheckerBuildKey(rscCfg config.AccountRiskRSCConfig, routedProxyURL string) string {
-	return rscCfg.Timeout.String() + "|" + strings.TrimSpace(rscCfg.ProbeProxyURL) + "|" + routedProxyURL
-}
-
-// runAccountRiskPatrol runs the bucketed verdict re-check loop. Each tick
-// re-checks a bounded batch of stale clean/error, unconfirmed denials, and
-// DeniedTTL-expired confirmed denials. Owned by Run's background WaitGroup
-// so shutdown joins it before the DB closes.
-func (a *Application) runAccountRiskPatrol(ctx context.Context) {
-	query := relational.NewRiskRepository(a.database)
-	timer := time.NewTimer(a.accountRisk.PatrolTickEvery())
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		// patrol.enabled 是运行时设置：关闭时本 tick 空转（任务常驻，切换免重启）。
-		if !a.accountRisk.PatrolEnabled() {
-			timer.Reset(a.accountRisk.PatrolTickEvery())
-			continue
-		}
-		patrolCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		patrolDue, errorRetryDue, deniedTTLDue := a.accountRisk.PatrolCutoffs()
-		due, err := query.ListPatrolDue(patrolCtx, account.ProviderWeb, patrolDue, errorRetryDue, deniedTTLDue, a.accountRisk.SnapshotConfig().DeniedConfirmations, a.accountRisk.PatrolBatchSize())
-		if err != nil {
-			a.logger.Warn("account_risk_patrol_query_failed", "error", err.Error())
-			cancel()
-			timer.Reset(a.accountRisk.PatrolTickEvery())
-			continue
-		}
-		if len(due) > 0 {
-			a.logger.Info("account_risk_patrol_batch", "due", len(due))
-			a.accountRisk.PatrolTick(patrolCtx, due)
-		}
-		cancel()
-		timer.Reset(a.accountRisk.PatrolTickEvery())
-	}
-}
-
-// PatrolRiskAccounts runs one PatrolTick over the given Web account IDs
-// using the live SSO probe. It force-enables attribution for the duration
-// of the call so a disabled runtime setting cannot no-op a one-shot.
-func (a *Application) PatrolRiskAccounts(ctx context.Context, ids []uint64) error {
-	if a == nil || a.accountRisk == nil {
-		return fmt.Errorf("account risk service not initialized")
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	cfg := a.accountRisk.SnapshotConfig()
-	a.logger.Info("account_risk_patrol_oneshot", "ids", len(ids), "onDenied", cfg.OnDenied, "concurrency", cfg.Concurrency)
-	a.accountRisk.PatrolTickForced(ctx, ids)
-	return nil
-}
-
-// RunDuePatrol lists currently due Web identities and re-checks them with the
-// live SSO probe. Intended for the admin "run patrol now" action; it does not
-// require patrolEnabled (operator intent).
-func (a *Application) RunDuePatrol(ctx context.Context) (int, error) {
-	if a == nil {
-		return 0, fmt.Errorf("account risk service not initialized")
-	}
-	return runDuePatrol(ctx, a.database, a.accountRisk, a.logger)
-}
-
-func (a *Application) CheckAccount(ctx context.Context, id uint64) error {
-	if a == nil {
-		return fmt.Errorf("account risk service not initialized")
-	}
-	return a.AttributeRiskAccounts(ctx, []uint64{id})
-}
-
-type riskHTTPAdapter struct {
-	risk     *risk.Service
-	accounts *accountapp.Service
-	db       *relational.Database
-	logger   *slog.Logger
-}
-
-func (h riskHTTPAdapter) CheckAccount(ctx context.Context, id uint64) error {
-	if h.risk == nil || h.accounts == nil {
-		return fmt.Errorf("account risk service not initialized")
-	}
-	view, err := h.accounts.Get(ctx, id)
-	if err != nil {
-		return fmt.Errorf("load account %d: %w", id, err)
-	}
-	h.risk.AttributeNowWithTrigger(ctx, view.Credential, account.RiskTriggerManual)
-	return nil
-}
-
-func (h riskHTTPAdapter) RunDuePatrol(ctx context.Context) (int, error) {
-	return runDuePatrol(ctx, h.db, h.risk, h.logger)
-}
-
-func runDuePatrol(ctx context.Context, db *relational.Database, riskSvc *risk.Service, logger *slog.Logger) (int, error) {
-	if riskSvc == nil {
-		return 0, fmt.Errorf("account risk service not initialized")
-	}
-	query := relational.NewRiskRepository(db)
-	patrolDue, errorRetryDue, deniedTTLDue := riskSvc.PatrolCutoffs()
-	due, err := query.ListPatrolDue(ctx, account.ProviderWeb, patrolDue, errorRetryDue, deniedTTLDue, riskSvc.SnapshotConfig().DeniedConfirmations, riskSvc.PatrolBatchSize())
-	if err != nil {
-		return 0, err
-	}
-	if len(due) == 0 {
-		return 0, nil
-	}
-	cfg := riskSvc.SnapshotConfig()
-	if logger != nil {
-		logger.Info("account_risk_patrol_manual", "due", len(due), "onDenied", cfg.OnDenied, "concurrency", cfg.Concurrency)
-	}
-	riskSvc.PatrolTickForced(ctx, due)
-	return len(due), nil
-}
-
-// AttributeRiskAccounts runs one request-path attribution per account ID
-// (each account's own provider/channel). Build/Console stays channel-scoped;
-// a Web ID is an SSO-origin denial and fans out.
-func (a *Application) AttributeRiskAccounts(ctx context.Context, ids []uint64) error {
-	if a == nil || a.accountRisk == nil || a.accounts == nil {
-		return fmt.Errorf("account risk service not initialized")
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	cfg := a.accountRisk.SnapshotConfig()
-	a.logger.Info("account_risk_attribute_oneshot", "ids", len(ids), "onDenied", cfg.OnDenied, "concurrency", cfg.Concurrency)
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		view, err := a.accounts.Get(ctx, id)
-		if err != nil {
-			return fmt.Errorf("load account %d: %w", id, err)
-		}
-		a.logger.Info("account_risk_attribute_oneshot_item", "account_id", id, "provider", string(view.Credential.Provider))
-		a.accountRisk.AttributeNowWithTrigger(ctx, view.Credential, account.RiskTriggerManual)
-	}
-	return nil
-}
-
 func maxBatchConcurrency(value config.BatchConfig) int {
 	return max(value.ImportConcurrency, value.ConversionConcurrency, value.SyncConcurrency, value.RefreshConcurrency)
 }
 
 func webProviderConfig(cfg config.Config) webprovider.Config {
 	return webprovider.Config{
-		BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeoutSeconds: int(cfg.Provider.Web.QuotaTimeout.Value().Seconds()),
+		BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeout: cfg.Provider.Web.QuotaTimeout.Value(),
 		StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
-		StatsigSignerURL:   cfg.Provider.Web.StatsigSignerURL,
-		ChatTimeoutSeconds: int(cfg.Provider.Web.ChatTimeout.Value().Seconds()), StreamIdleTimeoutSeconds: int(cfg.Provider.Web.StreamIdleTimeout.Value().Seconds()),
-		ImageTimeoutSeconds: int(cfg.Provider.Web.ImageTimeout.Value().Seconds()),
-		VideoTimeoutSeconds: int(cfg.Provider.Web.VideoTimeout.Value().Seconds()), MaxInputImageBytes: cfg.Media.MaxImageBytes,
+		StatsigSignerURL: cfg.Provider.Web.StatsigSignerURL,
+		ChatTimeout:      cfg.Provider.Web.ChatTimeout.Value(), StreamIdleTimeout: cfg.Provider.Web.StreamIdleTimeout.Value(),
+		ImageTimeout: cfg.Provider.Web.ImageTimeout.Value(),
+		VideoTimeout: cfg.Provider.Web.VideoTimeout.Value(), MaxInputImageBytes: cfg.Media.MaxImageBytes,
 		AllowNSFW: cfg.Provider.Web.AllowNSFW,
 	}
 }
@@ -762,7 +675,7 @@ func clearanceConfig(cfg config.Config) infraegress.ClearanceConfig {
 func consoleProviderConfig(cfg config.Config) consoleprovider.Config {
 	return consoleprovider.Config{
 		BaseURL: cfg.Provider.Console.BaseURL, SessionBaseURL: cfg.Provider.Web.BaseURL,
-		TimeoutSeconds: int(cfg.Provider.Console.ChatTimeout.Value().Seconds()), StreamIdleTimeoutSeconds: int(cfg.Provider.Console.StreamIdleTimeout.Value().Seconds()),
+		Timeout: cfg.Provider.Console.ChatTimeout.Value(), StreamIdleTimeout: cfg.Provider.Console.StreamIdleTimeout.Value(),
 	}
 }
 
@@ -772,20 +685,6 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 		Interval:        value.AutoCleanReauthInterval.Value(),
 		MinAge:          value.AutoCleanReauthMinAge.Value(),
 		IncludeDisabled: value.AutoCleanIncludeDisabled,
-	}
-}
-
-func qualityRetryRuntime(value config.RequestRetryConfig) gateway.QualityRetryRuntime {
-	return gateway.QualityRetryRuntime{
-		Enabled:             value.Enabled,
-		MaxAttempts:         value.MaxAttempts,
-		OnExhausted:         value.OnExhausted,
-		AccountCooldown:     value.AccountCooldown.Value(),
-		SameAccountRetry:    value.SameAccountRetry,
-		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
-		EvidenceTimeout:     value.EvidenceTimeout.Value(),
-		CreatedTimeout:      value.CreatedTimeout.Value(),
-		GuardedModels:       value.GuardedModels,
 	}
 }
 
@@ -807,22 +706,40 @@ func mediaConfig(cfg config.Config) mediaapp.Config {
 }
 
 // Run 启动 HTTP 服务和本地后台维护任务。
-func (a *Application) Run(ctx context.Context) error {
-	a.audits.Start()
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := a.audits.Close(closeCtx); err != nil {
-			a.logger.Warn("audit_shutdown_failed", "error", err)
+func (a *Application) Run(ctx context.Context) (resultErr error) {
+	ctx, err := a.beginRun(ctx)
+	if err != nil {
+		return err
+	}
+	defer close(a.runDone)
+	defer a.runCancel()
+	defer func() { resultErr = errors.Join(resultErr, a.closeClientKeyTouches()) }()
+	defer func() { resultErr = errors.Join(resultErr, a.closeModelSync()) }()
+	if a.egress != nil {
+		if err := a.egress.Start(ctx); err != nil {
+			return err
 		}
-	}()
+	}
+	if err := a.audits.Start(ctx); err != nil {
+		return fmt.Errorf("start audit recovery: %w", err)
+	}
 	runCtx, cancelBackground := context.WithCancel(ctx)
 	var background sync.WaitGroup
+	a.backgroundDone = make(chan struct{})
 	defer func() {
+		resultErr = errors.Join(resultErr, a.drainHTTP())
 		cancelBackground()
-		background.Wait()
+		go func() { background.Wait(); close(a.backgroundDone) }()
+		waitCtx, cancel := context.WithTimeout(context.Background(), a.joinTimeout())
+		defer cancel()
+		if err := waitStopped(waitCtx, a.serverDone); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("wait for HTTP listener: %w", err))
+		}
+		if err := waitStopped(waitCtx, a.backgroundDone); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("wait for application workers: %w", err))
+		}
 	}()
-	// 出口 IP 轮换 worker（事件驱动，配置启用时才启动）。
+	// 出口 IP 轮换 worker 常驻等待事件，支持禁用后热启用。
 	background.Add(1)
 	go func() {
 		defer background.Done()
@@ -830,7 +747,12 @@ func (a *Application) Run(ctx context.Context) error {
 	}()
 	errCh := make(chan error, 1)
 	servedAt := time.Now()
+	a.lifecycleMu.Lock()
+	a.requests = newHTTPRequests(a.server)
+	a.lifecycleMu.Unlock()
+	a.serverDone = make(chan struct{})
 	go func() {
+		defer close(a.serverDone)
 		a.logger.Info("server_started", "listen", a.server.Addr, "version", buildinfo.CurrentVersion(), "commit", buildinfo.CurrentCommit())
 		errCh <- a.server.ListenAndServe()
 	}()
@@ -846,9 +768,42 @@ func (a *Application) Run(ctx context.Context) error {
 		startBackground("invalidation_publisher", a.invalidations.RunPublisher)
 		startBackground("invalidation_subscriber", a.invalidations.RunSubscriber)
 	}
+	if a.qualityEvents != nil {
+		startBackground("guard_event_outbox", a.qualityEvents.Run)
+		startBackground("guard_completion_recovery", a.qualityJournal.RunCompletionRecovery)
+		startBackground("guard_event_retention", func(taskCtx context.Context) error {
+			a.runPeriodicTask(taskCtx, time.Minute, "guard_event_retention", func(runCtx context.Context) error {
+				sweepCtx, cancel := context.WithTimeout(runCtx, 5*time.Second)
+				defer cancel()
+				return a.qualityJournal.Sweep(sweepCtx, time.Now().UTC())
+			})
+			return nil
+		})
+	}
+	if a.qualityGuard != nil {
+		startBackground("guard_policy_reconcile", func(taskCtx context.Context) error {
+			a.runPeriodicTask(taskCtx, 5*time.Second, "guard_policy_reconcile", func(runCtx context.Context) error {
+				return a.qualityGuard.LoadPersisted(runCtx)
+			})
+			return nil
+		})
+	}
+	if a.quality != nil && a.qualityEvidence != nil {
+		startBackground("quality_shared_state", func(taskCtx context.Context) error {
+			a.runPeriodicTask(taskCtx, 3*time.Second, "quality_shared_state", func(ctx context.Context) error {
+				workCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				defer cancel()
+				if err := a.quality.RefreshState(workCtx); err != nil {
+					return err
+				}
+				return a.qualityEvidence.RefreshWindow(workCtx)
+			})
+			return nil
+		})
+	}
 	startBackground("settings_reconcile", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 30*time.Second, "settings_reconcile", func(runCtx context.Context) error {
-			return a.settings.ReloadPersisted(runCtx)
+			return a.reloadSettings(runCtx)
 		})
 		return nil
 	})
@@ -878,13 +833,9 @@ func (a *Application) Run(ctx context.Context) error {
 		})
 		return nil
 	})
-	if a.auditRetention > 0 {
-		// audit.retention：审计表无界增长的长时运行防线（0 = 关闭，不启动）。
-		// 与 requestRetry 同理不在运行时设置面内，修改需重启进程。
-		startBackground("audit_retention", func(taskCtx context.Context) error {
-			return a.audits.RunRetention(taskCtx, a.auditRetention)
-		})
-	}
+	startBackground("audit_retention", func(taskCtx context.Context) error {
+		return a.audits.RunRetention(taskCtx, a.settings)
+	})
 	// SQLite freelist 页归还：retention/媒体作业删除产生的空闲页只有
 	// 周期 incremental_vacuum 才真正缩小文件（auto_vacuum=INCREMENTAL
 	// 仅启用机制）。日频足够（页增速慢），非 SQLite 方言内部 no-op。
@@ -905,28 +856,19 @@ func (a *Application) Run(ctx context.Context) error {
 		})
 		return nil
 	})
+	startBackground("conversation_history_cleanup", func(taskCtx context.Context) error {
+		a.runPeriodicTask(taskCtx, historyapp.ConversationCleanupInterval, "conversation_history_cleanup", func(runCtx context.Context) error {
+			return a.historyRetention.CleanupConversations(runCtx, time.Now().UTC())
+		})
+		return nil
+	})
 	startBackground("response_ownership_cleanup", func(taskCtx context.Context) error {
-		a.runPeriodicTask(taskCtx, responseCleanupInterval, "response_ownership_cleanup", func(runCtx context.Context) error {
-			return a.cleanupExpiredResponses(runCtx, time.Now().UTC())
+		a.runPeriodicTask(taskCtx, historyapp.ResponseCleanupInterval, "response_ownership_cleanup", func(runCtx context.Context) error {
+			return a.historyRetention.CleanupResponses(runCtx, time.Now().UTC())
 		})
 		return nil
 	})
-	startBackground("audit_retention_cleanup", func(taskCtx context.Context) error {
-		a.runPeriodicTask(taskCtx, time.Hour, "audit_retention_cleanup", func(runCtx context.Context) error {
-			retentionDays := a.settings.Get().Config.Audit.RetentionDays
-			if retentionDays == 0 {
-				return nil
-			}
-			deleted, err := a.audits.PurgeOutdated(runCtx, retentionDays)
-			// 保留策略真实删除必须可观测：静默清理会让「配置保留 N 天」与
-			// 「审计里仍有更老数据」的矛盾无法被运维发现。
-			if err == nil && deleted > 0 {
-				a.logger.Info("audit_retention_days_purged", "retentionDays", retentionDays, "deleted", deleted)
-			}
-			return err
-		})
-		return nil
-	})
+
 	startBackground("quota_recovery", func(taskCtx context.Context) error {
 		a.quotaRecovery.Run(taskCtx)
 		return nil
@@ -947,24 +889,6 @@ func (a *Application) Run(ctx context.Context) error {
 		a.runStatsigWarmup(taskCtx)
 		return nil
 	})
-	if a.accountRisk != nil {
-		startBackground("account_risk_reconcile", func(taskCtx context.Context) error {
-			reconcileCtx, cancel := context.WithTimeout(taskCtx, 2*time.Minute)
-			// 先清理其他检测方法遗留的 clean 缓存（homepage 时代的结论一律
-			// "clean"，会压制新探针整整一个巡检周期），再重放风险结论。
-			a.accountRisk.InvalidateStaleCleanVerdicts(reconcileCtx)
-			a.accountRisk.ReconcileRiskyVerdicts(reconcileCtx)
-			cancel()
-			// runSupervisedTask restarts any task that returns: park until shutdown.
-			<-taskCtx.Done()
-			return nil
-		})
-		// patrol 任务常驻启动，每 tick 按运行时 patrol.enabled 门控。
-		startBackground("account_risk_patrol", func(taskCtx context.Context) error {
-			a.runAccountRiskPatrol(taskCtx)
-			return nil
-		})
-	}
 	startBackground("web_quota_startup_catchup", func(taskCtx context.Context) error {
 		a.runWebQuotaCatchup(taskCtx)
 		return nil
@@ -1009,19 +933,66 @@ func (a *Application) Run(ctx context.Context) error {
 		})
 		return nil
 	})
-	startBackground("egress_operations", func(taskCtx context.Context) error {
-		if err := a.egressOps.RunMaintenance(taskCtx); err != nil && !observability.IsShutdownCancellation(taskCtx, err) {
-			a.logger.Warn("egress_operations_initial_run_failed", "error", err)
-		}
-		a.runPeriodicTask(taskCtx, time.Minute, "egress_operations", a.egressOps.RunMaintenance)
-		return nil
+	if a.qualityInvestigator != nil {
+		startBackground("quality_probe_projection", a.qualityInvestigator.RunProjections)
+	}
+	startBackground("quality_probe_worker", func(taskCtx context.Context) error {
+		return a.runQualityProbeWorker(taskCtx)
 	})
+	// 身份组周期刷新(批2 遗留闭合):账号 CRUD 无缝隙点,周期整表
+	// 重算替代事件钩子——q_identity_group 是派生数据(幂等),5m 节拍
+	// 下运行期 SSO 关联变化至多延迟一个节拍生效(成员集合不变的
+	// 重算为 no-op)。
+	if a.quality != nil {
+		startBackground("quality_identity_refresh", func(taskCtx context.Context) error {
+			a.runPeriodicTask(taskCtx, 5*time.Minute, "quality_identity_refresh", func(runCtx context.Context) error {
+				if err := a.quality.RefreshIdentityGroups(runCtx); err != nil && !observability.IsShutdownCancellation(runCtx, err) {
+					a.logger.Warn("quality_identity_refresh_failed", "error", err)
+				}
+				return nil
+			})
+			return nil
+		})
+	}
+	// 历史保留清扫(批10):案件/探针历史表有界化——
+	// 观测表证据局自带清理,此前案件/当事方/探针
+	// 明细无清理路径(无界增长)。小时级节拍,
+	// 清理量为 0 时不打日志。
+	if a.quality != nil {
+		startBackground("quality_history_retention", func(taskCtx context.Context) error {
+			a.runPeriodicTask(taskCtx, time.Hour, "quality_history_retention", func(runCtx context.Context) error {
+				cases, parties, probes, err := a.quality.CleanExpiredCaseHistory(runCtx, time.Now().UTC())
+				if err != nil {
+					a.logger.Warn("quality_history_retention_failed", "error", err.Error())
+				} else if cases > 0 || probes > 0 {
+					a.logger.Info("quality_history_retention_swept", "cases", cases, "parties", parties, "probes", probes)
+				}
+				return nil
+			})
+			return nil
+		})
+	}
+	for _, pass := range []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"egress_subscriptions", a.egressOps.RunSubscriptionMaintenance}, {"egress_probes", a.egressOps.RunProbeMaintenance},
+	} {
+		startBackground(pass.name, func(taskCtx context.Context) error {
+			if err := pass.run(taskCtx); err != nil && !observability.IsShutdownCancellation(taskCtx, err) {
+				a.logger.Warn(pass.name+"_initial_run_failed", "error", err)
+			}
+			a.runPeriodicTask(taskCtx, time.Minute, pass.name, pass.run)
+			return nil
+		})
+	}
+
 	if a.settingsBus != nil {
 		startBackground("settings_change_listener", func(taskCtx context.Context) error {
 			return a.settingsBus.ListenSettingsChanges(taskCtx, func(eventCtx context.Context) error {
 				reloadCtx, cancel := context.WithTimeout(eventCtx, 5*time.Second)
 				defer cancel()
-				if err := a.settings.ReloadPersisted(reloadCtx); err != nil {
+				if err := a.reloadSettings(reloadCtx); err != nil {
 					a.logger.Warn("settings_reload_failed", "error", err)
 				}
 				return nil
@@ -1031,29 +1002,7 @@ func (a *Application) Run(ctx context.Context) error {
 	a.queueDueWebQuotaRefresh(runCtx)
 	select {
 	case <-ctx.Done():
-		// compose stop_grace_period 为 30s：排空 15s + 审计收尾 10s 预算
-		// + DB 关闭，最坏 ~26s 仍在宽限内（此前 10s 排空浪费了 20s 可用窗口）。
-		drainStart := time.Now()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := a.server.Shutdown(shutdownCtx); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				// 长流（requestTimeout 上限 2h）永远等不完：排空超时是预期。
-				// 记 WARN 后按操作员意图正常退出（exit 0）——此前返回错误会让
-				// SIGTERM 停止以 exit 1 结束，语义错误且污染失败率统计。
-				a.logger.Warn("server_shutdown_drain_timeout", "error", err)
-			} else {
-				return fmt.Errorf("关闭 HTTP 服务: %w", err)
-			}
-		}
-		// server_started 的对账本事件：日志即监控面时，运维据此在日志流中
-		// 区分「干净停止」与「崩溃后静默」。
-		a.logger.Info("server_stopped",
-			"uptime_ms", time.Since(servedAt).Milliseconds(),
-			"drain_ms", time.Since(drainStart).Milliseconds())
-		// 访问日志异步缓冲冲刷(2s 超时兜底):server_stopped 自身走同步
-		// logger 已落盘,此处只补齐缓冲中的访问日志。
-		httpmiddleware.FlushAsyncAccessLogs()
+		a.logger.Info("server_stopping", "uptime_ms", time.Since(servedAt).Milliseconds())
 		return nil
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -1061,58 +1010,6 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 		return err
 	}
-}
-
-func (a *Application) cleanupExpiredResponses(ctx context.Context, now time.Time) error {
-	cleanupCtx, cancel := context.WithTimeout(ctx, responseCleanupBudget)
-	defer cancel()
-	if a.cleanupLock != nil {
-		release, acquired, err := a.cleanupLock.Acquire(cleanupCtx, "response-ownership-cleanup", responseCleanupLockTTL)
-		if err != nil {
-			return err
-		}
-		if !acquired {
-			return nil
-		}
-		defer release()
-	}
-	var totalOwnership, totalWebState int64
-	for range responseCleanupMaxBatches {
-		if err := cleanupCtx.Err(); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			a.recordResponseCleanup(totalOwnership, totalWebState, true)
-			return nil
-		}
-		result, err := a.responses.DeleteExpired(cleanupCtx, now, responseOwnershipCleanupBatchSize, webResponseStateCleanupBatchSize)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-				a.recordResponseCleanup(totalOwnership, totalWebState, true)
-				return nil
-			}
-			return err
-		}
-		totalOwnership += result.OwnershipDeleted
-		totalWebState += result.WebStateDeleted
-		if !result.HasMore {
-			a.recordResponseCleanup(totalOwnership, totalWebState, false)
-			return nil
-		}
-	}
-	a.recordResponseCleanup(totalOwnership, totalWebState, true)
-	return nil
-}
-
-func (a *Application) recordResponseCleanup(ownershipDeleted, webStateDeleted int64, backlog bool) {
-	outcome := "complete"
-	if backlog {
-		outcome = "backlog"
-		a.logger.Warn("response_cleanup_backlog", "ownership_deleted", ownershipDeleted, "web_state_deleted", webStateDeleted)
-	}
-	labels := perfmetrics.Labels{Subsystem: "response", Operation: "cleanup", Outcome: outcome}
-	perfmetrics.Default.Add("response_cleanup_ownership_rows", labels, ownershipDeleted)
-	perfmetrics.Default.Add("response_cleanup_web_state_rows", labels, webStateDeleted)
 }
 
 func (a *Application) logPerformanceMetrics() {
@@ -1132,6 +1029,15 @@ func (a *Application) logPerformanceMetrics() {
 		perfmetrics.Default.SetGauge("quota_refresh_pending", labels, int64(quota.Pending))
 		perfmetrics.Default.SetGauge("quota_refresh_queued", labels, int64(quota.Queued))
 		perfmetrics.Default.SetGauge("quota_refresh_running", labels, int64(quota.Running))
+	}
+	// 守卫在场性 gauge:外部告警可对"守卫关闭期间仍有流量"建规则(计数为
+	// 0/1,多实例各报各的,与 guard-stats 同语义)。
+	if effective := a.gateway.GuardStatsSnapshot().Effective; effective != nil {
+		enabled := int64(0)
+		if effective.Enabled {
+			enabled = 1
+		}
+		perfmetrics.Default.SetGauge("quality_guard_enabled", perfmetrics.Labels{Subsystem: "gateway"}, enabled)
 	}
 	for _, sample := range perfmetrics.Default.CollectAndReset() {
 		a.logger.Info("performance_metric",
@@ -1153,11 +1059,86 @@ func (a *Application) logPerformanceMetrics() {
 }
 
 func (a *Application) Close() error {
-	var runtimeErr error
+	a.closeMu.Lock()
+	defer a.closeMu.Unlock()
+	if a.closed {
+		return nil
+	}
+	if err := a.stopRun(); err != nil {
+		return err
+	}
+	if err := a.closeDependencies(); err != nil {
+		return err
+	}
+	a.closed = true
+	if a.logger != nil {
+		a.logger.Info("application_closed")
+	}
+	return nil
+}
+
+func (a *Application) closeDependencies() error {
+	// Stop producers before their network, observation, runtime and SQL ports.
+	if err := a.closeClientKeyTouches(); err != nil {
+		return err
+	}
+	if err := a.closeModelSync(); err != nil {
+		return err
+	}
+	if a.qualityCourt != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.qualityCourt.Close(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("close quality court before dependencies: %w", err)
+		}
+	}
+	if a.qualityEnforcement != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.qualityEnforcement.Close(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("close quality enforcement before dependencies: %w", err)
+		}
+	}
+	if a.egressOps != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.egressOps.Close(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("close egress maintenance before dependencies: %w", err)
+		}
+	}
+	if a.egress != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.egress.Close(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("close egress before storage: %w", err)
+		}
+	}
+	if a.audits != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := a.audits.Close(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("close audit before storage: %w", err)
+		}
+	}
+	var journalErr, runtimeErr, qualityErr, databaseErr error
+	if a.auditJournal != nil {
+		journalErr = a.auditJournal.Close()
+	}
 	if a.runtime != nil {
 		runtimeErr = a.runtime.Close()
 	}
-	return errors.Join(runtimeErr, a.database.Close())
+	if a.quality != nil {
+		qualityErr = a.quality.Close()
+	}
+	if a.database != nil {
+		databaseErr = a.database.Close()
+	}
+	return errors.Join(journalErr, runtimeErr, qualityErr, databaseErr)
 }
 
 func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duration, name string, task func(context.Context) error) {
@@ -1235,4 +1216,13 @@ func minDuration(left, right time.Duration) time.Duration {
 		return left
 	}
 	return right
+}
+
+// reloadSettings lets either document converge even when the other's apply fails.
+func (a *Application) reloadSettings(ctx context.Context) error {
+	err := a.settings.ReloadPersisted(ctx)
+	if a.qualityTunables != nil {
+		err = errors.Join(err, a.qualityTunables.ReloadPersisted(ctx))
+	}
+	return err
 }

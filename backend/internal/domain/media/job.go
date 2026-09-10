@@ -31,31 +31,37 @@ const (
 
 // Job 表示可跨进程重启恢复的异步视频任务。
 type Job struct {
-	ID              string
-	RequestID       string
-	ClientKeyID     uint64
-	ClientKeyName   string
-	ClientIP        string
-	AccountID       uint64
-	AccountName     string
-	EgressNodeID    *uint64
-	EgressNodeName  string
-	EgressScope     string
-	EgressMode      string
-	Provider        string
-	Model           string
-	ModelRouteID    uint64
-	UpstreamModel   string
-	Operation       VideoOperation
-	Prompt          string
-	Seconds         int
-	Size            string
-	Quality         string
-	Status          Status
-	Progress        int
-	InputJSON       string
-	InputImageCount int
-	UpstreamURL     string
+	ID            string
+	RequestID     string
+	ClientKeyID   uint64
+	ClientKeyName string
+	ClientIP      string
+	AccessPolicy  JobAccessPolicy
+	Execution     VideoExecution
+	Limits        ExecutionLimits
+	Quota         JobQuota
+	// ClaimedFromStatus is ephemeral claim metadata, never persisted as a second status.
+	ClaimedFromStatus Status
+	AccountID         uint64
+	AccountName       string
+	EgressNodeID      *uint64
+	EgressNodeName    string
+	EgressScope       string
+	EgressMode        string
+	Provider          string
+	Model             string
+	ModelRouteID      uint64
+	UpstreamModel     string
+	Operation         VideoOperation
+	Prompt            string
+	Seconds           int
+	Size              string
+	Quality           string
+	Status            Status
+	Progress          int
+	InputJSON         string
+	InputImageCount   int
+	UpstreamURL       string
 	// ResultAssetID 指向本地媒体资产；XAI ZDR 上传完成后优先从此读取。
 	ResultAssetID   string
 	ContentType     string
@@ -67,4 +73,19 @@ type Job struct {
 	UpdatedAt       time.Time
 	CompletedAt     *time.Time
 	UsageRecordedAt *time.Time
+}
+
+// JobQuota is the selected quota snapshot and its durable handoff to M07.
+// It does not own quota arithmetic, upstream windows, or refresh policy.
+type JobQuota struct {
+	AccountID       uint64
+	Mode            string
+	SnapshotVersion uint64
+	RecordedAt      *time.Time
+}
+
+// PendingQuotaHandoff protects the durable generation source until M07 has
+// accepted its consumption, including while a failed archive is terminal.
+func (j Job) PendingQuotaHandoff() bool {
+	return j.Quota.RecordedAt == nil && (j.Execution.Phase == VideoExecutionGenerated || j.Execution.Phase == "" && j.Status == StatusCompleted)
 }

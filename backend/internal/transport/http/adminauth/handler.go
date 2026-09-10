@@ -11,6 +11,7 @@ import (
 
 	adminapp "github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	admindomain "github.com/chenyme/grok2api/backend/internal/domain/admin"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/adminsession"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -73,7 +74,7 @@ func (h *Handler) login(c *gin.Context) {
 		if errors.Is(err, adminapp.ErrLoginRateLimited) {
 			var limited *adminapp.LoginRateLimitedError
 			if errors.As(err, &limited) && limited.RetryAfter > 0 {
-				seconds := max(int64(1), int64((limited.RetryAfter+time.Second-1)/time.Second))
+				seconds := retryafter.SecondsCeil(limited.RetryAfter)
 				c.Header("Retry-After", strconv.FormatInt(seconds, 10))
 			}
 			response.Error(c, http.StatusTooManyRequests, "loginRateLimited", "登录尝试过于频繁，请稍后重试")
@@ -167,6 +168,10 @@ func (h *Handler) changePassword(c *gin.Context) {
 	if err := h.service.ChangePassword(c.Request.Context(), adminValue.ID, request.CurrentPassword, request.NewPassword); err != nil {
 		if errors.Is(err, adminapp.ErrInvalidCredentials) || errors.Is(err, adminapp.ErrInvalidPassword) {
 			response.Error(c, http.StatusBadRequest, "passwordChangeFailed", err.Error())
+			return
+		}
+		if errors.Is(err, adminapp.ErrRuntimeUnavailable) {
+			response.Error(c, http.StatusServiceUnavailable, "authRuntimeUnavailable", "管理员认证服务暂不可用")
 			return
 		}
 		response.Error(c, http.StatusInternalServerError, "passwordChangeFailed", "修改管理员密码失败")

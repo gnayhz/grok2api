@@ -16,36 +16,39 @@ type ModelSpec struct {
 }
 
 var catalog = []ModelSpec{
-	{PublicID: "grok-chat-fast", UpstreamModel: "grok-chat-fast", Capability: modeldomain.CapabilityChat, Mode: "fast", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-chat-auto", UpstreamModel: "grok-chat-auto", Capability: modeldomain.CapabilityChat, Mode: "auto", MinimumTier: account.WebTierSuper},
-	{PublicID: "grok-chat-expert", UpstreamModel: "grok-chat-expert", Capability: modeldomain.CapabilityChat, Mode: "expert", MinimumTier: account.WebTierSuper},
-	{PublicID: "grok-chat-heavy", UpstreamModel: "grok-chat-heavy", Capability: modeldomain.CapabilityChat, Mode: "heavy", MinimumTier: account.WebTierHeavy},
+	{UpstreamModel: "grok-chat-fast", Mode: "fast", MinimumTier: account.WebTierBasic},
+	{UpstreamModel: "grok-chat-auto", Mode: "auto", MinimumTier: account.WebTierSuper},
+	{UpstreamModel: "grok-chat-expert", Mode: "expert", MinimumTier: account.WebTierSuper},
+	{UpstreamModel: "grok-chat-heavy", Mode: "heavy", MinimumTier: account.WebTierHeavy},
 	// Lite keeps the distinct fast/chat product name. Imagine WebSocket models
 	// share the Console-facing product names but select their protocol version
 	// through enable_pro. Media products are available to Basic accounts with
 	// runtime selection fenced by tier-specific upstream quota windows.
-	{PublicID: "grok-imagine-image-lite", UpstreamModel: "grok-imagine-image", ProtocolModel: "imagine-lite", Capability: modeldomain.CapabilityImage, Mode: "fast", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-imagine-image", UpstreamModel: "grok-imagine-image-quality", ProtocolModel: "imagine", Capability: modeldomain.CapabilityImage, Mode: "image_pro", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-imagine-image-2.0", UpstreamModel: "grok-imagine-image-2.0", ProtocolModel: "imagine", ImaginePro: true, Capability: modeldomain.CapabilityImage, Mode: "image_pro", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-imagine-image-edit", UpstreamModel: "imagine-image-edit", Capability: modeldomain.CapabilityImageEdit, Mode: "image_edit", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-imagine-video", UpstreamModel: "grok-imagine-video", ProtocolModel: "imagine-video-gen", Capability: modeldomain.CapabilityVideo, Mode: "video", MinimumTier: account.WebTierBasic},
+	{UpstreamModel: "grok-imagine-image", ProtocolModel: "imagine-lite", Mode: "fast", MinimumTier: account.WebTierBasic},
+	{UpstreamModel: "grok-imagine-image-quality", ProtocolModel: "imagine", Mode: "image_pro", MinimumTier: account.WebTierBasic},
+	{UpstreamModel: "grok-imagine-image-2.0", ProtocolModel: "imagine", ImaginePro: true, Mode: "image_pro", MinimumTier: account.WebTierBasic},
+	{UpstreamModel: "imagine-image-edit", Mode: "image_edit", MinimumTier: account.WebTierBasic},
+	{UpstreamModel: "grok-imagine-video", ProtocolModel: "imagine-video-gen", Mode: "video", MinimumTier: account.WebTierBasic},
 }
 
-func Catalog() []ModelSpec { return append([]ModelSpec(nil), catalog...) }
-
-func Routes() []modeldomain.Route {
-	values := make([]modeldomain.Route, 0, len(catalog))
+// Catalog joins Provider wire parameters with the M05 product mapping.
+func Catalog() []ModelSpec {
+	values := make([]ModelSpec, 0, len(catalog))
 	for _, spec := range catalog {
-		publicID, _ := modeldomain.NormalizePublicID(account.ProviderWeb, spec.PublicID)
-		values = append(values, modeldomain.Route{PublicID: publicID, Provider: account.ProviderWeb, UpstreamModel: spec.UpstreamModel, Capability: spec.Capability, Enabled: true})
+		values = append(values, withPublicProduct(spec))
 	}
 	return values
+}
+
+func withPublicProduct(spec ModelSpec) ModelSpec {
+	spec.PublicID, spec.Capability, _ = modeldomain.CatalogDefault(account.ProviderWeb, spec.UpstreamModel)
+	return spec
 }
 
 func Resolve(upstreamModel string) (ModelSpec, bool) {
 	for _, spec := range catalog {
 		if spec.UpstreamModel == upstreamModel {
-			return spec, true
+			return withPublicProduct(spec), true
 		}
 	}
 	return ModelSpec{}, false

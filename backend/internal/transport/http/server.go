@@ -21,6 +21,7 @@ import (
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
@@ -33,6 +34,7 @@ import (
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
+	qualityhttp "github.com/chenyme/grok2api/backend/internal/transport/http/quality"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
 	systemhttp "github.com/chenyme/grok2api/backend/internal/transport/http/system"
 	"github.com/gin-gonic/gin"
@@ -41,6 +43,7 @@ import (
 )
 
 type Dependencies struct {
+	EgressRuntimeStats func() infraegress.RuntimeStats
 	Logger             *slog.Logger
 	RequestTimeout     time.Duration
 	MaxBodyBytes       int64
@@ -51,28 +54,30 @@ type Dependencies struct {
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness    func(context.Context) ReadinessSnapshot
-	Ready        func(context.Context) bool
-	TrafficReady func() bool
-	AdminAuth    *adminauthapp.Service
-	Accounts     *accountapp.Service
-	AccountSync  *accountsyncapp.Service
-	Models       *modelapp.Service
-	ClientKeys   *clientkeyapp.Service
-	Audits       *auditapp.Service
-	Dashboard    *dashboardapp.Service
-	Gateway      *gateway.Service
-	Media        *mediaapp.Service
-	Settings     *settingsapp.Service
-	Egress       *egressapp.Service
-	Updates      *updatecheckapp.Service
-	AccountRisk  AccountRiskActions
-}
-
-// AccountRiskActions is the admin risk-check / patrol-run surface.
-type AccountRiskActions interface {
-	CheckAccount(ctx context.Context, id uint64) error
-	RunDuePatrol(ctx context.Context) (int, error)
+	Readiness     func(context.Context) ReadinessSnapshot
+	Ready         func(context.Context) bool
+	TrafficReady  func() bool
+	AdminAuth     *adminauthapp.Service
+	Accounts      *accountapp.Service
+	AccountSync   *accountsyncapp.Service
+	Models        *modelapp.Service
+	ClientKeys    *clientkeyapp.Service
+	Audits        *auditapp.Service
+	Dashboard     *dashboardapp.Service
+	Gateway       *gateway.Service
+	Media         *mediaapp.Service
+	MediaImporter *mediaapp.ImageInputImporter
+	Settings      *settingsapp.Service
+	Egress        *egressapp.Service
+	Updates       *updatecheckapp.Service
+	// Quality 是新质量层管理面(重写批5:四入口 HTTP/DTO)。
+	Quality *qualityhttp.Deps
+	// EgressQualityStates 节点质量状态注入(批8 可见性整改:节点列表
+	// 徽章)。nil=质量层剥离态,节点响应不含质量字段(D2)。
+	EgressQualityStates func() map[uint64]egresshttp.NodeQualityState
+	// AccountQualityStates 账号质量状态注入(裁决亭可见性:账号列表
+	// 徽章)。nil=质量层剥离态,账号响应不含质量字段。
+	AccountQualityStates func() map[uint64]accounthttp.AccountQualityState
 }
 
 type ReadinessComponent struct {
@@ -154,7 +159,7 @@ func New(deps Dependencies) *gin.Engine {
 	if deps.SwaggerEnabled {
 		router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
-	mediaHandler := mediahttp.NewHandler(deps.Media)
+	mediaHandler := mediahttp.NewHandler(deps.Media, deps.MediaImporter)
 	mediaHandler.RegisterPublic(router)
 
 	adminRoot := router.Group("/api/admin/v1")
@@ -164,7 +169,6 @@ func New(deps Dependencies) *gin.Engine {
 	adminProtected.Use(middleware.AdminAuth(deps.AdminAuth))
 	authHandler.RegisterAuthenticated(adminProtected)
 	accountHandler := accounthttp.NewHandler(deps.Accounts, deps.AccountSync, deps.Logger)
-	accountHandler.SetRiskChecker(deps.AccountRisk)
 	accountHandler.Register(adminProtected)
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
@@ -173,11 +177,20 @@ func New(deps Dependencies) *gin.Engine {
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingsHandler := settingshttp.NewHandler(deps.Settings)
-	settingsHandler.SetPatrolRunner(deps.AccountRisk)
 	settingsHandler.Register(adminProtected)
 	egressHandler := egresshttp.NewHandler(deps.Egress, deps.Logger)
+	egressHandler.SetRuntimeStats(deps.EgressRuntimeStats)
+	if deps.EgressQualityStates != nil {
+		egressHandler.SetQualityStates(deps.EgressQualityStates)
+	}
+	if deps.AccountQualityStates != nil {
+		accountHandler.SetQualityStates(deps.AccountQualityStates)
+	}
 	egressHandler.Register(adminProtected)
-	guardstatshttp.NewHandler().Register(adminProtected)
+	guardstatshttp.NewHandler(deps.Gateway).Register(adminProtected)
+	if deps.Quality != nil {
+		qualityhttp.NewHandler(*deps.Quality).Register(adminProtected)
+	}
 	systemhttp.NewHandler(func() string {
 		if deps.Settings != nil {
 			return deps.Settings.PublicAPIBaseURL()
@@ -201,7 +214,7 @@ func New(deps Dependencies) *gin.Engine {
 	}
 	// 鉴权先于并发闸门:闸门在鉴权前会为每个伪造 key 占住一个全局并发槽,
 	// 无凭据流量即可把 1024 个槽耗尽, 令所有合法推理请求 503。先 401 伪请求,
-	// 闸门槽位只留给已通过鉴权的流量。per-key 的 RPM/并发租约仍在闸门之后。
+	// 闸门槽位只留给已通过鉴权的流量。per-key 的 RPM/并发租约在 ClientAuth 中取得，返回时释放。
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
 	v1.Use(deps.ConcurrencyGate.Middleware())
 	v1.Use(middleware.ObserveBodyMemory())

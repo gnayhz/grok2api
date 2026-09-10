@@ -11,11 +11,11 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
@@ -94,11 +94,13 @@ func (e *webMediaUpstreamError) providerResponse() *provider.Response {
 	if e.status != http.StatusForbidden {
 		code = "upstream_unavailable"
 	}
-	return jsonProviderResponse(e.status, map[string]any{"error": map[string]any{
+	response := jsonProviderResponse(e.status, map[string]any{"error": map[string]any{
 		"message": e.summary,
 		"type":    "upstream_error",
 		"code":    code,
 	}})
+	response.PolicyForbidden = e.IsPolicyForbidden()
+	return response
 }
 
 const (
@@ -264,6 +266,9 @@ func boundWebMediaDiagnostic(value string, limit int) string {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	if request.Resume != nil {
+		return provider.VideoResult{}, fmt.Errorf("Grok Web 视频没有可用的原生任务查询协议")
+	}
 	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
 	}
@@ -290,15 +295,27 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		resolution = "720p"
 	}
 	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
-	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionSubmitting, Route: "web", Endpoint: cfg.BaseURL}); err != nil {
+		return provider.VideoResult{}, err
+	}
+	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, cfg.VideoTimeout)
 	if err != nil {
+		if checkpointErr := provider.CheckpointVideoRejection(request, err); checkpointErr != nil {
+			return provider.VideoResult{}, checkpointErr
+		}
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
 	result, _, parseErr := parseVideoStream(response, request.Progress)
 	_ = response.Body.Close()
 	if parseErr != nil {
+		if checkpointErr := provider.CheckpointVideoFailure(request, parseErr); checkpointErr != nil {
+			return result, checkpointErr
+		}
 		if upstreamErr, ok := parseErr.(*webMediaUpstreamError); ok {
 			a.logWebMediaUpstreamRejection("video_generation", response, upstreamErr)
+		}
+		if checkpointErr := provider.CheckpointVideoRejection(request, parseErr); checkpointErr != nil {
+			return provider.VideoResult{}, checkpointErr
 		}
 		stage := provider.VideoStagePoll
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
@@ -309,6 +326,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if result.URL == "" {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, fmt.Errorf("视频生成完成但没有返回内容 URL"))
 	}
+	if err := provider.CheckpointVideo(request, provider.VideoCheckpoint{Phase: mediadomain.VideoExecutionGenerated, Result: result}); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
@@ -316,6 +336,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 // session. Direct asset URLs are not public and must not be exposed as a
 // substitute for this authenticated transfer.
 func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credential, rawURL string) (io.ReadCloser, string, int64, error) {
+	ctx = infraegress.WithPhysicalCallStage(ctx, "asset_download")
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Scheme != "https" || !trustedImageAssetHost(parsed.Hostname()) || parsed.User != nil {
 		return nil, "", 0, fmt.Errorf("视频内容 URL 不受信任")
@@ -341,13 +362,13 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	request.Header.Del("Content-Type")
 	response, err := lease.Do(request)
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		lease.Release()
 		return nil, "", 0, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_ = response.Body.Close()
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		lease.Release()
 		return nil, "", 0, fmt.Errorf("下载视频返回 %d", response.StatusCode)
 	}
@@ -362,9 +383,9 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 	}
 	onFinished := func(readErr error, complete bool) {
 		if readErr != nil {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, 0, readErr)
+			lease.Observe(0, readErr)
 		} else if complete {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, response.StatusCode, nil)
+			lease.Observe(response.StatusCode, nil)
 		}
 		lease.Release()
 	}
@@ -438,7 +459,7 @@ func webMediaStreamError(value map[string]any) error {
 	if message == "" {
 		message = "未提供错误详情"
 	}
-	return fmt.Errorf("视频上游错误: %s", message)
+	return &provider.VideoGenerationFailure{Err: fmt.Errorf("视频上游错误: %s", message)}
 }
 
 func videoFileAttachments(root map[string]any) []string {

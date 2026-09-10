@@ -14,16 +14,21 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 )
 
 type failureAttemptRecorder struct {
+	mu                  sync.Mutex
 	method              string
 	path                string
 	remainingBodyBudget int
@@ -71,6 +76,9 @@ func (r *failureAttemptRecorder) captureCredentialFailure(credential accountdoma
 }
 
 func (r *failureAttemptRecorder) captureResponse(credential accountdomain.Credential, startedAt time.Time, response *provider.Response, requestErr error) error {
+	if requestErr == nil && response != nil && response.RequestValidation != nil {
+		return nil
+	}
 	if requestErr != nil {
 		r.append(audit.Attempt{
 			Source:         audit.AttemptSourceTransport,
@@ -227,12 +235,16 @@ func (r *failureAttemptRecorder) captureQualityIdle(credential accountdomain.Cre
 }
 
 func (r *failureAttemptRecorder) append(attempt audit.Attempt) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	attempt.Number = len(r.attempts) + 1
 	r.attempts = append(r.attempts, attempt)
 }
 
 // captureBody 在单次和单请求预算内保留可读的脱敏正文片段。
 func (r *failureAttemptRecorder) captureBody(body []byte, alreadyTruncated bool) ([]byte, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(body) == 0 {
 		return nil, alreadyTruncated
 	}
@@ -253,6 +265,8 @@ func (r *failureAttemptRecorder) captureBody(body []byte, alreadyTruncated bool)
 }
 
 func (r *failureAttemptRecorder) snapshot() []audit.Attempt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return append([]audit.Attempt(nil), r.attempts...)
 }
 
@@ -270,8 +284,6 @@ type replayReadCloser struct {
 
 func (r *replayReadCloser) Close() error { return r.source.Close() }
 
-// applyDeferredStreamConversion runs the provider's client-protocol converter
-// after quality peek has already classified the raw upstream body.
 func qualityPeekProtocol(operation audit.Operation, response *provider.Response) string {
 	if response != nil && (response.ConvertStream != nil || response.ConvertJSON != nil) {
 		return qualityProtocolResponses
@@ -279,41 +291,136 @@ func qualityPeekProtocol(operation audit.Operation, response *provider.Response)
 	return qualityProtocolForOperation(operation)
 }
 
-func applyDeferredStreamConversion(response *provider.Response) {
+var errResponseConversion = errors.New("upstream response protocol conversion failed")
+var errResponseTerminalFailure = errors.New("upstream response did not complete successfully")
+
+// checkBufferedCompletion observes a completed JSON response independently of
+// admission. A visible thinking field cannot turn a failed or partial terminal
+// state into a successful delivery, nor can conversion erase that state.
+func checkBufferedCompletion(data []byte) error {
+	if !jsonpeek.Valid(data) {
+		return nil // Syntax/shape validation belongs to the decoder/converter.
+	}
+	var status, responseType []byte
+	var hasError bool
+	jsonpeek.ObjectFields(data, func(key, value []byte) bool {
+		switch string(key) {
+		case "status":
+			status = jsonpeek.UnquoteBytes(value)
+		case "type":
+			responseType = jsonpeek.UnquoteBytes(value)
+		case "error":
+			hasError = !bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+		}
+		return true
+	})
+	if hasError || string(responseType) == "error" {
+		return errResponseTerminalFailure
+	}
+	switch string(status) {
+	case "failed", "incomplete", "cancelled", "canceled", "queued", "in_progress":
+		return errResponseTerminalFailure
+	}
+	return responsecheck.JSON(data)
+}
+
+// applyDeferredStreamConversion prepares the client protocol after admission.
+// A conversion failure cannot fall back to a different protocol or an empty
+// successful response. Callers must abort before confirming cache writes.
+func prepareResponseDelivery(response *provider.Response, streaming bool, generation *textGeneration) error {
 	if response == nil {
-		return
+		return nil
+	}
+	if !streaming && response.StatusCode >= 200 && response.StatusCode < 300 && response.Body != nil {
+		if _, release, buffered := responsebuffer.Borrow(response.Body); buffered {
+			release()
+		} else {
+			body, err := responsebuffer.ReadAll(response.Body, responsebuffer.BudgetOf(response.Body), responsebuffer.JSONLimit)
+			_ = response.Body.Close()
+			response.Body = body
+			if err != nil {
+				return errors.Join(errResponseConversion, err)
+			}
+		}
+	}
+	if data, release, buffered := responsebuffer.Borrow(response.Body); buffered {
+		generation.observeJSON(response, data)
+		release()
+	}
+	return applyDeferredStreamConversion(response)
+}
+
+func applyDeferredStreamConversion(response *provider.Response) error {
+	if response == nil {
+		return nil
+	}
+	if data, release, buffered := responsebuffer.Borrow(response.Body); buffered {
+		err := checkBufferedCompletion(data)
+		release()
+		if err != nil {
+			return err
+		}
+	}
+	if response.ConvertStream != nil && response.ConvertJSON != nil {
+		return errResponseConversion
+	}
+	if (response.ConvertStream != nil || response.ConvertJSON != nil) && response.Body == nil {
+		return errResponseConversion
 	}
 	if response.ConvertStream != nil {
-		if response.Body != nil {
-			response.Body = response.ConvertStream(response.Body)
+		converted := response.ConvertStream(response.Body)
+		if converted == nil {
+			return errResponseConversion
 		}
+		response.Body = converted
 		response.ConvertStream = nil
 	}
 	if response.ConvertJSON == nil {
-		return
+		return nil
 	}
 	convert := response.ConvertJSON
 	response.ConvertJSON = nil
-	if response.Body == nil {
-		return
+	budget := responsebuffer.BudgetOf(response.Body)
+	data, release, buffered := responsebuffer.Borrow(response.Body)
+	if !buffered {
+		body, err := responsebuffer.ReadAll(response.Body, budget, responsebuffer.JSONLimit)
+		_ = response.Body.Close()
+		response.Body = body
+		if err != nil {
+			return errors.Join(errResponseConversion, err)
+		}
+		data, release, _ = body.BorrowBytes()
 	}
-	data, err := io.ReadAll(response.Body)
+	defer release()
 	_ = response.Body.Close()
-	if err != nil {
-		response.Body = io.NopCloser(bytes.NewReader(nil))
-		return
+	response.Body = io.NopCloser(bytes.NewReader(nil))
+	workspace, workspaceErr := responsebuffer.JSONWorkspace(budget, data)
+	if workspaceErr != nil {
+		return errors.Join(errResponseConversion, workspaceErr)
+	}
+	defer workspace.Release()
+	if err := checkBufferedCompletion(data); err != nil {
+		return err
 	}
 	converted, convErr := convert(data)
-	if convErr != nil || converted == nil {
-		response.Body = io.NopCloser(bytes.NewReader(data))
-		return
+	if convErr != nil {
+		return errors.Join(errResponseConversion, convErr)
 	}
-	response.Body = io.NopCloser(bytes.NewReader(converted))
+	if len(converted) == 0 {
+		return errResponseConversion
+	}
+	output := responsebuffer.New(budget, responsebuffer.JSONLimit)
+	if _, err := output.Write(converted); err != nil {
+		_ = output.Close()
+		return errors.Join(errResponseConversion, err)
+	}
+	response.Body = output.Body()
 	if response.Header == nil {
 		response.Header = http.Header{}
 	}
 	response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 	response.Header.Set("Content-Type", "application/json")
+	return nil
 }
 
 // readResponseBody 只读取诊断上限，同时把已读取前缀接回原始响应供后续错误处理。

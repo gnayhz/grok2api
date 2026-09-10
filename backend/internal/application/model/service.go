@@ -12,7 +12,6 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
@@ -35,6 +34,7 @@ var (
 	ErrInvalidInput  = errors.New("模型参数无效")
 	ErrNotFound      = errors.New("模型不存在")
 	ErrConflict      = errors.New("模型名称冲突")
+	ErrClosed        = errors.New("模型同步服务已关闭")
 )
 
 type UpdateInput struct {
@@ -88,11 +88,15 @@ type Service struct {
 	// SyncObserved): browser disconnects no longer abort a run over a very
 	// large account pool. Observers publish here so a reconnecting client can resume displaying
 	// progress via SyncProgress.
-	syncRunMu     sync.RWMutex
-	syncRunActive bool
-	syncCompleted int
-	syncTotal     int
-	syncErr       error
+	syncRunMu       sync.RWMutex
+	syncRunActive   bool
+	syncClosing     bool
+	syncRunCancel   context.CancelFunc
+	syncRunDone     chan struct{}
+	accountSyncRuns map[uint64]accountSyncRun
+	syncCompleted   int
+	syncTotal       int
+	syncErr         error
 }
 
 func NewService(models repository.ModelRepository, accounts repository.AccountRepository, accountService *accountapp.Service, providers *provider.Registry) *Service {
@@ -162,6 +166,9 @@ func (s *Service) endpointCapabilities(routes []modeldomain.Route) []string {
 func endpointCapabilitiesForDefinition(routes []modeldomain.Route, definition provider.Definition) []string {
 	available := make(map[string]bool, 6)
 	for _, route := range routes {
+		if !modeldomain.SupportsCapability(route.Provider, route.UpstreamModel, route.Capability) {
+			continue
+		}
 		switch route.Capability {
 		case modeldomain.CapabilityResponses, modeldomain.CapabilityChat:
 			available["completions"] = definition.Conversation.ChatCompletions
@@ -236,25 +243,6 @@ func (s *Service) ListEnabled(ctx context.Context) ([]modeldomain.Route, error) 
 	return s.models.ListEnabled(ctx)
 }
 
-func (s *Service) ListEnabledForClientKey(ctx context.Context, key clientkeydomain.Key) ([]modeldomain.Route, error) {
-	scope, valid := clientkeydomain.NormalizeAccountScope(clientkeydomain.AccountScope{Providers: key.ProviderScope, Tiers: key.TierScope})
-	if !valid {
-		return nil, ErrInvalidFilter
-	}
-	if !scope.IsRestricted() {
-		return s.models.ListEnabled(ctx)
-	}
-	providers := scope.Providers.Values()
-	if len(providers) == 1 && providers[0] == "all" {
-		providers = nil
-	}
-	tiers := scope.Tiers.Values()
-	if len(tiers) == 1 && tiers[0] == "all" {
-		tiers = nil
-	}
-	return s.models.ListEnabledForScope(ctx, repository.ModelListFilter{Providers: providers, Tiers: tiers})
-}
-
 func (s *Service) Get(ctx context.Context, id uint64) (modeldomain.Route, error) {
 	return s.models.Get(ctx, id)
 }
@@ -264,6 +252,8 @@ func (s *Service) GetByPublicID(ctx context.Context, publicID string) (modeldoma
 	return s.models.GetByPublicID(ctx, publicID)
 }
 
+// GetByPublicIDCandidates preserves the repository distinction between an absent
+// name and a configured but unavailable name, including persisted aliases.
 func (s *Service) GetByPublicIDCandidates(ctx context.Context, publicID string) ([]modeldomain.Route, error) {
 	return s.models.GetByPublicIDCandidates(ctx, publicID)
 }
@@ -291,8 +281,8 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (modeldomain.Ro
 	if err != nil {
 		return modeldomain.Route{}, err
 	}
-	if definition.ModelCatalog == provider.ModelCatalogStatic && s.providers.QuotaMode(input.Provider, upstreamModel) == "" {
-		return modeldomain.Route{}, invalidInput(fmt.Sprintf("%s 仅支持内置模型目录中的上游模型", definition.ModelNamespace))
+	if !modeldomain.SupportsCapability(input.Provider, upstreamModel, input.Capability) {
+		return modeldomain.Route{}, invalidInput(fmt.Sprintf("%s 上游模型 %s 不支持 %s 能力", definition.ModelNamespace, upstreamModel, input.Capability))
 	}
 	accountIDs, err := s.validateBoundAccounts(ctx, input.Provider, input.AccountIDs)
 	if err != nil {
@@ -316,10 +306,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (mod
 		if !ok {
 			return modeldomain.Route{}, invalidInput("publicId 不能为空、不能携带其他 Provider 前缀，且长度不能超过 255 个字符")
 		}
-		value.PublicID = publicID
-	}
-	if input.Enabled != nil {
-		value.Enabled = *input.Enabled
+		input.PublicID = &publicID
 	}
 	var accountIDs *[]uint64
 	if input.AccountIDs != nil {
@@ -329,7 +316,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (mod
 		}
 		accountIDs = &validated
 	}
-	updated, err := s.models.Update(ctx, value, accountIDs)
+	updated, err := s.models.Patch(ctx, id, modeldomain.RoutePatch{PublicID: input.PublicID, Enabled: input.Enabled, AccountIDs: accountIDs})
 	return updated, mapRepositoryError(err)
 }
 
@@ -348,22 +335,23 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	return s.models.DeleteMany(ctx, values)
 }
 
-func (s *Service) ListBindableAccounts(ctx context.Context, providerValue account.Provider) ([]AccountOption, error) {
+func (s *Service) ListBindableAccounts(ctx context.Context, providerValue account.Provider, page, pageSize int, search string) ([]AccountOption, int64, error) {
 	if !providerValue.IsValid() {
-		return nil, invalidInput("账号来源无效")
+		return nil, 0, invalidInput("账号来源无效")
 	}
-	values, _, err := s.accounts.List(ctx, repository.AccountListQuery{
-		Page:   repository.PageQuery{Offset: 0, Limit: 1000},
+	page, pageSize = normalizePage(page, pageSize)
+	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
+		Page:   repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: search},
 		Filter: repository.AccountListFilter{Provider: string(providerValue)},
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	result := make([]AccountOption, 0, len(values))
 	for _, value := range values {
 		result = append(result, AccountOption{ID: value.ID, Name: value.Name})
 	}
-	return result, nil
+	return result, total, nil
 }
 
 func (s *Service) validateProviderCapability(providerValue account.Provider, capability modeldomain.Capability) (provider.Definition, error) {
@@ -399,21 +387,12 @@ func (s *Service) validateBoundAccounts(ctx context.Context, providerValue accou
 	if len(result) == 0 {
 		return result, nil
 	}
-	values, _, err := s.accounts.List(ctx, repository.AccountListQuery{
-		Page:   repository.PageQuery{Offset: 0, Limit: 1000},
-		Filter: repository.AccountListFilter{Provider: string(providerValue)},
-	})
+	count, err := s.accounts.CountProviderAccountsByIDs(ctx, providerValue, result)
 	if err != nil {
 		return nil, err
 	}
-	available := make(map[uint64]bool, len(values))
-	for _, value := range values {
-		available[value.ID] = true
-	}
-	for _, id := range result {
-		if !available[id] {
-			return nil, invalidInput(fmt.Sprintf("账号 %d 不存在或与模型来源不匹配", id))
-		}
+	if count != int64(len(result)) {
+		return nil, invalidInput("绑定账号不存在或与模型来源不匹配")
 	}
 	return result, nil
 }
@@ -465,22 +444,46 @@ func (s *Service) storeSyncProgress(completed, total int) {
 // SyncProgress (the singleflight group joins concurrent callers to the same
 // in-flight run). A timeout bounds the detached run against leaks.
 func (s *Service) SyncObserved(ctx context.Context, observer SyncProgressObserver) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.syncRunMu.RLock()
+	closing := s.syncClosing
+	s.syncRunMu.RUnlock()
+	if closing {
+		return 0, ErrClosed
+	}
 	result := s.syncAll.DoChan("all", func() (any, error) {
-		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), modelSyncRunTimeout)
-		defer cancel()
 		s.syncRunMu.Lock()
+		// The singleflight function runs asynchronously. Close can win after
+		// the watcher entered DoChan but before this goroutine starts.
+		if s.syncClosing {
+			s.syncRunMu.Unlock()
+			return 0, ErrClosed
+		}
+		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), modelSyncRunTimeout)
+		done := make(chan struct{})
+		s.syncRunCancel, s.syncRunDone = cancel, done
 		s.syncRunActive = true
 		s.syncCompleted, s.syncTotal, s.syncErr = 0, 0, nil
 		s.syncRunMu.Unlock()
-		synced, err := s.syncAllAccounts(runCtx, func(completed, total int) {
-			s.storeSyncProgress(completed, total)
-			if observer != nil {
-				observer(completed, total)
-			}
+		var synced int
+		err := batch.Do(runCtx, func(workCtx context.Context) error {
+			var err error
+			synced, err = s.syncAllAccounts(workCtx, func(completed, total int) {
+				s.storeSyncProgress(completed, total)
+				if observer != nil {
+					observer(completed, total)
+				}
+			})
+			return err
 		})
+		cancel()
 		s.syncRunMu.Lock()
 		s.syncRunActive = false
 		s.syncErr = err
+		s.syncRunCancel = nil
+		close(done)
 		s.syncRunMu.Unlock()
 		return synced, err
 	})
@@ -495,6 +498,36 @@ func (s *Service) SyncObserved(ctx context.Context, observer SyncProgressObserve
 		}
 		return value.Val.(int), nil
 	}
+}
+
+// Close stops accepting detached syncs, cancels all registered runs and waits
+// for their workers and final state writes. Watcher cancellation alone keeps a full
+// run alive. A close timeout leaves dependencies owned by the run; callers must
+// retain them and retry Close after it finishes.
+func (s *Service) Close(ctx context.Context) error {
+	s.syncRunMu.Lock()
+	s.syncClosing = true
+	var runs []accountSyncRun
+	if s.syncRunDone != nil {
+		runs = append(runs, accountSyncRun{cancel: s.syncRunCancel, done: s.syncRunDone})
+	}
+	for _, run := range s.accountSyncRuns {
+		runs = append(runs, run)
+	}
+	s.syncRunMu.Unlock()
+	for _, run := range runs {
+		if run.cancel != nil {
+			run.cancel()
+		}
+	}
+	for _, run := range runs {
+		select {
+		case <-run.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func (s *Service) syncAllAccounts(ctx context.Context, observer SyncProgressObserver) (int, error) {
@@ -578,7 +611,7 @@ func (s *Service) syncAllAccounts(ctx context.Context, observer SyncProgressObse
 		for value := range providerModels {
 			models = append(models, value)
 		}
-		if err := s.models.UpsertDiscovered(ctx, providerValue, models); err != nil {
+		if err := s.publishDiscovered(ctx, providerValue, models); err != nil {
 			return 0, err
 		}
 		syncedModels += len(models)
@@ -605,7 +638,7 @@ func (s *Service) SyncAccount(ctx context.Context, accountID uint64) (int, error
 	if err != nil {
 		return 0, err
 	}
-	if err := s.models.UpsertDiscovered(ctx, credential.Provider, models); err != nil {
+	if err := s.publishDiscovered(ctx, credential.Provider, models); err != nil {
 		return 0, err
 	}
 	return len(models), nil
@@ -634,15 +667,18 @@ func (s *Service) SyncAccounts(ctx context.Context, accountIDs []uint64) (int, i
 }
 
 func (s *Service) syncAccountCapabilities(ctx context.Context, value account.Credential, adapter provider.ModelCatalogAdapter) ([]string, error) {
-	attemptedAt := time.Now().UTC()
+	ref, err := s.models.BeginAccountCapabilitySync(ctx, value.ID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
 	credential, err := s.account.EnsureCredential(ctx, value, false)
 	if err != nil {
-		s.markCapabilitySyncFailed(value.ID, attemptedAt, err)
+		s.markCapabilitySyncFailed(ref, value.CredentialRef(), err)
 		return nil, err
 	}
 	values, err := adapter.ListModels(ctx, credential)
 	if err != nil {
-		s.markCapabilitySyncFailed(credential.ID, attemptedAt, err)
+		s.markCapabilitySyncFailed(ref, credential.CredentialRef(), err)
 		return nil, err
 	}
 	models := normalizeDiscoveredModels(values)
@@ -653,13 +689,13 @@ func (s *Service) syncAccountCapabilities(ctx context.Context, value account.Cre
 			billing = &snapshot
 		} else if !errors.Is(billingErr, repository.ErrNotFound) {
 			// Billing 不存在按 Unknown 处理；其他仓储错误保留失败语义。
-			s.markCapabilitySyncFailed(credential.ID, attemptedAt, billingErr)
+			s.markCapabilitySyncFailed(ref, credential.CredentialRef(), billingErr)
 			return nil, billingErr
 		}
 		models = normalizeDiscoveredModels(normalizer.NormalizeAccountModelCapabilities(models, billing, credential))
 	}
-	if err := s.models.ReplaceAccountCapabilities(ctx, credential.ID, models, attemptedAt); err != nil {
-		s.markCapabilitySyncFailed(credential.ID, attemptedAt, err)
+	if err := s.models.CompleteAccountCapabilitySync(ctx, ref, modeldomain.CapabilitySyncResult{Credential: credential.CredentialRef(), Models: models}); err != nil {
+		s.markCapabilitySyncFailed(ref, credential.CredentialRef(), err)
 		return nil, err
 	}
 	return models, nil
@@ -683,10 +719,10 @@ func normalizeDiscoveredModels(values []string) []string {
 }
 
 // markCapabilitySyncFailed 使用独立短超时保存失败状态，避免请求取消后丢失账号能力诊断信息。
-func (s *Service) markCapabilitySyncFailed(accountID uint64, attemptedAt time.Time, cause error) {
+func (s *Service) markCapabilitySyncFailed(ref modeldomain.CapabilitySyncRef, credential account.CredentialRef, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), syncFailurePersistTimeout)
 	defer cancel()
-	_ = s.models.MarkAccountCapabilitySyncFailed(ctx, accountID, attemptedAt, cause.Error())
+	_ = s.models.CompleteAccountCapabilitySync(ctx, ref, modeldomain.CapabilitySyncResult{Credential: credential, Err: cause})
 }
 
 func normalizePage(page, pageSize int) (int, int) {

@@ -154,9 +154,9 @@ func readinessSnapshot(
 		if ledgerState.Ready {
 			snapshot.Components["billing_ledger"] = httpserver.ReadinessComponent{State: "ready"}
 		} else {
-			detail := fmt.Sprintf("审计账本不可用；连续失败 %d 次，丢失 %d 条，队列 %d/%d", ledgerState.ConsecutiveFailures, ledgerState.Dropped, ledgerState.QueueDepth, ledgerState.QueueCapacity)
+			detail := fmt.Sprintf("审计账本不可用；连续失败 %d 次，未接收 %d 条，待修复 %d 条，待写 %d/%d（%d/%d 字节）", ledgerState.ConsecutiveFailures, ledgerState.Dropped, ledgerState.Rejected, ledgerState.QueueDepth, ledgerState.QueueCapacity, ledgerState.PendingBytes, ledgerState.CapacityBytes)
 			snapshot.Components["billing_ledger"] = httpserver.ReadinessComponent{State: "degraded", Detail: detail}
-			if ledgerState.Irrecoverable || ledgerState.Mode == auditapp.LedgerModeEnforce {
+			if ledger.CheckLedgerReady() != nil {
 				snapshot.State = "not_ready"
 				return snapshot
 			}

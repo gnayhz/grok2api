@@ -29,6 +29,17 @@ func lockAccountLinkMutation(tx *gorm.DB) error {
 }
 
 func lockAccountLinkMutationWithTimeout(tx *gorm.DB, timeout time.Duration) error {
+	return lockAccountMaintenance(tx, timeout, false)
+}
+
+// Imports share the existing maintenance barrier: they can run concurrently,
+// but deletion cannot commit between checking its intent and installing material.
+// Acquire this before account row locks, and never across provider operations.
+func lockAccountImport(tx *gorm.DB) error {
+	return lockAccountMaintenance(tx, accountLinkLockTimeout, true)
+}
+
+func lockAccountMaintenance(tx *gorm.DB, timeout time.Duration, shared bool) error {
 	if tx.Dialector.Name() != "postgres" {
 		return nil
 	}
@@ -38,7 +49,11 @@ func lockAccountLinkMutationWithTimeout(tx *gorm.DB, timeout time.Duration) erro
 	parentCtx := tx.Statement.Context
 	lockCtx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
-	err := tx.WithContext(lockCtx).Exec("SELECT pg_advisory_xact_lock(?, ?)", accountLinkAdvisoryNamespace, accountLinkAdvisoryOperation).Error
+	query := "SELECT pg_advisory_xact_lock(?, ?)"
+	if shared {
+		query = "SELECT pg_advisory_xact_lock_shared(?, ?)"
+	}
+	err := tx.WithContext(lockCtx).Exec(query, accountLinkAdvisoryNamespace, accountLinkAdvisoryOperation).Error
 	if err != nil && parentCtx.Err() != nil {
 		return parentCtx.Err()
 	}
@@ -81,32 +96,51 @@ func linkWebToConsole(tx *gorm.DB, webAccountID, consoleAccountID uint64) error 
 	return tx.Create(&webConsoleAccountLinkModel{WebAccountID: webAccountID, ConsoleAccountID: consoleAccountID, CreatedAt: time.Now().UTC()}).Error
 }
 
-func (r *AccountRepository) UpdateIdentityMetadata(ctx context.Context, accountID uint64, email, userID, teamID string) error {
-	if accountID == 0 {
-		return repository.ErrNotFound
+// ApplyIdentity commits the observation and its trusted links together, after
+// fencing imports/deletion and checking the exact observed material generation.
+func (r *AccountRepository) ApplyIdentity(ctx context.Context, observed account.CredentialRef, identity account.IdentityObservation) (account.IdentityResult, error) {
+	var result account.IdentityResult
+	if observed.AccountID == 0 || !observed.Provider.IsValid() {
+		return result, repository.ErrNotFound
 	}
-	updates := make(map[string]any, 3)
-	if email = strings.TrimSpace(email); email != "" {
-		updates["email"] = email
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockAccountLinkMutation(tx); err != nil {
+			return err
+		}
+		if err := lockProviderAccount(tx, observed.AccountID, observed.Provider); err != nil {
+			return err
+		}
+		var row accountModel
+		if err := tx.Select("id", "provider", "email", "user_id", "team_id").Preload("Credential", func(q *gorm.DB) *gorm.DB { return q.Select("account_id", "generation") }).First(&row, observed.AccountID).Error; err != nil {
+			return err
+		}
+		if row.Credential == nil {
+			return repository.ErrNotFound
+		}
+		var err error
+		result, err = account.TransitionIdentity(account.IdentityState{
+			Material: account.CredentialRef{AccountID: row.ID, Provider: account.Provider(row.Provider), Generation: row.Credential.Generation},
+			Identity: account.IdentityObservation{Email: row.Email, UserID: row.UserID, TeamID: row.TeamID},
+		}, observed, identity)
+		if err != nil || !result.Applied {
+			return err
+		}
+		next := result.State.Identity
+		if err := resetWebProfileForChangedIdentity(tx, observed.Provider, observed.AccountID, row.UserID, next.UserID); err != nil {
+			return err
+		}
+		if err := tx.Model(&accountModel{}).Where("id = ?", observed.AccountID).Updates(map[string]any{"email": next.Email, "user_id": next.UserID, "team_id": next.TeamID}).Error; err != nil {
+			return err
+		}
+		return reconcileProviderLinksTx(tx, observed.AccountID)
+	})
+	if err != nil {
+		return account.IdentityResult{}, mapError(err)
 	}
-	if userID = strings.TrimSpace(userID); userID != "" {
-		updates["user_id"] = userID
+	if result.Applied {
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged, AccountID: observed.AccountID})
 	}
-	if teamID = strings.TrimSpace(teamID); teamID != "" {
-		updates["team_id"] = teamID
-	}
-	if len(updates) == 0 {
-		return nil
-	}
-	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", accountID).Updates(updates)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, AccountID: accountID})
-	return nil
+	return result, nil
 }
 
 // ReconcileProviderLinks 只建立无歧义的高可信关系；已有不同关系和多候选均保持不变。
@@ -118,43 +152,47 @@ func (r *AccountRepository) ReconcileProviderLinks(ctx context.Context, accountI
 		if err := lockAccountLinkMutation(tx); err != nil {
 			return err
 		}
-		var value accountModel
-		if err := tx.Select("id", "provider", "source_key", "user_id", "team_id").First(&value, accountID).Error; err != nil {
-			return err
-		}
-		switch account.Provider(value.Provider) {
-		case account.ProviderWeb:
-			if consoleSource, ok := matchingConsoleSourceKey(value.SourceKey); ok {
-				if candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", account.ProviderConsole, "source_key = ?", consoleSource); err != nil {
-					return err
-				} else if found {
-					if err := linkWebToConsole(tx, value.ID, candidate.ID); err != nil {
-						return err
-					}
-				}
-			}
-			if err := reconcileWebConsoleByUserID(tx, value, true); err != nil {
-				return err
-			}
-			return reconcileWebBuildByUserID(tx, value, true)
-		case account.ProviderConsole:
-			if webSource, ok := matchingWebSourceKey(value.SourceKey); ok {
-				if candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", account.ProviderWeb, "source_key = ?", webSource); err != nil {
-					return err
-				} else if found {
-					return linkWebToConsole(tx, candidate.ID, value.ID)
-				}
-			}
-			return reconcileWebConsoleByUserID(tx, value, false)
-		case account.ProviderBuild:
-			return reconcileWebBuildByUserID(tx, value, false)
-		}
-		return nil
+		return reconcileProviderLinksTx(tx, accountID)
 	}))
 	if err == nil {
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged, AccountID: accountID})
 	}
 	return err
+}
+
+func reconcileProviderLinksTx(tx *gorm.DB, accountID uint64) error {
+	var value accountModel
+	if err := tx.Select("id", "provider", "source_key", "user_id", "team_id").First(&value, accountID).Error; err != nil {
+		return err
+	}
+	switch account.Provider(value.Provider) {
+	case account.ProviderWeb:
+		if consoleSource, ok := matchingConsoleSourceKey(value.SourceKey); ok {
+			if candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", account.ProviderConsole, "source_key = ?", consoleSource); err != nil {
+				return err
+			} else if found {
+				if err := linkWebToConsole(tx, value.ID, candidate.ID); err != nil {
+					return err
+				}
+			}
+		}
+		if err := reconcileWebConsoleByUserID(tx, value, true); err != nil {
+			return err
+		}
+		return reconcileWebBuildByUserID(tx, value, true)
+	case account.ProviderConsole:
+		if webSource, ok := matchingWebSourceKey(value.SourceKey); ok {
+			if candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", account.ProviderWeb, "source_key = ?", webSource); err != nil {
+				return err
+			} else if found {
+				return linkWebToConsole(tx, candidate.ID, value.ID)
+			}
+		}
+		return reconcileWebConsoleByUserID(tx, value, false)
+	case account.ProviderBuild:
+		return reconcileWebBuildByUserID(tx, value, false)
+	}
+	return nil
 }
 
 func reconcileWebConsoleByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool) error {
@@ -478,7 +516,12 @@ func deleteLinkedGroupsTx(tx *gorm.DB, providerValue account.Provider, lockedRoo
 		return outcome, nil
 	}
 
-	// 4) Delete remaining rows and count them by provider.
+	// 4) Preserve deletion intent for the actual, locked set (including peers).
+	// A failed tombstone write rolls back the entire deletion.
+	if err := writeDeletedAccountTombstones(tx, deletable); err != nil {
+		return outcome, err
+	}
+	// 5) Delete remaining rows and count them by provider.
 	result := tx.Where("id IN ?", deletable).Delete(&accountModel{})
 	if result.Error != nil {
 		return outcome, result.Error
@@ -773,4 +816,57 @@ func listConsoleBuildPairs(db *gorm.DB, consoleIDs []uint64) ([]accountLinkPair,
 		Joins("JOIN account_provider_links apl ON apl.web_account_id = wcal.web_account_id").
 		Where("wcal.console_account_id IN ?", consoleIDs).Scan(&pairs).Error
 	return pairs, err
+}
+
+// LinkWebToBuild confirms the exact source and installed target material.
+func (r *AccountRepository) LinkWebToBuild(ctx context.Context, web, build account.CredentialRef) error {
+	if web.AccountID == 0 || build.AccountID == 0 || web.AccountID == build.AccountID || web.Provider != account.ProviderWeb || build.Provider != account.ProviderBuild {
+		return repository.ErrConflict
+	}
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockAccountLinkMutation(tx); err != nil {
+			return err
+		}
+		// Fence imports and ordinary credential refreshes until the link commits.
+		// All account rows are locked in increasing order before reading material.
+		var rows []accountModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "provider").Where("id IN ?", uniqueSortedIDs([]uint64{web.AccountID, build.AccountID})).Order("id ASC").Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) != 2 {
+			return repository.ErrNotFound
+		}
+		var material []accountCredentialModel
+		if err := tx.Select("account_id", "generation").Where("account_id IN ?", []uint64{web.AccountID, build.AccountID}).Find(&material).Error; err != nil {
+			return err
+		}
+		current := make(map[uint64]account.CredentialRef, 2)
+		for _, row := range rows {
+			for _, value := range material {
+				if row.ID == value.AccountID {
+					current[row.ID] = account.CredentialRef{AccountID: row.ID, Provider: account.Provider(row.Provider), Generation: value.Generation}
+				}
+			}
+		}
+		if !account.MatchWebBuildConversion(web, build, current[web.AccountID], current[build.AccountID]) {
+			return repository.ErrConflict
+		}
+		var existing accountProviderLinkModel
+		err := tx.Where("web_account_id = ? OR build_account_id = ?", web.AccountID, build.AccountID).First(&existing).Error
+		if err == nil {
+			if existing.WebAccountID == web.AccountID && existing.BuildAccountID == build.AccountID {
+				return nil
+			}
+			return repository.ErrConflict
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		return tx.Create(&accountProviderLinkModel{WebAccountID: web.AccountID, BuildAccountID: build.AccountID, CreatedAt: time.Now().UTC()}).Error
+	})
+	err = mapError(err)
+	if err == nil {
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged})
+	}
+	return err
 }

@@ -35,7 +35,7 @@ func TestParseToolConfigurationSupportsChatAndResponsesSchemas(t *testing.T) {
 
 func TestParseToolConfigurationAllowsRequiredHostedWebSearch(t *testing.T) {
 	configuration, err := parseToolConfiguration(
-		json.RawMessage(`[{"type":"web_search","max_uses":8}]`),
+		json.RawMessage(`[{"type":"web_search"}]`),
 		json.RawMessage(`"required"`),
 	)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestAnthropicWebSearchRequestConvertsForWebProvider(t *testing.T) {
 	converted, options, err := conversation.ConvertRequestWithOptions([]byte(`{
 		"model":"public","max_tokens":64,"stream":true,
 		"messages":[{"role":"user","content":"Perform a web search for the query: rust tutorials"}],
-		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
 		"tool_choice":{"type":"tool","name":"web_search"}
 	}`), "grok-chat-fast", conversation.OperationMessages)
 	if err != nil {
@@ -399,7 +399,7 @@ func webSearchResponseOptions(t *testing.T) conversation.ResponseOptions {
 	_, options, err := conversation.ConvertRequestWithOptions([]byte(`{
 		"model":"public","max_tokens":64,"stream":true,
 		"messages":[{"role":"user","content":"Perform a web search for the query: rust tutorials"}],
-		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
 		"tool_choice":{"type":"tool","name":"web_search"}
 	}`), "grok-chat-fast", conversation.OperationMessages)
 	if err != nil {
@@ -736,6 +736,58 @@ func TestGrokRenderCitationRejectsUnsafeURLs(t *testing.T) {
 		replacement, annotation := renderChatCard(parsed, "cite_unsafe", "render_inline_citation")
 		if replacement != "" || annotation != nil {
 			t.Fatalf("unsafe citation %q rendered as %q, %#v", rawURL, replacement, annotation)
+		}
+	}
+}
+
+func TestToolStreamSieveEveryChunkBoundary(t *testing.T) {
+	const xml = `<tool_calls><tool_call><tool_name>lookup</tool_name><parameters>{"value":9007199254740993}</parameters></tool_call></tool_calls>`
+	for size := 1; size <= len(xml); size++ {
+		sieve := newToolStreamSieve(map[string]struct{}{"lookup": {}})
+		var visible strings.Builder
+		var calls []parsedToolCall
+		for start := 0; start < len(xml); start += size {
+			result := sieve.Feed(xml[start:min(start+size, len(xml))])
+			visible.WriteString(result.SafeText)
+			calls = append(calls, result.Calls...)
+		}
+		result := sieve.Flush()
+		visible.WriteString(result.SafeText)
+		calls = append(calls, result.Calls...)
+		if visible.Len() != 0 || len(calls) != 1 || calls[0].Name != "lookup" || calls[0].Arguments != `{"value":9007199254740993}` {
+			t.Fatalf("size=%d visible=%q calls=%+v", size, visible.String(), calls)
+		}
+	}
+}
+
+func TestResponsesArrayInputPreservesInstructions(t *testing.T) {
+	for _, input := range []string{`"question"`, `[{"role":"user","content":"earlier"},{"role":"assistant","content":"answer"},{"role":"user","content":"question"}]`} {
+		normalized, err := normalizeOpenAIInput(openAIRequest{Instructions: "Reference record 0123 has value 2094.", Input: json.RawMessage(input)}, conversation.OperationResponses)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(normalized.Prompt, "Reference record 0123 has value 2094.") || !strings.Contains(normalized.Prompt, "question") || strings.Index(normalized.Prompt, "Reference") > strings.Index(normalized.Prompt, "question") {
+			t.Fatalf("instructions lost or reordered: %s", normalized.Prompt)
+		}
+	}
+}
+
+func BenchmarkToolStreamSieveLargeArguments(b *testing.B) {
+	text := `<tool_calls><tool_call><tool_name>lookup</tool_name><parameters>{"value":"` + strings.Repeat("x", 64<<10) + `"}</parameters></tool_call></tool_calls>`
+	b.ReportAllocs()
+	b.SetBytes(int64(len(text)))
+	for b.Loop() {
+		sieve := newToolStreamSieve(map[string]struct{}{"lookup": {}})
+		count := 0
+		for start := 0; start < len(text); start += 32 {
+			result := sieve.Feed(text[start:min(start+32, len(text))])
+			if result.Err != nil {
+				b.Fatal(result.Err)
+			}
+			count += len(result.Calls)
+		}
+		if count != 1 {
+			b.Fatalf("calls=%d", count)
 		}
 	}
 }

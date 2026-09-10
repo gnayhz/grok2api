@@ -1,15 +1,15 @@
 package app
 
 import (
+	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"strings"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 )
 
 func TestConsoleRoutesUseStableProviderNamespace(t *testing.T) {
-	routes := consoleprovider.Routes()
+	routes := modeldomain.CatalogRoutes(account.ProviderConsole)
 	if len(routes) == 0 {
 		t.Fatal("console catalog is empty")
 	}

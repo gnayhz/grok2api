@@ -65,13 +65,13 @@ func TestExampleConfigMatchesCodeDefaults(t *testing.T) {
 	if cfg.Provider.Web.ChatTimeout.Value() != 2*time.Minute {
 		t.Fatalf("provider.web.chatTimeout 语义应为 2m, got %s", cfg.Provider.Web.ChatTimeout.Value())
 	}
-	// requestRetry 其它字段（如 accountCooldown 12h vs 代码 24h）有意分叉，
-	// 不能整节比较。白名单两边都必须空（空=全部推理模型）。
+	// File and code leave the selection empty so production can initialize
+	// its default model list. The example intentionally enables the guard.
 	if len(cfg.RequestRetry.GuardedModels) != 0 {
-		t.Fatalf("example guardedModels = %#v, want empty (all models gated)", cfg.RequestRetry.GuardedModels)
+		t.Fatalf("example guardedModels = %#v, want bootstrap default selection", cfg.RequestRetry.GuardedModels)
 	}
 	if len(defaults.RequestRetry.GuardedModels) != 0 {
-		t.Fatalf("defaultConfig GuardedModels = %#v, want empty (all models gated)", defaults.RequestRetry.GuardedModels)
+		t.Fatalf("defaultConfig GuardedModels = %#v, want bootstrap default selection", defaults.RequestRetry.GuardedModels)
 	}
 	if cfg.RequestRetry.CreatedTimeout.Value() != 5*time.Second {
 		t.Fatalf("example createdTimeout = %s, want 5s", cfg.RequestRetry.CreatedTimeout.Value())
@@ -97,12 +97,6 @@ func TestExampleConfigMatchesCodeDefaults(t *testing.T) {
 	if defaults.RequestRetry.MaxAttempts != 2 {
 		t.Fatalf("defaultConfig maxAttempts = %d, want 2", defaults.RequestRetry.MaxAttempts)
 	}
-	if !cfg.RequestRetry.SameAccountRetry {
-		t.Fatal("example sameAccountRetry = false, want true")
-	}
-	if !defaults.RequestRetry.SameAccountRetry {
-		t.Fatal("defaultConfig sameAccountRetry = false, want true")
-	}
 	// idleAccountCooldown：示例 15m；defaultConfig 为 0，由 normalize 填 15m。
 	if cfg.RequestRetry.IdleAccountCooldown.Value() != 15*time.Minute {
 		t.Fatalf("example idleAccountCooldown = %s, want 15m", cfg.RequestRetry.IdleAccountCooldown.Value())
@@ -110,12 +104,12 @@ func TestExampleConfigMatchesCodeDefaults(t *testing.T) {
 	if defaults.RequestRetry.IdleAccountCooldown.Value() != 0 {
 		t.Fatalf("defaultConfig idleAccountCooldown = %s, want 0 (normalize fills 15m)", defaults.RequestRetry.IdleAccountCooldown.Value())
 	}
-	// accountCooldown：示例 12h；defaultConfig 24h。有意分叉，不能整节比较。
-	if cfg.RequestRetry.AccountCooldown.Value() != 12*time.Hour {
-		t.Fatalf("example accountCooldown = %s, want 12h", cfg.RequestRetry.AccountCooldown.Value())
+	// Temporary event-owned protection shares the 2m policy baseline.
+	if cfg.RequestRetry.AccountCooldown.Value() != 2*time.Minute {
+		t.Fatalf("example accountCooldown = %s, want 2m", cfg.RequestRetry.AccountCooldown.Value())
 	}
-	if defaults.RequestRetry.AccountCooldown.Value() != 24*time.Hour {
-		t.Fatalf("defaultConfig accountCooldown = %s, want 24h", defaults.RequestRetry.AccountCooldown.Value())
+	if defaults.RequestRetry.AccountCooldown.Value() != 2*time.Minute {
+		t.Fatalf("defaultConfig accountCooldown = %s, want 2m", defaults.RequestRetry.AccountCooldown.Value())
 	}
 	// enabled：示例 true（运维复制即开守卫）；defaultConfig 省略为 false。
 	if !cfg.RequestRetry.Enabled {

@@ -1,0 +1,267 @@
+{
+ "nodes": [
+  {
+   "current_epoch": 57,
+   "current_ip": "192.0.2.5",
+   "degrade_detail": [
+    {
+     "count": 6,
+     "epoch": 45,
+     "first_at": "2026-09-03T12:21:31.636510973Z",
+     "ip": "192.0.2.3",
+     "last_at": "2026-09-03T13:29:56.733374724Z",
+     "node_id": 52
+    },
+    {
+     "count": 1,
+     "epoch": 41,
+     "first_at": "2026-09-03T11:11:09.614243791Z",
+     "ip": "192.0.2.8",
+     "last_at": "2026-09-03T11:11:09.614243791Z",
+     "node_id": 52
+    },
+    {
+     "count": 2,
+     "epoch": 37,
+     "first_at": "2026-09-03T09:26:43.107565852Z",
+     "ip": "192.0.2.6",
+     "last_at": "2026-09-03T10:05:01.042179798Z",
+     "node_id": 52
+    },
+    {
+     "count": 2,
+     "epoch": 36,
+     "first_at": "2026-09-03T09:07:10.834897058Z",
+     "ip": "192.0.2.8",
+     "last_at": "2026-09-03T09:11:10.471873294Z",
+     "node_id": 52
+    }
+   ],
+   "degrade_total": 11,
+   "node_id": 52,
+   "state": "available",
+   "webhook": false
+  },
+  {
+   "current_epoch": 69,
+   "current_ip": "192.0.2.11",
+   "degrade_detail": [
+    {
+     "count": 2,
+     "epoch": 47,
+     "first_at": "2026-09-03T09:51:26.467042049Z",
+     "ip": "192.0.2.2",
+     "last_at": "2026-09-03T10:05:16.041941663Z",
+     "node_id": 107
+    },
+    {
+     "count": 3,
+     "epoch": 46,
+     "first_at": "2026-09-03T09:26:58.107580268Z",
+     "ip": "192.0.2.10",
+     "last_at": "2026-09-03T09:40:56.466977471Z",
+     "node_id": 107
+    },
+    {
+     "count": 3,
+     "epoch": 45,
+     "first_at": "2026-09-03T09:06:55.834869347Z",
+     "ip": "192.0.2.4",
+     "last_at": "2026-09-03T09:11:25.472413416Z",
+     "node_id": 107
+    },
+    {
+     "count": 3,
+     "epoch": 40,
+     "first_at": "2026-09-03T07:55:15.614102456Z",
+     "ip": "192.0.2.7",
+     "last_at": "2026-09-03T07:55:30.614647398Z",
+     "node_id": 107
+    },
+    {
+     "count": 5,
+     "epoch": 0,
+     "first_at": "2026-09-02T21:08:17.516993549Z",
+     "ip": "192.0.2.9",
+     "last_at": "2026-09-02T21:29:07.875660636Z",
+     "node_id": 107
+    }
+   ],
+   "degrade_total": 16,
+   "node_id": 107,
+   "state": "available",
+   "webhook": false
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 1,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:18:39.614914748Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T11:18:39.614914748Z",
+     "node_id": 108
+    }
+   ],
+   "degrade_total": 1,
+   "node_id": 108,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 6,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:20:54.614644779Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T13:59:28.191697847Z",
+     "node_id": 109
+    }
+   ],
+   "degrade_total": 6,
+   "node_id": 109,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 5,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:18:39.614914748Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T13:24:11.732726235Z",
+     "node_id": 110
+    }
+   ],
+   "degrade_total": 5,
+   "node_id": 110,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 5,
+     "epoch": 0,
+     "first_at": "2026-09-03T12:21:31.636510973Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T13:27:26.732414844Z",
+     "node_id": 111
+    }
+   ],
+   "degrade_total": 5,
+   "node_id": 111,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [],
+   "degrade_total": 0,
+   "node_id": 112,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 3,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:25:24.61463923Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T14:00:13.191719985Z",
+     "node_id": 113
+    }
+   ],
+   "degrade_total": 3,
+   "node_id": 113,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 1,
+     "epoch": 0,
+     "first_at": "2026-09-03T12:21:01.635557578Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T12:21:01.635557578Z",
+     "node_id": 114
+    }
+   ],
+   "degrade_total": 1,
+   "node_id": 114,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 2,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:26:39.61456542Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T13:59:43.191087993Z",
+     "node_id": 115
+    }
+   ],
+   "degrade_total": 2,
+   "node_id": 115,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 2,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:20:54.614644779Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T13:59:58.191067479Z",
+     "node_id": 116
+    }
+   ],
+   "degrade_total": 2,
+   "node_id": 116,
+   "state": "available",
+   "webhook": true
+  },
+  {
+   "current_epoch": 0,
+   "current_ip": "192.0.2.1",
+   "degrade_detail": [
+    {
+     "count": 6,
+     "epoch": 0,
+     "first_at": "2026-09-03T11:20:39.614444149Z",
+     "ip": "192.0.2.1",
+     "last_at": "2026-09-03T13:21:11.732669028Z",
+     "node_id": 117
+    }
+   ],
+   "degrade_total": 6,
+   "node_id": 117,
+   "state": "available",
+   "webhook": true
+  }
+ ]
+}

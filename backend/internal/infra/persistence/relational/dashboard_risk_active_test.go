@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 // TestDashboardActiveExcludesRiskFlagged locks the schedulable semantics of
@@ -19,7 +21,7 @@ func TestDashboardActiveExcludesRiskFlagged(t *testing.T) {
 	ids := accountModelIDs(rows)
 
 	// Flag one healthy enabled account as registration-risk.
-	if err := repo.UpdateRiskStatus(ctx, ids[1], "rsc_denied"); err != nil {
+	if err := repo.UpdateRiskAttribution(ctx, ids[1], repository.RiskAttribution{Status: "rsc_denied", Trigger: "manual"}); err != nil {
 		t.Fatal(err)
 	}
 

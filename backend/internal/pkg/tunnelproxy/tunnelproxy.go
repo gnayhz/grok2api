@@ -484,14 +484,20 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if !strings.HasPrefix(network, "tcp") {
 		return nil, fmt.Errorf("隧道代理不支持网络 %q", network)
 	}
+	ctx, cancel := context.WithTimeout(ctx, 2*tunnelHandshakeTimeout)
+	defer cancel()
+	owner := &handshakeOwner{}
+	ctx = context.WithValue(ctx, handshakeOwnerKey{}, owner)
 	if d.shadowsocksCipher != nil {
-		return d.dialShadowsocks(ctx, address)
+		conn, err := d.dialShadowsocks(ctx, address)
+		return owner.finish(ctx, conn, err)
 	}
 	target, err := netapi.ParseAddress(network, address)
 	if err != nil {
 		return nil, err
 	}
-	return d.proxy.Conn(ctx, target)
+	conn, err := d.proxy.Conn(ctx, target)
+	return owner.finish(ctx, conn, err)
 }
 
 func (d *Dialer) dialShadowsocks(ctx context.Context, address string) (net.Conn, error) {
@@ -501,6 +507,10 @@ func (d *Dialer) dialShadowsocks(ctx context.Context, address string) (net.Conn,
 	}
 	connection, err := newServerNetDialer().DialContext(ctx, "tcp", d.server)
 	if err != nil {
+		return nil, err
+	}
+	if err := ownHandshakeConn(ctx, connection); err != nil {
+		_ = connection.Close()
 		return nil, err
 	}
 	connection = d.shadowsocksCipher.StreamConn(connection)
@@ -718,7 +728,15 @@ type serverDialer struct {
 }
 
 func (d *serverDialer) Conn(ctx context.Context, _ netapi.Address) (net.Conn, error) {
-	return newServerNetDialer().DialContext(ctx, "tcp", d.address)
+	conn, err := newServerNetDialer().DialContext(ctx, "tcp", d.address)
+	if err != nil {
+		return nil, err
+	}
+	if err := ownHandshakeConn(ctx, conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 func newServerNetDialer() *net.Dialer {

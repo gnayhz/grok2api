@@ -1,20 +1,14 @@
 package console
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
-	"time"
 
 	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-)
-
-var (
-	resetDurationPattern = regexp.MustCompile(`(?i)(\d+)\s*([dhms])`)
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
 )
 
 func normalizeRequest(body []byte, spec ModelSpec) ([]byte, error) {
@@ -23,8 +17,15 @@ func normalizeRequest(body []byte, spec ModelSpec) ([]byte, error) {
 
 func normalizeRequestWithMetadata(body []byte, spec ModelSpec, metadata *provider.NormalizedRequestMetadata) ([]byte, error) {
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	// Tool schemas and structured-output constraints may contain integer IDs
+	// beyond float64 precision. Preserve their original numeric representation.
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
 		return nil, fmt.Errorf("解析 Console Responses 请求: %w", err)
+	}
+	if payload == nil || len(bytes.TrimSpace(body[decoder.InputOffset():])) != 0 {
+		return nil, fmt.Errorf("解析 Console Responses 请求: 必须是单个 JSON 对象")
 	}
 	payload["model"] = spec.UpstreamModel
 	// Console is stateless. Replay the supplied input and silently discard
@@ -46,8 +47,9 @@ func normalizeRequestWithMetadata(body []byte, spec ModelSpec, metadata *provide
 	normalizeReasoning(payload, spec)
 	updateConsoleReasoningMetadata(payload, spec, requestedEffort, metadata)
 	ensureReasoningInclude(payload)
-	retainedClientTools := normalizeConsoleTools(payload)
-	normalizeConsoleToolChoice(payload, retainedClientTools)
+	if err := normalizeConsoleTools(payload); err != nil {
+		return nil, err
+	}
 	return json.Marshal(payload)
 }
 
@@ -241,100 +243,40 @@ func ensureReasoningInclude(payload map[string]any) {
 	payload["include"] = result
 }
 
-func normalizeConsoleTools(payload map[string]any) bool {
-	value, exists := payload["tools"]
-	if !exists || value == nil {
-		delete(payload, "tools")
-		delete(payload, "tool_choice")
-		return false
+func normalizeConsoleTools(payload map[string]any) error {
+	if err := xaitools.NormalizePayload(payload); err != nil {
+		return err
 	}
-	tools, ok := value.([]any)
-	if !ok {
-		delete(payload, "tools")
-		delete(payload, "tool_choice")
-		return false
-	}
+	tools, _ := payload["tools"].([]any)
 	hasClientViewImage := hasConsoleFunctionTool(tools, "view_image")
-	result := make([]any, 0, len(tools))
-	retainedClientTools := false
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
+	for index, raw := range tools {
+		tool := raw.(map[string]any)
 		typeName, _ := tool["type"].(string)
-		switch strings.ToLower(strings.TrimSpace(typeName)) {
-		case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
-			// xAI equips web_search with a server-side tool also named view_image
-			// when image understanding is enabled. Prefer the client's function of
-			// that name so Codex can still inspect local files without mgw rejecting
-			// the request as a duplicate tool definition.
-			clean := map[string]any{"type": "web_search", "enable_image_understanding": !hasClientViewImage}
-			if enabled, ok := tool["enable_image_understanding"].(bool); ok && !hasClientViewImage {
-				clean["enable_image_understanding"] = enabled
+		switch typeName {
+		case "web_search":
+			// A client view_image definition owns that name. Avoid enabling the
+			// hosted tool of the same name; explicit contradictory choices fail.
+			if hasClientViewImage && tool["enable_image_understanding"] == true {
+				return fmt.Errorf("tools[%d].enable_image_understanding 与客户端 view_image 重名", index)
 			}
-			// Forward the image-search toggle (enable_image_search) so clients
-			// can explicitly enable/disable it; absent when not requested.
-			if enabled, ok := tool["enable_image_search"].(bool); ok {
-				clean["enable_image_search"] = enabled
+			if _, explicit := tool["enable_image_understanding"]; !explicit && hasClientViewImage {
+				tool["enable_image_understanding"] = false
 			}
-			result = append(result, clean)
 		case "x_search":
-			clean := map[string]any{"type": "x_search", "enable_video_understanding": true}
-			if enabled, ok := tool["enable_video_understanding"].(bool); ok {
-				clean["enable_video_understanding"] = enabled
-			}
-			// Forward the X-search time bounds (from_date/to_date, YYYY-MM-DD).
-			// Invalid formats and empty strings are dropped; if from_date is
-			// later than to_date both are dropped to avoid an upstream 400.
-			for _, field := range []string{"from_date", "to_date"} {
-				text, ok := tool[field].(string)
-				if !ok || text == "" {
-					continue
-				}
-				if date, err := time.Parse("2006-01-02", text); err == nil && date.Format("2006-01-02") == text {
-					clean[field] = text
-				}
-			}
-			from, hasFrom := clean["from_date"].(string)
-			to, hasTo := clean["to_date"].(string)
-			if hasFrom && hasTo {
-				fromDate, _ := time.Parse("2006-01-02", from)
-				toDate, _ := time.Parse("2006-01-02", to)
-				if fromDate.After(toDate) {
-					delete(clean, "from_date")
-					delete(clean, "to_date")
-				}
-			}
-			result = append(result, clean)
 		case "function":
 			name, _ := tool["name"].(string)
 			if strings.TrimSpace(name) == "" {
-				continue
+				return fmt.Errorf("tools[%d].name 不能为空", index)
 			}
-			clean := map[string]any{"type": "function", "name": strings.TrimSpace(name)}
-			for _, field := range []string{"description", "parameters", "strict"} {
-				if fieldValue, exists := tool[field]; exists {
-					clean[field] = fieldValue
-				}
-			}
-			result = append(result, clean)
-			retainedClientTools = true
 		case "mcp", "shell", "image_generation", "collections_search", "file_search", "code_execution", "code_interpreter":
-			// These are native xAI Responses tool variants. Keep their payloads,
-			// while namespace/tool_search remain client-side abstractions and are
-			// intentionally omitted instead of causing an upstream 400.
-			result = append(result, tool)
-			retainedClientTools = true
+		default:
+			return fmt.Errorf("Console 不支持 tools[%d].type=%q", index, typeName)
 		}
 	}
-	if len(result) == 0 {
-		delete(payload, "tools")
-		delete(payload, "tool_choice")
-		return false
+	if len(tools) > 0 && payload["tool_choice"] == nil {
+		payload["tool_choice"] = "auto"
 	}
-	payload["tools"] = result
-	return retainedClientTools
+	return nil
 }
 
 func hasConsoleFunctionTool(tools []any, target string) bool {
@@ -352,52 +294,6 @@ func hasConsoleFunctionTool(tools []any, target string) bool {
 	return false
 }
 
-func normalizeConsoleToolChoice(payload map[string]any, retainedClientTools bool) {
-	if _, exists := payload["tools"]; !exists {
-		delete(payload, "tool_choice")
-		return
-	}
-	choice, exists := payload["tool_choice"]
-	if !exists {
-		payload["tool_choice"] = "auto"
-		return
-	}
-	if value, ok := choice.(string); ok {
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "none", "auto":
-			payload["tool_choice"] = strings.ToLower(strings.TrimSpace(value))
-		case "required":
-			if !retainedClientTools {
-				payload["tool_choice"] = "auto"
-			}
-		default:
-			payload["tool_choice"] = "auto"
-		}
-		return
-	}
-	object, ok := choice.(map[string]any)
-	if !ok {
-		payload["tool_choice"] = "auto"
-		return
-	}
-	typeName, _ := object["type"].(string)
-	if typeName != "function" || !retainedClientTools {
-		payload["tool_choice"] = "auto"
-		return
-	}
-	name, _ := object["name"].(string)
-	if strings.TrimSpace(name) == "" {
-		if function, ok := object["function"].(map[string]any); ok {
-			name, _ = function["name"].(string)
-		}
-	}
-	if strings.TrimSpace(name) == "" {
-		payload["tool_choice"] = "auto"
-		return
-	}
-	payload["tool_choice"] = map[string]any{"type": "function", "name": strings.TrimSpace(name)}
-}
-
 func toolIdentity(value any) string {
 	tool, ok := value.(map[string]any)
 	if !ok {
@@ -409,41 +305,6 @@ func toolIdentity(value any) string {
 	}
 	name, _ := tool["name"].(string)
 	return typeName + ":" + name
-}
-
-func consoleRetryAfter(body []byte) time.Duration {
-	text := string(body)
-	index := strings.Index(strings.ToLower(text), "resets in:")
-	if index < 0 {
-		return 0
-	}
-	text = text[index+len("resets in:"):]
-	var total time.Duration
-	for _, match := range resetDurationPattern.FindAllStringSubmatch(text, -1) {
-		value, _ := strconv.Atoi(match[1])
-		switch strings.ToLower(match[2]) {
-		case "d":
-			total += time.Duration(value) * 24 * time.Hour
-		case "h":
-			total += time.Duration(value) * time.Hour
-		case "m":
-			total += time.Duration(value) * time.Minute
-		case "s":
-			total += time.Duration(value) * time.Second
-		}
-	}
-	return total
-}
-
-func parseConsoleRetryAfterHeader(value string, now time.Time) time.Duration {
-	value = strings.TrimSpace(value)
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
-		return time.Duration(seconds) * time.Second
-	}
-	if at, err := http.ParseTime(value); err == nil && at.After(now) {
-		return at.Sub(now)
-	}
-	return 0
 }
 
 func parseConsoleRateLimitMetadata(body []byte) *provider.RateLimitMetadata {

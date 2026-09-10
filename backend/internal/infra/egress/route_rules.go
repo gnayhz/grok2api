@@ -24,49 +24,68 @@ type cachedRoutingTargetNode struct {
 }
 
 // cachedRoutingTargetNode returns the current snapshot of one fixed routing
-// target. A ErrNotFound miss is not an error: the caller falls back to the
-// automatic schedule. Any other DB error is a read failure and is returned:
+// target. An ErrNotFound miss is returned as found=false; the caller rejects
+// an explicitly configured missing target. Other DB errors are returned:
 // 一次抖动把固定目标静默降级成自动调度,等于让流量无声绕开管理员配置
 // 的出口,必须留痕并按读失败语义上抛。
-func (m *Manager) cachedRoutingTargetNode(ctx context.Context, nodeID uint64) (domain.Node, bool, error) {
-	now := time.Now().UTC()
-	m.routeRuleNodeMu.RLock()
-	cached, ok := m.routeRuleNodeCache[nodeID]
-	m.routeRuleNodeMu.RUnlock()
-	if ok && now.Before(cached.expiresAt) {
-		return cached.node, true, nil
-	}
-	// singleflight 合并 TTL 过期瞬间的并发回源(固定路由目标是热路径,严格
-	// 绑定下读失败=请求失败);已取消的调用方在合并前快速失败,回源本身
-	// 脱离请求生命周期——与池缓存/listNodes 同一套范式。
-	if err := ctx.Err(); err != nil {
-		return domain.Node{}, false, err
-	}
-	loaded, err, _ := m.routingTargetLoads.Do(strconv.FormatUint(nodeID, 10), func() (any, error) {
-		checkTime := time.Now().UTC()
+func (m *routingRuntime) cachedRoutingTargetNode(ctx context.Context, nodeID uint64) (domain.Node, bool, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return domain.Node{}, false, err
+		}
 		m.routeRuleNodeMu.RLock()
-		if cached, ok := m.routeRuleNodeCache[nodeID]; ok && checkTime.Before(cached.expiresAt) {
-			m.routeRuleNodeMu.RUnlock()
-			return cached.node, nil
-		}
+		cached, ok := m.routeRuleNodeCache[nodeID]
 		m.routeRuleNodeMu.RUnlock()
-		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		node, err := m.repository.GetEgressNode(loadCtx, nodeID)
+		if ok && time.Now().Before(cached.expiresAt) {
+			return cached.node, true, nil
+		}
+		loaded, err := m.sharedLoad(ctx, &m.routingTargetLoads, strconv.FormatUint(nodeID, 10), func() (any, error) {
+			m.routeRuleNodeMu.RLock()
+			cached, ok := m.routeRuleNodeCache[nodeID]
+			version := m.routeRuleNodeVersion
+			m.routeRuleNodeMu.RUnlock()
+			if ok && time.Now().Before(cached.expiresAt) {
+				return cached.node, nil
+			}
+			loadCtx, cancel := m.tasks.context(ctx, 5*time.Second)
+			defer cancel()
+			node, err := m.getRuntimeNode(loadCtx, nodeID)
+			m.routeRuleNodeMu.Lock()
+			defer m.routeRuleNodeMu.Unlock()
+			if version != m.routeRuleNodeVersion {
+				return nil, errNodeSnapshotInvalidated
+			}
+			if err != nil {
+				return nil, err
+			}
+			// Remove expired entries on a miss. Target churn must not grow this map forever.
+			now := time.Now()
+			for id, value := range m.routeRuleNodeCache {
+				if !now.Before(value.expiresAt) {
+					delete(m.routeRuleNodeCache, id)
+				}
+			}
+			if len(m.routeRuleNodeCache) >= 4096 {
+				for id := range m.routeRuleNodeCache {
+					delete(m.routeRuleNodeCache, id)
+					break
+				}
+			}
+			m.routeRuleNodeCache[nodeID] = cachedRoutingTargetNode{node: node, expiresAt: now.Add(routingTargetNodeCacheTTL)}
+			return node, nil
+		})
+		if errors.Is(err, errNodeSnapshotInvalidated) {
+			continue
+		}
 		if err != nil {
-			return domain.Node{}, err
+			if errors.Is(err, repository.ErrNotFound) {
+				return domain.Node{}, false, nil
+			}
+			if ctx.Err() == nil {
+				m.log().Warn("egress_routing_target_read_failed", "node_id", nodeID, "error", err.Error())
+			}
+			return domain.Node{}, false, fmt.Errorf("读取固定路由目标节点 %d: %w", nodeID, err)
 		}
-		m.routeRuleNodeMu.Lock()
-		m.routeRuleNodeCache[nodeID] = cachedRoutingTargetNode{node: node, expiresAt: checkTime.Add(routingTargetNodeCacheTTL)}
-		m.routeRuleNodeMu.Unlock()
-		return node, nil
-	})
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return domain.Node{}, false, nil
-		}
-		m.log().Warn("egress_routing_target_read_failed", "node_id", nodeID, "error", err.Error())
-		return domain.Node{}, false, fmt.Errorf("读取固定路由目标节点 %d: %w", nodeID, err)
+		return loaded.(domain.Node), true, nil
 	}
-	return loaded.(domain.Node), true, nil
 }

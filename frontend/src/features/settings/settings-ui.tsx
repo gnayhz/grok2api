@@ -12,7 +12,7 @@ import { isDurationUnit, type DurationValue } from "@/features/settings/settings
 // 从 settings-page 抽出的表单原子组件:设置页与质量防护页共用同一套
 // 字段布局/时长输入,避免两处样式漂移。
 
-export function DurationInput({ id, value, onChange, disabled }: { id: string; value?: DurationValue; onChange: (value: DurationValue) => void; disabled?: boolean }) {
+export function DurationInput({ id, value, onChange, disabled, allowZero = false }: { id: string; value?: DurationValue; onChange: (value: DurationValue) => void; disabled?: boolean; allowZero?: boolean }) {
   const { t } = useTranslation();
   const unit = value?.unit ?? "s";
   return (
@@ -20,7 +20,7 @@ export function DurationInput({ id, value, onChange, disabled }: { id: string; v
       <Input
         id={id}
         type="number"
-        min="0.001"
+        min={allowZero ? "0" : "0.001"}
         step="any"
         disabled={disabled}
         className="min-w-0 rounded-r-none"

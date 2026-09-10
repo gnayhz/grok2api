@@ -172,6 +172,7 @@ func TestIdleTimeoutReadCloserClose(t *testing.T) {
 
 func TestEgressTransportScopesIdleTimeoutToEventStreams(t *testing.T) {
 	manager := infraegress.NewManager(emptyEgressRepository{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateBuildStreamIdleTimeout(30 * time.Second)
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
 
@@ -214,6 +215,7 @@ func TestEgressTransportIdleTimeoutCancelsHTTP2BodyRead(t *testing.T) {
 	defer server.Close()
 
 	manager := infraegress.NewManager(emptyEgressRepository{}, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateBuildStreamIdleTimeout(30 * time.Millisecond)
 	transport := &egressTransport{manager: manager, fallback: server.Client().Transport}
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/responses", strings.NewReader(`{}`))
@@ -262,7 +264,7 @@ func (emptyEgressRepository) CreateEgressNode(context.Context, domainegress.Node
 	return domainegress.Node{}, errors.New("unsupported")
 }
 
-func (emptyEgressRepository) UpdateEgressNode(context.Context, domainegress.Node) (domainegress.Node, error) {
+func (emptyEgressRepository) UpdateEgressNodeConfiguration(context.Context, domainegress.Node, domainegress.FixedTargetValidator) (domainegress.Node, error) {
 	return domainegress.Node{}, errors.New("unsupported")
 }
 

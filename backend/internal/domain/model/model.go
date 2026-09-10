@@ -151,7 +151,8 @@ func ExternalPublicID(provider account.Provider, value string) string {
 
 // PublicIDCandidateGroups 将下游模型名称展开为按匹配优先级排列的内部路由 ID 组。
 // 无前缀名称同时匹配所有 Provider。带前缀名称先按字面对外名称匹配，若不存在，
-// 再回退为历史上的显式 Provider 路由语法。
+// 再回退为历史上的显式 Provider 路由语法。配置的主名或持久别名即占用该
+// 名称；禁用、无可用账号、客户端权限不足均不能使它变成“不存在”。
 func PublicIDCandidateGroups(value string) [][]string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -226,4 +227,13 @@ func DisplayUpstreamModel(provider account.Provider, value string) string {
 		return strings.TrimSpace(value)
 	}
 	return provider.ModelNamespace() + "/" + upstream
+}
+
+// RoutePatch changes only explicitly supplied management fields. Nil retains
+// the current value; an empty AccountIDs slice restores automatic selection.
+// Provider, upstream model, capability and origin are not editable here.
+type RoutePatch struct {
+	PublicID   *string
+	Enabled    *bool
+	AccountIDs *[]uint64
 }

@@ -91,7 +91,10 @@ func TestDecidingLevelMatchesTargetFor(t *testing.T) {
 }
 
 // 账号模板判定与"代理池模式节点"判定的唯一权威在 domain:
-// 显式标志与模板占位符任一命中即为池模式节点。
+// 外部代理池标志(ProxyPool)与模板占位符任一命中即为池模式节点——出口
+// IP 由服务商自动更换,与换 IP Webhook(自建 WARP 出口的强制切换,互斥)
+// 无关。曾要求 ProxyPool && RotationEnabled 才算池,注释与用例自相矛盾,
+// 且导致无 Webhook 的真代理池被按固定出口落健康惩罚。
 func TestIsPoolModeNode(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -100,13 +103,11 @@ func TestIsPoolModeNode(t *testing.T) {
 		want     bool
 	}{
 		{"neither", Node{}, "http://plain.example:8080", false},
-		{"flag only", Node{ProxyPool: true}, "http://plain.example:8080", false},
-		{"flag+rotation", Node{ProxyPool: true, RotationEnabled: true}, "http://plain.example:8080", true},
-		{"rotation only", Node{RotationEnabled: true}, "http://plain.example:8080", false},
+		{"external pool (flag only)", Node{ProxyPool: true}, "http://plain.example:8080", true},
+		{"self-hosted warp (rotation only)", Node{RotationEnabled: true}, "http://plain.example:8080", false},
 		{"template only", Node{}, "http://gw.example:8080?user={account}", true},
-		{"both", Node{ProxyPool: true, RotationEnabled: true}, "http://gw.example:8080?user={account}", true},
-		{"flag without rotation no url", Node{ProxyPool: true}, "", false},
-		{"rotating no url", Node{ProxyPool: true, RotationEnabled: true}, "", true},
+		{"pool flag without url", Node{ProxyPool: true}, "", true},
+		{"warp without url", Node{RotationEnabled: true}, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

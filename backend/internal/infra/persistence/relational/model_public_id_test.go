@@ -29,7 +29,8 @@ func TestModelNamespaceMigrationPreservesAliasesRouteIDsAndKeyPermissions(t *tes
 		t.Fatal(err)
 	}
 	key := clientKeyModel{
-		Name: "namespace-migration", Prefix: "namespace", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "encrypted",
+		ModelScope: "restricted",
+		Name:       "namespace-migration", Prefix: "namespace", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 60, MaxConcurrent: 4, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {

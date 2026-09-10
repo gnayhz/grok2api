@@ -44,7 +44,7 @@ func qualitySizeSnapFrom(body []byte, chunk int) qualitySizeSnap {
 			observeQualityChunk(&state, body[i:end])
 		}
 	}
-	if len(state.pending) > 0 || state.skipUntilNewline {
+	if len(state.pending) > 0 {
 		observeQualityChunk(&state, []byte{10})
 	}
 	return qualitySizeSnap{

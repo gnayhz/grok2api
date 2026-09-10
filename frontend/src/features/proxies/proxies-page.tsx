@@ -1,69 +1,221 @@
-import { Network, Settings2, Waypoints } from "lucide-react";
+import { ArrowRight, Settings2 } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-
-import { Button } from "@/components/ui/button";
+import { useLocation, useNavigate } from "react-router-dom";
+import { OperationsButton as Button } from "@/features/operations/operations-ui";
 import { Spinner } from "@/components/ui/spinner";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { NodesPanel } from "@/features/proxies/nodes-panel";
-import { EgressOperationsProvider } from "@/features/proxies/operations-context";
-import { useEgressOperations } from "@/features/proxies/operations-shared";
-import { PoolsPanel } from "@/features/proxies/pools-panel";
-import { RoutingPanel } from "@/features/proxies/routing-panel";
-
-const sections = [
-  { value: "nodes", icon: Waypoints, labelKey: "proxies.tabs.nodes" },
-  { value: "pools", icon: Network, labelKey: "proxies.tabs.pools" },
-  { value: "routing", icon: Settings2, labelKey: "proxies.tabs.routing" },
-] as const;
-
-/**
- * Route rules + automation share one operations payload; the save action sits
- * in the page header (settings-page pattern) and only lights up when the
- * shared draft is dirty.
- */
-function ProxiesSaveAction() {
-  const { t } = useTranslation();
-  const operations = useEgressOperations();
-  if (!operations.isDirty) return null;
-  return (
-    <div className="flex shrink-0 items-center gap-2">
-      <Button type="button" variant="ghost" size="sm" disabled={operations.savePending} onClick={operations.discard}>
-        {t("proxies.discard")}
-      </Button>
-      <Button type="button" size="sm" disabled={operations.savePending} onClick={operations.save}>
-        {operations.savePending ? <Spinner /> : null}{t("common.save")}
-      </Button>
-    </div>
-  );
-}
+import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { NodesPanel } from "./nodes-panel";
+import { EgressOperationsProvider } from "./operations-context";
+import { useEgressOperations } from "./operations-shared";
+import { resolveEffectiveTarget } from "./effective-target";
+import { PoolsPanel } from "./pools-panel";
+import { RoutingPanel } from "./routing-panel";
+import {
+	useOperationsNodes,
+	useOperationsPools,
+} from "@/features/operations/operations-queries";
+import {
+	MetricRail,
+	OperationalMetric,
+	OperationsHeader,
+	OperationsTabs,
+	StatusPill,
+	OperationsError,
+} from "@/features/operations/operations-ui";
+import { networkSummary } from "@/features/operations/operations-data";
+import { useNow } from "@/features/guard/quality-hooks";
 
 export function ProxiesPage() {
-  const { t } = useTranslation();
-  return (
-    <EgressOperationsProvider>
-      <div className="w-full space-y-5">
-        <header className="flex min-h-8 items-center justify-between gap-3">
-          <h1 className="text-xl font-medium">{t("proxies.title")}</h1>
-          <ProxiesSaveAction />
-        </header>
+	return (
+		<EgressOperationsProvider>
+			<NetworkWorkspace />
+		</EgressOperationsProvider>
+	);
+}
+function NetworkWorkspace() {
+	const { t } = useTranslation();
+	const operations = useEgressOperations();
+	const location = useLocation();
+	const navigate = useNavigate();
+	const now = useNow(15000);
+	const nodes = useOperationsNodes();
+	const pools = useOperationsPools();
+	const summary = networkSummary(nodes.data?.items ?? [], now);
+	const [focus, setFocus] = useState({
+		search: "",
+		filter: "all",
+		revision: 0,
+	});
+	const requested = location.hash.slice(1);
+	const view = ["nodes", "pools", "routing"].includes(requested)
+		? requested
+		: "nodes";
+	const select = (next: string) =>
+		navigate({ pathname: "/proxies", hash: next });
+	const locate = (search: string, filter = "all") => {
+		setFocus((current) => ({ search, filter, revision: current.revision + 1 }));
+		select("nodes");
+	};
+	const value = (n: number | string | null) =>
+		nodes.isError || !nodes.data ? "—" : (n ?? "—");
+	const destination = (scope: "grok_build" | "grok_web" | "grok_console") => {
+		const target = resolveEffectiveTarget(operations.form, "inference", scope);
+		if (target.mode === "direct") return t("ops.direct");
+		if (target.mode === "auto") return t("ops.auto");
+		if (target.mode === "node")
+			return (
+				nodes.data?.items.find((n) => n.id === target.nodeId)?.name ??
+				t("ops.missingTarget")
+			);
+		return `${t("ops.poolTab")} · ${pools.data?.find((p) => p.id === target.poolId)?.name ?? t("ops.missingTarget")}`;
+	};
+	return (
+		<div className="ops-workspace">
+			<OperationsHeader
+				title={t("ops.network")}
+				description={t("ops.networkDescription")}
+				status={
+					<StatusPill
+						tone={
+							nodes.isError || !nodes.data
+								? "neutral"
+								: summary.attention
+									? "warn"
+									: "good"
+						}
+					>
+						{nodes.isError || !nodes.data
+							? t("ops.unknown")
+							: summary.attention
+								? `${summary.attention} · ${t("ops.attention")}`
+								: t("ops.nodeLoaded", { count: summary.total })}
+					</StatusPill>
+				}
+			/>
 
-        <Tabs defaultValue="nodes" className="gap-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <TabsList>
-              {sections.map(({ value, icon: Icon, labelKey }) => (
-                <TabsTrigger key={value} value={value} className="gap-1.5">
-                  <Icon className="size-3.5" />
-                  <span>{t(labelKey)}</span>
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </div>
+			{(nodes.isError || pools.isError || operations.isError) && (
+				<div className="mb-4">
+					<OperationsError
+						retry={() => {
+							void nodes.refetch();
+							void pools.refetch();
+							operations.retry();
+						}}
+					/>
+				</div>
+			)}
 
-          <TabsContent value="nodes" className="mt-0"><NodesPanel /></TabsContent>
-          <TabsContent value="pools" className="mt-0"><PoolsPanel /></TabsContent>
-          <TabsContent value="routing" className="mt-0"><RoutingPanel /></TabsContent>
-        </Tabs>
-      </div>
-    </EgressOperationsProvider>
-  );
+			<Tabs activationMode="manual" value={view} onValueChange={select}>
+				<OperationsTabs
+					items={[
+						{
+							value: "nodes",
+							label: t("ops.nodeTab"),
+							count: nodes.data?.total,
+						},
+						{
+							value: "pools",
+							label: t("ops.poolTab"),
+							count: pools.data?.length,
+						},
+						{ value: "routing", label: t("ops.routeTab") },
+					]}
+					end={t("ops.freshness")}
+				/>
+				<TabsContent value="nodes" className="mt-0">
+					<MetricRail>
+						<OperationalMetric
+							label={t("ops.availableNodes")}
+							value={value(summary.ready)}
+							detail={t("ops.availableHelp")}
+							tone="good"
+							onClick={() => locate("", "ready")}
+						/>
+						<OperationalMetric
+							label={t("ops.attention")}
+							value={value(summary.attention)}
+							detail={t("ops.attentionHelp")}
+							tone={summary.attention ? "warn" : undefined}
+							onClick={() => locate("", "attention")}
+						/>
+						<OperationalMetric
+							label={t("ops.unchecked")}
+							value={value(summary.unknown)}
+							detail={t("ops.uncheckedHelp")}
+							onClick={() => locate("", "unknown")}
+						/>
+						<OperationalMetric
+							label={t("ops.latency")}
+							value={
+								<>
+									{value(summary.median)}
+									{nodes.data && summary.median !== null && (
+										<span className="ml-1 text-sm font-normal text-muted-foreground">
+											ms
+										</span>
+									)}
+								</>
+							}
+							detail={t("ops.latencyHelp")}
+						/>
+					</MetricRail>
+					<div className="ops-route-strip">
+						{(["grok_build", "grok_web", "grok_console"] as const).map(
+							(scope) => (
+								<div className="ops-route-path" key={scope}>
+									<strong>{scope.replace("grok_", "").toUpperCase()}</strong>
+									<ArrowRight className="size-3 text-muted-foreground" />
+									<span className="truncate font-medium">
+										{operations.isPending || operations.isError
+											? t("ops.unknown")
+											: destination(scope)}
+									</span>
+								</div>
+							),
+						)}
+						<Button variant="ghost" size="sm" onClick={() => select("routing")}>
+							<Settings2 className="size-3.5" />
+							{t("ops.routeTab")}
+						</Button>
+					</div>
+
+					<NodesPanel
+						key={focus.revision}
+						initialSearch={focus.search}
+						initialCondition={focus.filter}
+					/>
+				</TabsContent>
+				<TabsContent value="pools" className="mt-0">
+					<PoolsPanel />
+				</TabsContent>
+				<TabsContent value="routing" className="mt-0">
+					<RoutingPanel />
+				</TabsContent>
+			</Tabs>
+			{operations.isDirty && (
+				<div className="ops-save-dock">
+					<span className="text-xs text-muted-foreground">
+						{t("ops.settingsDraft")}
+					</span>
+					<Button
+						size="sm"
+						variant="ghost"
+						disabled={operations.savePending}
+						onClick={operations.discard}
+					>
+						{t("proxies.discard")}
+					</Button>
+					<Button
+						size="sm"
+						disabled={operations.savePending}
+						onClick={operations.save}
+					>
+						{operations.savePending && <Spinner />}
+						{t("common.save")}
+					</Button>
+				</div>
+			)}
+		</div>
+	);
 }

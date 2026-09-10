@@ -35,7 +35,9 @@ func TestSaveOperationsConfigWithPoolRoutingTarget(t *testing.T) {
 	if err := domain.ValidateRoutingTargets(config.DefaultTarget, config.ScopeTargets, config.ClassTargets); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	saved, err := repo.SaveEgressOperationsConfig(ctx, config)
+	saved, err := repo.SaveEgressOperationsConfig(ctx, config, func(domain.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("save with pool target: %v", err)
 	}
@@ -47,7 +49,9 @@ func TestSaveOperationsConfigWithPoolRoutingTarget(t *testing.T) {
 	broken.ClassTargets = map[domain.TrafficClass]domain.RoutingTarget{
 		domain.TrafficClassVideo: {Mode: domain.RoutingTargetPool, PoolID: pool.ID + 1000},
 	}
-	if _, err := repo.SaveEgressOperationsConfig(ctx, broken); err == nil {
+	if _, err := repo.SaveEgressOperationsConfig(ctx, broken, func(domain.Node) error {
+		return nil
+	}); err == nil {
 		t.Fatal("missing pool target must be rejected")
 	}
 }

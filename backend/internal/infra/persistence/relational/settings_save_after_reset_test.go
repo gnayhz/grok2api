@@ -2,17 +2,17 @@ package relational
 
 import (
 	"context"
+	"errors"
+	"github.com/chenyme/grok2api/backend/internal/repository"
+	"math"
 	"testing"
 
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
-// TestRuntimeSettingsSaveAfterReset 锁定 ResetToDefaults 后首次保存的死锁
-// 回归:重置删除持久化行但服务层 revision 前进,Save(expectedRevision>0)
-// 的 UPDATE 命中 0 行。行不存在时必须回退 Create(主键并发冲突仍按
-// ErrConflict),否则恢复默认后的第一次保存永远 409,直到进程重启
-// (演示实例实测命中)。
+// Reset keeps the clock, so both an existing service and a restarted service
+// use the same next CAS revision. A missing row cannot revive a stale writer.
 func TestRuntimeSettingsSaveAfterReset(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
@@ -26,14 +26,23 @@ func TestRuntimeSettingsSaveAfterReset(t *testing.T) {
 	if _, revision, err := repo.Save(ctx, settingsdomain.Config{}, 0); err != nil || revision != 1 {
 		t.Fatalf("initial save: revision=%d err=%v", revision, err)
 	}
-	// 模拟 ResetToDefaults:行删除,服务层账本 revision 前进到 2。
-	if err := repo.Delete(ctx); err != nil {
+	// Reset persists revision 2, visible to any new reader.
+	if _, revision, err := repo.Reset(ctx, 1); err != nil || revision != 2 {
+		t.Fatalf("reset revision=%d err=%v", revision, err)
+	}
+	if _, stamp, revision, found, err := repo.Get(ctx); err != nil || found || revision != 2 || stamp.IsZero() {
+		t.Fatalf("reset read revision=%d found=%v err=%v", revision, found, err)
+	}
+	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if _, _, revision, found, err := repo.Get(ctx); err != nil || found || revision != 2 {
+		t.Fatalf("migration changed reset revision=%d found=%v err=%v", revision, found, err)
 	}
 	// 此后首次保存带 expectedRevision=2:不得返回 ErrConflict。
 	_, revision, saveErr := repo.Save(ctx, settingsdomain.Config{}, 2)
 	if saveErr != nil {
-		t.Fatalf("save after reset must insert, got err=%v", saveErr)
+		t.Fatalf("save after reset must update durable clock, got err=%v", saveErr)
 	}
 	if revision != 3 {
 		t.Fatalf("revision continuity: got %d, want 3", revision)
@@ -41,5 +50,24 @@ func TestRuntimeSettingsSaveAfterReset(t *testing.T) {
 	// 行存在时的 revision 竞争语义保持:过期 expectedRevision 仍冲突。
 	if _, _, err := repo.Save(ctx, settingsdomain.Config{}, 2); err == nil {
 		t.Fatal("stale revision on existing row must conflict")
+	}
+}
+
+func TestRuntimeSettingsMissingClockRejectsStaleWriter(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDatabase(t)
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewRuntimeSettingsRepository(db, cipher)
+	if _, _, err := repo.Save(ctx, settingsdomain.Config{}, 2); !errors.Is(err, repository.ErrConflict) {
+		t.Fatalf("missing row save: %v", err)
+	}
+	if _, _, err := repo.Reset(ctx, 2); !errors.Is(err, repository.ErrConflict) {
+		t.Fatalf("missing row reset: %v", err)
+	}
+	if _, _, err := repo.Reset(ctx, math.MaxInt64); err == nil {
+		t.Fatal("revision overflow accepted")
 	}
 }

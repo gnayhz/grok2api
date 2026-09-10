@@ -158,22 +158,26 @@ func (value EgressAssignmentMode) IsValid() bool {
 
 // Credential 表示持久化的上游 OAuth 账号。
 type Credential struct {
-	ID                        uint64
-	Provider                  Provider
-	AuthType                  AuthType
-	Name                      string
-	Email                     string
-	UserID                    string
-	TeamID                    string
-	SourceKey                 string
-	OIDCClientID              string
-	EncryptedAccessToken      string
-	EncryptedRefreshToken     string
-	EncryptedCloudflareCookie string
-	ExpiresAt                 time.Time
-	RefreshDueAt              *time.Time
-	LastRefreshAt             *time.Time
-	RefreshFailureCount       int
+	QuotaRecoveryRevision      uint64
+	QuotaRecoveryResetRevision uint64
+	CredentialGeneration       uint64
+	AuthError                  string
+	ID                         uint64
+	Provider                   Provider
+	AuthType                   AuthType
+	Name                       string
+	Email                      string
+	UserID                     string
+	TeamID                     string
+	SourceKey                  string
+	OIDCClientID               string
+	EncryptedAccessToken       string
+	EncryptedRefreshToken      string
+	EncryptedCloudflareCookie  string
+	ExpiresAt                  time.Time
+	RefreshDueAt               *time.Time
+	LastRefreshAt              *time.Time
+	RefreshFailureCount        int
 	// RefreshUnclassifiedAuthCount counts consecutive OAuth 400/401 rejections
 	// that cannot be classified from a machine-readable error code.
 	RefreshUnclassifiedAuthCount int
@@ -190,7 +194,12 @@ type Credential struct {
 	MaxConcurrent    int
 	MinimumRemaining float64
 	FailureCount     int
+	HealthRevision   uint64
 	CooldownUntil    *time.Time
+	// CooldownMarkedAt 记录本次冷却的写入时刻:RSC clean 自愈解除冷却时据
+	// 此执行最短保持期——clean 证明账号无辜,但不证明其出口路径已恢复,
+	// 惩罚毫秒级回弹会让降智波峰内的调度在同一批账号上打转。
+	CooldownMarkedAt *time.Time
 	LastError        string
 	// RiskStatus 为空表示无长期风险标记；rsc_denied 表示 RSC 判定注册风控，
 	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态），直到人工
@@ -252,6 +261,7 @@ type Credential struct {
 // CredentialMaterial contains the encrypted provider secrets and refresh
 // metadata loaded only after routing selects an account.
 type CredentialMaterial struct {
+	CredentialGeneration         uint64
 	AccountID                    uint64
 	Provider                     Provider
 	AuthType                     AuthType
@@ -279,6 +289,7 @@ func (m CredentialMaterial) ApplyTo(value Credential) (Credential, bool) {
 	if m.AccountID == 0 || value.ID != m.AccountID || m.Provider == "" || value.Provider != m.Provider {
 		return value, false
 	}
+	value.CredentialGeneration = m.CredentialGeneration
 	value.AuthType = m.AuthType
 	value.OIDCClientID = m.OIDCClientID
 	value.EncryptedAccessToken = m.EncryptedAccessToken
@@ -340,17 +351,22 @@ func IsWebImagineQuotaMode(mode string) bool {
 
 // QuotaWindow 表示 Provider 单个模式的额度窗口。
 type QuotaWindow struct {
-	AccountID     uint64
-	Mode          string
-	Remaining     int
-	Total         int
-	UsagePercent  float64
-	Breakdown     []QuotaBreakdown
+	AccountID       uint64
+	Mode            string
+	SnapshotVersion uint64
+	Revision        uint64
+	Remaining       int
+	Total           int
+	UsagePercent    float64
+	Breakdown       []QuotaBreakdown
+	// WindowSeconds/ResetAt may contain an account-owned recovery estimate.
+	// For Console chat these legacy fields schedule a probe, not guaranteed reset.
 	WindowSeconds int
 	ResetAt       *time.Time
 	SyncedAt      *time.Time
-	Source        QuotaSource
-	UpdatedAt     time.Time
+	// Source describes the quota amount; it does not certify reset timing.
+	Source    QuotaSource
+	UpdatedAt time.Time
 }
 
 // QuotaBreakdown 保存上游周额度中的产品枚举及其使用百分比。
@@ -537,6 +553,8 @@ type DeviceSession struct {
 	Interval                time.Duration
 	NextPollAt              time.Time
 	ExpiresAt               time.Time
+	PollToken               string
+	PollLeaseUntil          time.Time
 }
 
 // Remaining 返回当前月剩余额度。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -19,12 +20,18 @@ var ErrSubscriptionSync = errors.New("代理订阅同步失败")
 const hygieneSaveAttempts = 3
 
 func (s *Service) syncSource(ctx context.Context, operations OperationsRepository, source domain.SubscriptionSource) (ImportResult, error) {
+	claim, err := operations.BeginEgressSourceSync(ctx, source)
+	if err != nil {
+		return ImportResult{}, ErrSubscriptionSync
+	}
 	now := time.Now().UTC()
 	nextSyncAt := sourceNextSyncAt(source, now)
 	recordFailure := func() {
 		// The source URL and any transport detail are deliberately omitted from
 		// persisted status and API errors; they may contain subscription tokens.
-		_ = operations.UpdateEgressSourceSync(context.WithoutCancel(ctx), source.ID, now, nextSyncAt, 0, "订阅拉取或解析失败")
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = operations.FailEgressSourceSync(writeCtx, claim, now, nextSyncAt, "订阅拉取或解析失败")
 	}
 	if strings.TrimSpace(source.EncryptedURL) == "" {
 		recordFailure()
@@ -40,7 +47,7 @@ func (s *Service) syncSource(ctx context.Context, operations OperationsRepositor
 		recordFailure()
 		return ImportResult{}, ErrSubscriptionSync
 	}
-	content, err := fetchProxySubscription(ctx, urlValue, fetchProxy)
+	content, err := fetchProxySubscription(ctx, urlValue, fetchProxy, s.httpTransportOwner())
 	if err != nil {
 		recordFailure()
 		return ImportResult{}, ErrSubscriptionSync
@@ -50,12 +57,51 @@ func (s *Service) syncSource(ctx context.Context, operations OperationsRepositor
 		recordFailure()
 		return ImportResult{}, ErrSubscriptionSync
 	}
+	// AES-GCM uses a fresh random nonce on every Encrypt. Comparing freshly
+	// encrypted text with the stored ciphertext makes an unchanged feed look
+	// like a proxy edit and resets cooldown/probe health on every refresh.
+	// Reuse ciphertext only after verifying the normalized plaintext is equal.
+	var existing []domain.Node
+	if sourceNodes, ok := operations.(interface {
+		ListEgressNodesFromSource(context.Context, uint64) ([]domain.Node, error)
+	}); ok {
+		existing, err = sourceNodes.ListEgressNodesFromSource(ctx, source.ID)
+	} else if s.repository != nil {
+		existing, err = s.repository.ListEgressNodes(ctx, repository.SortQuery{})
+	}
+	if err != nil {
+		recordFailure()
+		return ImportResult{}, ErrSubscriptionSync
+	}
+	byKey := make(map[string]domain.Node)
+	for _, node := range existing {
+		if node.SourceID == source.ID {
+			byKey[node.SourceKey] = node
+		}
+	}
+	changed := make([]uint64, 0)
 	nodes := make([]domain.Node, 0, len(entries))
 	for index, entry := range entries {
-		encryptedProxy, encryptErr := s.cipher.Encrypt(entry.ProxyURL)
+		old, exists := byKey[entry.Key]
+		delete(byKey, entry.Key)
+		encryptedProxy := ""
+		if exists {
+			if plain, decryptErr := s.cipher.Decrypt(old.EncryptedProxyURL); decryptErr == nil {
+				if normalized, normalizeErr := NormalizeProxyURL(plain); normalizeErr == nil && normalized == entry.ProxyURL {
+					encryptedProxy = old.EncryptedProxyURL
+				}
+			}
+		}
+		var encryptErr error
+		if encryptedProxy == "" {
+			encryptedProxy, encryptErr = s.cipher.Encrypt(entry.ProxyURL)
+		}
 		if encryptErr != nil {
 			recordFailure()
 			return ImportResult{}, fmt.Errorf("%w: 加密导入节点", ErrSubscriptionSync)
+		}
+		if exists && (encryptedProxy != old.EncryptedProxyURL || old.ProxyPool || !old.Enabled) {
+			changed = append(changed, old.ID)
 		}
 		nodes = append(nodes, domain.Node{
 			Name: sourceNodeName(source.Name, index), Enabled: true,
@@ -63,19 +109,23 @@ func (s *Service) syncSource(ctx context.Context, operations OperationsRepositor
 			EncryptedProxyURL: encryptedProxy, Health: 1, ProbeStatus: domain.ProbeStatusUnknown,
 		})
 	}
-	imported, err := operations.UpsertEgressNodesFromSource(ctx, source.ID, nodes)
+	imported, err := operations.CommitEgressSourceSync(ctx, claim, nodes, now, nextSyncAt)
 	if err != nil {
 		recordFailure()
 		return ImportResult{}, ErrSubscriptionSync
 	}
+	for _, old := range byKey {
+		if old.Enabled {
+			changed = append(changed, old.ID)
+		}
+	}
+	s.forgetClearances(changed)
+	s.invalidateNodeSnapshots()
 	s.invalidateOperationsConfig()
 	// Subscription upserts bypass the node-edit guard: a refreshed entry can
 	// turn a fixed routing target into an account-bound template. Best effort -
 	// a hygiene failure must not fail the sync that already committed.
 	_ = s.enforceRoutingHygieneAfterSync(ctx, operations)
-	if err := operations.UpdateEgressSourceSync(ctx, source.ID, now, nextSyncAt, imported, ""); err != nil {
-		return ImportResult{}, err
-	}
 	return ImportResult{Imported: imported, Skipped: skipped}, nil
 }
 
@@ -88,27 +138,42 @@ func (s *Service) syncSource(ctx context.Context, operations OperationsRepositor
 // 写回契约:后台写者不得覆盖并发管理员提交。旧实现每次同步都无条件整行
 // 写回——即使没有任何目标需要剥离,也会把 [读取快照, 写回] 窗口内落库的
 // 管理员修改(检测间隔、探测提供方、路由目标)静默回滚。现在:没有目标被
-// 剥离时不写;需要写时优先走条件写(快照以来未变才落库),冲突时重读重算
-// 重试(上限 hygieneSaveAttempts 次)。管理员路径的整行替换语义不受影响;
-// 管理员晚到提交复活已剥离目标的情况由下一次同步的卫生检查自愈。
+// 剥离时不写;需要写时必须条件写(快照以来未变才落库),冲突时重读重算
+// 重试(上限 hygieneSaveAttempts 次)。管理员路径按当前固定目标政策保存，
+// 卫生检查无权覆盖其间已提交的新意图。
 func (s *Service) enforceRoutingHygieneAfterSync(ctx context.Context, operations OperationsRepository) error {
 	for attempt := 0; ; attempt++ {
 		config, err := operations.GetEgressOperationsConfig(ctx)
 		if err != nil {
 			return err
 		}
+		// A read failure cannot prove that an administrator's target is invalid.
+		// Keep the source snapshot intact until every target has been checked.
+		config.ScopeTargets = maps.Clone(config.ScopeTargets)
+		config.ClassTargets = maps.Clone(config.ClassTargets)
 		since := config.UpdatedAt
 		originalDefault := config.DefaultTarget
-		config.DefaultTarget = s.filterRoutingTarget(ctx, config.DefaultTarget)
+		config.DefaultTarget, err = s.filterRoutingTarget(ctx, config.DefaultTarget)
+		if err != nil {
+			return err
+		}
 		stripped := config.DefaultTarget != originalDefault
 		for scope, target := range config.ScopeTargets {
-			if filtered := s.filterRoutingTarget(ctx, target); !filtered.Configured() {
+			filtered, err := s.filterRoutingTarget(ctx, target)
+			if err != nil {
+				return err
+			}
+			if !filtered.Configured() {
 				delete(config.ScopeTargets, scope)
 				stripped = true
 			}
 		}
 		for class, target := range config.ClassTargets {
-			if filtered := s.filterRoutingTarget(ctx, target); !filtered.Configured() {
+			filtered, err := s.filterRoutingTarget(ctx, target)
+			if err != nil {
+				return err
+			}
+			if !filtered.Configured() {
 				delete(config.ClassTargets, class)
 				stripped = true
 			}
@@ -116,14 +181,9 @@ func (s *Service) enforceRoutingHygieneAfterSync(ctx context.Context, operations
 		if !stripped {
 			return nil
 		}
-		var saveErr error
-		if cas, ok := operations.(OperationsConfigCASWriter); ok {
-			_, saveErr = cas.SaveEgressOperationsConfigIfCurrent(ctx, config, since)
-			if errors.Is(saveErr, repository.ErrEgressConfigStale) && attempt+1 < hygieneSaveAttempts {
-				continue
-			}
-		} else {
-			_, saveErr = operations.SaveEgressOperationsConfig(ctx, config)
+		_, saveErr := operations.SaveEgressOperationsConfigIfCurrent(ctx, config, since, s.validateFixedTargetNode)
+		if errors.Is(saveErr, repository.ErrEgressConfigStale) && attempt+1 < hygieneSaveAttempts {
+			continue
 		}
 		if saveErr != nil {
 			return saveErr
@@ -135,18 +195,24 @@ func (s *Service) enforceRoutingHygieneAfterSync(ctx context.Context, operations
 
 // filterRoutingTarget keeps a configured node target only while the node
 // remains a valid fixed target; every other mode passes through unchanged.
-func (s *Service) filterRoutingTarget(ctx context.Context, target domain.RoutingTarget) domain.RoutingTarget {
+func (s *Service) filterRoutingTarget(ctx context.Context, target domain.RoutingTarget) (domain.RoutingTarget, error) {
 	if !target.Configured() || target.Mode.Normalized() != domain.RoutingTargetNode {
-		return target
+		return target, nil
 	}
 	node, err := s.repository.GetEgressNode(ctx, target.NodeID)
-	if err != nil || !domain.CanNodeServeFixedTarget(node) {
-		return domain.RoutingTarget{}
+	if errors.Is(err, repository.ErrNotFound) {
+		return domain.RoutingTarget{}, nil
+	}
+	if err != nil {
+		return target, err
+	}
+	if !domain.CanNodeServeFixedTarget(node) {
+		return domain.RoutingTarget{}, nil
 	}
 	if proxyURL, decryptErr := s.cipher.Decrypt(node.EncryptedProxyURL); decryptErr == nil && domain.IsAccountTemplateProxy(proxyURL) {
-		return domain.RoutingTarget{}
+		return domain.RoutingTarget{}, nil
 	}
-	return target
+	return target, nil
 }
 
 func sourceNextSyncAt(source domain.SubscriptionSource, now time.Time) time.Time {

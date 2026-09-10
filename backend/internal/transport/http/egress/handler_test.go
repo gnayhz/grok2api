@@ -12,6 +12,7 @@ import (
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/gin-gonic/gin"
@@ -36,7 +37,7 @@ func (r *proxyRevealRepository) GetEgressNode(_ context.Context, id uint64) (egr
 func (r *proxyRevealRepository) CreateEgressNode(_ context.Context, value egressdomain.Node) (egressdomain.Node, error) {
 	return value, nil
 }
-func (r *proxyRevealRepository) UpdateEgressNode(_ context.Context, value egressdomain.Node) (egressdomain.Node, error) {
+func (r *proxyRevealRepository) UpdateEgressNodeConfiguration(_ context.Context, value egressdomain.Node, validate egressdomain.FixedTargetValidator) (egressdomain.Node, error) {
 	return value, nil
 }
 func (r *proxyRevealRepository) DeleteEgressNode(context.Context, uint64) error { return nil }
@@ -359,7 +360,7 @@ func (r *missingPoolStubRepo) ListEgressNodesByPool(_ context.Context, _ uint64)
 }
 
 func (r *missingPoolStubRepo) SetEgressPoolMembers(_ context.Context, _ uint64, _ []uint64) error {
-	return nil
+	return repository.ErrNotFound
 }
 
 // 不存在的池设置成员曾把 repository.ErrNotFound 透传到 writeError 的
@@ -414,7 +415,9 @@ func TestRotateNodeMissingNodeMapsTo404(t *testing.T) {
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = httptest.NewRequest("POST", "/egress-nodes/999/rotate", nil)
 	context.Params = gin.Params{{Key: "id", Value: "999"}}
-	handler := NewHandler(egressapp.NewService(repoNotFound, cipher))
+	service := egressapp.NewService(repoNotFound, cipher)
+	service.SetRotationCoordination(memory.NewLockStore(), memory.NewRateLimiter())
+	handler := NewHandler(service)
 	handler.rotateNode(context)
 	if context.Writer.Status() != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (missing node must not surface as 500)", context.Writer.Status())

@@ -10,40 +10,14 @@ import (
 	"sync/atomic"
 	"testing"
 
+	gatewayapp "github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
-
-func TestStripReasoningEncryptedContentPreservesOnlyPortableHistory(t *testing.T) {
-	body := []byte(`{
-		"input":[
-			{"type":"reasoning","id":"rs_empty","status":"completed","summary":[],"encrypted_content":"opaque-empty"},
-			{"type":"reasoning","summary":[{"type":"summary_text","text":""}],"encrypted_content":"opaque-blank"},
-			{"type":"reasoning","id":"rs_summary","status":"completed","summary":[{"type":"summary_text","text":"readable"}],"encrypted_content":"opaque-summary"},
-			{"type":"message","role":"assistant","content":"answer","encrypted_content":"message-value"},
-			{"type":"message","role":"user","content":"continue"}
-		]
-	}`)
-	downgraded, changed := stripReasoningEncryptedContent(body)
-	if !changed {
-		t.Fatal("expected encrypted reasoning downgrade")
-	}
-	var payload struct {
-		Input []map[string]any `json:"input"`
-	}
-	if json.Unmarshal(downgraded, &payload) != nil || len(payload.Input) != 3 {
-		t.Fatalf("downgraded = %s", downgraded)
-	}
-	reasoning := payload.Input[0]
-	if reasoning["type"] != "reasoning" || reasoning["id"] != nil || reasoning["status"] != nil || reasoning["encrypted_content"] != nil {
-		t.Fatalf("reasoning = %#v", reasoning)
-	}
-	if payload.Input[1]["encrypted_content"] != "message-value" {
-		t.Fatalf("non-reasoning encrypted content changed: %#v", payload.Input[1])
-	}
-}
 
 func TestRecoverReasoningDecodeFailureRetriesSameUpstreamOnce(t *testing.T) {
 	adapter, encrypted := newReasoningRecoveryTestAdapter(t)
@@ -84,8 +58,9 @@ func TestRecoverReasoningDecodeFailureRetriesSameUpstreamOnce(t *testing.T) {
 	})
 
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
 		IdempotencyID: "original-id",
 		Body:          []byte(`{"model":"public","max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":512},"messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"}]},{"role":"user","content":"continue"}]}`),
 		NormalizeBody: true, Operation: conversation.OperationMessages,
@@ -111,8 +86,9 @@ func TestRecoverReasoningDecodeFailureDoesNotRetryOtherBadRequests(t *testing.T)
 		return jsonHTTPResponse(request, http.StatusBadRequest, `{"error":{"message":"unrelated invalid request"}}`), nil
 	})
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5",
 		Body: []byte(`{"model":"grok-4.5","input":[{"type":"reasoning","summary":[],"encrypted_content":"opaque"}]}`),
 	})
 	if err != nil {
@@ -152,6 +128,7 @@ func TestRecoverReasoningDecodeFailureStaysOnXAIFallbackPlane(t *testing.T) {
 		}
 	})
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
 		Credential: account.Credential{
 			ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted,
 			BuildRouteMode: account.BuildRouteAuto, BuildSuperEntitled: true,
@@ -191,8 +168,9 @@ func TestRecoverReasoningDecodeFailureResetsSessionWithoutOpaqueInput(t *testing
 		}
 	})
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
 		Body: []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"continue"}]}`),
 	})
 	if err != nil {
@@ -231,8 +209,9 @@ func TestRecoverReasoningDecodeFailureEscalatesFromOpaqueStripToSessionReset(t *
 		return jsonHTTPResponse(request, http.StatusBadRequest, `{"error":"Could not decode the compaction blob. Ensure it is unmodified from the compact response."}`), nil
 	})
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
 		Body: []byte(`{"model":"grok-4.5","input":[{"type":"reasoning","summary":[],"encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`),
 	})
 	if err != nil {
@@ -265,8 +244,9 @@ func TestRecoverReasoningDecodeFailurePreservesRateLimitAfterOpaqueStrip(t *test
 	})
 
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
 		Body: []byte(`{"model":"grok-4.5","input":[{"type":"reasoning","summary":[],"encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`),
 	})
 	if err != nil {
@@ -310,8 +290,9 @@ func TestRecoverReasoningDecodeFailurePreservesRateLimitAfterSessionReset(t *tes
 	})
 
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
 		Body: []byte(`{"model":"grok-4.5","input":[{"type":"reasoning","summary":[],"encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`),
 	})
 	if err != nil {
@@ -373,6 +354,7 @@ func TestRecoverReasoningDecodeFailureWithMillionTokenScaleCompactionBlob(t *tes
 	})
 
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
 		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
 		Method:         http.MethodPost,
 		Path:           "/responses",
@@ -399,8 +381,9 @@ func TestRecoverReasoningDecodeFailureDoesNotResetStoredResponseChain(t *testing
 		return jsonHTTPResponse(request, http.StatusBadRequest, `{"error":"Could not decode the compaction blob. Ensure it is unmodified from the compact response."}`), nil
 	})
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
 		Body: []byte(`{"model":"grok-4.5","previous_response_id":"resp_1","input":[{"role":"user","content":"continue"}]}`),
 	})
 	if err != nil {
@@ -422,8 +405,9 @@ func TestRecoverReasoningDecodeFailurePreservesOriginalWhenRetryFails(t *testing
 		return jsonHTTPResponse(request, http.StatusServiceUnavailable, `{"error":"temporary failure"}`), nil
 	})
 	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
-		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
-		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5",
+		HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, inferencedomain.NewAttemptBudget(3)),
+		Credential:     account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:         http.MethodPost, Path: "/responses", Model: "grok-4.5",
 		Body: []byte(`{"model":"grok-4.5","input":[{"type":"reasoning","summary":[],"encrypted_content":"opaque"}]}`),
 	})
 	if err != nil {

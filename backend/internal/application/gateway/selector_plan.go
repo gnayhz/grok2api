@@ -218,7 +218,15 @@ func (s *Selector) planCandidateIndexesWithHints(ctx context.Context, values []a
 // loadConcurrencySnapshot 在极短窗口内合并相同候选池的并发快照读取。
 // 快照只参与排序，最终容量仍由原子 Acquire 校验，因此陈旧快照不会突破账号并发上限。
 func (s *Selector) loadConcurrencySnapshot(ctx context.Context, keys []string) (map[string]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	cacheKey := concurrencySnapshotKey(keys)
+	if s.concurrencySnapshots != nil {
+		if values, ok := s.concurrencySnapshots.Get(cacheKey, time.Now()); ok {
+			return values, nil
+		}
+	}
 	load := func() (map[string]int, error) {
 		if batchReader, ok := s.concurrency.(repository.ConcurrencySnapshotReader); ok {
 			values, err := batchReader.CurrentMany(ctx, keys)
@@ -237,11 +245,32 @@ func (s *Selector) loadConcurrencySnapshot(ctx context.Context, keys []string) (
 		}
 		return values, nil
 	}
-	// 仅测试中的手工 Selector 可能没有初始化缓存，保持最小兼容回退。
-	if s.concurrencySnapshots == nil {
-		return load()
+	value, err := s.routingLoads.Do(ctx, "concurrency\x00"+string(cacheKey[:]), func() (any, error) {
+		started := time.Now()
+		if s.concurrencySnapshots != nil {
+			if values, ok := s.concurrencySnapshots.Get(cacheKey, started); ok {
+				return values, nil
+			}
+		}
+		values, err := load()
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// The TTL starts before the read, as before; a slow response does not
+		// extend the freshness of this hint. Manually built test selectors may
+		// omit the cache but retain the same in-flight cancellation contract.
+		if s.concurrencySnapshots != nil {
+			s.concurrencySnapshots.Set(cacheKey, values, started)
+		}
+		return values, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return s.concurrencySnapshots.Load(ctx, cacheKey, time.Now(), load)
+	return value.(map[string]int), nil
 }
 
 func concurrencySnapshotKey(keys []string) [32]byte {

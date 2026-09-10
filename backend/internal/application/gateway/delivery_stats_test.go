@@ -19,6 +19,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // TestDeliveredStatsRecordedFromTransportCallback 锁定轮26 交付统计的
@@ -45,13 +46,13 @@ func TestDeliveredStatsRecordedFromTransportCallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, account.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, acc.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, acc.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{Name: "dk", Prefix: "dk", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "enc", Enabled: true, RPMLimit: 120, MaxConcurrent: 8})
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll, Name: "dk", Prefix: "dk", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "enc", Enabled: true, RPMLimit: 120, MaxConcurrent: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestDeliveredStatsRecordedFromTransportCallback(t *testing.T) {
 	}
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clientService := clientkeyapp.NewService(nil, nil, nil, 60, 4, nil)
+	clientService := clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
 	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed, EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond})
@@ -82,7 +83,7 @@ func TestDeliveredStatsRecordedFromTransportCallback(t *testing.T) {
 		t.Fatal("RecordDelivery 未装配")
 	}
 	result.RecordDelivery(DeliveryStats{Events: 7, Bytes: 4096})
-	result.Finalize(Usage{}, "r1", "")
+	finishTestResult(t, result, Usage{}, "r1", "")
 	_ = result.Body.Close()
 
 	logs, total, err := auditRepo.List(ctx, 0, 5)

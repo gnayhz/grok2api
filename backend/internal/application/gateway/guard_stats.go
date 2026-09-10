@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"sync"
 	"time"
 )
@@ -49,9 +51,9 @@ type GuardSignalStat struct {
 	Triggered int64 `json:"triggered"`
 	// Requests 首个触发特征为该信号的请求数(每请求至多计一次)。
 	Requests int64 `json:"requests"`
-	// Rescued 这些请求最终成功交付(200)的数量。
+	// Rescued 最终交付完成且没有传输/协议错误的请求数；仅收到思考不计成功。
 	Rescued int64 `json:"rescued"`
-	// Failed 这些请求最终失败(4xx/5xx/503)的数量。
+	// Failed 包含交付前拒绝以及响应头发送后的断流、取消。
 	Failed   int64      `json:"failed"`
 	LastSeen *time.Time `json:"lastSeen,omitempty"`
 }
@@ -67,25 +69,38 @@ type GuardExemptStat struct {
 
 // GuardRetrialStat 汇总守卫触发后的恢复路径。
 type GuardRetrialStat struct {
-	// SameAccountRetryUsed 同号补偿重试发起次数。
-	SameAccountRetryUsed int64 `json:"sameAccountRetryUsed"`
-	// SameAccountRetryRescued 其中最终成功交付的请求数。
-	SameAccountRetryRescued int64 `json:"sameAccountRetryRescued"`
-	// ExhaustedDeliverLast 重试耗尽后 fail-open 放行最后一次的请求数。
-	ExhaustedDeliverLast int64 `json:"exhaustedDeliverLast"`
-	// ExhaustedRejected 重试耗尽后 fail-closed 拒绝的请求数。
+	// ExhaustedRejected 重试耗尽后 fail-closed 拒绝的请求数(耗尽策略
+	// 只剩 fail-closed,G12;同号重试已废除,G14)。
 	ExhaustedRejected int64 `json:"exhaustedRejected"`
 }
 
 // GuardStatsSnapshot 是管理端读取的完整快照。计数为进程本地,重启归零
 // (与 routingStats 同生命周期语义)。
+// GuardEffectiveConfig 是守卫当前生效配置的只读投影。数据源为
+// UpdateQualityRetry 的每次热更(启动装配+运行时设置应用),面板状态卡
+// 与外部告警据此直接回答"守卫现在是否在场"——历史事故中该状态只能靠
+// 豁免计数器事后反推。
+type GuardEffectiveConfig struct {
+	Enabled       bool      `json:"enabled"`
+	MaxAttempts   int       `json:"maxAttempts"`
+	OnExhausted   string    `json:"onExhausted"`
+	GuardedModels []string  `json:"guardedModels,omitempty"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// GuardStatsSnapshot 是管理端读取的完整快照。计数为进程本地,重启归零
+// (与 routingStats 同生命周期语义)。
 type GuardStatsSnapshot struct {
-	Signals []GuardSignalStat `json:"signals"`
+	Resources          responsebuffer.Snapshot `json:"resources"`
+	LocalProtection    LocalProtectionStats    `json:"localProtection"`
+	Backlog            *GuardBacklogStats      `json:"backlog,omitempty"`
+	BacklogUnavailable bool                    `json:"backlogUnavailable,omitempty"`
+	Signals            []GuardSignalStat       `json:"signals"`
 	// Exempts 按原因统计守卫未介入的请求(与 Signals 同生命周期语义)。
 	Exempts []GuardExemptStat `json:"exempts"`
 	Retrial GuardRetrialStat  `json:"retrial"`
-	// Canary 按结论统计换 IP 后 canary 一次性验证的执行结果。
-	Canary map[string]int64 `json:"canary"`
+	// Effective 守卫当前生效配置投影(UpdateQualityRetry 热更时刷新);nil=尚未初始化。
+	Effective *GuardEffectiveConfig `json:"effective,omitempty"`
 	// Since 统计起点(进程启动后首次记录)。
 	Since *time.Time `json:"since,omitempty"`
 }
@@ -94,12 +109,12 @@ type GuardStatsSnapshot struct {
 // 注册表每分钟被日志任务 CollectAndReset 清空,而管理 UI 需要跨清理周期
 // 存活的累计快照(与 egress.routingStats 相同的取舍)。
 type guardStatsCollector struct {
-	mu      sync.Mutex
-	signals map[GuardSignal]*GuardSignalStat
-	exempts map[string]*GuardExemptStat
-	retrial GuardRetrialStat
-	canary  map[string]int64
-	since   time.Time
+	mu        sync.Mutex
+	signals   map[GuardSignal]*GuardSignalStat
+	exempts   map[string]*GuardExemptStat
+	retrial   GuardRetrialStat
+	since     time.Time
+	effective *GuardEffectiveConfig
 }
 
 var guardStats = newGuardStatsCollector()
@@ -113,7 +128,7 @@ func newGuardStatsCollector() *guardStatsCollector {
 	for _, reason := range guardExemptOrder {
 		exempts[reason] = &GuardExemptStat{Reason: reason}
 	}
-	return &guardStatsCollector{signals: signals, exempts: exempts, canary: make(map[string]int64)}
+	return &guardStatsCollector{signals: signals, exempts: exempts}
 }
 
 func (c *guardStatsCollector) touch() {
@@ -178,38 +193,24 @@ func (c *guardStatsCollector) recordOutcome(signal GuardSignal, rescued bool) {
 	}
 }
 
-func (c *guardStatsCollector) recordSameAccountRetry() {
+func (c *guardStatsCollector) recordExhausted() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.touch()
-	c.retrial.SameAccountRetryUsed++
+	c.retrial.ExhaustedRejected++
 }
 
-func (c *guardStatsCollector) recordSameAccountRescued() {
+// setEffective 刷新守卫生效配置投影(UpdateQualityRetry 每次热更调用)。
+func (c *guardStatsCollector) setEffective(cfg QualityRetryRuntime) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.retrial.SameAccountRetryRescued++
-}
-
-func (c *guardStatsCollector) recordExhausted(deliverLast bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.touch()
-	if deliverLast {
-		c.retrial.ExhaustedDeliverLast++
-	} else {
-		c.retrial.ExhaustedRejected++
+	c.effective = &GuardEffectiveConfig{
+		Enabled:       cfg.Enabled,
+		MaxAttempts:   cfg.MaxAttempts,
+		OnExhausted:   cfg.OnExhausted,
+		GuardedModels: append([]string(nil), cfg.GuardedModels...),
+		UpdatedAt:     time.Now().UTC(),
 	}
-}
-
-func (c *guardStatsCollector) recordCanary(outcome string) {
-	if outcome == "" {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.touch()
-	c.canary[outcome]++
 }
 
 // Snapshot 返回稳定排序的副本,保证 UI 轮询行序不跳动。
@@ -239,11 +240,12 @@ func (c *guardStatsCollector) Snapshot() GuardStatsSnapshot {
 			exempts = append(exempts, copied)
 		}
 	}
-	canary := make(map[string]int64, len(c.canary))
-	for outcome, count := range c.canary {
-		canary[outcome] = count
+	snapshot := GuardStatsSnapshot{Signals: signals, Exempts: exempts, Retrial: c.retrial}
+	if c.effective != nil {
+		copied := *c.effective
+		copied.GuardedModels = append([]string(nil), c.effective.GuardedModels...)
+		snapshot.Effective = &copied
 	}
-	snapshot := GuardStatsSnapshot{Signals: signals, Exempts: exempts, Retrial: c.retrial, Canary: canary}
 	if !c.since.IsZero() {
 		since := c.since
 		snapshot.Since = &since
@@ -253,3 +255,107 @@ func (c *guardStatsCollector) Snapshot() GuardStatsSnapshot {
 
 // GuardStatsSnapshotForAPI 暴露给只读管理端点。
 func GuardStatsSnapshotForAPI() GuardStatsSnapshot { return guardStats.Snapshot() }
+
+// GuardEffectiveForAPI 返回守卫生效配置快照(热更即时反映;nil=尚未初始化)。
+func GuardEffectiveForAPI() *GuardEffectiveConfig {
+	guardStats.mu.Lock()
+	defer guardStats.mu.Unlock()
+	if guardStats.effective == nil {
+		return nil
+	}
+	copied := *guardStats.effective
+	copied.GuardedModels = append([]string(nil), guardStats.effective.GuardedModels...)
+	return &copied
+}
+
+// GuardDisabledExemptCountForAPI 返回 disabled 豁免(守卫不在场交付)的
+// 累计计数与最后发生时间。守卫重新启用时用于输出"关闭期间放行了多少"
+// 摘要——零计数表示本进程生命周期内守卫从未离场。
+func GuardDisabledExemptCountForAPI() (int64, time.Time) {
+	guardStats.mu.Lock()
+	defer guardStats.mu.Unlock()
+	stat, ok := guardStats.exempts[QualityExemptDisabled]
+	if !ok {
+		return 0, time.Time{}
+	}
+	last := time.Time{}
+	if stat.LastSeen != nil {
+		last = *stat.LastSeen
+	}
+	return stat.Count, last
+}
+
+// GuardStatsSnapshot pairs process counters with this gateway's policy authority.
+func (s *Service) GuardStatsSnapshot() GuardStatsSnapshot {
+	snapshot := GuardStatsSnapshotForAPI()
+	snapshot.Resources = responsebuffer.ProcessSnapshot()
+	if s != nil {
+		cfg := s.QualityRetryConfig()
+		if s.selector != nil {
+			snapshot.LocalProtection = s.selector.localProtectionStats()
+		}
+		snapshot.Effective = &GuardEffectiveConfig{Enabled: cfg.Enabled, MaxAttempts: cfg.MaxAttempts,
+			OnExhausted: cfg.OnExhausted, GuardedModels: cfg.GuardedModels}
+	}
+	return snapshot
+}
+
+type LocalProtectionStats struct {
+	Owners        int        `json:"owners"`
+	Limit         int        `json:"limit"`
+	Overflows     uint64     `json:"overflows"`
+	OverflowUntil *time.Time `json:"overflowUntil,omitempty"`
+}
+
+func (s *Selector) localProtectionStats() LocalProtectionStats {
+	s.qualityHoldsMu.Lock()
+	defer s.qualityHoldsMu.Unlock()
+	stats := LocalProtectionStats{Limit: maxLocalQualityOwners, Overflows: s.qualityHoldOverflows}
+	now := time.Now()
+	for _, owners := range s.qualityHolds {
+		for _, until := range owners {
+			if until.After(now) {
+				stats.Owners++
+			}
+		}
+	}
+	if s.qualityHoldOverflow.After(now) {
+		until := s.qualityHoldOverflow
+		stats.OverflowUntil = &until
+	}
+	return stats
+}
+
+type GuardBacklogStats struct {
+	InFlight        int64      `json:"inFlight"`
+	Unconfirmed     int64      `json:"unconfirmed"`
+	OldestExpiredAt *time.Time `json:"oldestExpiredAt,omitempty"`
+	Pending         int64      `json:"pending"`
+	Limit           int64      `json:"limit"`
+	OldestAt        *time.Time `json:"oldestAt,omitempty"`
+	Leased          int64      `json:"leased"`
+	Retrying        int64      `json:"retrying"`
+}
+type GuardBacklogSource interface {
+	GuardBacklog(context.Context) (GuardBacklogStats, error)
+}
+
+func (s *Service) GuardStatsSnapshotWithContext(ctx context.Context) GuardStatsSnapshot {
+	snapshot := s.GuardStatsSnapshot()
+	if s == nil {
+		return snapshot
+	}
+	if recorder := s.qualityEvents.Load(); recorder != nil {
+		if source, ok := recorder.value.(GuardBacklogSource); ok {
+			ctx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			stats, err := source.GuardBacklog(ctx)
+			if err != nil {
+				snapshot.BacklogUnavailable = true
+			} else {
+				snapshot.Backlog = &stats
+			}
+		}
+	}
+	return snapshot
+}

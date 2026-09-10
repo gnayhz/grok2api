@@ -22,6 +22,9 @@ func normalizeResponsesRequestWithMetadata(body []byte, model string, metadata *
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, nil, fmt.Errorf("解析 Responses 请求: %w", err)
 	}
+	if payload == nil {
+		return nil, nil, fmt.Errorf("Responses 请求必须是 JSON 对象")
+	}
 	payload["model"] = mustJSON(model)
 	if _, err := normalizeBuildRequestPayloadWithMetadata(payload, model, conversation.OperationResponses, metadata); err != nil {
 		return nil, nil, err

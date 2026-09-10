@@ -13,10 +13,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
+	"github.com/google/uuid"
 )
 
 const gatewayCompactionRetryDelay = 3 * time.Second
@@ -59,7 +63,7 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 	maxAttempts int,
 	retryDelay time.Duration,
 ) (*provider.Response, error) {
-	if maxAttempts < 1 {
+	if maxAttempts < 1 || request.DisableAutomaticReplay {
 		maxAttempts = 1
 	}
 	upstreamRequest := request
@@ -73,9 +77,17 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 		if attempt > 1 {
 			stage = "compaction_retry"
 		}
+		_, _, prepared, prepareErr := a.prepareReasoningReplay(ctx, request, body, base)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		defer historydomain.Discard(prepared)
 		attemptCtx := infraegress.WithPhysicalCallStage(ctx, stage)
 		resp, reqURL, err := a.doResponseRequest(attemptCtx, upstreamRequest, accessToken, body, base)
 		if err != nil {
+			if errors.Is(err, infraegress.ErrPhysicalCallLimit) {
+				return nil, err
+			}
 			lastErr = err
 			if attempt < maxAttempts && waitGatewayCompactionRetry(ctx, retryDelay) {
 				continue
@@ -84,7 +96,7 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 		}
 
 		var recoveredPrimaryFailure *provider.DiagnosticResponse
-		if strings.EqualFold(base, primaryBase) && shouldProbeXAIInferenceFallback(request.Credential, request.Billing, request.Method, request.Path, resp.StatusCode) {
+		if !request.DisableAutomaticReplay && strings.EqualFold(base, primaryBase) && shouldProbeXAIInferenceFallback(request.Credential, request.Billing, request.Method, request.Path, resp.StatusCode) {
 			primaryBody, primaryTruncated, readErr := provider.ReadDiagnosticBody(resp.Body)
 			_ = resp.Body.Close()
 			if readErr != nil {
@@ -96,12 +108,19 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 			} else {
 				fallbackBase := a.fallbackBaseURL()
 				if fallbackBase != "" && !strings.EqualFold(fallbackBase, base) {
+					_, _, fallbackPrepared, prepareErr := a.prepareReasoningReplay(ctx, request, body, fallbackBase)
+					if prepareErr != nil {
+						_ = primaryResp.Body.Close()
+						return nil, prepareErr
+					}
+					defer historydomain.Discard(fallbackPrepared)
 					fallbackCtx := infraegress.WithPhysicalCallStage(attemptCtx, "plane_fallback")
 					fallbackResp, fallbackURL, fallbackErr := a.doResponseRequest(fallbackCtx, upstreamRequest, accessToken, body, fallbackBase)
 					if fallbackErr == nil && isHTTPSuccess(fallbackResp.StatusCode) {
 						recoveredPrimaryFailure = bufferedFailureDiagnostic(primaryResp, primaryBody, primaryTruncated)
 						a.activateBuildAPIFallback(ctx, &request.Credential)
 						resp, reqURL, base = fallbackResp, fallbackURL, fallbackBase
+						prepared = fallbackPrepared
 					} else {
 						if fallbackErr == nil {
 							_ = fallbackResp.Body.Close()
@@ -134,20 +153,28 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 			return result, nil
 		}
 
-		resp.Body = wrapBuildSemanticIdle(resp.Body, a.config().StreamIdleTimeout)
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCompatibleResponseBytes+1))
-		_ = resp.Body.Close()
-		if readErr != nil {
+		stream := newBuildResponseStream(ctx, resp.Body, a.config().StreamIdleTimeout)
+		physicalID := attemptmeta.FromResponse(resp).ID
+		stream.Observe(func(event *responseflow.Event) {
+			if event.HasData {
+				infraegress.ObservePhysicalPayload(ctx, physicalID, event.Data)
+				infraegress.ObservePhysicalGeneration(ctx, physicalID, responsecheck.EventGeneration(string(event.Kind), event.Data))
+			}
+		})
+		sample, sampleErr := parseGatewayCompactionReader(stream)
+		readErr := stream.ReadOutcome()
+		_ = stream.Close()
+		if readErr != nil && readErr != io.EOF {
 			lastErr = readErr
 			if attempt < maxAttempts && waitGatewayCompactionRetry(ctx, retryDelay) {
 				continue
 			}
 			return nil, readErr
 		}
-		if len(data) > maxCompatibleResponseBytes {
-			return gatewayCompactionFailureProviderResponse(resp.Header, reqURL, modelCatalogChanged, warnings, "上游 compaction 响应超过 128 MiB"), nil
+		if errors.Is(sampleErr, responsebuffer.ErrExhausted) || errors.Is(sampleErr, responsebuffer.ErrLimit) {
+			return nil, sampleErr
 		}
-		sample, sampleErr := parseGatewayCompactionStream(data)
+
 		if sampleErr == nil && isDegenerateGatewayCompactionSummary(sample.summary) {
 			sampleErr = errGatewayCompactionDegenerate
 		}
@@ -160,13 +187,17 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 		}
 
 		continuation := gatewayCompactionContinuation(sample.summary)
-		blob, encodeErr := a.compaction.encode(request.PromptCacheKey, continuation)
+		blob, encodeErr := a.compaction.Encode(request.PromptCacheKey, continuation)
 		if encodeErr != nil {
 			return gatewayCompactionFailureProviderResponse(resp.Header, reqURL, modelCatalogChanged, warnings, "服务端 compaction 编码失败"), nil
 		}
 		converted, contentType, convertErr := buildGatewayCompactionResponse(sample.response, blob, request.Model, request.Streaming)
 		if convertErr != nil {
 			return gatewayCompactionFailureProviderResponse(resp.Header, reqURL, modelCatalogChanged, warnings, "服务端 compaction 响应编码失败"), nil
+		}
+		var commitOutput func() error
+		if prepared != nil {
+			commitOutput = prepared.Reset
 		}
 		headers := resp.Header.Clone()
 		headers.Del("Content-Encoding")
@@ -176,19 +207,37 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 			headers.Set("X-Grok2API-Compatibility-Warnings", warnings)
 		}
 		return &provider.Response{
-			StatusCode: resp.StatusCode, Status: resp.Status, Header: headers,
+			Attempt: attemptmeta.FromResponse(resp), StatusCode: resp.StatusCode, Status: resp.Status, Header: headers,
 			Body: io.NopCloser(bytes.NewReader(converted)), UpstreamURL: reqURL,
 			RecoveredPrimaryFailure: recoveredPrimaryFailure,
 			ModelCatalogChanged:     modelCatalogChanged,
+			CommitOutput:            commitOutput,
 		}, nil
 	}
 	return nil, lastErr
 }
 
 func parseGatewayCompactionStream(data []byte) (gatewayCompactionSample, error) {
+	return parseGatewayCompactionReader(bytes.NewReader(data))
+}
+func parseGatewayCompactionReader(source io.Reader) (gatewayCompactionSample, error) {
 	var completed map[string]any
 	var streamedParts []string
-	err := consumeCompatibleSSE(io.NopCloser(bytes.NewReader(data)), func(event compatibleSSEEvent) error {
+	budget := responsebuffer.NewRequest()
+	if body, ok := source.(io.ReadCloser); ok {
+		budget = responsebuffer.BudgetOf(body)
+	}
+	retention := responsebuffer.NewState(budget, 16<<20)
+	defer retention.Close()
+	received := 0
+	err := consumeCompatibleSSE(source, func(event compatibleSSEEvent) error {
+		received += len(event.Data())
+		if received > responsebuffer.JSONLimit {
+			return responsebuffer.ErrLimit
+		}
+		if err := retention.Grow(4*len(event.Data()), 0); err != nil {
+			return err
+		}
 		if !event.HasData() || bytes.Equal(bytes.TrimSpace(event.Data()), []byte("[DONE]")) {
 			return nil
 		}
@@ -428,7 +477,7 @@ func gatewayCompactionHTTPFailure(resp *http.Response, reqURL string, modelCatal
 		Body: body, BodyTruncated: truncated,
 	}
 	return &provider.Response{
-		StatusCode: resp.StatusCode, Status: resp.Status, Header: headers,
+		Attempt: attemptmeta.FromResponse(resp), StatusCode: resp.StatusCode, Status: resp.Status, Header: headers,
 		Body: io.NopCloser(bytes.NewReader(body)), UpstreamURL: reqURL,
 		Diagnostic: diagnostic, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged,
 	}, transient, nil

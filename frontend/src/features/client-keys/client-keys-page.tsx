@@ -22,7 +22,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { listModels } from "@/entities/model/model-api";
-import { createClientKey, deleteClientKey, deleteClientKeys, getClientKeySecret, listClientKeys, updateClientKey, updateClientKeysEnabled, type ClientKeyDTO, type CreateKeyResponseDTO, type ProviderScopeValue, type TierScopeValue } from "@/features/client-keys/client-keys-api";
+import { createClientKey, deleteClientKey, deleteClientKeys, getClientKeySecret, listClientKeys, updateClientKey, updateClientKeysEnabled, type ClientKeyDTO, type ClientKeyInput, type CreateKeyResponseDTO, type ProviderScopeValue, type TierScopeValue } from "@/features/client-keys/client-keys-api";
 import { EmptyState, ErrorState, LoadingState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -82,9 +82,6 @@ export function ClientKeysPage() {
     if (!value.expiryUnlimited && !value.expiresAt) {
       context.addIssue({ code: "custom", path: ["expiresAt"], message: t("errors.required") });
     }
-    if (value.modelScopeMode === "restricted" && value.allowedModelIds.length === 0) {
-      context.addIssue({ code: "custom", path: ["allowedModelIds"], message: t("keys.selectModelRequired") });
-    }
   });
   type KeyForm = z.infer<typeof schema>;
   const form = useForm<KeyForm>({
@@ -92,6 +89,7 @@ export function ClientKeysPage() {
     defaultValues: { name: "", enabled: true, expiryUnlimited: true, expiresAt: "", rpmUnlimited: false, rpmLimit: 120, concurrencyUnlimited: false, maxConcurrent: 8, billingUnlimited: true, billingLimitUsd: 10, allowModelAliases: false, modelScopeMode: "all", allowedModelIds: [], providerScope: ["all"], tierScope: ["all"] },
   });
   const keyEnabled = useWatch({ control: form.control, name: "enabled" });
+  const dirtyFields = form.formState.dirtyFields;
   const allowModelAliases = useWatch({ control: form.control, name: "allowModelAliases" });
   const modelScopeMode = useWatch({ control: form.control, name: "modelScopeMode" });
   const selectedModels = useWatch({ control: form.control, name: "allowedModelIds" });
@@ -105,7 +103,7 @@ export function ClientKeysPage() {
   const modelTierScope = tierScope.filter((value): value is Exclude<TierScopeValue, "all"> => value !== "all");
   const providerScopeSummary = providerScope.includes("all") ? t("keys.allProviders") : modelProviderScope.map((value) => ({ grok_build: "Build", grok_web: "Web", grok_console: "Console" })[value]).join(" · ");
   const tierScopeSummary = tierScope.includes("all") ? t("keys.allTiers") : modelTierScope.map((value) => value === "free" ? "Free" : "Super").join(" · ");
-  const modelScopeSummary = modelScopeMode === "all" ? t("keys.allModels") : t("keys.selectedModels", { count: selectedModels.length });
+  const modelScopeSummary = modelScopeMode === "all" ? t("keys.allModels") : selectedModels.length === 0 ? t("keys.noAllowedModels") : t("keys.selectedModels", { count: selectedModels.length });
 
   const keysQuery = useQuery({
     queryKey: ["client-keys", page, pageSize, debouncedSearch, statusFilter, modelScopeFilter, sort.field, sort.order],
@@ -126,6 +124,7 @@ export function ClientKeysPage() {
         maxConcurrent: values.concurrencyUnlimited ? 0 : values.maxConcurrent,
         billingLimitUsdTicks: values.billingUnlimited ? 0 : Math.round(values.billingLimitUsd * USD_TICKS),
         allowModelAliases: values.allowModelAliases,
+        modelScope: values.modelScopeMode,
         allowedModelIds: values.allowedModelIds,
         providerScope: values.providerScope,
         tierScope: values.tierScope,
@@ -135,7 +134,22 @@ export function ClientKeysPage() {
         return createClientKey(body);
       }
       if (!editing) throw new Error(t("errors.generic"));
-      return updateClientKey(editing.id, body);
+      const dirty = dirtyFields;
+      const patch: Partial<ClientKeyInput> = {};
+      if (dirty.name) patch.name = body.name;
+      if (dirty.enabled) patch.enabled = body.enabled;
+      if (dirty.rpmUnlimited || dirty.rpmLimit) patch.rpmLimit = body.rpmLimit;
+      if (dirty.concurrencyUnlimited || dirty.maxConcurrent) patch.maxConcurrent = body.maxConcurrent;
+      if (dirty.billingUnlimited || dirty.billingLimitUsd) patch.billingLimitUsdTicks = body.billingLimitUsdTicks;
+      if (dirty.allowModelAliases) patch.allowModelAliases = body.allowModelAliases;
+      if (dirty.providerScope) patch.providerScope = body.providerScope;
+      if (dirty.tierScope) patch.tierScope = body.tierScope;
+      if (dirty.expiryUnlimited || dirty.expiresAt) patch.expiresAt = body.expiresAt;
+      if (dirty.modelScopeMode || dirty.allowedModelIds) {
+        patch.modelScope = body.modelScope;
+        patch.allowedModelIds = body.allowedModelIds;
+      }
+      return updateClientKey(editing.id, patch);
     },
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["client-keys"] });
@@ -214,7 +228,7 @@ export function ClientKeysPage() {
       billingUnlimited: key.billingLimitUsdTicks === 0,
       billingLimitUsd: key.billingLimitUsdTicks > 0 ? key.billingLimitUsdTicks / USD_TICKS : 10,
       allowModelAliases: key.allowModelAliases,
-      modelScopeMode: key.allowedModelIds.length > 0 ? "restricted" : "all",
+      modelScopeMode: key.modelScope,
       allowedModelIds: key.allowedModelIds,
       providerScope: key.providerScope ?? ["all"],
       tierScope: key.tierScope ?? ["all"],
@@ -335,7 +349,7 @@ export function ClientKeysPage() {
                   <TableCell className="min-w-0">
                     <span className="block truncate font-medium" title={key.name}>{key.name}</span>
                     <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
-                      {key.allowedModelIds.length === 0 ? t("keys.allModels") : t("keys.selectedModels", { count: key.allowedModelIds.length })}
+                      {key.modelScope === "all" ? t("keys.allModels") : key.allowedModelIds.length === 0 ? t("keys.noAllowedModels") : t("keys.selectedModels", { count: key.allowedModelIds.length })}
                       {key.allowModelAliases ? ` · ${t("keys.modelAliases")}` : ""}
                     </span>
                   </TableCell>
@@ -475,7 +489,7 @@ export function ClientKeysPage() {
                   <Label htmlFor="key-enabled">{keyEnabled ? t("common.enabled") : t("common.disabled")}</Label>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("keys.enabledDescription")}</p>
                 </div>
-                <Switch className="shrink-0" id="key-enabled" checked={keyEnabled} onCheckedChange={(checked) => form.setValue("enabled", checked)} />
+                <Switch className="shrink-0" id="key-enabled" checked={keyEnabled} onCheckedChange={(checked) => form.setValue("enabled", checked, { shouldDirty: true })} />
               </section>
               <div className="overflow-hidden rounded-lg border">
                 <div className="divide-y">
@@ -563,6 +577,7 @@ export function ClientKeysPage() {
                     )} />
                   </div>
                 </div>
+                {modelScopeMode === "restricted" && selectedModels.length === 0 ? <p className="text-xs text-muted-foreground">{t("keys.noAllowedModelsHelp")}</p> : null}
                 {modelScopeMode === "restricted" ? (
                   <div className="min-w-0 border-t p-3">
                     <div className="min-w-0 overflow-hidden rounded-md bg-muted/25 p-1">
@@ -634,11 +649,14 @@ export function ClientKeysPage() {
 function BillingUsage({ value }: { value: ClientKeyDTO }) {
   const { t, i18n } = useTranslation();
   const used = value.billedUsageUsdTicks / USD_TICKS;
+  const reserved = (value.reservedUsageUsdTicks ?? 0) / USD_TICKS;
+  const pending = reserved > 0 ? <div className="truncate text-xs text-muted-foreground" title={t("keys.reservedUsageHelp")}>{t("keys.reservedUsage", { value: formatUSD(reserved, i18n.language) })}</div> : null;
   if (value.billingLimitUsdTicks <= 0) {
     return (
       <div className="min-w-0">
         <div className="text-xs">{t("keys.unlimited")}</div>
         <div className="truncate text-xs text-muted-foreground">{t("keys.billedUsage", { value: formatUSD(used, i18n.language) })}</div>
+        {pending}
       </div>
     );
   }
@@ -647,6 +665,7 @@ function BillingUsage({ value }: { value: ClientKeyDTO }) {
   return (
     <div className="min-w-0 space-y-1.5">
       <div className="truncate text-xs tabular-nums" title={`${formatUSD(used, i18n.language)} / ${formatUSD(limit, i18n.language)}`}>{formatUSD(used, i18n.language)} / {formatUSD(limit, i18n.language)}</div>
+      {pending}
       <div className="h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
         <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${percent}%` }} />
       </div>

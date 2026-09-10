@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 	"io"
 	"net/http"
 	"strconv"
@@ -14,21 +17,26 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
 )
 
 type Config struct {
-	BaseURL                  string
-	SessionBaseURL           string
-	TimeoutSeconds           int
-	StreamIdleTimeoutSeconds int
+	BaseURL           string
+	SessionBaseURL    string
+	Timeout           time.Duration
+	StreamIdleTimeout time.Duration
 }
 
 type Adapter struct {
@@ -46,8 +54,8 @@ func NewAdapter(cfg Config, egress *infraegress.Manager, cipher security.Cryptor
 }
 
 func normalizedConfig(cfg Config) Config {
-	if cfg.StreamIdleTimeoutSeconds <= 0 {
-		cfg.StreamIdleTimeoutSeconds = int(settingsdomain.DefaultConsoleStreamIdleTimeout.Seconds())
+	if cfg.StreamIdleTimeout <= 0 {
+		cfg.StreamIdleTimeout = settingsdomain.DefaultConsoleStreamIdleTimeout
 	}
 	return cfg
 }
@@ -66,8 +74,6 @@ func (a *Adapter) config() Config {
 	defer a.mu.RUnlock()
 	return a.cfg
 }
-
-func (a *Adapter) ModelAliases() []provider.ModelAlias { return Aliases() }
 
 func (a *Adapter) QuotaMode(upstreamModel string) string {
 	if _, ok := Resolve(upstreamModel); ok {
@@ -102,6 +108,8 @@ func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, 
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	ctx, finishTrace := upstreamtrace.Network(ctx, "console", request.Operation)
+	defer finishTrace()
 	if request.NormalizedMetadata != nil {
 		*request.NormalizedMetadata = provider.NormalizedRequestMetadata{}
 	}
@@ -119,7 +127,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	body := request.Body
 	var conversationOptions conversation.ResponseOptions
 	if request.NormalizeBody {
-		if request.Operation == conversation.OperationMessages {
+		if request.Operation == conversation.OperationMessages || request.Operation == conversation.OperationChat {
 			body, conversationOptions, err = conversation.ConvertRequestWithOptions(body, request.Model, request.Operation)
 			if err == nil && conversationOptions.ReasoningEffortSet && request.NormalizedMetadata != nil {
 				request.NormalizedMetadata.ReasoningEffort = conversationOptions.ReasoningEffort
@@ -134,12 +142,25 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return invalidConversationResponse(request.Operation, err), nil
 		}
 	}
+	policy := inferencedomain.ReplayPolicyFromRequest(body)
+	if request.NormalizedMetadata != nil {
+		request.NormalizedMetadata.ReplayPolicy = &policy
+	}
+	if request.OnNormalized != nil {
+		metadata := provider.NormalizedRequestMetadata{ReplayPolicy: &policy}
+		if request.NormalizedMetadata != nil {
+			metadata = *request.NormalizedMetadata
+		}
+		if err := request.OnNormalized(metadata); err != nil {
+			return nil, err
+		}
+	}
 	cfg := a.config()
 	// 对话主请求按推理语义路由(未单独配置时沿用作用域/总出口)。
 	ctx = infraegress.WithTrafficClass(ctx, egressdomain.TrafficClassInference)
-	requestCtx, totalCancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
+	requestCtx, totalCancel := context.WithTimeout(ctx, cfg.Timeout)
 	var idleCancel context.CancelCauseFunc
-	if request.Streaming && cfg.StreamIdleTimeoutSeconds > 0 {
+	if request.Streaming && cfg.StreamIdleTimeout > 0 {
 		requestCtx, idleCancel = context.WithCancelCause(requestCtx)
 	}
 	cancel := func() {
@@ -155,13 +176,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	}
 	response, err := a.doDPoPRequest(requestCtx, request.Credential, token, lease, http.MethodPost, consoleEndpoint(cfg.BaseURL), body, "*/*")
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		lease.Release()
 		cancel()
 		return nil, err
 	}
 	if request.Streaming && idleCancel != nil && response.StatusCode >= 200 && response.StatusCode < 300 && response.Body != nil {
-		response.Body = providerstreamidle.New(response.Body, time.Duration(cfg.StreamIdleTimeoutSeconds)*time.Second, idleCancel)
+		response.Body = providerstreamidle.New(response.Body, cfg.StreamIdleTimeout, idleCancel)
 	}
 	responseBodyTruncated := false
 	var rateLimit *provider.RateLimitMetadata
@@ -185,7 +206,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 		if shouldInvalidateConsoleClearance(data) {
 			lease.InvalidateClearance()
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+			lease.Observe(response.StatusCode, nil)
 		}
 		lease.Release()
 		cancel()
@@ -202,7 +223,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		if responseReleased {
 			return
 		}
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		lease.Release()
 		cancel()
 	}
@@ -212,58 +233,62 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			response.Body = upstreamtrace.TeeStream(traceDir, request.Operation, request.Model, response.Body)
 		}
 	}
+	clientBody := func() io.ReadCloser {
+		body := io.ReadCloser(&releaseBody{ReadCloser: response.Body, release: release})
+		if request.Streaming && response.StatusCode >= 200 && response.StatusCode < 300 {
+			stream := responsecheck.Stream(responseflow.New(body, responsebuffer.FromContext(ctx)))
+			physicalID := attemptmeta.FromResponse(response).ID
+			stream.Observe(func(event *responseflow.Event) {
+				if event.HasData {
+					infraegress.ObservePhysicalPayload(ctx, physicalID, event.Data)
+					infraegress.ObservePhysicalGeneration(ctx, physicalID, responsecheck.EventGeneration(string(event.Kind), event.Data))
+				}
+			})
+			body = stream
+		} else {
+			body = responsebuffer.AttachBudget(body, responsebuffer.FromContext(ctx))
+		}
+		return body
+	}
 	if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 		if request.Streaming && response.StatusCode >= 200 && response.StatusCode < 300 {
 			response.Header.Del("Content-Length")
 			response.Header.Set("Content-Type", "text/event-stream")
 			convertOp := request.Operation
 			convertOpts := conversationOptions
-			result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
+			result := responseResult(response, clientBody())
 			result.ConvertStream = func(raw io.ReadCloser) io.ReadCloser {
 				return conversation.ConvertResponseStreamWithOptions(raw, convertOp, convertOpts)
 			}
 			result.RateLimit = rateLimit
 			return result, nil
 		}
-		var data []byte
-		var readErr error
-		var diagnosticTruncated bool
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			data, readErr = io.ReadAll(io.LimitReader(response.Body, (64<<20)+1))
-		} else {
-			data, diagnosticTruncated, readErr = provider.ReadDiagnosticBody(response.Body)
-			diagnosticTruncated = diagnosticTruncated || responseBodyTruncated
+			response.Header.Del("Content-Length")
+			response.Header.Set("Content-Type", "application/json")
+			result := responseResult(response, clientBody())
+			result.RateLimit = rateLimit
+			result.ConvertJSON = func(raw []byte) ([]byte, error) {
+				return conversation.ConvertResponseJSONWithOptions(raw, request.Operation, conversationOptions)
+			}
+			return result, nil
 		}
+		data, diagnosticTruncated, readErr := provider.ReadDiagnosticBody(response.Body)
 		_ = response.Body.Close()
 		release()
 		if readErr != nil {
 			return nil, readErr
 		}
-		if response.StatusCode >= 200 && response.StatusCode < 300 && len(data) > 64<<20 {
-			return nil, fmt.Errorf("Console 对话响应超过 64 MiB")
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			diagnostic := &provider.DiagnosticResponse{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header.Clone(), Body: data, BodyTruncated: diagnosticTruncated}
-			converted := normalizeConversationError(data, request.Operation, response.StatusCode)
-			response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
-			response.Header.Set("Content-Type", "application/json")
-			result := responseResult(response, io.NopCloser(bytes.NewReader(converted)))
-			result.Diagnostic = diagnostic
-			result.RateLimit = rateLimit
-			return result, nil
-		}
-		convertOp := request.Operation
-		convertOpts := conversationOptions
-		response.Header.Del("Content-Length")
+		diagnostic := &provider.DiagnosticResponse{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header.Clone(), Body: data, BodyTruncated: diagnosticTruncated || responseBodyTruncated}
+		converted := normalizeConversationError(data, request.Operation, response.StatusCode)
+		response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 		response.Header.Set("Content-Type", "application/json")
-		result := responseResult(response, io.NopCloser(bytes.NewReader(data)))
+		result := responseResult(response, io.NopCloser(bytes.NewReader(converted)))
+		result.Diagnostic = diagnostic
 		result.RateLimit = rateLimit
-		result.ConvertJSON = func(raw []byte) ([]byte, error) {
-			return conversation.ConvertResponseJSONWithOptions(raw, convertOp, convertOpts)
-		}
 		return result, nil
 	}
-	result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
+	result := responseResult(response, clientBody())
 	result.RateLimit = rateLimit
 	return result, nil
 }
@@ -345,12 +370,12 @@ func normalizeRateLimitResponse(response *http.Response) (bool, *provider.RateLi
 	metadata := parseConsoleRateLimitMetadata(data)
 	if headerValue := response.Header.Get("Retry-After"); headerValue != "" {
 		if metadata != nil {
-			if retryAfter := parseConsoleRetryAfterHeader(headerValue, time.Now().UTC()); retryAfter > 0 {
+			if retryAfter := retryafter.Header(headerValue, time.Now().UTC()); retryAfter > 0 {
 				metadata.RetryAfter = retryAfter
 			}
 		}
 	} else {
-		retryAfter := consoleRetryAfter(data)
+		retryAfter := retryafter.ResetText(string(data))
 		if metadata != nil {
 			retryAfter = metadata.RetryAfter
 		}
@@ -367,7 +392,7 @@ func responseResult(response *http.Response, body io.ReadCloser) *provider.Respo
 		upstreamURL = response.Request.URL.String()
 	}
 	return &provider.Response{
-		StatusCode: response.StatusCode, Status: response.Status, Header: response.Header.Clone(), Body: body, QuotaUnits: 1, UpstreamURL: upstreamURL,
+		Attempt: attemptmeta.FromResponse(response), StatusCode: response.StatusCode, Status: response.Status, Header: response.Header.Clone(), Body: body, QuotaUnits: 1, UpstreamURL: upstreamURL,
 	}
 }
 
@@ -381,10 +406,19 @@ func jsonProviderResponse(status int, value any) *provider.Response {
 }
 
 func invalidConversationResponse(operation string, err error) *provider.Response {
-	if operation == conversation.OperationMessages {
-		return jsonProviderResponse(http.StatusBadRequest, map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": err.Error()}})
+	validation := &inferencedomain.RequestValidationError{Code: "invalid_request", Message: err.Error()}
+	var toolError *xaitools.Error
+	if errors.As(err, &toolError) {
+		validation.Code = toolError.Code
+		validation.Param = toolError.Param
 	}
-	return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": err.Error()}})
+	var payload any = map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": validation.Message, "code": validation.Code, "param": validation.Param}}
+	if operation == conversation.OperationMessages {
+		payload = map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": validation.Message}}
+	}
+	response := jsonProviderResponse(http.StatusBadRequest, payload)
+	response.RequestValidation = validation
+	return response
 }
 
 type releaseBody struct {

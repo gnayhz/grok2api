@@ -178,14 +178,14 @@ func TestQuotaRefreshFailureUsesBoundedExponentialBackoff(t *testing.T) {
 }
 
 // TestQuotaRefreshParksAfterFailureBudget：熔断停靠——连续失败耗尽预算的
-// (account,mode) 在 requeue 扫描中被清除且不再自动入队（历史线上
+// (account,mode) 在 requeue 扫描中保留停靠记忆且不再自动入队（历史线上
 // 重试风暴对策）；预算内的失败仍按退避正常重排。
 func TestQuotaRefreshParksAfterFailureBudget(t *testing.T) {
 	service := NewService(nil, nil, nil, nil, nil, nil, nil)
 	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 
-	// 预算外：连续失败到预算值 → requeue 必须停靠（删除状态、队列为空）。
+	// 预算外：连续失败到预算值 → requeue 必须停靠（保留状态、队列为空）。
 	service.quotaRefreshes["7:console"] = &quotaRefreshState{running: true}
 	for range quotaRefreshFailureBudget {
 		service.deferQuotaRefresh("7:console")
@@ -194,8 +194,8 @@ func TestQuotaRefreshParksAfterFailureBudget(t *testing.T) {
 	service.quotaRefreshMu.Lock()
 	_, parkedExists := service.quotaRefreshes["7:console"]
 	service.quotaRefreshMu.Unlock()
-	if parkedExists {
-		t.Fatal("state at failure budget must be parked (deleted), not retained")
+	if !parkedExists {
+		t.Fatal("state at failure budget must retain its parked demand")
 	}
 	if drained := len(service.quotaRefreshQueue); drained != 0 {
 		t.Fatalf("parked state must not be re-enqueued, queue length = %d", drained)
@@ -260,7 +260,7 @@ func TestRecentConsoleUsageSnapshotSuppressesDuplicateUpstreamRefresh(t *testing
 		{AccountID: credential.ID, Mode: "console_image", Remaining: 5, Total: 5, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream, UpdatedAt: now},
 		{AccountID: credential.ID, Mode: "console_video", Remaining: 2, Total: 2, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream, UpdatedAt: now},
 	}
-	if err := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", now, windows); err != nil {
+	if err := replaceQuotaWindowsFixture(accounts, ctx, credential.ID, "", now, windows); err != nil {
 		t.Fatal(err)
 	}
 	adapter := &consoleQuotaSnapshotAdapter{}
@@ -334,15 +334,15 @@ func TestQuotaRefreshCrossInstanceGenerationTriggersSingleTrailingRefresh(t *tes
 	second.QueueQuotaRefresh(credential.ID, "weekly")
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		generation, dirty, generationErr := coordinator.QuotaRefreshGeneration(ctx, credential.ID, "weekly")
+		generation, dirty, generationErr := coordinator.GetQuotaRefreshState(ctx, credential.ID, "weekly")
 		if generationErr != nil {
 			t.Fatal(generationErr)
 		}
-		if generation >= 2 && dirty {
+		if generation.Generation >= 2 && dirty {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("shared generation = %d, dirty = %v", generation, dirty)
+			t.Fatalf("shared generation = %+v, dirty = %v", generation, dirty)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -456,7 +456,7 @@ func TestReconcileConsoleRateLimitVerifiesUsageBeforeExhausting(t *testing.T) {
 				t.Fatal(err)
 			}
 			oldSyncedAt := time.Now().UTC().Add(-24 * time.Hour)
-			if err := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", oldSyncedAt, []accountdomain.QuotaWindow{
+			if err := replaceQuotaWindowsFixture(accounts, ctx, credential.ID, "", oldSyncedAt, []accountdomain.QuotaWindow{
 				{Mode: "console", Remaining: 10, Total: 10, SyncedAt: &oldSyncedAt, Source: accountdomain.QuotaSourceUpstream},
 				{Mode: "console_image", Remaining: 5, Total: 5, SyncedAt: &oldSyncedAt, Source: accountdomain.QuotaSourceUpstream},
 				{Mode: "console_video", Remaining: 2, Total: 2, SyncedAt: &oldSyncedAt, Source: accountdomain.QuotaSourceUpstream},
@@ -506,7 +506,7 @@ func TestReconcileConsoleRateLimitQueuesRetryWhenUsageProbeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", now, []accountdomain.QuotaWindow{
+	if err := replaceQuotaWindowsFixture(accounts, ctx, credential.ID, "", now, []accountdomain.QuotaWindow{
 		{Mode: "console", Remaining: 9, Total: 10, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream},
 		{Mode: "console_image", Remaining: 5, Total: 5, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream},
 		{Mode: "console_video", Remaining: 2, Total: 2, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream},
@@ -592,7 +592,7 @@ func TestConsoleImmediateAndQueuedRefreshUseSameDistributedLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldSyncedAt := time.Now().UTC().Add(-time.Hour)
-	if err := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", oldSyncedAt, []accountdomain.QuotaWindow{
+	if err := replaceQuotaWindowsFixture(accounts, ctx, credential.ID, "", oldSyncedAt, []accountdomain.QuotaWindow{
 		{Mode: "console", Remaining: 9, Total: 10, SyncedAt: &oldSyncedAt, Source: accountdomain.QuotaSourceUpstream},
 		{Mode: "console_image", Remaining: 5, Total: 5, SyncedAt: &oldSyncedAt, Source: accountdomain.QuotaSourceUpstream},
 		{Mode: "console_video", Remaining: 2, Total: 2, SyncedAt: &oldSyncedAt, Source: accountdomain.QuotaSourceUpstream},
@@ -642,7 +642,7 @@ func TestRefreshWebImagineQuotaModeAtomicallyReplacesGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveQuotaWindows(ctx, credential.ID, accountdomain.WebTierSuper, now, []accountdomain.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, credential.ID, accountdomain.WebTierSuper, now, []accountdomain.QuotaWindow{
 		{AccountID: credential.ID, Mode: "weekly", Remaining: 90, Total: 100, UpdatedAt: now},
 		{AccountID: credential.ID, Mode: accountdomain.QuotaModeWebImagePro, Remaining: 4, UpdatedAt: now},
 		{AccountID: credential.ID, Mode: accountdomain.QuotaModeWebVideo720p, Remaining: 1, UpdatedAt: now},
@@ -694,7 +694,7 @@ func TestRefreshPaidWebImagineFallsBackToSharedWeeklyQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveQuotaWindows(ctx, credential.ID, accountdomain.WebTierSuper, now, []accountdomain.QuotaWindow{
+	if err := saveQuotaWindowsFixture(accounts, ctx, credential.ID, accountdomain.WebTierSuper, now, []accountdomain.QuotaWindow{
 		{AccountID: credential.ID, Mode: "weekly", Remaining: 50, Total: 100, UpdatedAt: now},
 		{AccountID: credential.ID, Mode: accountdomain.QuotaModeWebImagePro, Remaining: 4, UpdatedAt: now},
 	}); err != nil {
@@ -745,7 +745,7 @@ func TestRefreshConsoleQuotaModePersistsCompleteUsageSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := accounts.SaveQuotaWindows(ctx, credential.ID, "", now, []accountdomain.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(accounts, ctx, credential.ID, "", now, []accountdomain.QuotaWindow{{
 		AccountID: credential.ID, Mode: "console", Remaining: 20, Total: 20,
 		WindowSeconds: 3600, Source: accountdomain.QuotaSourceDefault, UpdatedAt: now,
 	}}); err != nil {
@@ -858,7 +858,7 @@ func TestSyncIncompleteConsoleQuotasMigratesOnlyLegacySnapshot(t *testing.T) {
 		for index := range windows {
 			windows[index].AccountID = credential.ID
 		}
-		if err := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", now, windows); err != nil {
+		if err := replaceQuotaWindowsFixture(accounts, ctx, credential.ID, "", now, windows); err != nil {
 			t.Fatal(err)
 		}
 		return credential.ID
@@ -918,7 +918,7 @@ func TestSyncStaleConsoleQuotasRefreshesOnlyOldCompleteSnapshots(t *testing.T) {
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		if replaceErr := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", syncedAt, []accountdomain.QuotaWindow{
+		if replaceErr := replaceQuotaWindowsFixture(accounts, ctx, credential.ID, "", syncedAt, []accountdomain.QuotaWindow{
 			{Mode: "console", Remaining: 9, Total: 10, SyncedAt: &syncedAt, Source: accountdomain.QuotaSourceUpstream},
 			{Mode: "console_image", Remaining: 5, Total: 5, SyncedAt: &syncedAt, Source: accountdomain.QuotaSourceUpstream},
 			{Mode: "console_video", Remaining: 2, Total: 2, SyncedAt: &syncedAt, Source: accountdomain.QuotaSourceUpstream},
@@ -937,7 +937,7 @@ func TestSyncStaleConsoleQuotasRefreshesOnlyOldCompleteSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.ReplaceQuotaWindows(ctx, legacy.ID, "", staleAt, []accountdomain.QuotaWindow{{
+	if err := replaceQuotaWindowsFixture(accounts, ctx, legacy.ID, "", staleAt, []accountdomain.QuotaWindow{{
 		Mode: "console", Remaining: 20, Total: 20, SyncedAt: &staleAt, Source: accountdomain.QuotaSourceDefault,
 	}}); err != nil {
 		t.Fatal(err)

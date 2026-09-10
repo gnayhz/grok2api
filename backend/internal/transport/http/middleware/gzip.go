@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"compress/gzip"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,6 +20,8 @@ type gzipWriter struct {
 	gz         *gzip.Writer
 	started    bool
 	skip       bool
+	finished   bool
+	finishErr  error
 }
 
 var gzipWriterPool = sync.Pool{
@@ -25,6 +29,9 @@ var gzipWriterPool = sync.Pool{
 }
 
 func (w *gzipWriter) Write(data []byte) (int, error) {
+	if w.finished {
+		return 0, io.ErrClosedPipe
+	}
 	if !w.started {
 		w.started = true
 		ct := w.Header().Get("Content-Type")
@@ -56,11 +63,53 @@ func (w *gzipWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func (w *gzipWriter) Flush() {
-	if w.gz != nil {
-		_ = w.gz.Flush()
+func (w *gzipWriter) Flush() { _ = w.FlushError() }
+
+func (w *gzipWriter) FlushError() error {
+	if w.finishErr != nil {
+		return w.finishErr
 	}
-	w.ResponseWriter.Flush()
+	if w.gz != nil && !w.finished {
+		if err := w.gz.Flush(); err != nil {
+			return err
+		}
+	}
+	// Gin's void Flush would hide a network FlushError. Bypass its wrapper,
+	// as inference does for an uncompressed response.
+	var target http.ResponseWriter = w.ResponseWriter
+	if wrapper, ok := target.(interface{ Unwrap() http.ResponseWriter }); ok {
+		target = wrapper.Unwrap()
+	}
+	err := http.NewResponseController(target).Flush()
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+// FinishResponseEncoding drains encoder-owned bytes before a handler records
+// delivery. It does not close the HTTP connection or assert client consumption.
+// Ordinary writers have no encoding work; wrappers expose it through Unwrap.
+func FinishResponseEncoding(writer http.ResponseWriter) error {
+	for {
+		if encoder, ok := writer.(interface{ FinishResponseEncoding() error }); ok {
+			return encoder.FinishResponseEncoding()
+		}
+		wrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		writer = wrapper.Unwrap()
+	}
+}
+
+func (w *gzipWriter) FinishResponseEncoding() error {
+	if w.finished || w.gz == nil {
+		return w.finishErr
+	}
+	w.finished = true
+	w.finishErr = w.gz.Close()
+	return w.finishErr
 }
 
 // Gzip 按请求协商启用响应压缩（Accept-Encoding: gzip）。
@@ -72,10 +121,15 @@ func Gzip() gin.HandlerFunc {
 		}
 		rw := &gzipWriter{ResponseWriter: c.Writer, underlying: c.Writer}
 		c.Writer = rw
+		defer func() {
+			_ = rw.FinishResponseEncoding()
+			if rw.gz != nil {
+				gzipWriterPool.Put(rw.gz)
+			}
+			// A recovered panic or outer middleware must not start another
+			// encoding stream after this wrapper relinquishes its compressor.
+			rw.finished = true
+		}()
 		c.Next()
-		if rw.gz != nil {
-			_ = rw.gz.Close()
-			gzipWriterPool.Put(rw.gz)
-		}
 	}
 }

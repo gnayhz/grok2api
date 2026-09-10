@@ -31,28 +31,22 @@ type OperationsRepository interface {
 	CreateEgressSource(context.Context, domain.SubscriptionSource) (domain.SubscriptionSource, error)
 	UpdateEgressSource(context.Context, domain.SubscriptionSource) (domain.SubscriptionSource, error)
 	DeleteEgressSource(context.Context, uint64) error
-	UpdateEgressSourceSync(context.Context, uint64, time.Time, time.Time, int, string) error
-	UpsertEgressNodesFromSource(context.Context, uint64, []domain.Node) (int, error)
+	BeginEgressSourceSync(context.Context, domain.SubscriptionSource) (domain.SourceSyncClaim, error)
+	CommitEgressSourceSync(context.Context, domain.SourceSyncClaim, []domain.Node, time.Time, time.Time) (int, error)
+	FailEgressSourceSync(context.Context, domain.SourceSyncClaim, time.Time, time.Time, string) error
 	CreateEgressNodes(context.Context, []domain.Node) (int, error)
+	BeginEgressNodeProbe(context.Context, uint64, string) (uint64, error)
 	UpdateEgressNodeProbe(context.Context, uint64, string, domain.ProbeResult) error
 	ListDueEgressNodes(context.Context, time.Time, time.Duration, int) ([]domain.Node, error)
 	GetEgressOperationsConfig(context.Context) (domain.OperationsConfig, error)
-	SaveEgressOperationsConfig(context.Context, domain.OperationsConfig) (domain.OperationsConfig, error)
+	SaveEgressOperationsConfig(context.Context, domain.OperationsConfig, domain.FixedTargetValidator) (domain.OperationsConfig, error)
+	SaveEgressOperationsConfigIfCurrent(ctx context.Context, value domain.OperationsConfig, since time.Time, validate domain.FixedTargetValidator) (domain.OperationsConfig, error)
 }
 
 // NodeProber is implemented by the infrastructure egress manager. Its fixed
 // probe endpoint prevents admin input from controlling the outbound target.
 type NodeProber interface {
 	ProbeEgressNode(context.Context, domain.Node) (domain.ProbeResult, error)
-}
-
-// OperationsConfigCASWriter is the optional compare-and-write capability for
-// operations-config writers whose snapshot may race concurrent administrators.
-// Background writers (subscription-sync hygiene) must use it so a stale
-// snapshot can never overwrite a concurrent admin commit; repositories without
-// it fall back to the unconditional save with unchanged-snapshot skip.
-type OperationsConfigCASWriter interface {
-	SaveEgressOperationsConfigIfCurrent(ctx context.Context, value domain.OperationsConfig, since time.Time) (domain.OperationsConfig, error)
 }
 
 type OperationsConfigInvalidator interface {
@@ -64,6 +58,21 @@ type OperationsConfigInvalidator interface {
 // become visible to scheduling.
 type PoolCacheInvalidator interface {
 	InvalidatePoolCache()
+}
+
+// NodeSnapshotInvalidator refreshes scheduling state without retiring live
+// connection pools. Probe observations and imports do not change a transport.
+type NodeSnapshotInvalidator interface {
+	InvalidateNodeSnapshots()
+}
+
+func (s *Service) invalidateNodeSnapshots() {
+	s.mu.RLock()
+	manager := s.clearance
+	s.mu.RUnlock()
+	if invalidator, ok := manager.(NodeSnapshotInvalidator); ok {
+		invalidator.InvalidateNodeSnapshots()
+	}
 }
 
 type SubscriptionSourceInput struct {
@@ -298,6 +307,7 @@ func (s *Service) ImportText(ctx context.Context, input ImportInput) (ImportResu
 	if err != nil {
 		return ImportResult{}, err
 	}
+	s.invalidateNodeSnapshots()
 	return ImportResult{Imported: created, Skipped: skipped}, nil
 }
 
@@ -327,7 +337,29 @@ func (s *Service) testNode(ctx context.Context, id uint64, observe bool) (domain
 	if prober == nil {
 		return domain.ProbeResult{}, ErrOperationsUnavailable
 	}
+	revision, err := operations.BeginEgressNodeProbe(ctx, id, node.EncryptedProxyURL)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return domain.ProbeResult{}, ErrNotFound
+		}
+		if errors.Is(err, repository.ErrConflict) {
+			return domain.ProbeResult{}, ErrProbeStale
+		}
+		return domain.ProbeResult{}, err
+	}
 	result, probeErr := prober.ProbeEgressNode(ctx, node)
+	result.Revision = revision
+	var executionErr *domain.ProbeExecutionError
+	if errors.As(probeErr, &executionErr) {
+		// Local inability to observe must preserve the last completed probe and
+		// cannot create dead-exit evidence or trigger rotation.
+		result.Status = domain.ProbeStatusUnknown
+		return result, probeErr
+	}
+	if ctx.Err() != nil || errors.Is(probeErr, context.Canceled) {
+		result.Status = domain.ProbeStatusUnknown
+		return result, &domain.ProbeExecutionError{Err: errors.Join(probeErr, ctx.Err())}
+	}
 	if result.TestedAt.IsZero() {
 		result.TestedAt = time.Now().UTC()
 	}
@@ -352,6 +384,7 @@ func (s *Service) testNode(ctx context.Context, id uint64, observe bool) (domain
 	// An unreachable proxy is a completed probe with an unhealthy result, not
 	// an API operation failure. Persistence and repository failures still return
 	// above so callers can distinguish them from node health.
+	s.invalidateNodeSnapshots()
 	if observe {
 		s.observeProbeResult(node, result)
 	}
@@ -380,6 +413,7 @@ func (s *Service) TestNodes(ctx context.Context, ids []uint64) (ProbeBatchResult
 		return result, nil
 	}
 	var mu sync.Mutex
+	var operationErr error
 	jobs := make(chan uint64)
 	var workers sync.WaitGroup
 	for range min(maxConcurrentProbes, len(ids)) {
@@ -389,7 +423,11 @@ func (s *Service) TestNodes(ctx context.Context, ids []uint64) (ProbeBatchResult
 			for id := range jobs {
 				probe, err := s.TestNode(ctx, id)
 				mu.Lock()
-				if err == nil && probe.Status == domain.ProbeStatusHealthy {
+				if err != nil {
+					if operationErr == nil {
+						operationErr = err
+					}
+				} else if probe.Status == domain.ProbeStatusHealthy {
 					result.Healthy++
 				} else {
 					result.Unhealthy++
@@ -409,7 +447,7 @@ func (s *Service) TestNodes(ctx context.Context, ids []uint64) (ProbeBatchResult
 	}
 	close(jobs)
 	workers.Wait()
-	return result, nil
+	return result, operationErr
 }
 
 func (s *Service) OperationsConfig(ctx context.Context) (domain.OperationsConfig, error) {
@@ -463,11 +501,8 @@ func (s *Service) UpdateOperationsConfig(ctx context.Context, input OperationsCo
 	if err := domain.ValidateRoutingTargets(config.DefaultTarget, config.ScopeTargets, config.ClassTargets); err != nil {
 		return domain.OperationsConfig{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	if err := s.validateRoutingTargets(ctx, config); err != nil {
-		return domain.OperationsConfig{}, err
-	}
 	config.UpdatedAt = time.Now().UTC()
-	saved, err := operations.SaveEgressOperationsConfig(ctx, config)
+	saved, err := operations.SaveEgressOperationsConfig(ctx, config, s.validateFixedTargetNode)
 	if errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
 		return domain.OperationsConfig{}, fmt.Errorf("%w: 出口路由的固定目标节点必须保持启用且可用", ErrInvalidInput)
 	}
@@ -478,47 +513,6 @@ func (s *Service) UpdateOperationsConfig(ctx context.Context, input OperationsCo
 		s.invalidateOperationsConfig()
 	}
 	return saved, err
-}
-
-// validateRoutingTargets checks that referenced nodes and pools exist and
-// remain schedulable. Sticky per-account proxy templates are rejected: they
-// rotate their exit with the caller identity, contradicting a fixed target.
-func (s *Service) validateRoutingTargets(ctx context.Context, config domain.OperationsConfig) error {
-	nodeIDs := make(map[uint64]struct{})
-	poolIDs := make(map[uint64]struct{})
-	collect := func(target domain.RoutingTarget) {
-		switch target.Mode.Normalized() {
-		case domain.RoutingTargetNode:
-			nodeIDs[target.NodeID] = struct{}{}
-		case domain.RoutingTargetPool:
-			poolIDs[target.PoolID] = struct{}{}
-		}
-	}
-	collect(config.DefaultTarget)
-	for _, target := range config.ScopeTargets {
-		collect(target)
-	}
-	for _, target := range config.ClassTargets {
-		collect(target)
-	}
-	for id := range nodeIDs {
-		node, err := s.repository.GetEgressNode(ctx, id)
-		if err != nil {
-			return fmt.Errorf("%w: 出口路由的固定目标节点不存在", ErrInvalidInput)
-		}
-		if err := s.validateFixedTargetNode(node); err != nil {
-			return err
-		}
-	}
-	for id := range poolIDs {
-		if s.poolsRepository() == nil {
-			return fmt.Errorf("%w: 代理池存储不可用", ErrOperationsUnavailable)
-		}
-		if _, err := s.poolsRepository().GetEgressPool(ctx, id); err != nil {
-			return fmt.Errorf("%w: 出口路由目标代理池不存在", ErrInvalidInput)
-		}
-	}
-	return nil
 }
 
 func (s *Service) applySourceInput(value domain.SubscriptionSource, input SubscriptionSourceInput, create bool) (domain.SubscriptionSource, error) {

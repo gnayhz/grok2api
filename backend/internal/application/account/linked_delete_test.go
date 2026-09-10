@@ -194,7 +194,7 @@ func seedLinkedTrio(t *testing.T, repo *relational.AccountRepository, digest, us
 	console = mustUpsertLinked(t, repo, accountdomain.Credential{
 		Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO, Name: "console", SourceKey: "console-sso:" + digest, UserID: userID,
 	})
-	if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.ReconcileProviderLinks(ctx, web.ID); err != nil {

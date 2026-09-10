@@ -1,8 +1,8 @@
 package settings
 
 import (
-	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -12,29 +12,17 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type riskPatrolRunner interface {
-	RunDuePatrol(ctx context.Context) (int, error)
-}
-
 type Handler struct {
 	service *settingsapp.Service
-	patrol  riskPatrolRunner
 }
 
 func NewHandler(service *settingsapp.Service) *Handler { return &Handler{service: service} }
-
-func (h *Handler) SetPatrolRunner(runner riskPatrolRunner) {
-	if h == nil {
-		return
-	}
-	h.patrol = runner
-}
 
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/settings", h.get)
 	router.PUT("/settings", h.update)
 	router.DELETE("/settings", h.reset)
-	router.POST("/settings/account-risk/patrol", h.runPatrol)
+	router.POST("/settings/egress-rotation/reset", h.resetRotation)
 }
 
 type settingsConfigDTO struct {
@@ -49,30 +37,10 @@ type settingsConfigDTO struct {
 	Audit             auditConfigDTO             `json:"audit"`
 	ClientKeyDefaults clientKeyDefaultsConfigDTO `json:"clientKeyDefaults"`
 	Accounts          *accountsConfigDTO         `json:"accounts,omitempty"`
-	// RequestRetry/EgressRotation/AccountRisk 为指针节：旧管理端未发送时
+	// RequestRetry/EgressRotation 为指针节：旧管理端未发送时
 	// 保持 nil，服务端沿用当前值而非清零。
 	RequestRetry   *requestRetryConfigDTO   `json:"requestRetry,omitempty"`
 	EgressRotation *egressRotationConfigDTO `json:"egressRotation,omitempty"`
-	AccountRisk    *accountRiskConfigDTO    `json:"accountRisk,omitempty"`
-}
-
-type accountRiskConfigDTO struct {
-	Enabled          bool   `json:"enabled"`
-	Method           string `json:"method"`
-	Concurrency      int    `json:"concurrency"`
-	Timeout          string `json:"timeout"`
-	OnDenied         string `json:"onDenied"`
-	PatrolEnabled    bool   `json:"patrolEnabled"`
-	PatrolBucketDays int    `json:"patrolBucketDays"`
-	PatrolInterval   string `json:"patrolInterval,omitempty"`
-	PatrolBatchSize  int    `json:"patrolBatchSize,omitempty"`
-	// 探针出口代理(空=直连)与 denied 定罪策略。整节替换语义与该节
-	// 其余标量字段一致;前端与后端同镜像分发,不存在旧 UI 缺字段的载荷。
-	ProbeProxyURL       string `json:"probeProxyURL"`
-	DeniedConfirmations int    `json:"deniedConfirmations"`
-	DeniedTTL           string `json:"deniedTTL"`
-	// BuildProbeEnabled 指针语义:字段缺省(旧客户端)不覆盖当前值。
-	BuildProbeEnabled *bool `json:"buildProbeEnabled,omitempty"`
 }
 
 type requestRetryConfigDTO struct {
@@ -80,7 +48,6 @@ type requestRetryConfigDTO struct {
 	MaxAttempts         int    `json:"maxAttempts"`
 	OnExhausted         string `json:"onExhausted"`
 	AccountCooldown     string `json:"accountCooldown"`
-	SameAccountRetry    bool   `json:"sameAccountRetry"`
 	EvidenceTimeout     string `json:"evidenceTimeout"`
 	CreatedTimeout      string `json:"createdTimeout"`
 	IdleAccountCooldown string `json:"idleAccountCooldown"`
@@ -96,8 +63,6 @@ type egressRotationConfigDTO struct {
 	SettleDelay              string `json:"settleDelay"`
 	ProbeTimeout             string `json:"probeTimeout"`
 	ProbeInterval            string `json:"probeInterval"`
-	CanaryModelPublicID      string `json:"canaryModelPublicId"`
-	CanaryCreatedTimeout     string `json:"canaryCreatedTimeout"`
 }
 
 type serverConfigDTO struct {
@@ -182,11 +147,15 @@ type segmentedSelectorConfigDTO struct {
 }
 
 type auditConfigDTO struct {
-	BufferSize    int    `json:"bufferSize"`
-	BatchSize     int    `json:"batchSize"`
-	FlushInterval string `json:"flushInterval"`
-	CommitDelayMS int    `json:"commitDelayMS"`
-	RetentionDays *int   `json:"retentionDays,omitempty"`
+	BufferSize          int     `json:"bufferSize"`
+	BatchSize           int     `json:"batchSize"`
+	FlushInterval       string  `json:"flushInterval"`
+	CommitDelayMS       int     `json:"commitDelayMS"`
+	RetentionDays       *int    `json:"retentionDays,omitempty"`
+	RetentionPeriod     *string `json:"retentionPeriod,omitempty"`
+	RetentionSource     string  `json:"retentionSource,omitempty"`
+	FileRetentionPeriod string  `json:"fileRetentionPeriod,omitempty"`
+	FileRetentionSource string  `json:"fileRetentionSource,omitempty"`
 }
 
 type clientKeyDefaultsConfigDTO struct {
@@ -209,7 +178,34 @@ type settingsResponse struct {
 	RecommendedProviderBuild providerBuildRecommendationDTO `json:"recommendedProviderBuild"`
 	UpdatedAt                time.Time                      `json:"updatedAt"`
 	Revision                 uint64                         `json:"revision,string"`
+	AppliedRevision          uint64                         `json:"appliedRevision,string"`
+	ApplyPending             bool                           `json:"applyPending"`
+	ApplyTargets             []applyStatusDTO               `json:"applyTargets"`
+	Notification             notificationStatusDTO          `json:"notification"`
 	RestartRequired          []string                       `json:"restartRequired"`
+	// FileRequestRetry 文件配置基线的 requestRetry 节(覆盖标记/回同步数据源)。
+	FileRequestRetry *requestRetryConfigDTO `json:"fileRequestRetry,omitempty"`
+}
+
+type applyStatusDTO struct {
+	Name            string     `json:"name"`
+	AppliedRevision uint64     `json:"appliedRevision,string"`
+	Pending         bool       `json:"pending"`
+	Error           string     `json:"error,omitempty"`
+	LastAttemptAt   *time.Time `json:"lastAttemptAt,omitempty"`
+}
+type notificationStatusDTO struct {
+	Revision      uint64     `json:"revision,string"`
+	State         string     `json:"state"`
+	Error         string     `json:"error,omitempty"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+}
+
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }
 
 type providerBuildRecommendationDTO struct {
@@ -223,7 +219,12 @@ type updateRequest struct {
 }
 
 func (h *Handler) get(c *gin.Context) {
-	response.Success(c, http.StatusOK, newSettingsResponse(h.service.Get()))
+	snapshot, err := h.service.Read(c.Request.Context())
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "settingsLoadFailed", "读取运行设置失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newSettingsResponse(snapshot))
 }
 
 func (h *Handler) update(c *gin.Context) {
@@ -245,32 +246,67 @@ func (h *Handler) update(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "settingsUpdateFailed", "保存运行设置失败")
 		return
 	}
-	response.Success(c, http.StatusOK, newSettingsResponse(result))
+	status := http.StatusOK
+	if result.ApplyPending {
+		status = http.StatusAccepted
+	}
+	response.Success(c, status, newSettingsResponse(result))
 }
 
-// reset 删除持久化运行设置，恢复「以 config.yaml 为默认」的优先级
-// 语义（round 87 文档化陷阱的一键恢复路径，替代手删 runtime_settings
-// 行）。响应返回重置后的快照（即文件基线）。
-func (h *Handler) runPatrol(c *gin.Context) {
-	if h.patrol == nil {
-		response.Error(c, http.StatusServiceUnavailable, "accountRiskUnavailable", "风险巡检未初始化")
-		return
-	}
-	due, err := h.patrol.RunDuePatrol(c.Request.Context())
-	if err != nil {
-		response.Error(c, http.StatusBadGateway, "accountRiskPatrolFailed", "巡检执行失败: "+err.Error())
-		return
-	}
-	response.Success(c, http.StatusOK, gin.H{"due": due})
-}
-
+// reset records file-default mode with the same durable CAS contract as save.
+// Legacy empty DELETE bodies use the service's observed revision. New clients
+// send their snapshot revision for protection against stale browser state too.
 func (h *Handler) reset(c *gin.Context) {
-	result, err := h.service.ResetToDefaults(c.Request.Context())
+	var request struct {
+		Revision *uint64 `json:"revision,string"`
+	}
+	err := c.ShouldBindJSON(&request)
+	if err != nil && !errors.Is(err, io.EOF) || err == nil && request.Revision == nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: revision 必须为版本字符串")
+		return
+	}
+	expectedRevision := h.service.Get().Revision
+	if request.Revision != nil {
+		expectedRevision = *request.Revision
+	}
+	result, err := h.service.ResetToDefaults(c.Request.Context(), expectedRevision)
+	if errors.Is(err, settingsapp.ErrConflict) {
+		response.Error(c, http.StatusConflict, "settingsConflict", "设置已被其他会话更新，请刷新后重试")
+		return
+	}
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "settingsResetFailed", "恢复文件默认设置失败")
 		return
 	}
-	response.Success(c, http.StatusOK, newSettingsResponse(result))
+	status := http.StatusOK
+	if result.ApplyPending {
+		status = http.StatusAccepted
+	}
+	response.Success(c, status, newSettingsResponse(result))
+}
+
+func (h *Handler) resetRotation(c *gin.Context) {
+	var request struct {
+		Revision *uint64 `json:"revision,string"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || request.Revision == nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "revision 必须为版本字符串")
+		return
+	}
+	result, err := h.service.ResetEgressRotation(c.Request.Context(), *request.Revision)
+	if errors.Is(err, settingsapp.ErrConflict) {
+		response.Error(c, http.StatusConflict, "settingsConflict", "设置已被其他会话更新，请刷新后重试")
+		return
+	}
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "settingsResetFailed", "恢复出口轮换默认设置失败")
+		return
+	}
+	status := http.StatusOK
+	if result.ApplyPending {
+		status = http.StatusAccepted
+	}
+	response.Success(c, status, newSettingsResponse(result))
 }
 
 func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
@@ -326,6 +362,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		Audit: settingsapp.AuditConfig{
 			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval, CommitDelayMS: value.Audit.CommitDelayMS,
 			RetentionDays: intValue(value.Audit.RetentionDays), RetentionDaysProvided: value.Audit.RetentionDays != nil,
+			RetentionPeriod: optionalString(value.Audit.RetentionPeriod), RetentionPeriodProvided: value.Audit.RetentionPeriod != nil,
 		},
 		ClientKeyDefaults: settingsapp.ClientKeyDefaultsConfig{
 			RPMLimit: value.ClientKeyDefaults.RPMLimit, MaxConcurrent: value.ClientKeyDefaults.MaxConcurrent,
@@ -357,27 +394,10 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		result.RequestRetry = settingsapp.RequestRetryEditable{
 			Enabled: value.RequestRetry.Enabled, MaxAttempts: value.RequestRetry.MaxAttempts,
 			OnExhausted: value.RequestRetry.OnExhausted, AccountCooldown: value.RequestRetry.AccountCooldown,
-			SameAccountRetry: value.RequestRetry.SameAccountRetry,
-			EvidenceTimeout:  value.RequestRetry.EvidenceTimeout, CreatedTimeout: value.RequestRetry.CreatedTimeout,
+			EvidenceTimeout: value.RequestRetry.EvidenceTimeout, CreatedTimeout: value.RequestRetry.CreatedTimeout,
 			IdleAccountCooldown: value.RequestRetry.IdleAccountCooldown,
 		}
 		result.RequestRetryProvided = true
-	}
-	if value.AccountRisk != nil {
-		risk := settingsapp.AccountRiskEditable{
-			Enabled: value.AccountRisk.Enabled, Method: value.AccountRisk.Method,
-			Concurrency: value.AccountRisk.Concurrency, Timeout: value.AccountRisk.Timeout,
-			OnDenied: value.AccountRisk.OnDenied, PatrolEnabled: value.AccountRisk.PatrolEnabled,
-			PatrolBucketDays:    value.AccountRisk.PatrolBucketDays,
-			PatrolInterval:      value.AccountRisk.PatrolInterval,
-			PatrolBatchSize:     value.AccountRisk.PatrolBatchSize,
-			ProbeProxyURL:       value.AccountRisk.ProbeProxyURL,
-			DeniedConfirmations: value.AccountRisk.DeniedConfirmations,
-			DeniedTTL:           value.AccountRisk.DeniedTTL,
-			BuildProbeEnabled:   value.AccountRisk.BuildProbeEnabled,
-		}
-		result.AccountRisk = risk
-		result.AccountRiskProvided = true
 	}
 	if value.EgressRotation != nil {
 		result.EgressRotation = settingsapp.EgressRotationEditable{
@@ -385,8 +405,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			MinNodeInterval: value.EgressRotation.MinNodeInterval, MaxGlobalPerHour: value.EgressRotation.MaxGlobalPerHour,
 			WebhookTimeout: value.EgressRotation.WebhookTimeout, WebhookRetries: value.EgressRotation.WebhookRetries,
 			SettleDelay: value.EgressRotation.SettleDelay, ProbeTimeout: value.EgressRotation.ProbeTimeout,
-			ProbeInterval: value.EgressRotation.ProbeInterval, CanaryModelPublicID: value.EgressRotation.CanaryModelPublicID,
-			CanaryCreatedTimeout: value.EgressRotation.CanaryCreatedTimeout,
+			ProbeInterval: value.EgressRotation.ProbeInterval,
 		}
 		result.EgressRotationProvided = true
 	}
@@ -394,6 +413,10 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 }
 
 func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
+	targets := make([]applyStatusDTO, len(value.ApplyTargets))
+	for i, state := range value.ApplyTargets {
+		targets[i] = applyStatusDTO{Name: state.Name, AppliedRevision: state.AppliedRevision, Pending: state.Pending, Error: state.Error, LastAttemptAt: optionalTime(state.LastAttemptAt)}
+	}
 	config := value.Config
 	return settingsResponse{
 		Config: settingsConfigDTO{
@@ -447,7 +470,9 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			},
 			Audit: auditConfigDTO{
 				BufferSize: config.Audit.BufferSize, BatchSize: config.Audit.BatchSize, FlushInterval: config.Audit.FlushInterval, CommitDelayMS: config.Audit.CommitDelayMS,
-				RetentionDays: intPointer(config.Audit.RetentionDays),
+				RetentionDays:   legacyRetentionDays(config.Audit),
+				RetentionPeriod: stringPointer(config.Audit.RetentionPeriod), RetentionSource: config.Audit.RetentionSource,
+				FileRetentionPeriod: config.Audit.FileRetentionPeriod, FileRetentionSource: config.Audit.FileRetentionSource,
 			},
 			ClientKeyDefaults: clientKeyDefaultsConfigDTO{
 				RPMLimit: config.ClientKeyDefaults.RPMLimit, MaxConcurrent: config.ClientKeyDefaults.MaxConcurrent,
@@ -461,32 +486,13 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				AutoCleanReauthMinAge:                config.Accounts.AutoCleanReauthMinAge,
 				AutoCleanIncludeDisabled:             config.Accounts.AutoCleanIncludeDisabled,
 			},
-			RequestRetry: &requestRetryConfigDTO{
-				Enabled: config.RequestRetry.Enabled, MaxAttempts: config.RequestRetry.MaxAttempts,
-				OnExhausted: config.RequestRetry.OnExhausted, AccountCooldown: config.RequestRetry.AccountCooldown,
-				SameAccountRetry: config.RequestRetry.SameAccountRetry,
-				EvidenceTimeout:  config.RequestRetry.EvidenceTimeout, CreatedTimeout: config.RequestRetry.CreatedTimeout,
-				IdleAccountCooldown: config.RequestRetry.IdleAccountCooldown,
-			},
-			AccountRisk: &accountRiskConfigDTO{
-				Enabled: config.AccountRisk.Enabled, Method: config.AccountRisk.Method,
-				Concurrency: config.AccountRisk.Concurrency, Timeout: config.AccountRisk.Timeout,
-				OnDenied: config.AccountRisk.OnDenied, PatrolEnabled: config.AccountRisk.PatrolEnabled,
-				PatrolBucketDays:    config.AccountRisk.PatrolBucketDays,
-				PatrolInterval:      config.AccountRisk.PatrolInterval,
-				PatrolBatchSize:     config.AccountRisk.PatrolBatchSize,
-				ProbeProxyURL:       config.AccountRisk.ProbeProxyURL,
-				DeniedConfirmations: config.AccountRisk.DeniedConfirmations,
-				DeniedTTL:           config.AccountRisk.DeniedTTL,
-				BuildProbeEnabled:   config.AccountRisk.BuildProbeEnabled,
-			},
+			RequestRetry: requestRetryDTOFrom(config.RequestRetry),
 			EgressRotation: &egressRotationConfigDTO{
 				Enabled: config.EgressRotation.Enabled, MaxAttemptsPerQuarantine: config.EgressRotation.MaxAttemptsPerQuarantine,
 				MinNodeInterval: config.EgressRotation.MinNodeInterval, MaxGlobalPerHour: config.EgressRotation.MaxGlobalPerHour,
 				WebhookTimeout: config.EgressRotation.WebhookTimeout, WebhookRetries: config.EgressRotation.WebhookRetries,
 				SettleDelay: config.EgressRotation.SettleDelay, ProbeTimeout: config.EgressRotation.ProbeTimeout,
-				ProbeInterval: config.EgressRotation.ProbeInterval, CanaryModelPublicID: config.EgressRotation.CanaryModelPublicID,
-				CanaryCreatedTimeout: config.EgressRotation.CanaryCreatedTimeout,
+				ProbeInterval: config.EgressRotation.ProbeInterval,
 			},
 		},
 		RecommendedProviderBuild: providerBuildRecommendationDTO{
@@ -494,6 +500,18 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			UserAgent:     value.RecommendedProviderBuild.UserAgent,
 		},
 		UpdatedAt: value.UpdatedAt, Revision: value.Revision, RestartRequired: value.RestartRequired,
+		AppliedRevision: value.AppliedRevision, ApplyPending: value.ApplyPending, ApplyTargets: targets,
+		Notification:     notificationStatusDTO{Revision: value.Notification.Revision, State: value.Notification.State, Error: value.Notification.Error, LastAttemptAt: optionalTime(value.Notification.LastAttemptAt)},
+		FileRequestRetry: requestRetryDTOFrom(value.FileRequestRetry),
+	}
+}
+
+func requestRetryDTOFrom(value settingsapp.RequestRetryEditable) *requestRetryConfigDTO {
+	return &requestRetryConfigDTO{
+		Enabled: value.Enabled, MaxAttempts: value.MaxAttempts,
+		OnExhausted: value.OnExhausted, AccountCooldown: value.AccountCooldown,
+		EvidenceTimeout: value.EvidenceTimeout, CreatedTimeout: value.CreatedTimeout,
+		IdleAccountCooldown: value.IdleAccountCooldown,
 	}
 }
 
@@ -534,4 +552,11 @@ func stringSliceValue(value *[]string) []string {
 func stringSlicePointer(value []string) *[]string {
 	cloned := append([]string(nil), value...)
 	return &cloned
+}
+
+func legacyRetentionDays(value settingsapp.AuditConfig) *int {
+	if !value.RetentionDaysProvided {
+		return nil
+	}
+	return intPointer(value.RetentionDays)
 }

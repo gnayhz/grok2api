@@ -24,6 +24,18 @@ export type AuditBillingBreakdownDTO = {
 };
 
 export type AuditDTO = {
+  responseId?: string;
+  upstreamStatusCode?: number;
+  admissionOutcome?: string;
+  generationOutcome?: string;
+  historyCommit?: string;
+  providerStateCommit?: string;
+  ownershipCommit?: string;
+  deliveryOutcome?: string;
+  physicalReceipt?: string;
+  qualityReceipt?: string;
+  ledgerOutcome?: string;
+
   id: string;
   requestId: string;
   clientKeyId: string;
@@ -48,6 +60,7 @@ export type AuditDTO = {
   mediaInputImages: number;
   mediaOutputImages: number;
   mediaOutputSeconds: number;
+  audioDurationMs?: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -68,6 +81,10 @@ export type AuditDTO = {
   degradeClass?: string;
   /** fail-open 交付标记：预算耗尽后按放行策略交出的降智响应（主行按成功记账）。 */
   qualityFailOpen?: boolean;
+  /** 守卫未介入的豁免原因（disabled 等）；空=守卫介入。 */
+  qualityExempt?: string;
+  /** 守卫介入时最终交付尝试的判决规则（thinking=观察到思考增量）。 */
+  qualityRule?: string;
   /** 转发到客户端的 SSE data 事件数（非流式恒 1）；0=未统计或未到达。 */
   deliveredEvents: number;
   /** 转发到客户端的累计字节；0=未统计或未到达。 */
@@ -103,7 +120,33 @@ export type AuditAttemptDTO = {
   errorChain: Array<{ type: string; message: string }>;
 };
 
+export type AuditGenerationUsageDTO = {
+  physicalId: string;
+  ordinal: number;
+  accountId: string;
+  accountName: string;
+  model: string;
+  selected: boolean;
+  outcome: "completed" | "failed" | "unconfirmed";
+  usageSource: "upstream" | "estimated" | "none";
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  contextInputTokens: number;
+  contextOutputTokens: number;
+  numSourcesUsed: number;
+  numServerSideToolsUsed: number;
+  costInUsdTicks: number;
+  estimatedCostInUsdTicks: number;
+  pricingModel: string;
+  pricingVersion: string;
+};
+
 export type AuditDetailDTO = {
+  generationUsages?: AuditGenerationUsageDTO[];
   audit: AuditDTO;
   attempts: AuditAttemptDTO[];
 };
@@ -161,10 +204,22 @@ const auditValidator = hasShape({
   egressScope: isOptional(isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset")), egressMode: isOptional(isOneOf("direct", "proxy")),
   statusCode: isNumber, streaming: isBoolean,
   mediaInputImages: isNumber, mediaOutputImages: isNumber, mediaOutputSeconds: isNumber, inputTokens: isNumber,
+  audioDurationMs: isOptional(isNumber),
   cachedInputTokens: isNumber, outputTokens: isNumber, reasoningTokens: isNumber, totalTokens: isNumber,
   costInUsdTicks: isNumber, estimatedCostInUsdTicks: isNumber, pricingModel: isOptional(isString), pricingVersion: isOptional(isString), billing: isOptional(auditBillingValidator),
   numSourcesUsed: isNumber, numServerSideToolsUsed: isNumber, contextInputTokens: isNumber, contextOutputTokens: isNumber,
-  firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber), degradeClass: isOptional(isString), qualityFailOpen: isOptional(isBoolean),
+  firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber), degradeClass: isOptional(isString), qualityFailOpen: isOptional(isBoolean), qualityExempt: isOptional(isString), qualityRule: isOptional(isString),
+  responseId: isOptional(isString),
+  upstreamStatusCode: isOptional(isNumber),
+  admissionOutcome: isOptional(isString),
+  generationOutcome: isOptional(isString),
+  historyCommit: isOptional(isString),
+  providerStateCommit: isOptional(isString),
+  ownershipCommit: isOptional(isString),
+  deliveryOutcome: isOptional(isString),
+  physicalReceipt: isOptional(isString),
+  qualityReceipt: isOptional(isString),
+  ledgerOutcome: isOptional(isString),
   deliveredEvents: isNumber, deliveredBytes: isNumber,
   durationMs: isNumber, errorCode: isOptional(isString), requestMethod: isOptional(isString), requestPath: isOptional(isString),
   requestHeaders: isOptional(isRecordOf(isArrayOf(isString))), attemptCount: isNumber, createdAt: isString,
@@ -190,9 +245,34 @@ const decodeAuditSummary = createObjectDecoder<AuditSummaryDTO>("audit summary",
     source: isString, asOf: isString, pricedRequests: isNumber, unpricedRequests: isNumber, pricedTokens: isNumber, unpricedTokens: isNumber,
   }),
 });
-const decodeAuditDetail = createObjectDecoder<AuditDetailDTO>("audit detail", {
+const auditGenerationValidator = hasShape({
+  physicalId: isString,
+  ordinal: isNumber,
+  accountId: isString,
+  accountName: isString,
+  model: isString,
+  selected: isBoolean,
+  outcome: isOneOf("completed", "failed", "unconfirmed"),
+  usageSource: isOneOf("upstream", "estimated", "none"),
+  inputTokens: isNumber,
+  cachedInputTokens: isNumber,
+  cacheCreationTokens: isNumber,
+  outputTokens: isNumber,
+  reasoningTokens: isNumber,
+  totalTokens: isNumber,
+  contextInputTokens: isNumber,
+  contextOutputTokens: isNumber,
+  numSourcesUsed: isNumber,
+  numServerSideToolsUsed: isNumber,
+  costInUsdTicks: isNumber,
+  estimatedCostInUsdTicks: isNumber,
+  pricingModel: isString,
+  pricingVersion: isString,
+});
+export const decodeAuditDetail = createObjectDecoder<AuditDetailDTO>("audit detail", {
   audit: auditValidator,
   attempts: isArrayOf(auditAttemptValidator),
+  generationUsages: isOptional(isArrayOf(auditGenerationValidator)),
 });
 
 type AuditQuery = {

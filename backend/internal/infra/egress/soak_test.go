@@ -47,6 +47,7 @@ func TestEgressSoakResourceStability(t *testing.T) {
 	}
 	repo.config = config
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	nodeA := domain.Node{ID: 10, Name: "soak-a", Enabled: true, Health: 1}
 	nodeB := domain.Node{ID: 20, Name: "soak-b", Enabled: true, Health: 1}
 	nodeA.EncryptedProxyURL = encryptedProxy(t, cipher, proxyA.URL)
@@ -87,12 +88,8 @@ func TestEgressSoakResourceStability(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		runSoakIteration(t, ctx, manager, origin, i, i%97 == 0)
-		// 搅动进程内守卫状态:证据标记/解除、池缓存失效(游标簿记重置)、
-		// 粘性判定记忆失效(代理 URL 变更→记忆表逐出重建)。
-		if i%50 == 0 {
-			manager.MarkDegradeEvidence(10)
-			manager.ClearDegradeEvidence(10)
-		}
+		// 搅动进程内状态:池缓存失效(游标簿记重置)、粘性判定记忆
+		// 失效(代理 URL 变更→记忆表逐出重建)。
 		if i%200 == 0 {
 			manager.InvalidatePoolCache()
 		}
@@ -157,6 +154,9 @@ func runSoakIteration(t *testing.T, ctx context.Context, manager *Manager, origi
 		// 模拟一次瞬时降智反馈(随后下轮迭代恢复):反馈只记录状态, 不产生
 		// 网络 I/O; 使用成功状态保持节点可调度。
 		manager.FeedbackForScope(ctx, domain.ScopeBuild, lease.NodeID, http.StatusOK, nil)
+		if err := manager.FlushFeedback(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

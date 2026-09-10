@@ -13,12 +13,12 @@ type AdminRepository interface {
 	Create(ctx context.Context, value admin.Admin) (admin.Admin, error)
 	GetByUsername(ctx context.Context, username string) (admin.Admin, error)
 	GetByID(ctx context.Context, id uint64) (admin.Admin, error)
-	UpdatePasswordAndRevokeSessions(ctx context.Context, id uint64, passwordHash string) error
+	UpdatePasswordAndRevokeSessions(ctx context.Context, expected admin.PasswordRef, passwordHash string) error
 }
 
 // AdminSessionRepository 定义管理员刷新会话持久化能力。
 type AdminSessionRepository interface {
-	Create(ctx context.Context, value admin.Session) (admin.Session, error)
+	CreateForPassword(ctx context.Context, expected admin.PasswordRef, tokenHash string, expiresAt time.Time) (admin.Session, error)
 	GetByID(ctx context.Context, id uint64) (admin.Session, error)
 	GetByTokenHash(ctx context.Context, tokenHash string) (admin.Session, error)
 	// GetByPreviousTokenHash 按上一代 refresh token hash 查找会话：轮换后
@@ -26,5 +26,7 @@ type AdminSessionRepository interface {
 	GetByPreviousTokenHash(ctx context.Context, tokenHash string) (admin.Session, error)
 	Rotate(ctx context.Context, id uint64, expectedTokenHash, newTokenHash string, expiresAt time.Time) error
 	Revoke(ctx context.Context, id uint64) error
-	RevokeAllByAdmin(ctx context.Context, adminID uint64) error
+	// RevokeByTokenHash accepts the current or immediately previous refresh
+	// token, allowing logout to race with an in-flight rotation response.
+	RevokeByTokenHash(ctx context.Context, tokenHash string) error
 }

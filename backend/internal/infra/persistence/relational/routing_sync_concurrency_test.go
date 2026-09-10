@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	egress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 // TestPostgresRoutingSaveConcurrentWithSync 在真实 PostgreSQL 上核查配置
@@ -44,11 +46,11 @@ func TestPostgresRoutingSaveConcurrentWithSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := repo.CreateEgressNode(ctx, egress.Node{Name: "concurrent-target", Enabled: true, EncryptedProxyURL: encryptedProxy, Health: 1})
+	source, err := repo.CreateEgressSource(ctx, egress.SubscriptionSource{Name: fmt.Sprintf("concurrent-feed-%d", time.Now().UTC().UnixNano()), Enabled: true, EncryptedURL: "enc", RefreshIntervalSeconds: 900})
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := repo.CreateEgressSource(ctx, egress.SubscriptionSource{Name: fmt.Sprintf("concurrent-feed-%d", time.Now().UTC().UnixNano()), Enabled: true, EncryptedURL: "enc", RefreshIntervalSeconds: 900})
+	node, err := repo.CreateEgressNode(ctx, egress.Node{Name: "concurrent-target", SourceID: source.ID, SourceKey: "target", Enabled: true, EncryptedProxyURL: encryptedProxy, Health: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,32 +62,13 @@ func TestPostgresRoutingSaveConcurrentWithSync(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			// 换血交替:目标节点是手动节点(无 source_key), upsert 不直接触碰
-			// 它; 可用性由本侧直接翻转。upsert 事务末尾的悬挂引用清理
-			// (clearInvalidEgressRoutingReferences)在每次同步都会执行——
-			// 先禁用再同步, 让清理与并发的路由保存真正竞争。
-			if i%2 == 1 {
-				disabled := node
-				disabled.Enabled = false
-				if _, err := repo.UpdateEgressNode(ctx, disabled); err != nil {
-					syncErrors.Add(1)
-					t.Errorf("disable round %d: %v", i, err)
-					return
-				}
-			} else {
-				enabled := node
-				enabled.Enabled = true
-				if _, err := repo.UpdateEgressNode(ctx, enabled); err != nil {
-					syncErrors.Add(1)
-					t.Errorf("enable round %d: %v", i, err)
-					return
-				}
-			}
+			// Exercise the actual source writer: absent entries are disabled
+			// and routing references removed in its own transaction.
 			var nodes []egress.Node
-			if i%4 == 0 {
-				nodes = append(nodes, egress.Node{SourceID: source.ID, SourceKey: "feed-entry", Name: "feed-entry", Enabled: true, EncryptedProxyURL: encryptedProxy, Health: 1})
+			if i%2 == 0 {
+				nodes = append(nodes, node)
 			}
-			if _, err := repo.UpsertEgressNodesFromSource(ctx, source.ID, nodes); err != nil {
+			if _, err := commitSourceNodesForTest(t, repo, ctx, source.ID, nodes); err != nil {
 				syncErrors.Add(1)
 				t.Errorf("sync round %d: %v", i, err)
 				return
@@ -99,10 +82,14 @@ func TestPostgresRoutingSaveConcurrentWithSync(t *testing.T) {
 			config.ScopeTargets = map[egress.Scope]egress.RoutingTarget{
 				egress.ScopeBuild: {Mode: egress.RoutingTargetNode, NodeID: node.ID},
 			}
-			saved, err := repo.SaveEgressOperationsConfig(ctx, config)
-			if err != nil {
-				// 目标节点恰被禁用时校验拒绝是正确语义, 不计入错误。
+			saved, err := repo.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error { return nil })
+			if errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
 				continue
+			}
+			if err != nil {
+				saveErrors.Add(1)
+				t.Errorf("save round %d: %v", i, err)
+				return
 			}
 			if saved.ScopeTargets[egress.ScopeBuild].NodeID != node.ID {
 				saveErrors.Add(1)
@@ -118,13 +105,7 @@ func TestPostgresRoutingSaveConcurrentWithSync(t *testing.T) {
 	}
 
 	// 终态不变式:最后一次同步卫生后, 持久化路由不引用不可调度节点。
-	final := node
-	final.Enabled = false
-	if _, err := repo.UpdateEgressNode(ctx, final); err != nil {
-		t.Fatal(err)
-	}
-	// 一次同步即可触发事务内悬挂引用清理。
-	if _, err := repo.UpsertEgressNodesFromSource(ctx, source.ID, nil); err != nil {
+	if _, err := commitSourceNodesForTest(t, repo, ctx, source.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	config, err := repo.GetEgressOperationsConfig(ctx)

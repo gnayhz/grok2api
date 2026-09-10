@@ -26,6 +26,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check repository contents
+        run: |
+          python3 scripts/check-repository-test.py
+          python3 scripts/check-repository.py --staged
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -37,6 +42,11 @@ jobs:
       # scripts/verify.sh 交付门——免费账户 Actions 限额有限,单次 push
       # 跑 10+ 分钟不划算(实测 race 一个包 324s、总 11 分钟)。
       # 发布前手动执行 ./scripts/verify.sh full 即可。
+      - name: Verify check orchestration
+        run: |
+          bash scripts/verify_test.sh
+          scripts/verify.sh check
+
       - name: Test backend
         working-directory: backend
         run: go test ./...
@@ -70,8 +80,7 @@ jobs:
         working-directory: frontend
         run: pnpm lint
 
-      # 与本地 pnpm test 对齐（round 59 补齐）：26 个前端测试（SSE 解析
-      # 契约、错误码 i18n 防漂移等）此前从未在 CI 执行。
+      # 与本地 pnpm test 共用前端契约、状态与错误码翻译检查。
       - name: Test frontend
         working-directory: frontend
         run: pnpm test

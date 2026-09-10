@@ -40,6 +40,7 @@ import {
   type VoiceInfo,
 } from "@/features/creative-console/creative-console-api";
 import { getClientKeySecret, listClientKeys, type ClientKeyDTO } from "@/features/client-keys/client-keys-api";
+import { SpeechPlayback } from "@/features/creative-console/speech-playback";
 import { importVideoInputFromURL, uploadMediaInput } from "@/features/media/media-api";
 import { PageHeader } from "@/shared/components/page-header";
 import { cn } from "@/shared/lib/cn";
@@ -126,7 +127,8 @@ export function CreativeConsolePage() {
   });
   const availableModels = useMemo(() => (modelsQuery.data ?? []).filter((model) => model.enabled && model.available), [modelsQuery.data]);
   const permittedModels = useMemo(() => {
-    if (!selectedKey || selectedKey.allowedModelIds.length === 0) return availableModels;
+    if (!selectedKey) return [];
+    if (selectedKey.modelScope === "all") return availableModels;
     const allowedModelIds = new Set(selectedKey.allowedModelIds);
     return availableModels.filter((model) => allowedModelIds.has(model.id));
   }, [availableModels, selectedKey]);
@@ -978,7 +980,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange, active }: Crea
     queryFn: ({ signal }) => listVoices({ apiKey, model: "grok-voice-latest", signal }),
     // Lazy: only prefetch reference voice options once the video tab itself is
     // active — opening the console on the chat tab must not fire voice calls.
-    enabled: Boolean(apiKey && active && action === "generate"),
+    enabled: Boolean(apiKey && active && activeModel && action === "generate"),
     staleTime: 60_000,
   });
   const voices = useMemo(() => voicesQuery.data ?? [], [voicesQuery.data]);
@@ -1399,7 +1401,7 @@ function VoicePanel({ apiKey, model, modelOptions, onModelChange, active }: Crea
     queryKey: ["creative-console", "voices", apiKey, activeModel],
     queryFn: ({ signal }) => listVoices({ apiKey, model: activeModel || "grok-voice-latest", signal }),
     // Lazy: fetch the voice list only when the voice tab is actually opened.
-    enabled: Boolean(apiKey && active) && subMode === "tts",
+    enabled: Boolean(apiKey && active && activeModel) && subMode === "tts",
     staleTime: 60_000,
   });
   const voices = useMemo(() => voicesQuery.data ?? [], [voicesQuery.data]);
@@ -1448,15 +1450,7 @@ function VoicePanel({ apiKey, model, modelOptions, onModelChange, active }: Crea
       <div className="min-h-0 flex-1 overflow-y-auto px-1 py-4">
         {!ttsResult && !sttResult && !busy ? <WelcomeState title={t("creativeConsole.welcomeVoice")} /> : null}
         {busy ? <LoadingResult text={subMode === "tts" ? t("creativeConsole.synthesizing") : t("creativeConsole.transcribing")} /> : null}
-        {ttsResult ? (
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 rounded-2xl bg-secondary/40 p-4">
-            <audio controls src={ttsResult.url} className="w-full" />
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-              <span>{ttsResult.contentType}{typeof ttsResult.duration === "number" ? ` · ${ttsResult.duration.toFixed(2)}s` : ""}</span>
-              <Button variant="secondary" size="sm" asChild><a href={ttsResult.url} download="speech.mp3"><ExternalLink />{t("creativeConsole.open")}</a></Button>
-            </div>
-          </div>
-        ) : null}
+        {ttsResult ? <SpeechPlayback result={ttsResult} /> : null}
         {sttResult ? (
           <div className="mx-auto w-full max-w-3xl space-y-3 rounded-2xl bg-secondary/40 p-4">
             <p className="whitespace-pre-wrap text-sm leading-6">{sttResult.text}</p>

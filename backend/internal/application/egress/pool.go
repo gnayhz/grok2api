@@ -11,7 +11,11 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-// poolStore is the persistence surface dedicated pools need.
+// poolStore is the persistence surface dedicated pools need. Create and update
+// validate domain.ValidatePoolFallback against the graph at commit; deletion
+// removes incoming edges in the same serialization boundary. Membership writers
+// verify current parents and preserve current priorities while serialized with
+// parent deletion and priority updates.
 type poolStore interface {
 	ListEgressPools(ctx context.Context) ([]domain.Pool, error)
 	GetEgressPool(ctx context.Context, id uint64) (domain.Pool, error)
@@ -104,7 +108,7 @@ func (s *Service) CreatePool(ctx context.Context, input PoolInput) (domain.Publi
 	if err != nil {
 		return domain.PublicPool{}, err
 	}
-	if err := s.validatePoolInput(ctx, store, input, nil); err != nil {
+	if err := validatePoolInput(input); err != nil {
 		return domain.PublicPool{}, err
 	}
 	pool, err := store.CreateEgressPool(ctx, domain.Pool{
@@ -112,26 +116,25 @@ func (s *Service) CreatePool(ctx context.Context, input PoolInput) (domain.Publi
 		Strategy: input.Strategy, FallbackMode: input.FallbackMode, FallbackPoolID: normalizedPoolFallback(input.FallbackMode, input.FallbackPoolID),
 	})
 	if err != nil {
-		return domain.PublicPool{}, err
+		return domain.PublicPool{}, poolWriteError(err)
 	}
 	return s.publicPool(ctx, pool)
 }
 
-// UpdatePool validates and updates one pool. Fallback cycle detection walks
-// the whole chain so A→B→A configurations are rejected before persisting.
+// UpdatePool validates input and delegates graph validation to the atomic writer.
 func (s *Service) UpdatePool(ctx context.Context, id uint64, input PoolInput) (domain.PublicPool, error) {
 	store, err := s.poolStore()
 	if err != nil {
 		return domain.PublicPool{}, err
 	}
-	current, err := store.GetEgressPool(ctx, id)
+	_, err = store.GetEgressPool(ctx, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return domain.PublicPool{}, ErrNotFound
 		}
 		return domain.PublicPool{}, err
 	}
-	if err := s.validatePoolInput(ctx, store, input, &current); err != nil {
+	if err := validatePoolInput(input); err != nil {
 		return domain.PublicPool{}, err
 	}
 	updated, err := store.UpdateEgressPool(ctx, domain.Pool{
@@ -139,7 +142,7 @@ func (s *Service) UpdatePool(ctx context.Context, id uint64, input PoolInput) (d
 		Strategy: input.Strategy, FallbackMode: input.FallbackMode, FallbackPoolID: normalizedPoolFallback(input.FallbackMode, input.FallbackPoolID),
 	})
 	if err != nil {
-		return domain.PublicPool{}, err
+		return domain.PublicPool{}, poolWriteError(err)
 	}
 	s.invalidatePoolCache()
 	return s.publicPool(ctx, updated)
@@ -153,7 +156,7 @@ func (s *Service) DeletePool(ctx context.Context, id uint64) error {
 		return err
 	}
 	if err := store.DeleteEgressPool(ctx, id); err != nil {
-		return err
+		return poolWriteError(err)
 	}
 	s.invalidateOperationsConfig()
 	s.invalidatePoolCache()
@@ -167,45 +170,11 @@ func (s *Service) SetPoolMembers(ctx context.Context, poolID uint64, nodeIDs []u
 	if err != nil {
 		return err
 	}
-	if _, err := store.GetEgressPool(ctx, poolID); err != nil {
-		// repository.ErrNotFound 直接透传会被 writeError 落到 500 分支;
-		// 与其他服务方法一致地归一为应用层 ErrNotFound(404)。
-		if errors.Is(err, repository.ErrNotFound) {
-			return ErrNotFound
-		}
-		return err
-	}
-	if err := s.validateMemberNodes(ctx, nodeIDs); err != nil {
-		return err
-	}
 	if err := store.SetEgressPoolMembers(ctx, poolID, nodeIDs); err != nil {
-		return err
+		return poolWriteError(err)
 	}
 	s.invalidateOperationsConfig()
 	s.invalidatePoolCache()
-	return nil
-}
-
-// validateMemberNodes rejects unknown node ids up front: the member table has
-// no foreign key, and a ghost row would echo back in MemberIDs while every
-// other view silently skips it.
-func (s *Service) validateMemberNodes(ctx context.Context, nodeIDs []uint64) error {
-	if len(nodeIDs) == 0 {
-		return nil
-	}
-	nodes, err := s.repository.ListEgressNodes(ctx, repository.SortQuery{})
-	if err != nil {
-		return err
-	}
-	known := make(map[uint64]struct{}, len(nodes))
-	for _, node := range nodes {
-		known[node.ID] = struct{}{}
-	}
-	for _, id := range nodeIDs {
-		if _, ok := known[id]; !ok {
-			return fmt.Errorf("%w: 节点 %d 不存在", ErrInvalidInput, id)
-		}
-	}
 	return nil
 }
 
@@ -216,25 +185,11 @@ func (s *Service) SetPoolMemberPriority(ctx context.Context, poolID, nodeID uint
 	if err != nil {
 		return err
 	}
-	members, err := store.EgressPoolMembers(ctx)
-	if err != nil {
-		return err
-	}
-	belongs := false
-	for _, id := range members[poolID] {
-		if id == nodeID {
-			belongs = true
-			break
-		}
-	}
-	if !belongs {
-		return fmt.Errorf("%w: 节点不在该池中", ErrInvalidInput)
-	}
 	if priority < 0 {
 		return fmt.Errorf("%w: 首选顺序必须不小于 0", ErrInvalidInput)
 	}
 	if err := store.SetEgressPoolMemberPriority(ctx, poolID, nodeID, priority); err != nil {
-		return err
+		return poolWriteError(err)
 	}
 	s.invalidateOperationsConfig()
 	s.invalidatePoolCache()
@@ -252,12 +207,6 @@ func (s *Service) poolStore() (poolStore, error) {
 	return store, nil
 }
 
-// poolsRepository exposes the read side for save-time routing validation.
-func (s *Service) poolsRepository() poolStore {
-	store, _ := s.poolStore()
-	return store
-}
-
 func (s *Service) publicPool(ctx context.Context, pool domain.Pool) (domain.PublicPool, error) {
 	pools, err := s.ListPools(ctx)
 	if err != nil {
@@ -273,11 +222,9 @@ func (s *Service) publicPool(ctx context.Context, pool domain.Pool) (domain.Publ
 	return domain.PublicPool{}, ErrNotFound
 }
 
-// validatePoolInput checks name/strategy/fallback consistency and that the
-// fallback chain never forms a cycle, walking the whole persisted chain: the
-// runtime guard only detects cycles after traffic already degraded, so the
-// configuration must reject A→B→A (and longer loops) at save time.
-func (s *Service) validatePoolInput(ctx context.Context, store poolStore, input PoolInput, current *domain.Pool) error {
+// Input shape is checked here; the graph rule runs on the writer's current
+// snapshot, never on a separate preflight read that another writer can invalidate.
+func validatePoolInput(input PoolInput) error {
 	if name := strings.TrimSpace(input.Name); name == "" || len(name) > 160 {
 		return fmt.Errorf("%w: 池名称长度必须在 1 到 160 之间", ErrInvalidInput)
 	}
@@ -288,44 +235,20 @@ func (s *Service) validatePoolInput(ctx context.Context, store poolStore, input 
 	if !mode.IsValid() {
 		return fmt.Errorf("%w: 池回退模式无效: %q", ErrInvalidInput, input.FallbackMode)
 	}
-	if mode != domain.PoolFallbackPool {
-		input.FallbackPoolID = 0
-	}
-	if input.FallbackPoolID == 0 {
-		if mode == domain.PoolFallbackPool {
-			// 数据库 CHECK(fallback_mode='pool' ⇒ fallback_pool_id>0)会兜底,
-			// 但那会把本可 400 的输入错误变成 500 egressNodeOperationFailed。
-			return fmt.Errorf("%w: 回退模式为 pool 时必须指定回退代理池", ErrInvalidInput)
-		}
-		return nil
-	}
-	if input.FallbackPoolID == currentID(current) {
-		return fmt.Errorf("%w: 池不能回退到自身", ErrInvalidInput)
-	}
-	pools, err := store.ListEgressPools(ctx)
-	if err != nil {
-		return err
-	}
-	byID := make(map[uint64]domain.Pool, len(pools))
-	for _, pool := range pools {
-		byID[pool.ID] = pool
-	}
-	// 从被改的池出发沿链走:改的是本池的出边,环必然经过本池。
-	next := input.FallbackPoolID
-	for hop := 0; hop <= len(pools); hop++ {
-		if next == currentID(current) {
-			return fmt.Errorf("%w: 池回退链不能成环", ErrInvalidInput)
-		}
-		follower, ok := byID[next]
-		if !ok || follower.FallbackMode.Normalized() != domain.PoolFallbackPool {
-			return nil
-		}
-		next = follower.FallbackPoolID
-		if next == 0 {
-			return nil
-		}
+	if mode == domain.PoolFallbackPool && input.FallbackPoolID == 0 {
+		return fmt.Errorf("%w: 回退模式为 pool 时必须指定回退代理池", ErrInvalidInput)
 	}
 	return nil
+}
+
+func poolWriteError(err error) error {
+	if errors.Is(err, domain.ErrInvalidPoolFallback) || errors.Is(err, domain.ErrInvalidPoolMember) {
+		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	if errors.Is(err, repository.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
 }
 
 // normalizedPoolFallback zeroes the chained pool unless the mode needs it so
@@ -335,11 +258,4 @@ func normalizedPoolFallback(mode domain.PoolFallbackMode, poolID uint64) uint64 
 		return 0
 	}
 	return poolID
-}
-
-func currentID(current *domain.Pool) uint64 {
-	if current == nil {
-		return 0
-	}
-	return current.ID
 }

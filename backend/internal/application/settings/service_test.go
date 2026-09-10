@@ -40,19 +40,22 @@ func (r *runtimeSettingsRepositoryStub) Save(_ context.Context, value settingsdo
 	return r.updatedAt, r.revision, nil
 }
 
-func (r *runtimeSettingsRepositoryStub) Delete(context.Context) error {
+func (r *runtimeSettingsRepositoryStub) Reset(_ context.Context, expectedRevision uint64) (time.Time, uint64, error) {
+	if expectedRevision != r.revision {
+		return time.Time{}, 0, repository.ErrConflict
+	}
 	r.value = settingsdomain.Config{}
-	r.updatedAt = time.Time{}
-	r.revision = 0
+	r.updatedAt = time.Now().UTC()
+	r.revision++
 	r.found = false
-	return nil
+	return r.updatedAt, r.revision, nil
 }
 
 func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Server.MaxConcurrentRequests = 2048
 	input.ProviderBuild.ResponseHeaderTimeout = "7m"
@@ -116,7 +119,7 @@ func TestUpdateRejectsBuildResponseHeaderTimeoutOutsideSafeRange(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			cfg := testConfig(t)
 			repository := &runtimeSettingsRepositoryStub{}
-			service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+			service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 			input := service.Get().Config
 			input.ProviderBuild.ResponseHeaderTimeout = value
 			if _, err := service.Update(context.Background(), 0, input); !errors.Is(err, ErrInvalidInput) {
@@ -153,7 +156,7 @@ func TestUpdateRejectsStreamIdleTimeoutBeyondChatTimeout(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := testConfig(t)
 			repository := &runtimeSettingsRepositoryStub{}
-			service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+			service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 			input := service.Get().Config
 			test.mutate(&input)
 			if _, err := service.Update(context.Background(), 0, input); !errors.Is(err, ErrInvalidInput) {
@@ -170,7 +173,7 @@ func TestUpdateValidatesMaxAttemptsRange(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 
 	input := service.Get().Config
 	input.Routing.MaxAttempts = 65535
@@ -207,7 +210,7 @@ func TestUpdatePreservesBuildChatDeniedPolicyWhenFieldIsOmitted(t *testing.T) {
 	cfg.Routing.MarkBuildChatDeniedAsReauth = true
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Routing.MarkBuildChatDeniedAsReauth = false
 	input.Routing.MarkBuildChatDeniedAsReauthProvided = false
@@ -225,7 +228,7 @@ func TestUpdatePreservesAccountIsolationWhenFieldIsOmitted(t *testing.T) {
 	cfg.Routing.AccountIsolatedConnections = true
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Routing.AccountIsolatedConnections = false
 	input.Routing.AccountIsolatedConnectionsProvided = false
@@ -321,7 +324,7 @@ func TestLegacyShadowSettingCannotEnableSegmentedSelector(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"Routing":{"SegmentedSelector":{"ActiveEnabled":false,"Enabled":true,"MinCandidates":3000,"WindowSize":64,"SamplePercent":100}}}`), &persisted); err != nil {
 		t.Fatal(err)
 	}
-	loaded := applyDomainConfig(testConfig(t), persisted)
+	loaded := mustApplyDomainConfig(t, testConfig(t), persisted)
 	if loaded.Routing.SegmentedSelectorEnabled {
 		t.Fatal("legacy shadow-only setting enabled the authoritative segmented selector")
 	}
@@ -377,7 +380,7 @@ func TestLoadPersistedKeepsClearanceDefaultsForOlderPayload(t *testing.T) {
 }
 
 func TestSnapshotIncludesRecommendedBuildBaseline(t *testing.T) {
-	service := NewService(testConfig(t), time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, nil)
+	service := newTestService(testConfig(t), time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, nil)
 	recommended := service.Get().RecommendedProviderBuild
 	if recommended.ClientVersion != config.RecommendedBuildClientVersion || recommended.UserAgent != config.RecommendedBuildUserAgent {
 		t.Fatalf("recommended build = %#v", recommended)
@@ -387,7 +390,7 @@ func TestSnapshotIncludesRecommendedBuildBaseline(t *testing.T) {
 func TestUpdateRejectsBatchConcurrencyOutsideSafeRange(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
-	service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 	input := service.Get().Config
 	input.Batch.ConversionConcurrency = 51
 	if _, err := service.Update(context.Background(), 0, input); !errors.Is(err, ErrInvalidInput) {
@@ -401,7 +404,7 @@ func TestUpdateRejectsBatchConcurrencyOutsideSafeRange(t *testing.T) {
 func TestBatchRandomDelayCanBeDisabledAndPersisted(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
-	service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 	input := service.Get().Config
 	input.Batch.RandomDelay = "0s"
 	if _, err := service.Update(context.Background(), 0, input); err != nil {
@@ -422,7 +425,7 @@ func TestBatchRandomDelayCanBeDisabledAndPersisted(t *testing.T) {
 func TestUpdateRejectsInvalidDurationWithoutChangingConfig(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
-	service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 	input := service.Get().Config
 	input.Routing.StickyTTL = "tomorrow"
 	if _, err := service.Update(context.Background(), service.Get().Revision, input); err == nil {
@@ -436,7 +439,7 @@ func TestUpdateRejectsInvalidDurationWithoutChangingConfig(t *testing.T) {
 func TestStatsigManualValueIsWriteOnlyAndClearedByURLMode(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
-	service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 	manual := base64.RawStdEncoding.EncodeToString(make([]byte, 70))
 	input := service.Get().Config
 	input.ProviderWeb.StatsigMode = config.StatsigModeManual
@@ -509,6 +512,8 @@ func TestLoadPersistedBackfillsMissingServerConcurrency(t *testing.T) {
 
 func TestApplyDomainConfigPreservesExplicitCapacitySettings(t *testing.T) {
 	base := testConfig(t)
+	base.Audit.JournalDirectory = filepath.Join(t.TempDir(), "durable-audit")
+	base.Audit.JournalMaxBytes = 128 << 20
 	value := toDomainConfig(base)
 	value.Server.MaxConcurrentRequests = 1024
 	value.Routing.CapacityWait = 500 * time.Millisecond
@@ -516,7 +521,10 @@ func TestApplyDomainConfigPreservesExplicitCapacitySettings(t *testing.T) {
 	value.ClientKeyDefaults.RPMLimit = 120
 	value.ClientKeyDefaults.MaxConcurrent = 8
 
-	applied := applyDomainConfig(base, value)
+	applied := mustApplyDomainConfig(t, base, value)
+	if applied.Audit.JournalDirectory != base.Audit.JournalDirectory || applied.Audit.JournalMaxBytes != base.Audit.JournalMaxBytes {
+		t.Fatalf("settings replaced bootstrap journal: %+v", applied.Audit)
+	}
 	if applied.Server.MaxConcurrentRequests != 1024 {
 		t.Fatalf("maxConcurrentRequests = %d, want 1024", applied.Server.MaxConcurrentRequests)
 	}
@@ -562,7 +570,7 @@ func TestReloadPersistedAppliesOnlyNewerVersion(t *testing.T) {
 	updatedAt := time.Now().UTC()
 	repository := &runtimeSettingsRepositoryStub{value: toDomainConfig(cfg), updatedAt: updatedAt, revision: 1, found: true}
 	applyCount := 0
-	service := NewService(cfg, updatedAt, 1, repository, nil, func(config.Config) { applyCount++ })
+	service := newTestService(cfg, updatedAt, 1, repository, nil, func(config.Config) { applyCount++ })
 
 	if err := service.ReloadPersisted(context.Background()); err != nil {
 		t.Fatal(err)
@@ -581,16 +589,19 @@ func TestReloadPersistedAppliesOnlyNewerVersion(t *testing.T) {
 	}
 }
 
-func TestReloadPersistedRevertsToBaselineWhenRowDeleted(t *testing.T) {
+func TestReloadPersistedRevertsToBaselineOnDurableReset(t *testing.T) {
 	baseline := testConfig(t)
 	override := baseline
 	override.Frontend.PublicAPIBaseURL = "https://edge.example.test"
 	repository := &runtimeSettingsRepositoryStub{}
 	applyCount := 0
-	service := NewService(override, time.Now().UTC(), 0, repository, nil, func(config.Config) { applyCount++ })
+	service := newTestService(override, time.Now().UTC(), 0, repository, nil, func(config.Config) { applyCount++ })
 	service.SetFileConfig(baseline)
 
-	// 远端实例重置：持久化行被删除，通知本实例重载。
+	// 远端实例重置：覆盖已移除，持久时钟推进到 1。
+	if _, _, err := repository.Reset(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.ReloadPersisted(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +631,7 @@ func TestReloadPersistedRevertsToBaselineWhenRowDeleted(t *testing.T) {
 func TestUpdateRejectsStaleRevision(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
-	service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 	input := service.Get().Config
 	input.Routing.MaxAttempts++
 	if _, err := service.Update(context.Background(), 1, input); !errors.Is(err, ErrConflict) {
@@ -668,7 +679,7 @@ func TestUpdateEmptyFrontendOverrideFallsBackToYAML(t *testing.T) {
 	cfg.Frontend.PublicAPIBaseURLOverride = "http://runtime.example.com"
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Frontend.PublicAPIBaseURL = ""
 	if _, err := service.Update(context.Background(), 0, input); err != nil {
@@ -685,7 +696,7 @@ func TestUpdateEmptyFrontendOverrideFallsBackToYAML(t *testing.T) {
 func TestApplyDomainConfigAccountsDefaults(t *testing.T) {
 	base := testConfig(t)
 	// 旧持久化 JSON 无 Accounts 段时，应保持代码默认：关闭 + 10m + 1h。
-	loaded := applyDomainConfig(base, settingsdomain.Config{
+	loaded := mustApplyDomainConfig(t, base, settingsdomain.Config{
 		Server: settingsdomain.ServerConfig{MaxConcurrentRequests: base.Server.MaxConcurrentRequests},
 		ProviderBuild: settingsdomain.ProviderBuildConfig{
 			BaseURL: base.Provider.Build.BaseURL, FallbackBaseURL: base.Provider.Build.FallbackBaseURL,
@@ -738,7 +749,7 @@ func TestUpdateAuditCommitDelayRoundTrip(t *testing.T) {
 	cfg := testConfig(t)
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Audit.CommitDelayMS = 12
 	snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
@@ -752,36 +763,38 @@ func TestUpdateAuditCommitDelayRoundTrip(t *testing.T) {
 
 func TestUpdateAuditRetentionPreservesExplicitZero(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Audit.RetentionDays = 7
+	cfg.Audit.RetentionPeriod = config.Duration(7 * 24 * time.Hour)
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
+	input.Audit.RetentionPeriodProvided = false
 	input.Audit.RetentionDays = 0
 	input.Audit.RetentionDaysProvided = true
 
 	if _, err := service.Update(context.Background(), service.Get().Revision, input); err != nil {
 		t.Fatal(err)
 	}
-	if applied.Audit.RetentionDays != 0 {
+	if applied.Audit.RetentionPeriod != 0 {
 		t.Fatalf("applied audit policy = %#v", applied.Audit)
 	}
-	if repo.value.Audit.RetentionDays == nil || *repo.value.Audit.RetentionDays != 0 {
+	if repo.value.Audit.RetentionPeriod == nil || *repo.value.Audit.RetentionPeriod != 0 || repo.value.Audit.RetentionDays != nil {
 		t.Fatalf("persisted audit policy = %#v", repo.value.Audit)
 	}
 	reloaded, _, _, err := LoadPersisted(context.Background(), cfg, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.Audit.RetentionDays != 0 {
+	if reloaded.Audit.RetentionPeriod != 0 {
 		t.Fatalf("reloaded audit policy = %#v", reloaded.Audit)
 	}
 }
 
 func TestLoadPersistedKeepsAuditDefaultsForOlderPayload(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Audit.RetentionDays = 30
+	cfg.Audit.RetentionPeriod = config.Duration(30 * 24 * time.Hour)
 	value := toDomainConfig(cfg)
+	value.Audit.RetentionPeriod = nil
 	value.Audit.RetentionDays = nil
 	repo := &runtimeSettingsRepositoryStub{value: value, found: true}
 
@@ -789,14 +802,14 @@ func TestLoadPersistedKeepsAuditDefaultsForOlderPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Audit.RetentionDays != 30 {
+	if loaded.Audit.RetentionPeriod.Value() != 30*24*time.Hour {
 		t.Fatalf("legacy audit defaults = %#v", loaded.Audit)
 	}
 }
 
 func TestUpdateRejectsNegativeAuditCommitDelay(t *testing.T) {
 	cfg := testConfig(t)
-	service := NewService(cfg, time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, nil)
+	service := newTestService(cfg, time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, nil)
 	input := service.Get().Config
 	input.Audit.CommitDelayMS = -1
 	if _, err := service.Update(context.Background(), service.Get().Revision, input); err == nil {
@@ -808,7 +821,7 @@ func TestUpdateAccountsAutoCleanRoundTrip(t *testing.T) {
 	cfg := testConfig(t)
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Accounts = AccountsConfig{
 		MarkBuildForbiddenReauth: true, MarkBuildForbiddenReauthProvided: true,
@@ -844,7 +857,7 @@ func TestUpdateWithoutAccountsPreservesCurrentAutoCleanConfig(t *testing.T) {
 	cfg.Accounts.AutoCleanIncludeDisabled = true
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Accounts = AccountsConfig{}
 	input.AccountsProvided = false
@@ -862,7 +875,7 @@ func TestUpdateWithoutBuildForbiddenFieldPreservesCurrentPolicy(t *testing.T) {
 	cfg.Accounts.MarkBuildForbiddenReauth = true
 	cfg.Accounts.BuildForbiddenReauthCodes = []string{"custom-denial"}
 	var applied config.Config
-	service := NewService(cfg, time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, func(next config.Config) { applied = next })
 	input := service.Get().Config
 	input.Accounts.MarkBuildForbiddenReauth = false
 	input.Accounts.MarkBuildForbiddenReauthProvided = false
@@ -901,7 +914,7 @@ func TestUpdateRejectsInvalidBuildForbiddenCodes(t *testing.T) {
 	}()} {
 		cfg := testConfig(t)
 		repository := &runtimeSettingsRepositoryStub{}
-		service := NewService(cfg, time.Time{}, 0, repository, nil, nil)
+		service := newTestService(cfg, time.Time{}, 0, repository, nil, nil)
 		input := service.Get().Config
 		input.Accounts.BuildForbiddenReauthCodes = codes
 		input.Accounts.BuildForbiddenReauthCodesProvided = true
@@ -912,4 +925,66 @@ func TestUpdateRejectsInvalidBuildForbiddenCodes(t *testing.T) {
 			t.Fatalf("invalid codes were persisted: %#v", codes)
 		}
 	}
+}
+
+func TestLegacyGuardSettingsAreReadOnlyProjection(t *testing.T) {
+	cfg := testConfig(t)
+	repo := &runtimeSettingsRepositoryStub{}
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, nil)
+	authority := cfg.RequestRetry
+	authority.Enabled = true
+	authority.MaxAttempts = 3
+	service.SetRequestRetryProjection(func() config.RequestRetryConfig { return authority })
+	input := service.Get().Config
+	input.RequestRetry.Enabled = false
+	input.RequestRetry.MaxAttempts = 9
+	snapshot, err := service.Update(context.Background(), 0, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Config.RequestRetry.Enabled || snapshot.Config.RequestRetry.MaxAttempts != 3 || repo.value.RequestRetry != nil {
+		t.Fatal("legacy settings created a second guard authority")
+	}
+	authority.MaxAttempts = 5
+	if service.Get().Config.RequestRetry.MaxAttempts != 5 {
+		t.Fatal("projection did not follow authority")
+	}
+	authority.MaxAttempts = 100
+	authority.CreatedTimeout = config.Duration(24 * time.Hour)
+	input = service.Get().Config
+	input.Server.MaxConcurrentRequests = 2048
+	if _, err := service.Update(context.Background(), 1, input); err != nil {
+		t.Fatalf("unrelated guard projection blocked gateway edit: %v", err)
+	}
+	if repo.value.RequestRetry != nil {
+		t.Fatal("wrote read-only projection")
+	}
+
+}
+
+func TestReloadPersistedRejectsLostClock(t *testing.T) {
+	repo := &runtimeSettingsRepositoryStub{}
+	service := newTestService(testConfig(t), time.Time{}, 0, repo, nil, nil)
+	input := service.Get().Config
+	input.Server.MaxConcurrentRequests = 2048
+	if _, err := service.Update(context.Background(), 0, input); err != nil {
+		t.Fatal(err)
+	}
+	repo.revision = 0
+	repo.found = false
+	if err := service.ReloadPersisted(context.Background()); err == nil {
+		t.Fatal("lost durable clock was silently accepted")
+	}
+	if service.Get().Revision != 1 || service.Get().Config.Server.MaxConcurrentRequests != 2048 {
+		t.Fatal("lost clock changed observed settings")
+	}
+}
+
+func mustApplyDomainConfig(t *testing.T, base config.Config, value settingsdomain.Config) config.Config {
+	t.Helper()
+	merged, err := applyDomainConfig(base, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return merged
 }

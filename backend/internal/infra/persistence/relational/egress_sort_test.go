@@ -129,10 +129,10 @@ func TestEgressStateUpdatesDoNotOverwriteClearanceOrHealth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateEgressNodeHealth(ctx, node.ID, 0.4, 2, nil, "anti-bot rejection"); err != nil {
+	if err := database.db.Model(&egressNodeModel{}).Where("id = ?", node.ID).Updates(map[string]any{"health": 0.4, "failure_count": 2, "last_error": "anti-bot rejection"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateEgressNodeClearance(ctx, node.ID, "new-cookie", "new-agent", strings.Repeat("a", 64), strings.Repeat("b", 64), time.Now().UTC()); err != nil {
+	if err := repo.ApplyEgressClearance(ctx, egress.ClearanceUpdate{NodeID: node.ID, EncryptedProxyURL: node.EncryptedProxyURL, BindingRevision: node.BindingRevision, ExpectedRevision: node.ClearanceRevision, EncryptedCookie: "new-cookie", UserAgent: "new-agent", Fingerprint: strings.Repeat("a", 64), BindingFingerprint: strings.Repeat("b", 64), RefreshedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := repo.GetEgressNode(ctx, node.ID)
@@ -201,7 +201,9 @@ func TestInitializeSchemaAddsProxyPoolWithoutChangingExistingRows(t *testing.T) 
 		t.Fatalf("legacy row changed during migration: %#v", existing)
 	}
 	existing.ProxyPool = true
-	updated, err := repo.UpdateEgressNode(ctx, existing)
+	updated, err := repo.UpdateEgressNodeConfiguration(ctx, existing, func(egress.Node) error {
+		return nil
+	})
 	if err != nil || !updated.ProxyPool {
 		t.Fatalf("proxy pool did not round trip: %#v, err=%v", updated, err)
 	}

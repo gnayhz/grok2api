@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestFindModelRoutesOrderingContract(t *testing.T) {
 	repo := NewModelRepository(database)
 	// 三 Provider 同名（候选命中）+ 一个纯别名路由（别名命中）。
 	for _, p := range []account.Provider{account.ProviderConsole, account.ProviderWeb, account.ProviderBuild} {
-		if err := repo.UpsertDiscovered(ctx, p, []string{"grok-order-x"}); err != nil {
+		if err := testsupport.Discover(ctx, repo, p, []string{"grok-order-x"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -54,13 +55,13 @@ func TestFindModelRoutesOrderingContract(t *testing.T) {
 	// 前三：候选命中按 Provider 优先级 build→web→console。
 	wantProviders := []string{"grok_build", "grok_web", "grok_console"}
 	for i, want := range wantProviders {
-		if rows[i].Provider != want {
-			t.Fatalf("rows[%d].provider = %s, want %s", i, rows[i].Provider, want)
+		if rows[i].Route.Provider != want {
+			t.Fatalf("rows[%d].provider = %s, want %s", i, rows[i].Route.Provider, want)
 		}
 	}
 	// 末位：别名命中的 console 路由（同为 console 但别名命中排后）。
-	if rows[3].Provider != "grok_console" || rows[3].UpstreamModel != "grok-alias-only" {
-		t.Fatalf("rows[3] = %s/%s, want 别名命中的 grok-alias-only", rows[3].Provider, rows[3].UpstreamModel)
+	if rows[3].Route.Provider != "grok_console" || rows[3].Route.UpstreamModel != "grok-alias-only" {
+		t.Fatalf("rows[3] = %s/%s, want 别名命中的 grok-alias-only", rows[3].Route.Provider, rows[3].Route.UpstreamModel)
 	}
 	// 未知名（无候选无别名）→ ErrRecordNotFound。
 	if _, err := findModelRoutesByPublicID(database.db.WithContext(ctx), "grok-never-registered"); err == nil {

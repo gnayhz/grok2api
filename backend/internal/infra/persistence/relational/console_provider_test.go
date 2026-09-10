@@ -29,7 +29,7 @@ func TestConsoleQuotaParticipatesInRoutingAndSummary(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	resetAt := now.Add(time.Hour)
-	if err := repository.SaveQuotaWindows(ctx, credential.ID, "", now, []account.QuotaWindow{
+	if err := saveQuotaWindowsFixture(repository, ctx, credential.ID, "", now, []account.QuotaWindow{
 		{
 			AccountID: credential.ID, Mode: "console", Remaining: 20, Total: 20, WindowSeconds: 3600,
 			ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream, UpdatedAt: now,
@@ -94,7 +94,7 @@ func TestHasQuotaWindowsRejectsLegacyConsoleSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := repository.SaveQuotaWindows(ctx, credential.ID, "", now, []account.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(repository, ctx, credential.ID, "", now, []account.QuotaWindow{{
 		AccountID: credential.ID, Mode: "console", Remaining: 20, Total: 20, WindowSeconds: 3600,
 		Source: account.QuotaSourceDefault, UpdatedAt: now,
 	}}); err != nil {

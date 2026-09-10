@@ -11,6 +11,7 @@ import (
 	"time"
 
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -51,23 +52,12 @@ type CreateInput struct {
 	BillingLimitUSDTicks int64
 	AllowModelAliases    bool
 	AllowedModels        []uint64
+	ModelScope           *clientkeydomain.ModelScope
 	ProviderScope        clientkeydomain.ProviderScope
 	TierScope            clientkeydomain.TierScope
 }
 
-type UpdateInput struct {
-	Name                 *string
-	Enabled              *bool
-	ExpiresAt            *time.Time
-	ClearExpiresAt       bool
-	RPMLimit             *int
-	MaxConcurrent        *int
-	BillingLimitUSDTicks *int64
-	AllowModelAliases    *bool
-	AllowedModels        *[]uint64
-	ProviderScope        *clientkeydomain.ProviderScope
-	TierScope            *clientkeydomain.TierScope
-}
+type UpdateInput = clientkeydomain.ManagementPatch
 
 type Created struct {
 	Key    clientkeydomain.Key
@@ -92,32 +82,23 @@ type Service struct {
 	cipher        security.Cryptor
 	activeMu      sync.RWMutex
 	activeBilling map[string]struct{}
-	// mediaJobs 可选：装配时注入。删除 client key 时预检活跃媒体作业
-	//（media_jobs.client_key_id 是 ON DELETE RESTRICT 外键）并清理终态
-	// 作业行——缺失时退回旧行为（依赖 FK 报错落 500）。
-	mediaJobs repository.MediaJobRepository
+	billingOwner  string
 }
 
 type billingReservationRepository interface {
-	ReserveBillingUsage(ctx context.Context, id uint64, eventID string, amount int64, expiresAt time.Time) (bool, error)
+	ReserveBillingUsage(ctx context.Context, id uint64, eventID string, amount int64, expiresAt time.Time, scope repository.BillingReservationScope) (bool, error)
 	CancelBillingReservation(ctx context.Context, eventID string) error
-	CleanupExpiredBillingReservations(ctx context.Context, now time.Time, limit int, protectedEventIDs ...[]string) (int, error)
+	CleanupExpiredBillingReservations(ctx context.Context, now time.Time, limit int, scope repository.BillingReservationScope) (int, error)
 }
 
 type internalKeyInspector interface {
 	CountInternalKeys(context.Context, []uint64) (int64, error)
 }
 
-func NewService(keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher security.Cryptor) *Service {
-	service := &Service{keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, activeBilling: make(map[string]struct{})}
+func NewService(billingOwner string, keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher security.Cryptor) *Service {
+	service := &Service{billingOwner: strings.TrimSpace(billingOwner), keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, activeBilling: make(map[string]struct{})}
 	service.UpdateDefaults(defaultRPM, defaultMax)
 	return service
-}
-
-// SetMediaJobRepository 注入媒体作业仓储（可选依赖）：使 BatchDelete 能以
-// 可操作的冲突错误替代 FK RESTRICT 落下的裸 500（round 51）。
-func (s *Service) SetMediaJobRepository(mediaJobs repository.MediaJobRepository) {
-	s.mediaJobs = mediaJobs
 }
 
 func (s *Service) UpdateDefaults(defaultRPM, defaultMax int) {
@@ -187,6 +168,17 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 	if !providerScopeValid || !tierScopeValid {
 		return Created{}, invalidInput("providerScope 或 tierScope 无效")
 	}
+	var requestedScope clientkeydomain.ModelScope
+	if input.ModelScope != nil {
+		requestedScope = *input.ModelScope
+		if requestedScope == "" {
+			return Created{}, invalidInput("modelScope 无效")
+		}
+	}
+	modelScope, allowedModels, err := clientkeydomain.NormalizeModelAccess(requestedScope, input.AllowedModels)
+	if err != nil {
+		return Created{}, invalidInput(err.Error())
+	}
 	prefix, err := security.NewHexToken(6)
 	if err != nil {
 		return Created{}, err
@@ -219,7 +211,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 	value, err := s.keys.Create(ctx, clientkeydomain.Key{
 		Name: strings.TrimSpace(input.Name), Prefix: prefix, SecretHash: security.HashToken(raw), EncryptedSecret: encryptedSecret,
 		Enabled: input.Enabled, ExpiresAt: input.ExpiresAt, RPMLimit: input.RPMLimit, MaxConcurrent: input.MaxConcurrent,
-		BillingLimitUSDTicks: input.BillingLimitUSDTicks, AllowModelAliases: input.AllowModelAliases, AllowedModels: input.AllowedModels,
+		BillingLimitUSDTicks: input.BillingLimitUSDTicks, AllowModelAliases: input.AllowModelAliases, AllowedModels: allowedModels, ModelScope: modelScope,
 		ProviderScope: providerScope, TierScope: tierScope,
 	})
 	if err != nil {
@@ -261,59 +253,11 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (cli
 	if value.InternalKind != "" {
 		return clientkeydomain.Key{}, ErrSystemManaged
 	}
-	if input.Name != nil {
-		value.Name = strings.TrimSpace(*input.Name)
-		if value.Name == "" {
-			return clientkeydomain.Key{}, invalidInput("Key 名称不能为空")
-		}
+	patch, err := input.Normalize()
+	if err != nil {
+		return clientkeydomain.Key{}, invalidInput(err.Error())
 	}
-	if input.Enabled != nil {
-		value.Enabled = *input.Enabled
-	}
-	if input.ClearExpiresAt {
-		value.ExpiresAt = nil
-	} else if input.ExpiresAt != nil {
-		value.ExpiresAt = input.ExpiresAt
-	}
-	if input.RPMLimit != nil {
-		if *input.RPMLimit < 0 || *input.RPMLimit > clientkeydomain.MaxRPMLimit {
-			return clientkeydomain.Key{}, invalidInput("rpmLimit 必须在 0 到 100000 之间")
-		}
-		value.RPMLimit = *input.RPMLimit
-	}
-	if input.MaxConcurrent != nil {
-		if *input.MaxConcurrent < 0 || *input.MaxConcurrent > clientkeydomain.MaxConcurrent {
-			return clientkeydomain.Key{}, invalidInput("maxConcurrent 必须在 0 到 1024 之间")
-		}
-		value.MaxConcurrent = *input.MaxConcurrent
-	}
-	if input.BillingLimitUSDTicks != nil {
-		if *input.BillingLimitUSDTicks < 0 || *input.BillingLimitUSDTicks > clientkeydomain.MaxBillingLimitTicks {
-			return clientkeydomain.Key{}, invalidInput("billingLimitUsdTicks 超出允许范围")
-		}
-		value.BillingLimitUSDTicks = *input.BillingLimitUSDTicks
-	}
-	if input.AllowModelAliases != nil {
-		value.AllowModelAliases = *input.AllowModelAliases
-	}
-	if input.AllowedModels != nil {
-		value.AllowedModels = *input.AllowedModels
-	}
-	if input.ProviderScope != nil {
-		providerScope, valid := clientkeydomain.NormalizeProviderScope(*input.ProviderScope)
-		if !valid {
-			return clientkeydomain.Key{}, invalidInput("providerScope 无效")
-		}
-		value.ProviderScope = providerScope
-	}
-	if input.TierScope != nil {
-		tierScope, valid := clientkeydomain.NormalizeTierScope(*input.TierScope)
-		if !valid {
-			return clientkeydomain.Key{}, invalidInput("tierScope 无效")
-		}
-		value.TierScope = tierScope
-	}
-	updated, err := s.keys.Update(ctx, value)
+	updated, err := s.keys.Patch(ctx, id, patch)
 	if err == nil {
 		s.authCache.deleteID(id)
 	}
@@ -329,7 +273,7 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 		return ErrSystemManaged
 	}
 	if err := s.keys.Delete(ctx, id); err != nil {
-		return mapRepositoryError(err)
+		return mapDeletionError(err)
 	}
 	s.touches.deleteID(id)
 	s.authCache.deleteID(id)
@@ -353,7 +297,7 @@ func (s *Service) BatchSetEnabled(ctx context.Context, ids []uint64, enabled boo
 	return updated, err
 }
 
-// BatchDelete 原子删除客户端 Key 及其模型权限。
+// BatchDelete 原子删除普通客户端 Key、关系与满足 M17 释放条件的作业/票据。
 func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) {
 	values, err := normalizeBatchIDs(ids)
 	if err != nil {
@@ -362,25 +306,12 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	if err := s.rejectInternalKeys(ctx, values); err != nil {
 		return 0, err
 	}
-	if s.mediaJobs != nil {
-		// media_jobs.client_key_id 是 ON DELETE RESTRICT：作业行存在时
-		// DeleteMany 被 FK 拒绝并落裸 500。活跃作业给出可操作的冲突；
-		// 终态作业只剩归档价值（审计行有 client_key_name 快照），随删。
-		if active, activeErr := s.mediaJobs.CountActiveMediaJobsByClientKeys(ctx, values); activeErr != nil {
-			return 0, activeErr
-		} else if active > 0 {
-			return 0, fmt.Errorf("%w: %d 个媒体作业仍在执行（queued/in_progress），请先等待完成或清理后再删除该 Key", ErrConflict, active)
-		}
-		if _, terminalErr := s.mediaJobs.DeleteTerminalMediaJobsByClientKeys(ctx, values); terminalErr != nil {
-			return 0, terminalErr
-		}
-	}
 	deleted, err := s.keys.DeleteMany(ctx, values)
 	if err == nil {
 		s.touches.deleteIDs(values)
 		s.authCache.deleteIDs(values)
 	}
-	return deleted, err
+	return deleted, mapDeletionError(err)
 }
 
 // Authenticate 校验 API Key、RPM 和并发限制，并返回请求结束时必须调用的 release。
@@ -390,21 +321,22 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
 	}
 	now := time.Now().UTC()
-	if s.authCache.getNegative(prefix, now) {
+	lookup := s.authCache.lookup(prefix, now)
+	if lookup.negative {
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
 	}
-	value, cached := s.authCache.get(prefix, now)
-	if !cached {
+	value := lookup.value
+	if !lookup.found {
 		var err error
 		value, err = s.keys.GetByPrefix(ctx, prefix)
 		if err != nil {
 			if !errors.Is(err, repository.ErrNotFound) {
 				return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 客户端 Key 仓储: %v", ErrRuntimeUnavailable, err)
 			}
-			s.authCache.putNegative(prefix, now)
+			s.authCache.putNegative(prefix, lookup.generation, now)
 			return clientkeydomain.Key{}, nil, ErrInvalidKey
 		}
-		s.authCache.put(prefix, value, now)
+		s.authCache.put(prefix, value, lookup.generation, now)
 	}
 	if value.InternalKind != "" {
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
@@ -447,13 +379,9 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 			return clientkeydomain.Key{}, nil, &RateLimitedError{RetryAfter: retryAfter}
 		}
 	}
-	if s.touches.shouldTouch(value.ID, now) {
-		// lastUsedAt 仅服务管理面展示;同步 UPDATE 出现在请求路径(每 key
-		// 每分钟一次)是不必要的串行点。移出请求生命周期:断开连接不打断
-		// 簿记(WithoutCancel),丢失一次 Touch 对功能无影响。
-		touchCtx, touchCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	if touchCtx, finish := s.touches.start(ctx, value.ID, now); finish != nil {
 		go func(keyID uint64) {
-			defer touchCancel()
+			defer finish()
 			_ = s.keys.Touch(touchCtx, keyID)
 		}(value.ID)
 	}
@@ -475,7 +403,7 @@ func (s *Service) rejectInternalKeys(ctx context.Context, ids []uint64) error {
 	return nil
 }
 
-// CanUseModel 判断空权限列表代表全部模型，否则要求显式授权。
+// CanUseModel applies M08 model authorization independently of relation count.
 func (s *Service) CanUseModel(value clientkeydomain.Key, modelID uint64) bool {
 	return value.AllowsModel(modelID)
 }
@@ -485,6 +413,9 @@ func (s *Service) ReserveBilling(ctx context.Context, key clientkeydomain.Key, e
 	if key.BillingLimitUSDTicks <= 0 || amount <= 0 {
 		return false, nil
 	}
+	if s.billingOwner == "" || len(s.billingOwner) > 64 {
+		return false, fmt.Errorf("%w: 持久计费预留缺少有效实例归属", ErrRuntimeUnavailable)
+	}
 	repo, ok := s.keys.(billingReservationRepository)
 	if !ok {
 		return false, fmt.Errorf("%w: 客户端 Key 仓储不支持计费预留", ErrRuntimeUnavailable)
@@ -492,7 +423,7 @@ func (s *Service) ReserveBilling(ctx context.Context, key clientkeydomain.Key, e
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	reserved, err := repo.ReserveBillingUsage(ctx, key.ID, eventID, amount, time.Now().UTC().Add(ttl))
+	reserved, err := repo.ReserveBillingUsage(ctx, key.ID, eventID, amount, time.Now().UTC().Add(ttl), s.billingScope())
 	if errors.Is(err, repository.ErrLimitExceeded) {
 		perfmetrics.Default.Inc("billing_reservation_total", perfmetrics.Labels{Subsystem: "billing", Operation: "reserve", Outcome: "limit_exceeded"})
 		return false, ErrBillingLimit
@@ -525,6 +456,18 @@ func (s *Service) CancelBilling(ctx context.Context, eventID string) error {
 	return nil
 }
 
+// ProtectBillingBatch restores/retains the activity of durably accepted facts.
+// M19 invokes it before its worker or startup cleanup can observe them.
+func (s *Service) ProtectBillingBatch(eventIDs []string) {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	for _, eventID := range eventIDs {
+		if eventID != "" {
+			s.activeBilling[eventID] = struct{}{}
+		}
+	}
+}
+
 // CompleteBilling removes the process-local active marker after the audit and
 // billing transaction commits or the reservation is explicitly cancelled.
 func (s *Service) CompleteBilling(eventID string) {
@@ -535,12 +478,6 @@ func (s *Service) CompleteBilling(eventID string) {
 }
 
 func (s *Service) CompleteBillingBatch(eventIDs []string) {
-	s.ReleaseBillingProtectionBatch(eventIDs)
-}
-
-// ReleaseBillingProtectionBatch removes process-local activity markers. The
-// durable reservation remains authoritative until commit, cancel, or expiry.
-func (s *Service) ReleaseBillingProtectionBatch(eventIDs []string) {
 	if len(eventIDs) == 0 {
 		return
 	}
@@ -551,19 +488,26 @@ func (s *Service) ReleaseBillingProtectionBatch(eventIDs []string) {
 	s.activeMu.Unlock()
 }
 
-// CleanupExpiredBilling 释放进程异常遗留的过期预留。
-func (s *Service) CleanupExpiredBilling(ctx context.Context, limit int) (int, error) {
-	repo, ok := s.keys.(billingReservationRepository)
-	if !ok {
-		return 0, fmt.Errorf("%w: 客户端 Key 仓储不支持计费预留", ErrRuntimeUnavailable)
-	}
+func (s *Service) billingScope() repository.BillingReservationScope {
 	s.activeMu.RLock()
+	defer s.activeMu.RUnlock()
 	protected := make([]string, 0, len(s.activeBilling))
 	for eventID := range s.activeBilling {
 		protected = append(protected, eventID)
 	}
-	s.activeMu.RUnlock()
-	cleaned, err := repo.CleanupExpiredBillingReservations(ctx, time.Now().UTC(), limit, protected)
+	return repository.BillingReservationScope{OwnerID: s.billingOwner, ProtectedEventIDs: protected}
+}
+
+// CleanupExpiredBilling 释放进程异常遗留的过期预留。
+func (s *Service) CleanupExpiredBilling(ctx context.Context, limit int) (int, error) {
+	if s.billingOwner == "" || len(s.billingOwner) > 64 {
+		return 0, fmt.Errorf("%w: 持久计费预留缺少有效实例归属", ErrRuntimeUnavailable)
+	}
+	repo, ok := s.keys.(billingReservationRepository)
+	if !ok {
+		return 0, fmt.Errorf("%w: 客户端 Key 仓储不支持计费预留", ErrRuntimeUnavailable)
+	}
+	cleaned, err := repo.CleanupExpiredBillingReservations(ctx, time.Now().UTC(), limit, s.billingScope())
 	outcome := "success"
 	if err != nil {
 		outcome = "failed"
@@ -605,6 +549,9 @@ func invalidInput(message string) error {
 
 // mapRepositoryError 将仓储错误转换为客户端 Key 应用错误。
 func mapRepositoryError(err error) error {
+	if errors.Is(err, repository.ErrInvalidRecord) {
+		return invalidInput("allowedModelIds 包含不存在或无效的模型")
+	}
 	if errors.Is(err, repository.ErrNotFound) {
 		return ErrNotFound
 	}
@@ -612,4 +559,14 @@ func mapRepositoryError(err error) error {
 		return ErrConflict
 	}
 	return err
+}
+
+// Preserve M17's actionable reason while exposing M08's conflict contract.
+func mapDeletionError(err error) error {
+	for _, reason := range []error{media.ErrJobActive, media.ErrJobCompletionPending} {
+		if errors.Is(err, reason) {
+			return fmt.Errorf("%w: %w", ErrConflict, reason)
+		}
+	}
+	return mapRepositoryError(err)
 }

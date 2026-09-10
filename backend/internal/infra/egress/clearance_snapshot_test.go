@@ -42,6 +42,7 @@ func TestRefreshDueClearancesViaSnapshotCacheSemantics(t *testing.T) {
 		ClearanceFingerprint: "", // 指纹不匹配 → 持久状态不算新鲜 → 应触发求解
 	})
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: solver.URL, TargetURL: "https://x.example/"})
 
 	// (1) 指纹不匹配的持久状态必须触发求解(经快照缓存路径)。

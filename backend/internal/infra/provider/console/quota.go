@@ -14,10 +14,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
-const (
-	consoleQuotaTimeout                = 30 * time.Second
-	consolePredictedChatRecoveryWindow = 24 * time.Hour
-)
+const consoleQuotaTimeout = 30 * time.Second
 
 func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) (provider.QuotaSnapshot, error) {
 	windows, syncedAt, err := a.syncConsoleQuotas(ctx, credential)
@@ -60,7 +57,7 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 	endpoint := consoleV1Endpoint(a.config().BaseURL, "/usage")
 	response, err := a.doDPoPRequest(requestCtx, credential, ssoToken, lease, http.MethodGet, endpoint, nil, "application/json")
 	if err != nil {
-		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return nil, time.Time{}, err
 	}
 	data, truncated, readErr := provider.ReadDiagnosticBody(response.Body)
@@ -78,7 +75,7 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 			lease.InvalidateClearance()
 		}
 		if !dpopRequired {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+			lease.Observe(response.StatusCode, nil)
 		}
 		suffix := ""
 		if truncated {
@@ -86,7 +83,10 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 		}
 		return nil, time.Time{}, fmt.Errorf("Console usage 接口返回 %d%s", response.StatusCode, suffix)
 	}
-	a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
+	if truncated {
+		return nil, time.Time{}, fmt.Errorf("Console usage 响应超过 64 KiB")
+	}
 	var payload struct {
 		Quotas []struct {
 			Kind           string `json:"kind"`
@@ -113,19 +113,10 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 		if quota.Limit > 0 {
 			usagePercent = float64(quota.Limit-quota.Remaining) / float64(quota.Limit) * 100
 		}
-		windowSeconds := 0
-		var resetAt *time.Time
-		if mode == QuotaMode {
-			windowSeconds = int(consolePredictedChatRecoveryWindow / time.Second)
-			if quota.Remaining == 0 {
-				predicted := now.Add(consolePredictedChatRecoveryWindow)
-				resetAt = &predicted
-			}
-		}
 		byMode[mode] = account.QuotaWindow{
 			AccountID: credential.ID, Mode: mode, Remaining: quota.Remaining, Total: quota.Limit,
-			UsagePercent: usagePercent, WindowSeconds: windowSeconds, ResetAt: resetAt,
-			SyncedAt: &now, Source: account.QuotaSourceUpstream, UpdatedAt: now,
+			UsagePercent: usagePercent,
+			SyncedAt:     &now, Source: account.QuotaSourceUpstream, UpdatedAt: now,
 		}
 	}
 	for _, mode := range []string{QuotaMode, QuotaModeImage, QuotaModeVideo} {

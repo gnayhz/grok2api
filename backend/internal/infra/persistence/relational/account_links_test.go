@@ -33,10 +33,10 @@ func TestReconcileProviderLinksUsesOnlyHighConfidenceIdentity(t *testing.T) {
 		UserID: "user-1", EgressIdentity: identity,
 	})
 	nsfwEnabledAt := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
-	if err := repo.MarkWebNSFWEnabled(ctx, web.ID, nsfwEnabledAt); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, web.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileNSFWEnabled, OccurredAt: nsfwEnabledAt}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkWebTermsAccepted(ctx, web.ID, account.CurrentWebTermsVersion, nsfwEnabledAt); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, web.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileTermsAccepted, TermsVersion: account.CurrentWebTermsVersion, OccurredAt: nsfwEnabledAt}); err != nil {
 		t.Fatal(err)
 	}
 	console := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
@@ -89,7 +89,8 @@ func TestReconcileProviderLinksUsesOnlyHighConfidenceIdentity(t *testing.T) {
 			t.Fatalf("routing identities for %s = %#v", provider, values)
 		}
 	}
-	if _, err := repo.UpdateTokens(ctx, web.ID, "rotated-encrypted-token", "", time.Time{}, 0); err != nil {
+	web.EncryptedAccessToken = "rotated-encrypted-token"
+	if _, _, err := repo.UpsertByIdentity(ctx, web); err != nil {
 		t.Fatal(err)
 	}
 	web, err = repo.Get(ctx, web.ID)
@@ -156,11 +157,11 @@ func TestInitializeSchemaBackfillsStableWebEgressIdentity(t *testing.T) {
 	build := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 		Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "legacy-build", SourceKey: "legacy-build",
 	})
-	if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := repo.SaveQuotaWindows(ctx, web.ID, account.WebTierAuto, now, []account.QuotaWindow{{
+	if err := saveQuotaWindowsFixture(repo, ctx, web.ID, account.WebTierAuto, now, []account.QuotaWindow{{
 		AccountID: web.ID, Mode: "weekly", Remaining: 7, Total: 10, WindowSeconds: 3600, SyncedAt: &now, Source: account.QuotaSourceUpstream,
 	}}); err != nil {
 		t.Fatal(err)
@@ -264,7 +265,7 @@ func TestResolveLinkedDeleteIDsWebAndTwoHop(t *testing.T) {
 	console := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 		Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: "console-linked", SourceKey: "console-sso:" + strings.Repeat("e", 64), UserID: "u-link",
 	})
-	if err := repo.LinkWebToBuild(ctx, webLinked.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, webLinked.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.ReconcileProviderLinks(ctx, webLinked.ID); err != nil {
@@ -404,7 +405,7 @@ func TestDeleteManyRejectsWhenLinkedPeerHasActiveMediaJob(t *testing.T) {
 	build := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 		Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "build-media", SourceKey: "build-media", UserID: "u-media",
 	})
-	if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	resolution, err := repo.ResolveLinkedDeleteIDs(ctx, account.ProviderWeb, []uint64{web.ID}, []account.Provider{account.ProviderBuild})
@@ -465,7 +466,7 @@ func TestDeleteManyWithLinkedAtomicWebBothAndMediaBlock(t *testing.T) {
 	console := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 		Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: "console-atomic", SourceKey: "console-sso:" + digest, UserID: "u-atomic",
 	})
-	if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.ReconcileProviderLinks(ctx, web.ID); err != nil {
@@ -500,7 +501,7 @@ func TestDeleteManyWithLinkedAtomicWebBothAndMediaBlock(t *testing.T) {
 	build2 := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 		Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "build-media2", SourceKey: "build-media2", UserID: "u-media2",
 	})
-	if err := repo.LinkWebToBuild(ctx, web2.ID, build2.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web2.CredentialRef(), build2.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	key := clientKeyModel{Name: "atomic-media-key", Prefix: "atomic-media-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
@@ -539,7 +540,7 @@ func TestDeleteManyWithLinkedAtomicWebBothAndMediaBlock(t *testing.T) {
 	build3 := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 		Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "build-clean3", SourceKey: "build-clean3", UserID: "u-clean3",
 	})
-	if err := repo.LinkWebToBuild(ctx, web3.ID, build3.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, web3.CredentialRef(), build3.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	skipOutcome, err := repo.DeleteManyWithLinked(ctx, account.ProviderWeb, []uint64{web2.ID, web3.ID}, []account.Provider{account.ProviderBuild}, true)
@@ -595,7 +596,7 @@ func TestDeleteAccountStatusBatchWithLinkedCursorAndSkip(t *testing.T) {
 		build := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{
 			Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: fmt.Sprintf("cl-build-%d", i), SourceKey: fmt.Sprintf("cl-build-%d", i), UserID: fmt.Sprintf("cl-%d", i),
 		})
-		if err := repo.LinkWebToBuild(ctx, web.ID, build.ID); err != nil {
+		if err := repo.LinkWebToBuild(ctx, web.CredentialRef(), build.CredentialRef()); err != nil {
 			t.Fatal(err)
 		}
 		disable(web.ID)
@@ -685,7 +686,7 @@ func TestCountCleanupWithLinked(t *testing.T) {
 	webA := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "pv-a", SourceKey: "sso:" + digestA, UserID: "pv-a"})
 	buildA := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "pv-a-build", SourceKey: "pv-a-build", UserID: "pv-a"})
 	consoleA := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: "pv-a-console", SourceKey: "console-sso:" + digestA, UserID: "pv-a"})
-	if err := repo.LinkWebToBuild(ctx, webA.ID, buildA.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, webA.CredentialRef(), buildA.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.ReconcileProviderLinks(ctx, webA.ID); err != nil {
@@ -707,7 +708,7 @@ func TestCountCleanupWithLinked(t *testing.T) {
 	digestD := strings.Repeat("s", 64)
 	webD := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "pv-d", SourceKey: "sso:" + digestD, UserID: "pv-d"})
 	buildD := createLinkedAccountTestCredential(t, ctx, repo, account.Credential{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "pv-d-build", SourceKey: "pv-d-build", UserID: "pv-d"})
-	if err := repo.LinkWebToBuild(ctx, webD.ID, buildD.ID); err != nil {
+	if err := repo.LinkWebToBuild(ctx, webD.CredentialRef(), buildD.CredentialRef()); err != nil {
 		t.Fatal(err)
 	}
 	_ = consoleA

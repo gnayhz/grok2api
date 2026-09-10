@@ -30,31 +30,33 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type createRequest struct {
-	Name                 string    `json:"name" binding:"required"`
-	Enabled              *bool     `json:"enabled"`
-	ExpiresAt            string    `json:"expiresAt"`
-	RPMLimit             *int      `json:"rpmLimit"`
-	MaxConcurrent        *int      `json:"maxConcurrent"`
-	BillingLimitUSDTicks int64     `json:"billingLimitUsdTicks"`
-	AllowModelAliases    *bool     `json:"allowModelAliases"`
-	AllowedModelIDs      []string  `json:"allowedModelIds"`
-	ProviderScope        *[]string `json:"providerScope"`
-	TierScope            *[]string `json:"tierScope"`
-	AccountPool          *string   `json:"accountPool"`
+	Name                 string                      `json:"name" binding:"required"`
+	Enabled              *bool                       `json:"enabled"`
+	ExpiresAt            string                      `json:"expiresAt"`
+	RPMLimit             *int                        `json:"rpmLimit"`
+	MaxConcurrent        *int                        `json:"maxConcurrent"`
+	BillingLimitUSDTicks int64                       `json:"billingLimitUsdTicks"`
+	AllowModelAliases    *bool                       `json:"allowModelAliases"`
+	AllowedModelIDs      []string                    `json:"allowedModelIds"`
+	ModelScope           *clientkeydomain.ModelScope `json:"modelScope"`
+	ProviderScope        *[]string                   `json:"providerScope"`
+	TierScope            *[]string                   `json:"tierScope"`
+	AccountPool          *string                     `json:"accountPool"`
 }
 
 type updateRequest struct {
-	Name                 *string   `json:"name"`
-	Enabled              *bool     `json:"enabled"`
-	ExpiresAt            *string   `json:"expiresAt"`
-	RPMLimit             *int      `json:"rpmLimit"`
-	MaxConcurrent        *int      `json:"maxConcurrent"`
-	BillingLimitUSDTicks *int64    `json:"billingLimitUsdTicks"`
-	AllowModelAliases    *bool     `json:"allowModelAliases"`
-	AllowedModelIDs      *[]string `json:"allowedModelIds"`
-	ProviderScope        *[]string `json:"providerScope"`
-	TierScope            *[]string `json:"tierScope"`
-	AccountPool          *string   `json:"accountPool"`
+	Name                 *string                     `json:"name"`
+	Enabled              *bool                       `json:"enabled"`
+	ExpiresAt            *string                     `json:"expiresAt"`
+	RPMLimit             *int                        `json:"rpmLimit"`
+	MaxConcurrent        *int                        `json:"maxConcurrent"`
+	BillingLimitUSDTicks *int64                      `json:"billingLimitUsdTicks"`
+	AllowModelAliases    *bool                       `json:"allowModelAliases"`
+	AllowedModelIDs      *[]string                   `json:"allowedModelIds"`
+	ModelScope           *clientkeydomain.ModelScope `json:"modelScope"`
+	ProviderScope        *[]string                   `json:"providerScope"`
+	TierScope            *[]string                   `json:"tierScope"`
+	AccountPool          *string                     `json:"accountPool"`
 }
 
 type batchUpdateRequest struct {
@@ -69,20 +71,22 @@ type batchDeleteRequest struct {
 }
 
 type keyResponse struct {
-	ID                   uint64     `json:"id,string"`
-	Name                 string     `json:"name"`
-	Prefix               string     `json:"prefix"`
-	Enabled              bool       `json:"enabled"`
-	ExpiresAt            *time.Time `json:"expiresAt,omitempty"`
-	RPMLimit             int        `json:"rpmLimit"`
-	MaxConcurrent        int        `json:"maxConcurrent"`
-	BillingLimitUSDTicks int64      `json:"billingLimitUsdTicks"`
-	BilledUsageUSDTicks  int64      `json:"billedUsageUsdTicks"`
-	AllowModelAliases    bool       `json:"allowModelAliases"`
-	AllowedModelIDs      []string   `json:"allowedModelIds"`
-	ProviderScope        []string   `json:"providerScope"`
-	TierScope            []string   `json:"tierScope"`
-	LastUsedAt           *time.Time `json:"lastUsedAt,omitempty"`
+	ID                    uint64                     `json:"id,string"`
+	Name                  string                     `json:"name"`
+	Prefix                string                     `json:"prefix"`
+	Enabled               bool                       `json:"enabled"`
+	ExpiresAt             *time.Time                 `json:"expiresAt,omitempty"`
+	RPMLimit              int                        `json:"rpmLimit"`
+	MaxConcurrent         int                        `json:"maxConcurrent"`
+	BillingLimitUSDTicks  int64                      `json:"billingLimitUsdTicks"`
+	ReservedUsageUSDTicks int64                      `json:"reservedUsageUsdTicks"`
+	BilledUsageUSDTicks   int64                      `json:"billedUsageUsdTicks"`
+	AllowModelAliases     bool                       `json:"allowModelAliases"`
+	AllowedModelIDs       []string                   `json:"allowedModelIds"`
+	ModelScope            clientkeydomain.ModelScope `json:"modelScope"`
+	ProviderScope         []string                   `json:"providerScope"`
+	TierScope             []string                   `json:"tierScope"`
+	LastUsedAt            *time.Time                 `json:"lastUsedAt,omitempty"`
 }
 
 func (h *Handler) list(c *gin.Context) {
@@ -170,7 +174,7 @@ func (h *Handler) create(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidAccountScope", err.Error())
 		return
 	}
-	input := clientkeyapp.CreateInput{Name: request.Name, Enabled: enabled, ExpiresAt: expiresAt, BillingLimitUSDTicks: request.BillingLimitUSDTicks, AllowedModels: modelIDs}
+	input := clientkeyapp.CreateInput{Name: request.Name, Enabled: enabled, ExpiresAt: expiresAt, BillingLimitUSDTicks: request.BillingLimitUSDTicks, AllowedModels: modelIDs, ModelScope: request.ModelScope}
 	if providerScope != nil {
 		input.ProviderScope = *providerScope
 	}
@@ -211,7 +215,7 @@ func (h *Handler) update(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidAccountScope", err.Error())
 		return
 	}
-	input := clientkeyapp.UpdateInput{Name: request.Name, Enabled: request.Enabled, RPMLimit: request.RPMLimit, MaxConcurrent: request.MaxConcurrent, BillingLimitUSDTicks: request.BillingLimitUSDTicks, AllowModelAliases: request.AllowModelAliases, ProviderScope: providerScope, TierScope: tierScope}
+	input := clientkeyapp.UpdateInput{Name: request.Name, Enabled: request.Enabled, RPMLimit: request.RPMLimit, MaxConcurrent: request.MaxConcurrent, BillingLimitUSDTicks: request.BillingLimitUSDTicks, AllowModelAliases: request.AllowModelAliases, ProviderScope: providerScope, TierScope: tierScope, ModelScope: request.ModelScope}
 	if request.ExpiresAt != nil {
 		if *request.ExpiresAt == "" {
 			input.ClearExpiresAt = true
@@ -293,7 +297,7 @@ func newKeyResponse(value clientkeydomain.Key) keyResponse {
 	return keyResponse{
 		ID: value.ID, Name: value.Name, Prefix: value.Prefix, Enabled: value.Enabled, ExpiresAt: value.ExpiresAt,
 		RPMLimit: value.RPMLimit, MaxConcurrent: value.MaxConcurrent, BillingLimitUSDTicks: value.BillingLimitUSDTicks,
-		BilledUsageUSDTicks: value.BilledUsageUSDTicks, AllowModelAliases: value.AllowModelAliases, AllowedModelIDs: ids,
+		BilledUsageUSDTicks: value.BilledUsageUSDTicks, ReservedUsageUSDTicks: value.ReservedUsageUSDTicks, AllowModelAliases: value.AllowModelAliases, AllowedModelIDs: ids, ModelScope: value.ModelScope,
 		ProviderScope: value.ProviderScope.Values(), TierScope: value.TierScope.Values(), LastUsedAt: value.LastUsedAt,
 	}
 }

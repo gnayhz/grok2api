@@ -1,3 +1,4 @@
+import { acceptSessionToken, currentSession, endSession, isCurrentSession, sessionAccessToken, type AdminSession } from "@/shared/auth/session";
 import { createObjectDecoder, hasShape, isString, type ApiDecoder } from "@/shared/api/decoder";
 import { runtimeConfig } from "@/shared/config/runtime-config";
 import { i18n } from "@/shared/i18n";
@@ -16,27 +17,41 @@ export class ApiError extends Error {
   }
 }
 
-let accessToken: string | null = null;
-let refreshPromise: Promise<RefreshResult> | null = null;
-const sessionInvalidatedListeners = new Set<() => void>();
+let refreshEntry: { session: AdminSession; promise: Promise<RefreshResult> } | null = null;
 const refreshLockName = "grok2api:admin-session-refresh";
+const sessionRefreshTimeoutMs = 5_000;
 const maxEventStreamBufferCharacters = 1 << 20;
 const eventStreamInactivityTimeoutMs = 60_000;
 
-export type RefreshResult = "refreshed" | "invalid" | "unavailable";
+export type RefreshResult = "refreshed" | "invalid" | "unavailable" | "superseded";
 
-export function setAccessToken(token: string | null): void {
-  accessToken = token;
+// Detach caller signals at completion, and reject promptly even if a custom
+// transport finishes late. Fetch still receives the signal to stop its body.
+function requestScope(session: AdminSession, caller?: AbortSignal | null) {
+  const controller = new AbortController();
+  const signals = caller ? [session.signal, caller] : [session.signal];
+  const abort = (event: Event) => controller.abort((event.target as AbortSignal).reason);
+  for (const signal of signals) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+  return { signal: controller.signal, dispose: () => signals.forEach(signal => signal.removeEventListener("abort", abort)) };
 }
 
-export function subscribeSessionInvalidated(listener: () => void): () => void {
-  sessionInvalidatedListeners.add(listener);
-  return () => sessionInvalidatedListeners.delete(listener);
-}
-
-function invalidateSession(): void {
-  accessToken = null;
-  sessionInvalidatedListeners.forEach((listener) => listener());
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    promise.then(value => {
+      signal.removeEventListener("abort", abort);
+      if (signal.aborted) reject(signal.reason);
+      else resolve(value);
+    }, error => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+  });
 }
 
 // round 111 导出：创意工作台调用 /v1/* 拿到的 OpenAI 兼容错误码需要同一
@@ -46,8 +61,9 @@ export function localizedErrorMessage(code: string, fallback: string): string {
   return i18n.exists(key) ? i18n.t(key) : fallback;
 }
 
-async function parseResponse<T>(response: Response, decode: ApiDecoder<T>): Promise<T> {
+async function parseResponse<T>(response: Response, decode: ApiDecoder<T>, signal?: AbortSignal): Promise<T> {
   const payload: unknown = await response.json().catch(() => null);
+  signal?.throwIfAborted();
   if (!response.ok) {
     const error = readErrorEnvelope(payload);
     const code = error.code ?? "requestFailed";
@@ -76,45 +92,49 @@ function readErrorEnvelope(payload: unknown): { code?: string; message?: string;
   };
 }
 
-async function requestRefresh(): Promise<RefreshResult> {
+async function requestRefresh(session: AdminSession): Promise<RefreshResult> {
+  if (!isCurrentSession(session)) return "superseded";
+  const timeoutController = new AbortController();
+  const timeout = window.setTimeout(() => timeoutController.abort(), sessionRefreshTimeoutMs);
+  const scope = requestScope(session, timeoutController.signal);
   try {
-    const response = await fetch(`${runtimeConfig.apiBaseUrl}/api/admin/v1/auth/refresh`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
+    const response = await abortable(fetch(`${runtimeConfig.apiBaseUrl}/api/admin/v1/auth/refresh`, {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}", signal: scope.signal,
+    }), scope.signal);
     if (response.status === 401) {
-      invalidateSession();
+      void response.body?.cancel().catch(() => undefined);
+      endSession(session);
       return "invalid";
     }
-    const tokens = await parseResponse(response, decodeAuthTokensDTO);
-    setAccessToken(tokens.accessToken);
-    return "refreshed";
+    const tokens = await abortable(parseResponse(response, decodeAuthTokensDTO, scope.signal), scope.signal);
+    return acceptSessionToken(session, tokens.accessToken) ? "refreshed" : "superseded";
   } catch {
-    return "unavailable";
+    return isCurrentSession(session) ? "unavailable" : "superseded";
+  } finally {
+    scope.dispose();
+    window.clearTimeout(timeout);
   }
 }
 
-async function requestRefreshWithBrowserLock(): Promise<RefreshResult> {
-  if (!("locks" in navigator)) {
-    return requestRefresh();
-  }
+async function requestRefreshWithBrowserLock(session: AdminSession): Promise<RefreshResult> {
+  if (!("locks" in navigator)) return requestRefresh(session);
   try {
-    return await navigator.locks.request(refreshLockName, requestRefresh);
+    // Retain the bounded, best-effort cross-tab lock. Server rotation remains
+    // authoritative; session checks also apply inside a delayed lock callback.
+    return await navigator.locks.request(refreshLockName, { ifAvailable: true }, () => requestRefresh(session));
   } catch {
-    return "unavailable";
+    return isCurrentSession(session) ? "unavailable" : "superseded";
   }
 }
 
-export async function refreshAccessToken(): Promise<RefreshResult> {
-  if (!refreshPromise) {
-    refreshPromise = requestRefreshWithBrowserLock()
-      .finally(() => {
-        refreshPromise = null;
-      });
+export async function refreshAccessToken(session: AdminSession = currentSession()): Promise<RefreshResult> {
+  if (!isCurrentSession(session)) return "superseded";
+  if (!refreshEntry || refreshEntry.session !== session) {
+    const entry = { session, promise: requestRefreshWithBrowserLock(session) };
+    refreshEntry = entry;
+    void entry.promise.finally(() => { if (refreshEntry === entry) refreshEntry = null; });
   }
-  return refreshPromise;
+  return refreshEntry.promise;
 }
 
 type RequestOptions = Omit<RequestInit, "body"> & {
@@ -123,7 +143,7 @@ type RequestOptions = Omit<RequestInit, "body"> & {
   retryAuth?: boolean;
 };
 
-async function sendApiRequest(path: string, options: RequestOptions): Promise<Response> {
+async function sendApiRequest(path: string, options: RequestOptions, session: AdminSession): Promise<Response> {
   const { authenticated = true, retryAuth, body, headers, ...requestInit } = options;
   void retryAuth;
   const requestHeaders = new Headers(headers);
@@ -135,6 +155,7 @@ async function sendApiRequest(path: string, options: RequestOptions): Promise<Re
     requestHeaders.set("Content-Type", "application/json");
     requestBody = JSON.stringify(body);
   }
+  const accessToken = sessionAccessToken(session);
   if (authenticated && accessToken) {
     requestHeaders.set("Authorization", `Bearer ${accessToken}`);
   }
@@ -147,29 +168,45 @@ async function sendApiRequest(path: string, options: RequestOptions): Promise<Re
   });
 }
 
-export async function apiRequest<T>(path: string, options: RequestOptions, decode: ApiDecoder<T>): Promise<T> {
+async function withApiResponse<T>(path: string, options: RequestOptions, consume: (response: Response, signal: AbortSignal) => Promise<T>): Promise<T> {
+  const session = currentSession();
+  const scope = requestScope(session, options.signal);
   const { authenticated = true, retryAuth = true } = options;
-  let response: Response;
+  let response: Response | undefined;
   try {
-    response = await sendApiRequest(path, options);
-  } catch {
-    // fetch 本身抛出（服务不可达/断网/DNS 失败）此前把浏览器原始
-    // TypeError("Failed to fetch") 直接冒泡到 ErrorState——未本地化且
-    // 语言混杂。统一归类为本地化的 networkError。
-    throw new ApiError(0, "networkError", localizedErrorMessage("networkError", "Cannot reach the server. Check the network or retry later."));
-  }
-
-  if (response.status === 401 && authenticated && retryAuth) {
-    const refreshResult = await refreshAccessToken();
-    if (refreshResult === "refreshed") {
-      return apiRequest<T>(path, { ...options, retryAuth: false }, decode);
-    }
-    if (refreshResult === "unavailable") {
+    for (let attempt = 0; ; attempt++) {
+      scope.signal.throwIfAborted();
+      try {
+        response = await abortable(sendApiRequest(path, { ...options, signal: scope.signal }, session), scope.signal);
+      } catch (error) {
+        scope.signal.throwIfAborted();
+        if (error instanceof ApiError) throw error;
+        throw new ApiError(0, "networkError", localizedErrorMessage("networkError", "Cannot reach the server. Check the network or retry later."));
+      }
+      if (response.status !== 401 || !authenticated) break;
+      void response.body?.cancel().catch(() => undefined);
+      if (!retryAuth || attempt > 0) {
+        endSession(session);
+        scope.signal.throwIfAborted();
+      }
+      const result = await abortable(refreshAccessToken(session), scope.signal);
+      scope.signal.throwIfAborted();
+      if (result === "refreshed") continue;
       throw new ApiError(503, "sessionRefreshUnavailable", localizedErrorMessage("sessionRefreshUnavailable", "Unable to refresh the session. Please retry."));
     }
+    const result = await abortable(consume(response, scope.signal), scope.signal);
+    scope.signal.throwIfAborted();
+    return result;
+  } catch (error) {
+    void response?.body?.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    scope.dispose();
   }
+}
 
-  return parseResponse(response, decode);
+export async function apiRequest<T>(path: string, options: RequestOptions, decode: ApiDecoder<T>): Promise<T> {
+  return withApiResponse(path, options, (response, signal) => parseResponse(response, decode, signal));
 }
 
 export type ApiStreamEvent<T> = {
@@ -179,24 +216,12 @@ export type ApiStreamEvent<T> = {
 
 // apiEventStream 使用现有管理员鉴权发起 POST SSE，并正确处理任意分块边界。
 export async function apiEventStream<T>(path: string, options: RequestOptions, decode: ApiDecoder<T>, onEvent: (value: ApiStreamEvent<T>) => void): Promise<void> {
-  const { authenticated = true, retryAuth = true } = options;
-  let response: Response;
-  try {
-    response = await sendApiRequest(path, options);
-  } catch {
-    throw new ApiError(0, "networkError", localizedErrorMessage("networkError", "Cannot reach the server. Check the network or retry later."));
-  }
-  if (response.status === 401 && authenticated && retryAuth) {
-    const refreshResult = await refreshAccessToken();
-    if (refreshResult === "refreshed") {
-      return apiEventStream(path, { ...options, retryAuth: false }, decode, onEvent);
-    }
-    if (refreshResult === "unavailable") {
-      throw new ApiError(503, "sessionRefreshUnavailable", localizedErrorMessage("sessionRefreshUnavailable", "Unable to refresh the session. Please retry."));
-    }
-  }
+  return withApiResponse(path, options, (response, signal) => consumeEventStream(response, signal, decode, onEvent));
+}
+
+async function consumeEventStream<T>(response: Response, signal: AbortSignal, decode: ApiDecoder<T>, onEvent: (value: ApiStreamEvent<T>) => void): Promise<void> {
   if (!response.ok) {
-    await parseResponse(response, decodeNever);
+    await parseResponse(response, decodeNever, signal);
   }
   if (!response.body) {
     throw new ApiError(response.status, "invalidResponse", localizedErrorMessage("invalidResponse", "Server returned an invalid response"));
@@ -208,9 +233,12 @@ export async function apiEventStream<T>(path: string, options: RequestOptions, d
   }
 
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
   const decoder = new TextDecoder();
   let buffer = "";
   const dispatch = (block: string) => {
+    signal.throwIfAborted();
     let event = "message";
     const data: string[] = [];
     block.split("\n").forEach((line) => {
@@ -230,7 +258,8 @@ export async function apiEventStream<T>(path: string, options: RequestOptions, d
 
   try {
     for (;;) {
-      const { done, value } = await readEventStreamChunk(reader, response.status);
+      const { done, value } = await readEventStreamChunk(reader, response.status, signal);
+      signal.throwIfAborted();
       buffer += decoder.decode(value, { stream: !done });
       buffer = buffer.replaceAll("\r\n", "\n");
       let boundary = buffer.indexOf("\n\n");
@@ -252,11 +281,12 @@ export async function apiEventStream<T>(path: string, options: RequestOptions, d
     await reader.cancel().catch(() => undefined);
     throw error;
   } finally {
+    signal.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
 }
 
-async function readEventStreamChunk(reader: ReadableStreamDefaultReader<Uint8Array>, status: number): Promise<ReadableStreamReadResult<Uint8Array>> {
+async function readEventStreamChunk(reader: ReadableStreamDefaultReader<Uint8Array>, status: number, signal: AbortSignal): Promise<ReadableStreamReadResult<Uint8Array>> {
   let timeout = 0;
   const inactivity = new Promise<never>((_, reject) => {
     timeout = window.setTimeout(() => {
@@ -264,7 +294,7 @@ async function readEventStreamChunk(reader: ReadableStreamDefaultReader<Uint8Arr
     }, eventStreamInactivityTimeoutMs);
   });
   try {
-    return await Promise.race([reader.read(), inactivity]);
+    return await abortable(Promise.race([reader.read(), inactivity]), signal);
   } finally {
     window.clearTimeout(timeout);
   }
@@ -276,20 +306,10 @@ export type ApiDownloadResult = {
 };
 
 export async function apiDownloadResponse(path: string, options: RequestOptions = {}): Promise<ApiDownloadResult> {
-  const { authenticated = true, retryAuth = true } = options;
-  const response = await sendApiRequest(path, options);
-  if (response.status === 401 && authenticated && retryAuth) {
-    const refreshResult = await refreshAccessToken();
-    if (refreshResult === "refreshed") return apiDownloadResponse(path, { ...options, retryAuth: false });
-    if (refreshResult === "unavailable") {
-      throw new ApiError(503, "sessionRefreshUnavailable", localizedErrorMessage("sessionRefreshUnavailable", "Unable to refresh the session. Please retry."));
-    }
-  }
-  if (!response.ok) {
-    await parseResponse(response, decodeNever);
-    throw new ApiError(response.status, "requestFailed", localizedErrorMessage("requestFailed", "The request failed"));
-  }
-  return { blob: await response.blob(), headers: response.headers };
+  return withApiResponse(path, options, async (response, signal) => {
+    if (!response.ok) await parseResponse(response, decodeNever, signal);
+    return { blob: await response.blob(), headers: response.headers };
+  });
 }
 
 export async function apiDownload(path: string, options: RequestOptions = {}): Promise<Blob> {

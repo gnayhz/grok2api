@@ -160,15 +160,8 @@ func TestNormalizeResponsesRequestLoadsServerToolSearchHistory(t *testing.T) {
 	}
 }
 
-func TestNormalizeResponsesRequestEagerLoadsServerToolSearch(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
-		"model":"public","input":"hello",
-		"tools":[
-			{"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object"}},
-			{"type":"tool_search"}
-		],
-		"tool_choice":{"type":"tool_search"}
-	}`), "grok-4.5")
+func TestNormalizeResponsesRequestEagerLoadsOptionalServerToolSearch(t *testing.T) {
+	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{"input":"hello","tools":[{"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object"}},{"type":"tool_search"}],"tool_choice":"auto"}`), "grok-4.5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,33 +173,17 @@ func TestNormalizeResponsesRequestEagerLoadsServerToolSearch(t *testing.T) {
 	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "lookup" || tools[0].(map[string]any)["defer_loading"] != nil || payload["tool_choice"] != "auto" {
 		t.Fatalf("payload = %#v", payload)
 	}
-	if compatibility == nil || !strings.Contains(compatibility.warningHeader(), "server_tool_search_eager_loaded") || !strings.Contains(compatibility.warningHeader(), "server_tool_search_choice_downgraded") {
+	if compatibility == nil || !strings.Contains(compatibility.warningHeader(), "server_tool_search_eager_loaded") {
 		t.Fatalf("compatibility = %#v", compatibility)
 	}
 }
 
-func TestNormalizeResponsesRequestDropsEmptyServerToolSearchChoice(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
-		"model":"public","input":"hello",
-		"tools":[{"type":"tool_search"}],
-		"tool_choice":{"type":"tool_search"},
-		"parallel_tool_calls":true
-	}`), "grok-4.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(normalized, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := payload["tools"]; exists {
-		t.Fatalf("tools = %#v", payload["tools"])
-	}
-	if _, exists := payload["tool_choice"]; exists {
-		t.Fatalf("tool_choice = %#v", payload["tool_choice"])
-	}
-	if _, exists := payload["parallel_tool_calls"]; exists {
-		t.Fatalf("parallel_tool_calls = %#v", payload["parallel_tool_calls"])
+func TestNormalizeResponsesRequestRejectsForcedServerToolSearch(t *testing.T) {
+	for _, tools := range []string{`[{"type":"tool_search"}]`, `[{"type":"tool_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]`} {
+		_, _, err := normalizeResponsesRequest([]byte(`{"input":"hello","tools":`+tools+`,"tool_choice":{"type":"tool_search"},"parallel_tool_calls":true}`), "grok-4.5")
+		if err == nil {
+			t.Fatal("forced server search must not become auto or disappear")
+		}
 	}
 }
 

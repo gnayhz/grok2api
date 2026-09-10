@@ -220,7 +220,7 @@ func TestPeekPathsDoNotLeakGoroutines(t *testing.T) {
 			var closed int32
 			raw := &countingReadCloser{Reader: bytes.NewReader(make([]byte, qualityBodyPeekLimit+1)), closed: &closed}
 			replay, verdict, _, err := peekQualityBody(raw, cfg)
-			if err != nil || verdict != QualityDeliver {
+			if err != errQualityHoldLimit || verdict != QualityWait {
 				t.Errorf("oversized verdict=%s err=%v", verdict, err)
 			}
 			if replay == nil {

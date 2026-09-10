@@ -3,11 +3,14 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
+	audit "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	clientkey "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 )
 
@@ -26,7 +29,7 @@ func TestAttemptLoopNonStreamChatHold(t *testing.T) {
 	adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: healthyChat}}
 
 	result, err := service.CreateChatCompletion(ctx, Input{
-		RequestID: "req-nonstream-hold", ClientKey: clientkey.Key{ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+		RequestID: "req-nonstream-hold", ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
 		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"write a game"}]}`),
 	})
 	if err != nil {
@@ -39,7 +42,7 @@ func TestAttemptLoopNonStreamChatHold(t *testing.T) {
 	if !strings.Contains(string(body), "a considered answer") {
 		t.Fatalf("delivered body = %s", body)
 	}
-	result.Finalize(Usage{}, "nonstream-ok", "")
+	finishTestResult(t, result, Usage{}, "nonstream-ok", "")
 	_ = result.Body.Close()
 	attempts := adapter.Attempts()
 	if len(attempts) != 2 {
@@ -60,7 +63,7 @@ func TestAttemptLoopNonStreamFailClosed(t *testing.T) {
 	adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
 
 	result, err := service.CreateChatCompletion(ctx, Input{
-		RequestID: "req-nonstream-fc", ClientKey: clientkey.Key{ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+		RequestID: "req-nonstream-fc", ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
 		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"anything"}]}`),
 	})
 	if err == nil && result.StatusCode != http.StatusServiceUnavailable {
@@ -98,7 +101,7 @@ func TestAttemptLoopNonStreamMessagesHold(t *testing.T) {
 	adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: healthyBody}}
 
 	result, err := service.CreateMessage(ctx, Input{
-		RequestID: "req-nonstream-msg", ClientKey: clientkey.Key{ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+		RequestID: "req-nonstream-msg", ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
 		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","budget_tokens":1024}}`),
 	})
 	if err != nil {
@@ -111,7 +114,7 @@ func TestAttemptLoopNonStreamMessagesHold(t *testing.T) {
 	if !strings.Contains(string(body), "a considered anthropic answer") {
 		t.Fatalf("delivered body = %s", body)
 	}
-	result.Finalize(Usage{}, "msg-nonstream-ok", "")
+	finishTestResult(t, result, Usage{}, "msg-nonstream-ok", "")
 	_ = result.Body.Close()
 	attempts := adapter.Attempts()
 	if len(attempts) != 2 {
@@ -132,7 +135,7 @@ func TestAttemptLoopNonStreamMessagesFailClosed(t *testing.T) {
 	adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
 
 	result, err := service.CreateMessage(ctx, Input{
-		RequestID: "req-msg-fc", ClientKey: clientkey.Key{ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+		RequestID: "req-msg-fc", ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
 		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"anything"}],"thinking":{"type":"enabled","budget_tokens":1024}}`),
 	})
 	if err == nil && result.StatusCode != http.StatusServiceUnavailable {
@@ -152,5 +155,123 @@ func TestAttemptLoopNonStreamMessagesFailClosed(t *testing.T) {
 	}
 	if attempts := adapter.Attempts(); len(attempts) != 2 {
 		t.Fatalf("attempts = %v, want both accounts tried", attempts)
+	}
+}
+
+// TestAttemptLoopFailClosedAuditCarriesRule 锚定审计归因:
+// 耗尽拒绝的 503 主行必须带最终判决规则指纰
+// (此前仅交付尝试记规则,拒绝行的 quality_rule
+// 恒空——面板对 503 归因必须逐条展开 attempt 明细)。
+func TestAttemptLoopFailClosedAuditCarriesRule(t *testing.T) {
+	ctx := context.Background()
+	degraded := `{"id":"chatcmpl-rule","choices":[{"message":{"content":"SECRET_DEGRADED_PAYLOAD"}}]}`
+	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
+	service, credentials, database := newGuardLoopServiceWithDB(t, adapter, "nonstream-rule-one", "nonstream-rule-two")
+	adapter.responses[credentials[0].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
+	adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
+
+	_, err := service.CreateChatCompletion(ctx, Input{
+		RequestID: "req-nonstream-rule", ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+		Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"anything"}]}`),
+	})
+	var failure *UpstreamFailure
+	if !errors.As(err, &failure) || failure.Code != ErrorQualityDegraded {
+		t.Fatalf("err = %v, want quality degraded", err)
+	}
+	records, total, listErr := database.List(ctx, 0, 20)
+	if listErr != nil {
+		t.Fatalf("查询审计主行: %v", listErr)
+	}
+	var found *audit.Record
+	for i := range records {
+		if records[i].RequestID == "req-nonstream-rule" {
+			found = &records[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("审计主行必须落库 (total=%d)", total)
+	}
+	if found.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("主行状态应 503, got %d", found.StatusCode)
+	}
+	if found.QualityRule == "" {
+		t.Fatal("耗尽拒绝的审计主行必须带判决规则指纹(quality_rule)")
+	}
+}
+
+// TestAttemptLoopConcurrentLeasesReleased 锚定并发租约不泄漏:
+// MaxConcurrent=1 的两账号在 8 路并发下至多 2 路拿到
+// 租约、其余得并发上限拒绝;全部落定后再发
+// 两路必须成功——失败路径的 release 若泄漏,
+// 后续请求会被残留租约永久拒绝(批10
+// 并发压测的回归锈定)。
+func TestAttemptLoopConcurrentLeasesReleased(t *testing.T) {
+	ctx := context.Background()
+	healthy := `{"id":"chatcmpl-ok","usage":{"prompt_tokens":5,"completion_tokens":30,"completion_tokens_details":{"reasoning_tokens":18}},"choices":[{"message":{"reasoning_content":"think","content":"answer"}}]}`
+	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
+	service, credentials := newGuardLoopService(t, adapter, "conc-one", "conc-two")
+	for _, credential := range credentials {
+		adapter.responses[credential.ID] = []scriptedBuildResponse{{status: http.StatusOK, body: healthy}, {status: http.StatusOK, body: healthy}, {status: http.StatusOK, body: healthy}}
+	}
+
+	const burst = 8
+	var wg sync.WaitGroup
+	succeeded, limited, failed := 0, 0, 0
+	var mu sync.Mutex
+	results := make([]*Result, 0, burst)
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			result, err := service.CreateChatCompletion(ctx, Input{
+				RequestID: fmt.Sprintf("req-conc-%d", n), ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+				Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"hi"}]}`),
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				succeeded++
+				results = append(results, result)
+			default:
+				var selection *SelectionUnavailableError
+				if errors.As(err, &selection) {
+					limited++
+				} else {
+					failed++
+					t.Logf("UNEXPECT %T: %v", err, err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if failed != 0 {
+		t.Fatalf("并发路径不得出现非预期失败, failed=%d", failed)
+	}
+	if succeeded > 2 {
+		t.Fatalf("MaxConcurrent=1 ×2 账号下至多 2 路拿到租约, succeeded=%d", succeeded)
+	}
+	// 交付路径的租约随 Finalize/Close 释放(与真实
+	// HTTP 生命周期同款)——先收尾再验证。
+	for _, result := range results {
+		finishTestResult(t, result, Usage{}, "conc-done", "")
+		_ = result.Body.Close()
+	}
+	// 全部落定后租约必须已释放:后续两路串行成功。
+	// 后续结果同样必须终结——不终结则请求 0
+	// 永久持租约(与生产 transport 层恒定
+	// 终结的语义不同),且测试内 sticky 亲缘
+	// 可能把下一路钉到同一被占账号——
+	// 这是第二循环抓到的偶发失败(≈1/10)根因。
+	for i := 0; i < 2; i++ {
+		result, err := service.CreateChatCompletion(ctx, Input{
+			RequestID: fmt.Sprintf("req-conc-after-%d", i), ClientKey: clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: 1, Name: "k"}, PublicModel: "grok-4.6", Streaming: false,
+			Body: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"hi"}]}`),
+		})
+		if err != nil {
+			t.Fatalf("并发落定后租约泄漏(后续请求 %d 失败): %v", i, err)
+		}
+		finishTestResult(t, result, Usage{}, fmt.Sprintf("conc-after-%d", i), "")
+		_ = result.Body.Close()
 	}
 }

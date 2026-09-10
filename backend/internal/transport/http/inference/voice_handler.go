@@ -147,6 +147,9 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 			return
 		}
 		form := c.Request.MultipartForm
+		if form != nil {
+			defer func() { _ = form.RemoveAll() }()
+		}
 		get := func(name string) string {
 			if form == nil {
 				return ""
@@ -162,7 +165,6 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 		}
 		input.URL = get("url")
 		input.AudioFormat = get("audio_format")
-		input.SampleRate = firstNonEmpty(get("sample_rate"), get("sample_rate_hertz"))
 		input.Language = get("language")
 		if openAICompatible {
 			input.ResponseFormat = get("response_format")
@@ -176,22 +178,16 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 				unsupportedOpenAIParameter = "timestamp_granularities[]"
 			}
 		}
-		input.Format = parseTruthy(get("format"))
-		input.Multichannel = parseTruthy(get("multichannel"))
-		if channels := get("channels"); channels != "" {
-			if value, err := strconv.Atoi(channels); err == nil {
-				input.Channels = value
-			}
+		options, err := multipartSTTOptions(form)
+		if err == nil {
+			err = options.apply(&input)
 		}
-		input.Diarize = parseTruthy(get("diarize"))
-		input.FillerWords = parseTruthy(get("filler_words"))
+		if err != nil {
+			writeGatewayError(c, err)
+			return
+		}
 		if form != nil {
 			input.KeyTerms = append([]string(nil), form.Value["keyterm"]...)
-		}
-		if threshold := get("vad_threshold"); threshold != "" {
-			if value, err := strconv.ParseFloat(threshold, 64); err == nil {
-				input.VADThreshold = &value
-			}
 		}
 		file, header, err := c.Request.FormFile("file")
 		if err == nil {
@@ -213,18 +209,12 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 		}
 	} else if isJSONRequest(c) {
 		var payload struct {
+			sttOptions
 			Model                  string   `json:"model"`
 			URL                    string   `json:"url"`
 			AudioFormat            string   `json:"audio_format"`
-			SampleRate             any      `json:"sample_rate"`
 			Language               string   `json:"language"`
-			Format                 any      `json:"format"`
-			Multichannel           any      `json:"multichannel"`
-			Channels               any      `json:"channels"`
-			Diarize                any      `json:"diarize"`
 			KeyTerms               []string `json:"keyterm"`
-			FillerWords            any      `json:"filler_words"`
-			VADThreshold           *float64 `json:"vad_threshold"`
 			ResponseFormat         string   `json:"response_format"`
 			Prompt                 string   `json:"prompt"`
 			Temperature            *float64 `json:"temperature"`
@@ -239,19 +229,12 @@ func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool)
 		}
 		input.URL = strings.TrimSpace(payload.URL)
 		input.AudioFormat = strings.TrimSpace(payload.AudioFormat)
-		input.SampleRate = anyString(payload.SampleRate)
 		input.Language = strings.TrimSpace(payload.Language)
-		input.Format = anyTruthy(payload.Format)
-		input.Multichannel = anyTruthy(payload.Multichannel)
-		if channels := anyString(payload.Channels); channels != "" {
-			if value, err := strconv.Atoi(channels); err == nil {
-				input.Channels = value
-			}
+		if err := payload.sttOptions.apply(&input); err != nil {
+			writeGatewayError(c, err)
+			return
 		}
-		input.Diarize = anyTruthy(payload.Diarize)
 		input.KeyTerms = payload.KeyTerms
-		input.FillerWords = anyTruthy(payload.FillerWords)
-		input.VADThreshold = payload.VADThreshold
 		if openAICompatible {
 			input.ResponseFormat = strings.TrimSpace(payload.ResponseFormat)
 			if strings.TrimSpace(payload.Prompt) != "" {
@@ -371,53 +354,6 @@ func parseOptimizeStreamingLatency(value json.RawMessage) (int, error) {
 		return 0, errors.New("optimize_streaming_latency 必须是 0 到 4 的整数")
 	}
 	return result, nil
-}
-
-func parseTruthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-func anyTruthy(value any) bool {
-	switch typed := value.(type) {
-	case nil:
-		return false
-	case bool:
-		return typed
-	case string:
-		return parseTruthy(typed)
-	case float64:
-		return typed != 0
-	default:
-		return false
-	}
-}
-
-func anyString(value any) string {
-	switch typed := value.(type) {
-	case nil:
-		return ""
-	case string:
-		return strings.TrimSpace(typed)
-	case float64:
-		return strconv.FormatInt(int64(typed), 10)
-	case json.Number:
-		return typed.String()
-	default:
-		return strings.TrimSpace(stringify(value))
-	}
-}
-
-func stringify(value any) string {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return ""
-	}
-	return strings.Trim(string(data), `"`)
 }
 
 func firstNonEmpty(values ...string) string {

@@ -55,10 +55,10 @@ func (h *quotaRefreshExpiryHeap) Pop() any {
 	return last
 }
 
-func (c *QuotaRefreshCoordinator) MarkQuotaRefreshDirty(_ context.Context, accountID uint64, mode string, ttl time.Duration) (uint64, error) {
+func (c *QuotaRefreshCoordinator) MarkQuotaRefreshDirty(_ context.Context, accountID uint64, mode string, ttl time.Duration) (repository.QuotaRefreshVersion, error) {
 	mode = strings.TrimSpace(mode)
 	if accountID == 0 || mode == "" || ttl <= 0 {
-		return 0, fmt.Errorf("quota refresh identity is invalid")
+		return repository.QuotaRefreshVersion{}, fmt.Errorf("quota refresh identity is invalid")
 	}
 	now := time.Now().UTC()
 	key := quotaRefreshKey(accountID, mode)
@@ -67,21 +67,21 @@ func (c *QuotaRefreshCoordinator) MarkQuotaRefreshDirty(_ context.Context, accou
 	c.pruneLocked(now)
 	state := c.values[key]
 	if _, dirty := c.dirty[key]; !dirty && len(c.dirty) >= maxQuotaRefreshDirty {
-		return 0, fmt.Errorf("quota refresh dirty set is full")
+		return repository.QuotaRefreshVersion{}, fmt.Errorf("quota refresh dirty set is full")
 	}
 	state.accountID = accountID
 	state.mode = mode
 	state.generation++
-	state.expiresAt = now.Add(ttl)
+	state.expiresAt = now.Add(ttl).Truncate(time.Millisecond)
 	state.dirty = true
 	c.values[key] = state
 	c.dirty[key] = struct{}{}
 	heap.Push(&c.expires, quotaRefreshExpiry{key: key, generation: state.generation, expiresAt: state.expiresAt})
 	c.compactExpiryHeapLocked()
-	return state.generation, nil
+	return repository.QuotaRefreshVersion{Generation: state.generation, ExpiresAt: state.expiresAt}, nil
 }
 
-func (c *QuotaRefreshCoordinator) QuotaRefreshGeneration(_ context.Context, accountID uint64, mode string) (uint64, bool, error) {
+func (c *QuotaRefreshCoordinator) GetQuotaRefreshState(_ context.Context, accountID uint64, mode string) (repository.QuotaRefreshVersion, bool, error) {
 	now := time.Now().UTC()
 	key := quotaRefreshKey(accountID, strings.TrimSpace(mode))
 	c.mu.Lock()
@@ -91,12 +91,12 @@ func (c *QuotaRefreshCoordinator) QuotaRefreshGeneration(_ context.Context, acco
 		delete(c.values, key)
 		delete(c.dirty, key)
 		c.compactExpiryHeapLocked()
-		return 0, false, nil
+		return repository.QuotaRefreshVersion{}, false, nil
 	}
-	return state.generation, state.dirty, nil
+	return repository.QuotaRefreshVersion{Generation: state.generation, ExpiresAt: state.expiresAt}, state.dirty, nil
 }
 
-func (c *QuotaRefreshCoordinator) ClearQuotaRefreshDirty(_ context.Context, accountID uint64, mode string, generation uint64) (bool, error) {
+func (c *QuotaRefreshCoordinator) ClearQuotaRefreshDirty(_ context.Context, accountID uint64, mode string, version repository.QuotaRefreshVersion) (bool, error) {
 	key := quotaRefreshKey(accountID, strings.TrimSpace(mode))
 	now := time.Now().UTC()
 	c.mu.Lock()
@@ -108,7 +108,7 @@ func (c *QuotaRefreshCoordinator) ClearQuotaRefreshDirty(_ context.Context, acco
 		c.compactExpiryHeapLocked()
 		return false, nil
 	}
-	if state.generation != generation {
+	if state.generation != version.Generation || !state.expiresAt.Equal(version.ExpiresAt) || !state.dirty {
 		return false, nil
 	}
 	state.dirty = false
@@ -117,7 +117,7 @@ func (c *QuotaRefreshCoordinator) ClearQuotaRefreshDirty(_ context.Context, acco
 	return true, nil
 }
 
-func (c *QuotaRefreshCoordinator) ListQuotaRefreshDirty(_ context.Context, now time.Time, limit int) ([]repository.QuotaRefreshDirty, error) {
+func (c *QuotaRefreshCoordinator) ScanQuotaRefreshDirty(_ context.Context, now time.Time, cursor uint64, limit int) ([]repository.QuotaRefreshDirty, uint64, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
@@ -134,7 +134,7 @@ func (c *QuotaRefreshCoordinator) ListQuotaRefreshDirty(_ context.Context, now t
 			}
 			continue
 		}
-		values = append(values, repository.QuotaRefreshDirty{AccountID: state.accountID, Mode: state.mode, Generation: state.generation})
+		values = append(values, repository.QuotaRefreshDirty{AccountID: state.accountID, Mode: state.mode, Version: repository.QuotaRefreshVersion{Generation: state.generation, ExpiresAt: state.expiresAt}})
 	}
 	sort.Slice(values, func(i, j int) bool {
 		if values[i].AccountID != values[j].AccountID {
@@ -142,11 +142,16 @@ func (c *QuotaRefreshCoordinator) ListQuotaRefreshDirty(_ context.Context, now t
 		}
 		return values[i].Mode < values[j].Mode
 	})
-	if len(values) > limit {
-		values = values[:limit]
-	}
 	c.compactExpiryHeapLocked()
-	return values, nil
+	if cursor >= uint64(len(values)) {
+		return nil, 0, nil
+	}
+	end := min(cursor+uint64(limit), uint64(len(values)))
+	page := values[cursor:end]
+	if end == uint64(len(values)) {
+		end = 0
+	}
+	return page, end, nil
 }
 
 func (c *QuotaRefreshCoordinator) pruneLocked(now time.Time) {

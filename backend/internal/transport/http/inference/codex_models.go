@@ -8,7 +8,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/gin-gonic/gin"
 )
@@ -77,53 +76,6 @@ var codexReasoningDescriptions = map[string]string{
 	"max":    "Maximum reasoning depth for the hardest problems",
 }
 
-type grokModelCapability struct {
-	contextWindow int
-	description   string
-	imageInput    bool
-}
-
-// Metadata besides reasoning levels. Reasoning levels come from domain/model so aliases and
-// Codex catalogs never diverge from the levels each model actually supports.
-var grokCapabilities = map[string]grokModelCapability{
-	"grok-4.5":                     {500000, "xAI Grok 4.5 frontier model with reasoning and vision.", true},
-	"grok-4.6":                     {500000, "xAI Grok 4.6 frontier model with reasoning and vision.", true},
-	"grok-4.3":                     {1000000, "xAI Grok 4.3 high-capacity reasoning model.", true},
-	"grok-build-0.1":               {256000, "xAI Grok Build 0.1 coding model.", false},
-	"grok-4.20-0309-reasoning":     {2000000, "xAI Grok 4.20 reasoning model.", true},
-	"grok-4.20-0309-non-reasoning": {2000000, "xAI Grok 4.20 non-reasoning model.", true},
-	"grok-4.20-multi-agent-0309":   {2000000, "xAI Grok 4.20 multi-agent model.", true},
-	"grok-3-mini":                  {131072, "xAI Grok 3 Mini model.", false},
-	"grok-3-mini-fast":             {131072, "xAI Grok 3 Mini Fast model.", false},
-	"grok-composer-2.5-fast":       {200000, "xAI Grok Composer 2.5 model.", false},
-}
-
-var grokDefaultCapability = grokModelCapability{
-	contextWindow: 128000,
-	description:   "Grok model served via grok2api.",
-}
-
-func lookupGrokCapability(providerValue account.Provider, slug string) (grokModelCapability, []string) {
-	// Effort-suffixed aliases inherit the base model's metadata.
-	if base, _, ok := modeldomain.ParseReasoningModelAlias(slug); ok {
-		slug = base
-	}
-	levels := modeldomain.SupportedReasoningEffortsForProvider(providerValue, slug)
-	if capability, ok := grokCapabilities[slug]; ok {
-		return capability, levels
-	}
-	return grokDefaultCapability, levels
-}
-
-func codexVisibilityForCapability(capability modeldomain.Capability) string {
-	switch capability {
-	case modeldomain.CapabilityImage, modeldomain.CapabilityImageEdit, modeldomain.CapabilityVideo:
-		return "hide"
-	default:
-		return "list"
-	}
-}
-
 func codexReasoningLevelsFor(levels []string) []codexReasoningLevel {
 	result := make([]codexReasoningLevel, 0, len(levels))
 	for _, level := range levels {
@@ -132,39 +84,31 @@ func codexReasoningLevelsFor(levels []string) []codexReasoningLevel {
 	return result
 }
 
-func codexAgentToolsSupported(item modelListItem) bool {
-	return item.Provider == account.ProviderBuild && item.Capability == modeldomain.CapabilityResponses
-}
-
-func newCodexModelCatalog(items []modelListItem) codexModelCatalog {
+func newCodexModelCatalog(items []modeldomain.PublicModel) codexModelCatalog {
 	models := make([]codexModelEntry, 0, len(items))
 	for index, item := range items {
-		capability, reasoningLevels := lookupGrokCapability(item.Provider, item.ID)
-		defaultLevel := modeldomain.DefaultReasoningEffortForProvider(item.Provider, item.ID)
-		// Alias entries pin a single effort; advertise only that level for client UX.
-		if _, effort, ok := modeldomain.ParseReasoningModelAlias(item.ID); ok {
-			reasoningLevels = []string{effort}
-			defaultLevel = effort
-		}
 		modalities := []string{"text"}
-		if capability.imageInput {
+		if item.ImageInput {
 			modalities = append(modalities, "image")
 		}
+		visibility := "hide"
+		if item.AgentVisible {
+			visibility = "list"
+		}
 		var applyPatchToolType *string
-		toolsSupported := codexAgentToolsSupported(item)
+		toolsSupported := item.AgentTools
 		if toolsSupported {
 			value := "freeform"
 			applyPatchToolType = &value
 		}
-		reasoningSupported := modeldomain.SupportsReasoningForProvider(item.Provider, item.ID)
 		models = append(models, codexModelEntry{
 			Slug:                              item.ID,
 			DisplayName:                       codexDisplayName(item.ID),
-			Description:                       capability.description,
-			DefaultReasoningLevel:             defaultLevel,
-			SupportedReasoningLevels:          codexReasoningLevelsFor(reasoningLevels),
+			Description:                       item.Description,
+			DefaultReasoningLevel:             item.DefaultReasoningLevel,
+			SupportedReasoningLevels:          codexReasoningLevelsFor(item.ReasoningLevels),
 			ShellType:                         "shell_command",
-			Visibility:                        codexVisibilityForCapability(item.Capability),
+			Visibility:                        visibility,
 			MinimalClientVersion:              "0.0.0",
 			SupportedInAPI:                    true,
 			Priority:                          index + 1,
@@ -172,8 +116,8 @@ func newCodexModelCatalog(items []modelListItem) codexModelCatalog {
 			ServiceTiers:                      []any{},
 			BaseInstructions:                  codexBaseInstructions,
 			IncludeSkillsUsageInstructions:    false,
-			SupportsReasoningSummaryParameter: reasoningSupported,
-			SupportsReasoningSummaries:        reasoningSupported,
+			SupportsReasoningSummaryParameter: item.ReasoningSupported,
+			SupportsReasoningSummaries:        item.ReasoningSupported,
 			DefaultReasoningSummary:           "auto",
 			SupportVerbosity:                  false,
 			ApplyPatchToolType:                applyPatchToolType,
@@ -181,8 +125,8 @@ func newCodexModelCatalog(items []modelListItem) codexModelCatalog {
 			TruncationPolicy:                  codexTruncationPolicy{Mode: "tokens", Limit: 10000},
 			SupportsParallelToolCalls:         toolsSupported,
 			SupportsImageDetailOriginal:       false,
-			ContextWindow:                     capability.contextWindow,
-			MaxContextWindow:                  capability.contextWindow,
+			ContextWindow:                     item.ContextWindow,
+			MaxContextWindow:                  item.ContextWindow,
 			EffectiveContextWindowPercent:     95,
 			ExperimentalSupportedTools:        []string{},
 			InputModalities:                   modalities,

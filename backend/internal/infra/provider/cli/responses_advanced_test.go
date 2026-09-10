@@ -181,10 +181,10 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool = request["tools"].([]any)[0].(map[string]any)
-	if len(tool) != 1 || tool["type"] != "web_search" {
-		t.Fatalf("Codex web search 未降级: %#v", tool)
+	if len(tool) != 3 || tool["type"] != "web_search" || tool["enable_image_search"] != false || tool["enable_image_understanding"] != false {
+		t.Fatalf("text-only search restrictions lost: %#v", tool)
 	}
-	if !strings.Contains(compatibility.warningHeader(), "web_search_controls_downgraded") {
+	if !strings.Contains(compatibility.warningHeader(), "web_search_controls_normalized") {
 		t.Fatalf("compatibility warnings = %q", compatibility.warningHeader())
 	}
 
@@ -241,7 +241,7 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	domains := request["tools"].([]any)[0].(map[string]any)["filters"].(map[string]any)["excluded_domains"].([]any)
-	if len(domains) != maxWebSearchDomains {
+	if len(domains) != 5 {
 		t.Fatalf("excluded_domains count = %d", len(domains))
 	}
 
@@ -262,101 +262,18 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 	for _, restricted := range []string{
 		`"search_content_types":["image"]`,
 		`"filters":{"blocked_domains":["example.com"]}`,
+		`"external_web_access":false`,
+		`"indexed_web_access":false`,
+		`"safe_search":true`,
+		`"max_search_results":2`,
+		`"unknown_control":true`,
 	} {
-		normalized, compatibility, err = normalizeResponsesRequest([]byte(`{
-			"model":"public","input":"search","tools":[{"type":"web_search",`+restricted+`}]
-		}`), "grok-4.5")
-		if err != nil {
-			t.Fatal(err)
+		for _, choice := range []string{`"auto"`, `{"type":"web_search"}`} {
+			_, _, err = normalizeResponsesRequest([]byte(`{"input":"search","tools":[{"type":"web_search",`+restricted+`}],"tool_choice":`+choice+`}`), "grok-4.5")
+			if err == nil {
+				t.Fatalf("unrepresentable search constraint accepted: %s", restricted)
+			}
 		}
-		request = nil
-		if err := json.Unmarshal(normalized, &request); err != nil {
-			t.Fatal(err)
-		}
-		tool = request["tools"].([]any)[0].(map[string]any)
-		if len(tool) != 1 || tool["type"] != "web_search" || compatibility == nil || compatibility.warningHeader() == "" {
-			t.Fatalf("restricted web search should downgrade: tool=%#v compatibility=%#v", tool, compatibility)
-		}
-	}
-
-	normalized, compatibility, err = normalizeResponsesRequest([]byte(`{
-		"model":"public","input":"do not access the internet",
-		"tools":[{"type":"web_search","external_web_access":false}],
-		"tool_choice":{"type":"web_search"}
-	}`), "grok-4.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	request = nil
-	if err := json.Unmarshal(normalized, &request); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := request["tools"]; exists {
-		t.Fatalf("disabled web search request = %#v", request)
-	}
-	if _, exists := request["tool_choice"]; exists {
-		t.Fatalf("disabled web search tool_choice = %#v", request["tool_choice"])
-	}
-	warnings := compatibility.warningHeader()
-	if !strings.Contains(warnings, "web_search_disabled_no_external_access") || !strings.Contains(warnings, "tool_choice_without_tools_ignored") {
-		t.Fatalf("compatibility warnings = %q", warnings)
-	}
-
-	normalized, compatibility, err = normalizeResponsesRequest([]byte(`{
-		"model":"public","input":"use local tools only",
-		"tools":[
-			{"type":"web_search","external_web_access":false},
-			{"type":"function","name":"local_lookup","parameters":{"type":"object"}}
-		]
-	}`), "grok-4.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	request = nil
-	if err := json.Unmarshal(normalized, &request); err != nil {
-		t.Fatal(err)
-	}
-	tools := request["tools"].([]any)
-	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "local_lookup" {
-		t.Fatalf("local-only tools = %#v", tools)
-	}
-	if !strings.Contains(compatibility.warningHeader(), "web_search_disabled_no_external_access") {
-		t.Fatalf("compatibility warnings = %q", compatibility.warningHeader())
-	}
-
-	normalized, _, err = normalizeResponsesRequest([]byte(`{
-		"model":"public","input":"offline only",
-		"tools":[{"type":"web_search","external_web_access":false}],
-		"tool_choice":"auto"
-	}`), "grok-4.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	request = nil
-	if err := json.Unmarshal(normalized, &request); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := request["tools"]; exists {
-		t.Fatalf("disabled automatic web search request = %#v", request)
-	}
-	if _, exists := request["tool_choice"]; exists {
-		t.Fatalf("disabled automatic web search tool_choice = %#v", request["tool_choice"])
-	}
-
-	normalized, compatibility, err = normalizeResponsesRequest([]byte(`{
-		"model":"public","input":"search",
-		"tools":[{"type":"web_search","unknown_control":true}]
-	}`), "grok-4.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	request = nil
-	if err := json.Unmarshal(normalized, &request); err != nil {
-		t.Fatal(err)
-	}
-	tool = request["tools"].([]any)[0].(map[string]any)
-	if len(tool) != 1 || tool["type"] != "web_search" || compatibility == nil || !strings.Contains(compatibility.warningHeader(), "web_search_unknown_controls_ignored") {
-		t.Fatalf("unknown web search option should downgrade: tool=%#v compatibility=%#v", tool, compatibility)
 	}
 }
 

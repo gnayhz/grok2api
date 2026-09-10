@@ -43,36 +43,50 @@ func (r *AdminRepository) GetByID(ctx context.Context, id uint64) (admin.Admin, 
 	return toAdminDomain(row), nil
 }
 
-func (r *AdminRepository) UpdatePasswordAndRevokeSessions(ctx context.Context, id uint64, passwordHash string) error {
+func (r *AdminRepository) UpdatePasswordAndRevokeSessions(ctx context.Context, expected admin.PasswordRef, passwordHash string) error {
 	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&adminModel{}).Where("id = ?", id).Updates(map[string]any{"password_hash": passwordHash, "updated_at": time.Now().UTC()})
+		if expected.AdminID == 0 || expected.Hash == "" {
+			return repository.ErrConflict
+		}
+		result := tx.Model(&adminModel{}).Where("id = ? AND password_hash = ?", expected.AdminID, expected.Hash).Updates(map[string]any{"password_hash": passwordHash, "updated_at": time.Now().UTC()})
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
-			return repository.ErrNotFound
+			return repository.ErrConflict
 		}
-		return tx.Where("admin_id = ?", id).Delete(&adminSessionModel{}).Error
+		return tx.Where("admin_id = ?", expected.AdminID).Delete(&adminSessionModel{}).Error
 	})
 }
 
 type AdminSessionRepository struct{ db *Database }
 
-const maxAdminSessions = 100
-
 func NewAdminSessionRepository(db *Database) *AdminSessionRepository {
 	return &AdminSessionRepository{db: db}
 }
 
-func (r *AdminSessionRepository) Create(ctx context.Context, value admin.Session) (admin.Session, error) {
-	row := adminSessionModel{AdminID: value.AdminID, RefreshTokenHash: value.RefreshTokenHash, ExpiresAt: value.ExpiresAt, CreatedAt: time.Now().UTC()}
+func (r *AdminSessionRepository) CreateForPassword(ctx context.Context, expected admin.PasswordRef, tokenHash string, expiresAt time.Time) (admin.Session, error) {
+	row := adminSessionModel{AdminID: expected.AdminID, RefreshTokenHash: tokenHash, ExpiresAt: expiresAt, CreatedAt: time.Now().UTC()}
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if expected.AdminID == 0 || expected.Hash == "" {
+			return repository.ErrConflict
+		}
+		// Shared with password updates. The SQL condition is rechecked after a
+		// competing change commits; no old verification can mint a new session.
+		locked := tx.Model(&adminModel{}).Where("id = ? AND password_hash = ?", expected.AdminID, expected.Hash).
+			UpdateColumn("password_hash", gorm.Expr("password_hash"))
+		if locked.Error != nil {
+			return locked.Error
+		}
+		if locked.RowsAffected != 1 {
+			return repository.ErrConflict
+		}
 		now := time.Now().UTC()
 		if err := tx.Where("expires_at <= ?", now).Delete(&adminSessionModel{}).Error; err != nil {
 			return err
 		}
 		var staleIDs []uint64
-		if err := tx.Model(&adminSessionModel{}).Where("admin_id = ?", value.AdminID).Order("created_at DESC, id DESC").Offset(maxAdminSessions-1).Pluck("id", &staleIDs).Error; err != nil {
+		if err := tx.Model(&adminSessionModel{}).Where("admin_id = ?", expected.AdminID).Order("created_at DESC, id DESC").Offset(admin.MaxSessions-1).Pluck("id", &staleIDs).Error; err != nil {
 			return err
 		}
 		if len(staleIDs) > 0 {
@@ -138,6 +152,9 @@ func (r *AdminSessionRepository) Revoke(ctx context.Context, id uint64) error {
 	return r.db.db.WithContext(ctx).Delete(&adminSessionModel{}, id).Error
 }
 
-func (r *AdminSessionRepository) RevokeAllByAdmin(ctx context.Context, adminID uint64) error {
-	return r.db.db.WithContext(ctx).Where("admin_id = ?", adminID).Delete(&adminSessionModel{}).Error
+func (r *AdminSessionRepository) RevokeByTokenHash(ctx context.Context, tokenHash string) error {
+	if tokenHash == "" {
+		return nil
+	}
+	return r.db.db.WithContext(ctx).Where("refresh_token_hash = ? OR previous_refresh_token_hash = ?", tokenHash, tokenHash).Delete(&adminSessionModel{}).Error
 }

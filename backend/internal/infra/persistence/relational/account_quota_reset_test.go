@@ -8,9 +8,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 )
 
-// TestResetQuotaStateLiftsPenaltyCooldown 验证重置额度同时把惩罚冷却恢复到健康基线：
-// 空流/缺推理误判产生的 24h 冷却不再只能干等过期。
-func TestResetQuotaStateLiftsPenaltyCooldown(t *testing.T) {
+// Quota reset leaves the independently owned health restriction intact.
+func TestResetQuotaStatePreservesPenaltyCooldown(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	repo := NewAccountRepository(database)
@@ -31,14 +30,14 @@ func TestResetQuotaStateLiftsPenaltyCooldown(t *testing.T) {
 	if err := database.db.Where("id = ?", ids[0]).Take(&after).Error; err != nil {
 		t.Fatal(err)
 	}
-	if after.CooldownUntil != nil {
-		t.Fatalf("cooldown_until = %v, want nil", after.CooldownUntil)
+	if after.CooldownUntil == nil || !after.CooldownUntil.Equal(until) {
+		t.Fatalf("cooldown_until = %v, want original deadline", after.CooldownUntil)
 	}
-	if after.FailureCount != 0 {
-		t.Fatalf("failure_count = %d, want 0", after.FailureCount)
+	if after.FailureCount != 3 {
+		t.Fatalf("failure_count = %d, want 3", after.FailureCount)
 	}
-	if after.LastError != "" {
-		t.Fatalf("last_error = %q, want empty", after.LastError)
+	if after.LastError != "upstream status 504" {
+		t.Fatalf("last_error = %q, want original reason", after.LastError)
 	}
 	// 健康账号不应产生无效写入副作用（列值保持原样）。
 	var healthy accountModel
@@ -50,9 +49,8 @@ func TestResetQuotaStateLiftsPenaltyCooldown(t *testing.T) {
 	}
 }
 
-// TestResetProviderQuotaStateLiftsPenaltyCooldown 全量重置同样解除启用账号的惩罚冷却，
-// 且不触碰未启用账号（activeOnly 语义保持）。
-func TestResetProviderQuotaStateLiftsPenaltyCooldown(t *testing.T) {
+// Both active and disabled accounts keep their independent health state.
+func TestResetProviderQuotaStatePreservesPenaltyCooldown(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	repo := NewAccountRepository(database)
@@ -80,8 +78,8 @@ func TestResetProviderQuotaStateLiftsPenaltyCooldown(t *testing.T) {
 	if err := database.db.Where("id = ?", ids[0]).Take(&active).Error; err != nil {
 		t.Fatal(err)
 	}
-	if active.CooldownUntil != nil || active.FailureCount != 0 || active.LastError != "" {
-		t.Fatalf("active penalty not lifted: %+v", active)
+	if active.CooldownUntil == nil || !active.CooldownUntil.Equal(until) || active.FailureCount != 1 || active.LastError != "upstream status 504" {
+		t.Fatalf("active health restriction changed: %+v", active)
 	}
 	if err := database.db.Where("id = ?", ids[1]).Take(&disabled).Error; err != nil {
 		t.Fatal(err)

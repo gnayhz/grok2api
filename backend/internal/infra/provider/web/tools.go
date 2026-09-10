@@ -6,8 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net/http"
 	"regexp"
 	"strings"
+
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 )
 
 const (
@@ -58,6 +67,7 @@ type toolParseResult struct {
 }
 
 type toolStreamResult struct {
+	Err      error
 	SafeText string
 	Calls    []parsedToolCall
 	Complete bool
@@ -67,6 +77,7 @@ type toolStreamResult struct {
 type toolStreamSieve struct {
 	available map[string]struct{}
 	buffer    string
+	capture   strings.Builder
 	capturing bool
 	done      bool
 }
@@ -77,14 +88,24 @@ func parseToolConfiguration(rawTools, rawChoice json.RawMessage) (toolConfigurat
 	trimmed := bytes.TrimSpace(rawTools)
 	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
 		var values []map[string]any
-		if err := json.Unmarshal(trimmed, &values); err != nil {
+		if err := jsonvalue.Unmarshal(trimmed, &values); err != nil {
 			return toolConfiguration{}, errors.New("tools 必须是数组")
 		}
 		if len(values) > maxFunctionTools {
 			return toolConfiguration{}, fmt.Errorf("tools 不能超过 %d 个", maxFunctionTools)
 		}
 		configuration.ResponseTools = make([]any, 0, len(values))
+		// A forced hosted choice must remove other declared functions before
+		// prompt construction; otherwise required could be satisfied by them.
+		var forced map[string]any
+		_ = jsonvalue.Unmarshal(rawChoice, &forced)
+		forcedKind, _ := forced["type"].(string)
+		forceSearch := xaitools.HostedKind(forcedKind) == "web_search"
 		for _, value := range values {
+			typeName, _ := value["type"].(string)
+			if forceSearch && xaitools.HostedKind(typeName) != "web_search" {
+				continue
+			}
 			configuration.ResponseTools = append(configuration.ResponseTools, value)
 			function, supported, err := parseFunctionTool(value)
 			if err != nil {
@@ -94,10 +115,13 @@ func parseToolConfiguration(rawTools, rawChoice json.RawMessage) (toolConfigurat
 				configuration.Functions = append(configuration.Functions, function)
 				continue
 			}
-			typeName, _ := value["type"].(string)
 			switch strings.ToLower(strings.TrimSpace(typeName)) {
-			case "web_search", "web_search_preview":
-				// Grok Web 原生搜索始终由上游执行，这两个标准声明无需注入函数提示词。
+			case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
+				// The browser gateway protocol currently exposes no search scope
+				// controls. A prompt instruction cannot enforce a domain/budget.
+				if err := validateWebSearchConstraints(value); err != nil {
+					return toolConfiguration{}, err
+				}
 				configuration.HostedWebSearch = true
 			default:
 				return toolConfiguration{}, fmt.Errorf("Grok Web 暂不支持 tools.type=%q", typeName)
@@ -112,6 +136,9 @@ func parseToolConfiguration(rawTools, rawChoice json.RawMessage) (toolConfigurat
 	configuration.Choice = choice
 	configuration.ForcedName = forcedName
 	configuration.ResponseChoice = responseChoice
+	if choice == "none" && configuration.HostedWebSearch {
+		return toolConfiguration{}, errors.New("Grok Web 无法执行 hosted web_search 的 tool_choice=none")
+	}
 	configuration.available = make(map[string]struct{}, len(configuration.Functions))
 	for _, function := range configuration.Functions {
 		if _, exists := configuration.available[function.Name]; exists {
@@ -128,6 +155,44 @@ func parseToolConfiguration(rawTools, rawChoice json.RawMessage) (toolConfigurat
 		return toolConfiguration{}, errors.New("tool_choice 要求调用函数，但 tools 中没有可用函数")
 	}
 	return configuration, nil
+}
+
+func validateWebSearchConstraints(tool map[string]any) error {
+	for field := range tool {
+		switch field {
+		case "type", "search_context_size", "user_location":
+		default:
+			return fmt.Errorf("Grok Web 无法执行 web_search.%s 约束", field)
+		}
+	}
+	return nil
+}
+
+func mergeWebSearchOptions(rawTools, options json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(options)) == 0 || bytes.Equal(bytes.TrimSpace(options), []byte("null")) {
+		return rawTools, nil
+	}
+	var search map[string]any
+	if err := jsonvalue.Unmarshal(options, &search); err != nil || search == nil {
+		return nil, errors.New("web_search_options 必须是对象")
+	}
+	search["type"] = "web_search"
+	if err := validateWebSearchConstraints(search); err != nil {
+		return nil, err
+	}
+	var tools []map[string]any
+	if len(bytes.TrimSpace(rawTools)) > 0 {
+		if err := jsonvalue.Unmarshal(rawTools, &tools); err != nil {
+			return nil, errors.New("tools 必须是数组")
+		}
+	}
+	for _, tool := range tools {
+		kind, _ := tool["type"].(string)
+		if xaitools.HostedKind(kind) == "web_search" {
+			return nil, errors.New("web_search_options 与 tools.web_search 重复")
+		}
+	}
+	return json.Marshal(append(tools, search))
 }
 
 func parseFunctionTool(value map[string]any) (functionTool, bool, error) {
@@ -183,6 +248,11 @@ func parseToolChoice(raw json.RawMessage) (string, string, any, error) {
 	switch typeName {
 	case "none", "auto", "required":
 		return typeName, "", value, nil
+	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
+		if len(value) != 1 {
+			return "", "", nil, errors.New("Grok Web 不支持附加 hosted tool_choice 约束")
+		}
+		return "required", "", value, nil
 	case "function":
 		name, _ := value["name"].(string)
 		if nested, ok := value["function"].(map[string]any); ok {
@@ -242,6 +312,9 @@ TOOL CALL FORMAT - follow these rules exactly:
 </tool_calls>
 
 WHEN TO CALL: %s`, definitions.String(), choiceInstruction)
+	if configuration.ForcedName != "" {
+		system = strings.Replace(system, "<tool_name>TOOL_NAME</tool_name>", "<tool_name>"+configuration.ForcedName+"</tool_name>", 1)
+	}
 	return "[system]\n" + system + "\n\n" + prompt
 }
 
@@ -321,6 +394,7 @@ func parseJSONToolCalls(text string, available map[string]struct{}, result toolP
 		return result
 	}
 	decoder := json.NewDecoder(strings.NewReader(text[start:]))
+	decoder.UseNumber()
 	var envelope struct {
 		ToolCalls []map[string]any `json:"tool_calls"`
 	}
@@ -362,7 +436,7 @@ func appendParsedToolCall(calls *[]parsedToolCall, name, arguments string, avail
 	if !json.Valid([]byte(arguments)) {
 		return
 	}
-	var object map[string]any
+	var object map[string]json.RawMessage
 	if json.Unmarshal([]byte(arguments), &object) != nil {
 		return
 	}
@@ -375,7 +449,7 @@ func normalizeToolArguments(value string) string {
 		return "{}"
 	}
 	var parsed any
-	if json.Unmarshal([]byte(value), &parsed) != nil {
+	if jsonvalue.Unmarshal([]byte(value), &parsed) != nil {
 		return value
 	}
 	encoded, err := json.Marshal(parsed)
@@ -401,44 +475,59 @@ func (s *toolStreamSieve) Feed(chunk string) toolStreamResult {
 	if s.done || chunk == "" {
 		return toolStreamResult{SafeText: chunk}
 	}
-	combined := s.buffer + chunk
-	s.buffer = ""
+	safe := ""
+	previous := s.capture.Len()
 	if !s.capturing {
-		lower := strings.ToLower(combined)
-		index := strings.Index(lower, "<tool_calls")
+		combined := s.buffer + chunk
+		s.buffer = ""
+		index := strings.Index(strings.ToLower(combined), "<tool_calls")
 		if index < 0 {
-			safe, pending := splitToolPrefix(combined)
+			text, pending := splitToolPrefix(combined)
 			s.buffer = pending
-			return toolStreamResult{SafeText: safe}
+			return toolStreamResult{SafeText: text}
 		}
+		safe, chunk = combined[:index], combined[index:]
 		s.capturing = true
-		s.buffer = combined[index:]
-		combined = combined[:index]
 	}
-	lower := strings.ToLower(s.buffer)
-	endIndex := strings.Index(lower, "</tool_calls>")
+	if len(chunk) > responsebuffer.JSONLimit-s.capture.Len() {
+		return toolStreamResult{Err: responsebuffer.ErrLimit}
+	}
+	s.capture.WriteString(chunk)
+	// Scan only newly appended bytes plus the closing marker's overlap.
+	// String returns a borrowed view; it does not copy the growing call.
+	all := s.capture.String()
+	const closing = "</tool_calls>"
+	scanFrom := max(0, previous-len(closing)+1)
+	endIndex := strings.Index(strings.ToLower(all[scanFrom:]), closing)
 	if endIndex < 0 {
-		return toolStreamResult{SafeText: combined}
+		return toolStreamResult{SafeText: safe}
 	}
-	endIndex += len("</tool_calls>")
-	raw := s.buffer[:endIndex]
-	remainder := s.buffer[endIndex:]
+	endIndex += scanFrom + len(closing)
+	raw, remainder := all[:endIndex], all[endIndex:]
 	parsed := parseToolCalls(raw, s.available)
-	s.buffer = ""
+	s.capture.Reset()
 	s.capturing = false
 	s.done = len(parsed.Calls) > 0
 	if len(parsed.Calls) == 0 {
 		raw += remainder
 	}
-	return toolStreamResult{SafeText: combined, Calls: parsed.Calls, Complete: true, Raw: raw}
+	return toolStreamResult{SafeText: safe, Calls: parsed.Calls, Complete: true, Raw: raw}
 }
 
 func (s *toolStreamSieve) Flush() toolStreamResult {
-	if s.done || s.buffer == "" {
+	if s.done {
 		return toolStreamResult{}
 	}
 	raw := s.buffer
+	if s.capturing {
+		raw = s.capture.String()
+	}
 	s.buffer = ""
+	s.capture.Reset()
+	s.capturing = false
+	if raw == "" {
+		return toolStreamResult{}
+	}
 	parsed := parseToolCalls(raw, s.available)
 	if len(parsed.Calls) > 0 {
 		s.done = true
@@ -456,4 +545,35 @@ func splitToolPrefix(value string) (string, string) {
 		}
 	}
 	return value, ""
+}
+
+// The Web model emulates function calls in text. A successful terminal must
+// still honor a client's explicit choice; prose is not a forced tool result.
+func checkToolChoice(parsed *parsedChat, configuration toolConfiguration) error {
+	if configuration.ForcedName != "" {
+		for _, call := range parsed.ToolCalls {
+			if call.Name == configuration.ForcedName {
+				return nil
+			}
+		}
+		return responsecheck.ErrToolChoice
+	}
+	if configuration.Choice == "required" && len(parsed.ToolCalls) == 0 {
+		if configuration.HostedWebSearch && (len(parsed.HostedSearchCalls) > 0 || len(parsed.SearchSources) > 0 || parsed.ServerTools > 0) {
+			return nil
+		}
+		return responsecheck.ErrToolChoice
+	}
+	return nil
+}
+
+func invalidWebToolRequest(operation string, err error) *provider.Response {
+	validation := &inferencedomain.RequestValidationError{Code: "invalid_tools", Message: err.Error()}
+	var payload any = map[string]any{"error": map[string]any{"type": "invalid_request_error", "code": validation.Code, "message": validation.Message}}
+	if operation == "messages" {
+		payload = map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": validation.Message}}
+	}
+	response := jsonProviderResponse(http.StatusBadRequest, payload)
+	response.RequestValidation = validation
+	return response
 }

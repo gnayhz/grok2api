@@ -404,7 +404,7 @@ func assertMediaJobSQLLacksBuild(t *testing.T, database *Database) {
 	if !strings.Contains(sql, "grok_web") {
 		t.Fatalf("legacy media_jobs missing grok_web: %s", sql)
 	}
-	if !strings.Contains(sql, "1048576") {
+	if !strings.Contains(sqliteConstraintDefinition(sql, "chk_media_jobs_input_json"), "1048576") {
 		t.Fatalf("legacy media_jobs missing old input_json limit: %s", sql)
 	}
 }
@@ -412,7 +412,7 @@ func assertMediaJobSQLLacksBuild(t *testing.T, database *Database) {
 func assertMediaJobSQLLacksNewInputLimit(t *testing.T, database *Database) {
 	t.Helper()
 	sql := mediaJobsTableSQL(t, database)
-	if !strings.Contains(sql, "1048576") || strings.Contains(sql, strconv.Itoa(mediadomain.MaxInputJSONBytes)) {
+	if !strings.Contains(sqliteConstraintDefinition(sql, "chk_media_jobs_input_json"), "1048576") || strings.Contains(sqliteConstraintDefinition(sql, "chk_media_jobs_input_json"), strconv.Itoa(mediadomain.MaxInputJSONBytes)) {
 		t.Fatalf("previous media_jobs input constraint was not installed: %s", sql)
 	}
 	if !strings.Contains(sql, "grok_build") || !strings.Contains(strings.ToUpper(sql), "ON DELETE SET NULL") {
@@ -434,7 +434,8 @@ func assertMediaJobSQLContainsBuild(t *testing.T, database *Database) {
 		t.Fatalf("media_jobs account history is not detached on account delete: %s", sql)
 	}
 	limitLiteral := strconv.Itoa(mediadomain.MaxInputJSONBytes)
-	if !strings.Contains(sql, limitLiteral) || strings.Contains(sql, "1048576") {
+	inputConstraint := sqliteConstraintDefinition(sql, "chk_media_jobs_input_json")
+	if !strings.Contains(inputConstraint, limitLiteral) || strings.Contains(inputConstraint, "1048576") {
 		t.Fatalf("media_jobs input_json limit was not upgraded to %s: %s", limitLiteral, sql)
 	}
 }

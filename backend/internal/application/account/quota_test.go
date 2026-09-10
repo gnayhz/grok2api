@@ -9,6 +9,7 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 type quotaResetRepository struct {
@@ -151,21 +152,21 @@ func TestBatchResetQuotaStatePreservesBillingAndClearsLocalBlocks(t *testing.T) 
 	}
 	now := time.Now().UTC()
 	next := now.Add(24 * time.Hour)
-	if err := accounts.SaveBilling(ctx, accountdomain.Billing{AccountID: credential.ID, PlanName: "free", Used: 42, SyncedAt: now}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, accountdomain.Billing{AccountID: credential.ID, PlanName: "free", Used: 42, SyncedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveQuotaRecovery(ctx, accountdomain.QuotaRecovery{
+	if err := testsupport.Recovery(ctx, accounts, accountdomain.QuotaRecovery{
 		AccountID: credential.ID, Kind: accountdomain.QuotaRecoveryKindFree, Status: accountdomain.QuotaRecoveryStatusExhausted,
 		ExhaustedAt: &now, NextProbeAt: &next, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.UpsertModelQuotaBlock(ctx, accountdomain.ModelQuotaBlock{
+	if err := testsupport.ModelRestriction(ctx, accounts, accountdomain.ModelQuotaBlock{
 		AccountID: credential.ID, UpstreamModel: "grok-test", Reason: "model_quota_depleted", CooldownUntil: next,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.UpsertModelQuotaBlock(ctx, accountdomain.ModelQuotaBlock{
+	if err := testsupport.ModelRestriction(ctx, accounts, accountdomain.ModelQuotaBlock{
 		AccountID: credential.ID, UpstreamModel: "grok-denied", Reason: "model_access_denied", CooldownUntil: next,
 	}); err != nil {
 		t.Fatal(err)
@@ -209,13 +210,13 @@ func TestResetAllBuildQuotaStateOnlyProcessesEnabledBuildAccounts(t *testing.T) 
 	disabledBuild := create(accountdomain.ProviderBuild, "reset-all-disabled", false)
 	web := create(accountdomain.ProviderWeb, "reset-all-web", true)
 	disabledBuild.Enabled = false
-	if _, err := accounts.Update(ctx, disabledBuild); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, disabledBuild.ID, repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{Enabled: &disabledBuild.Enabled}}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	next := now.Add(24 * time.Hour)
-	for _, value := range []accountdomain.Credential{enabledBuild, disabledBuild, web} {
-		if err := accounts.SaveQuotaRecovery(ctx, accountdomain.QuotaRecovery{
+	for _, value := range []accountdomain.Credential{enabledBuild, disabledBuild} {
+		if err := testsupport.Recovery(ctx, accounts, accountdomain.QuotaRecovery{
 			AccountID: value.ID, Kind: accountdomain.QuotaRecoveryKindFree, Status: accountdomain.QuotaRecoveryStatusExhausted,
 			ExhaustedAt: &now, NextProbeAt: &next, UpdatedAt: now,
 		}); err != nil {
@@ -223,6 +224,9 @@ func TestResetAllBuildQuotaStateOnlyProcessesEnabledBuildAccounts(t *testing.T) 
 		}
 	}
 
+	if err := testsupport.ModelRestriction(ctx, accounts, accountdomain.ModelQuotaBlock{AccountID: web.ID, UpstreamModel: "web-model", Reason: "model_quota_depleted", CooldownUntil: next}); err != nil {
+		t.Fatal(err)
+	}
 	reset, err := service.ResetAllBuildQuotaState(ctx)
 	if err != nil || reset != 1 {
 		t.Fatalf("reset = %d, err = %v", reset, err)
@@ -230,7 +234,11 @@ func TestResetAllBuildQuotaStateOnlyProcessesEnabledBuildAccounts(t *testing.T) 
 	if _, err := accounts.GetQuotaRecovery(ctx, enabledBuild.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("enabled Build recovery should be cleared, err = %v", err)
 	}
-	for _, value := range []accountdomain.Credential{disabledBuild, web} {
+	webCandidates, err := accounts.ListRoutingCandidates(ctx, accountdomain.ProviderWeb, 0, "web-model", "")
+	if err != nil || len(webCandidates) != 1 || webCandidates[0].ModelQuotaBlock == nil {
+		t.Fatalf("reset changed excluded Web quota: %v", err)
+	}
+	for _, value := range []accountdomain.Credential{disabledBuild} {
 		if _, err := accounts.GetQuotaRecovery(ctx, value.ID); err != nil {
 			t.Fatalf("recovery for account %d should remain, err = %v", value.ID, err)
 		}

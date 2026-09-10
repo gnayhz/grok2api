@@ -2,11 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 )
 
 const maxIdleInspectBytes = 64 << 10
@@ -51,6 +55,7 @@ type semanticIdleReadCloser struct {
 
 	mu         sync.Mutex
 	detector   buildSSEActivityDetector
+	canonical  bool
 	finished   bool
 	timedOut   bool
 	readers    int
@@ -66,6 +71,25 @@ func wrapBuildSemanticIdle(body io.ReadCloser, idle time.Duration) io.ReadCloser
 		return body
 	}
 	return &semanticIdleReadCloser{inner: body, idle: idle, remaining: idle}
+}
+
+func newBuildResponseStream(ctx context.Context, body io.ReadCloser, idle time.Duration) *responseflow.Stream {
+	if idle <= 0 {
+		return responsecheck.Stream(responseflow.New(body, responsebuffer.FromContext(ctx)))
+	}
+	timer := &semanticIdleReadCloser{inner: body, idle: idle, remaining: idle, canonical: true}
+	stream := responsecheck.Stream(responseflow.New(timer, responsebuffer.FromContext(ctx)))
+	stream.Observe(func(event *responseflow.Event) {
+		detector := buildSSEActivityDetector{eventName: string(event.Kind), data: event.Data[:min(len(event.Data), maxIdleInspectBytes)]}
+		if event.HasData && detector.classifyActivity() {
+			timer.mu.Lock()
+			if !timer.finished {
+				timer.remaining = timer.idle
+			}
+			timer.mu.Unlock()
+		}
+	})
+	return stream
 }
 
 func (r *semanticIdleReadCloser) timeout() {
@@ -149,7 +173,7 @@ func (r *semanticIdleReadCloser) Read(buffer []byte) (int, error) {
 	n, err := r.inner.Read(buffer)
 
 	r.mu.Lock()
-	if n > 0 && !r.finished && r.detector.Observe(buffer[:n]) {
+	if n > 0 && !r.finished && !r.canonical && r.detector.Observe(buffer[:n]) {
 		r.remaining = r.idle
 		if r.readers > 0 && !r.finished {
 			r.clockStart = time.Now()

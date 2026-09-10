@@ -19,6 +19,11 @@ func (r *evictionScopeRepo) GetEgressNode(_ context.Context, _ uint64) (domain.N
 	return r.node, nil
 }
 
+func (r *evictionScopeRepo) UpdateEgressNodeConfiguration(_ context.Context, node domain.Node, validate domain.FixedTargetValidator) (domain.Node, error) {
+	r.node = node
+	return node, nil
+}
+
 func (r *evictionScopeRepo) ListEgressNodes(context.Context, repository.SortQuery) ([]domain.Node, error) {
 	return []domain.Node{r.node}, nil
 }
@@ -30,22 +35,28 @@ func (r *evictionScopeRepo) ListEgressNodes(context.Context, repository.SortQuer
 func TestFeedback403EvictsOnlyBrowserScopeClients(t *testing.T) {
 	manager, _ := newPoolTestManager(t)
 	manager.repository = &evictionScopeRepo{node: domain.Node{ID: 9, Name: "mixed", Enabled: true, Health: 1}}
-	manager.accountIsolated.Store(false)
+	manager.routing.repository = manager.repository
+	manager.clearance.repository = manager.repository
+	manager.transport.accountIsolated.Store(false)
 
-	buildClient, err := manager.clientForWithOptions(9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{})
+	buildClient, err := manager.transport.clientForWithOptions(9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	webClient, err := manager.clientForWithOptions(9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{})
+	webClient, err := manager.transport.clientForWithOptions(9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 9, 403, nil)
 
-	manager.clientMu.Lock()
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.transport.clientMu.Lock()
 	var buildAlive, webAlive bool
-	for key, cached := range manager.clients {
+	for key, cached := range manager.transport.clients {
 		if key.nodeID != 9 {
 			continue
 		}
@@ -56,7 +67,7 @@ func TestFeedback403EvictsOnlyBrowserScopeClients(t *testing.T) {
 			webAlive = cached.client == webClient.client
 		}
 	}
-	manager.clientMu.Unlock()
+	manager.transport.clientMu.Unlock()
 	if !buildAlive {
 		t.Fatal("Build client was evicted by a browser-scope 403; anti-bot rejection must not collateralize the Build pool")
 	}
@@ -70,16 +81,22 @@ func TestFeedback403EvictsOnlyBrowserScopeClients(t *testing.T) {
 func TestFeedbackTransportErrorStillEvictsAllScopes(t *testing.T) {
 	manager, _ := newPoolTestManager(t)
 	manager.repository = &evictionScopeRepo{node: domain.Node{ID: 9, Name: "mixed", Enabled: true, Health: 1}}
-	manager.accountIsolated.Store(false)
+	manager.routing.repository = manager.repository
+	manager.clearance.repository = manager.repository
+	manager.transport.accountIsolated.Store(false)
 
-	if _, err := manager.clientForWithOptions(9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForWithOptions(9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.clientForWithOptions(9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForWithOptions(9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
 	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 9, 0, errors.New("connection refused"))
+
+	if err := manager.FlushFeedback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	if managerHasClientForNode(manager, 9) {
 		t.Fatal("transport error must evict all clients for the node")

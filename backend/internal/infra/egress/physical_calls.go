@@ -14,6 +14,7 @@ type physicalCallTrace struct {
 	provider  string
 	operation string
 	ordinal   atomic.Uint64
+	ledger    physicalLedger
 }
 
 type physicalCallContext struct {
@@ -24,8 +25,8 @@ type physicalCallContext struct {
 
 type physicalCallContextKey struct{}
 
-// WithPhysicalCallTrace starts observe-only physical-call accounting for one
-// downstream request. It does not impose a retry budget or alter transport.
+// WithPhysicalCallTrace starts bounded physical-call accounting for one
+// downstream request. Every transport submission reserves a ledger entry.
 func WithPhysicalCallTrace(ctx context.Context, provider, operation string) context.Context {
 	if ctx == nil {
 		return ctx
@@ -65,6 +66,11 @@ func WithPhysicalCallStage(ctx context.Context, stage string) context.Context {
 }
 
 func recordPhysicalCall(ctx context.Context, response *http.Response, err error) {
+	recordPhysicalExchange(ctx, response, err)
+	recordPhysicalCallMetric(ctx, response, err)
+}
+
+func recordPhysicalCallMetric(ctx context.Context, response *http.Response, err error) {
 	value := physicalCallFromContext(ctx)
 	if value.trace == nil {
 		return
@@ -87,6 +93,8 @@ func RecordDirectPhysicalCall(ctx context.Context, response *http.Response, err 
 	recordPhysicalCall(ctx, response, err)
 }
 
+func BeginDirectPhysicalCall(ctx context.Context) error { return beginPhysicalCall(ctx) }
+
 func physicalCallFromContext(ctx context.Context) physicalCallContext {
 	if ctx == nil {
 		return physicalCallContext{}
@@ -106,7 +114,7 @@ func normalizePhysicalProvider(value string) string {
 
 func normalizePhysicalOperation(value string) string {
 	switch strings.TrimSpace(value) {
-	case "responses", "chat", "messages", "compaction", "response_get", "response_delete":
+	case "responses", "chat", "messages", "compaction", "response_get", "response_delete", "image", "image_edit", "video", "tts", "stt", "realtime", "voice":
 		return strings.TrimSpace(value)
 	case "responses_compact":
 		return "compaction"
@@ -139,7 +147,7 @@ func normalizePhysicalPlane(value string) string {
 
 func normalizePhysicalStage(value string) string {
 	switch strings.TrimSpace(value) {
-	case "primary", "plane_fallback", "reasoning_replay", "reasoning_session_reset", "compaction", "compaction_retry", "anti_bot_retry", "statsig_meta":
+	case "primary", "plane_fallback", "reasoning_replay", "reasoning_session_reset", "compaction", "compaction_retry", "anti_bot_retry", "statsig_meta", "connection_retry", "credential_prepare", "authorization_retry", "video_poll", "asset_download":
 		return strings.TrimSpace(value)
 	default:
 		return "other"
@@ -161,6 +169,8 @@ func physicalCallOutcome(response *http.Response, err error) string {
 		return "empty_response"
 	}
 	switch {
+	case response.StatusCode == http.StatusSwitchingProtocols:
+		return "upgraded"
 	case response.StatusCode >= 200 && response.StatusCode < 300:
 		return "success"
 	case response.StatusCode >= 300 && response.StatusCode < 400:

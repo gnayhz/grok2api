@@ -54,19 +54,20 @@ func TestCachedPoolMembersMergesConcurrentReloads(t *testing.T) {
 		member: map[uint64][]domain.Node{7: {{ID: 71, Name: "m1", Enabled: true, Health: 1}}},
 	}, gate: make(chan struct{})}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	ctx := context.Background()
-	if _, _, err := manager.cachedPoolMembers(ctx, 7, time.Now().UTC()); err != nil {
+	if _, _, err := manager.routing.cachedPoolMembers(ctx, 7, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
 	// 缓存条目直接置为已过期(领头的内部复查用真实时间,伪造调用方 now
 	// 骗不过它——内部复查本身是合并正确性的一部分)。
-	manager.fallbackMu.Lock()
-	stale := manager.poolFallbacks[7]
+	manager.routing.fallbackMu.Lock()
+	stale := manager.routing.poolFallbacks[7]
 	stale.expiresAt = time.Now().UTC().Add(-time.Second)
-	manager.poolFallbacks[7] = stale
-	manager.fallbackMu.Unlock()
+	manager.routing.poolFallbacks[7] = stale
+	manager.routing.fallbackMu.Unlock()
 	repo.blocking.Store(true)
 
 	const concurrency = 32
@@ -75,7 +76,7 @@ func TestCachedPoolMembersMergesConcurrentReloads(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			pool, members, err := manager.cachedPoolMembers(ctx, 7, time.Now().UTC())
+			pool, members, err := manager.routing.cachedPoolMembers(ctx, 7, time.Now().UTC())
 			if err != nil {
 				t.Errorf("cachedPoolMembers: %v", err)
 				return
@@ -105,7 +106,7 @@ func TestCachedPoolMembersMergesConcurrentReloads(t *testing.T) {
 	}
 
 	// 合并回源写入的新缓存对后续请求生效:零额外进入。
-	if _, _, err := manager.cachedPoolMembers(ctx, 7, time.Now().UTC()); err != nil {
+	if _, _, err := manager.routing.cachedPoolMembers(ctx, 7, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if repo.entered.Load() != 2 || repo.reads.Load() != 2 {

@@ -23,15 +23,16 @@ import (
 )
 
 var (
-	ErrAssetNotFound         = errors.New("媒体资源不存在")
-	ErrInvalidImage          = errors.New("图片内容无效")
-	ErrInvalidImageSelection = errors.New("图片选择无效")
-	ErrInvalidVideoSelection = errors.New("视频任务选择无效")
-	ErrActiveVideoSelection  = errors.New("排队中或生成中的视频任务不能删除")
-	ErrInvalidFilter         = errors.New("媒体筛选条件无效")
-	ErrMediaJobsUnavailable  = errors.New("视频任务仓储未配置")
-	ErrInputAssetNotFound    = errors.New("临时输入资产不存在或已过期")
-	ErrMediaCapacity         = errors.New("媒体存储容量不足")
+	ErrAssetNotFound          = mediadomain.ErrAssetNotFound
+	ErrInvalidImage           = errors.New("图片内容无效")
+	ErrInvalidImageSelection  = errors.New("图片选择无效")
+	ErrInvalidVideoSelection  = errors.New("视频任务选择无效")
+	ErrActiveVideoSelection   = mediadomain.ErrJobActive
+	ErrVideoCompletionPending = mediadomain.ErrJobCompletionPending
+	ErrInvalidFilter          = errors.New("媒体筛选条件无效")
+	ErrMediaJobsUnavailable   = errors.New("视频任务仓储未配置")
+	ErrInputAssetNotFound     = errors.New("临时输入资产不存在或已过期")
+	ErrMediaCapacity          = errors.New("媒体存储容量不足")
 )
 
 // InputAssetTTL 是临时输入的硬保留上限；无论任务状态如何，超过后都可回收。
@@ -53,7 +54,6 @@ type Service struct {
 	cleanupSignal chan struct{}
 	configChanged chan struct{}
 	totalBytes    atomic.Int64
-	inputSaveMu   sync.Mutex
 }
 
 type Config struct {
@@ -119,7 +119,7 @@ func (s *Service) UpdateConfig(cfg Config) {
 
 // SaveImage 校验并保存一份不可变图片，文件写入失败或元数据落库失败时不会留下半成品。
 func (s *Service) SaveImage(ctx context.Context, data []byte) (mediadomain.Asset, error) {
-	return s.saveImage(ctx, data, nil, "img_")
+	return s.saveImage(ctx, data, nil, "img_", 0)
 }
 
 // SaveInputImage 保存不会进入图库、不会公开读取并会自动过期的视频输入图片。
@@ -129,28 +129,15 @@ func (s *Service) SaveInputImage(ctx context.Context, data []byte) (mediadomain.
 	if len(data) == 0 || inputLimit <= 0 || int64(len(data)) > inputLimit {
 		return mediadomain.Asset{}, ErrInvalidImage
 	}
-	s.inputSaveMu.Lock()
-	defer s.inputSaveMu.Unlock()
-	total, err := s.assets.TotalMediaAssetBytes(ctx)
+	capacityLimit, err := s.checkInputCapacity(ctx, int64(len(data)), cfg)
 	if err != nil {
 		return mediadomain.Asset{}, err
 	}
-	capacityLimit := cleanupThresholdBytes(cfg)
-	if capacityLimit <= 0 || capacityLimit > cfg.MaxTotalBytes {
-		capacityLimit = cfg.MaxTotalBytes
-	}
-	if int64(len(data)) > capacityLimit || total > capacityLimit-int64(len(data)) {
-		select {
-		case s.cleanupSignal <- struct{}{}:
-		default:
-		}
-		return mediadomain.Asset{}, ErrMediaCapacity
-	}
 	expiresAt := time.Now().UTC().Add(InputAssetTTL)
-	return s.saveImage(ctx, data, &expiresAt, mediadomain.InputAssetIDPrefix)
+	return s.saveImage(ctx, data, &expiresAt, mediadomain.InputAssetIDPrefix, capacityLimit)
 }
 
-func (s *Service) saveImage(ctx context.Context, data []byte, expiresAt *time.Time, idPrefix string) (mediadomain.Asset, error) {
+func (s *Service) saveImage(ctx context.Context, data []byte, expiresAt *time.Time, idPrefix string, capacityLimit int64) (mediadomain.Asset, error) {
 	cfg := s.runtimeConfig()
 	if len(data) == 0 || int64(len(data)) > cfg.MaxImageBytes {
 		return mediadomain.Asset{}, ErrInvalidImage
@@ -173,7 +160,7 @@ func (s *Service) saveImage(ctx context.Context, data []byte, expiresAt *time.Ti
 		ID: id, Kind: "image", StorageKey: storageKey, MIMEType: mimeType,
 		SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), ExpiresAt: expiresAt, CreatedAt: createdAt,
 	}
-	if err := s.assets.CreateMediaAsset(ctx, asset); err != nil {
+	if err := s.registerAsset(ctx, asset, capacityLimit); err != nil {
 		_ = s.objects.Delete(context.WithoutCancel(ctx), storageKey)
 		return mediadomain.Asset{}, err
 	}
@@ -403,8 +390,8 @@ func (s *Service) AdminDeleteVideoJobs(ctx context.Context, ids []string) (int, 
 		return 0, err
 	}
 	for _, job := range jobs {
-		if job.Status != mediadomain.StatusCompleted && job.Status != mediadomain.StatusFailed {
-			return 0, ErrActiveVideoSelection
+		if err := job.CheckDeletion(); err != nil {
+			return 0, err
 		}
 	}
 
@@ -414,6 +401,9 @@ func (s *Service) AdminDeleteVideoJobs(ctx context.Context, ids []string) (int, 
 			if err := s.tickets.DeleteUploadTicketsByJobID(ctx, job.ID); err != nil {
 				return deleted, err
 			}
+		}
+		if err := s.deleteVideoSourceAssets(ctx, job.ID); err != nil {
+			return deleted, err
 		}
 		if err := s.deleteVideoAsset(ctx, job.ResultAssetID); err != nil {
 			return deleted, err
@@ -430,6 +420,25 @@ func (s *Service) AdminDeleteVideoJobs(ctx context.Context, ids []string) (int, 
 		s.totalBytes.Store(total)
 	}
 	return deleted, nil
+}
+
+// A terminal job cannot acquire new source assets. Repeated bounded pages
+// include archives that were registered but never selected as the result.
+func (s *Service) deleteVideoSourceAssets(ctx context.Context, jobID string) error {
+	for {
+		assets, err := s.assets.ListMediaAssetsBySourceJob(ctx, jobID, repository.MaxMediaAssetLookupKeys)
+		if err != nil {
+			return err
+		}
+		for _, asset := range assets {
+			if err := s.deleteVideoAsset(ctx, asset.ID); err != nil {
+				return err
+			}
+		}
+		if len(assets) < repository.MaxMediaAssetLookupKeys {
+			return nil
+		}
+	}
 }
 
 // deleteVideoAsset 删除任务绑定的本地视频对象与元数据；缺失对象按幂等成功处理。
@@ -661,81 +670,6 @@ func (s *Service) Cleanup(ctx context.Context) (int, error) {
 		offset = 0
 	}
 	s.totalBytes.Store(total)
-	return deleted, nil
-}
-
-// mediaObjectLister 是对象存储的可选枚举能力（本地驱动实现）。不支持时
-// 孤儿回收静默跳过，存储后端行为不变。
-type mediaObjectLister interface {
-	ListMediaObjectFiles(ctx context.Context) (objects, temps map[string]time.Time, err error)
-}
-
-const (
-	// orphanSweepInterval 孤儿对账频率：崩溃残留积累速率极低，日频足够。
-	orphanSweepInterval = 24 * time.Hour
-	// orphanGracePeriod 是文件修改时间宽限期：覆盖多实例共享存储下
-	// 「对象已硬链接提交、元数据行对其他实例尚未可见」的竞态窗口
-	// （实际为毫秒级），同时容忍时钟偏移。
-	orphanGracePeriod = 24 * time.Hour
-)
-
-// sweepOrphanObjects 对账文件系统与元数据，回收硬链接提交后、元数据行
-// 写入前崩溃残留的孤儿对象与过期临时文件。Cleanup 只枚举 DB 行，这类
-// 文件对其不可见且不计入容量统计——不回收则永久泄漏并绕过 MaxTotalBytes。
-// 有 DB 行的对象与宽限期内的文件一律保留；删除幂等（ErrNotExist 容忍），
-// 多实例并发对账安全。返回删除的文件数。
-func (s *Service) sweepOrphanObjects(ctx context.Context, now time.Time) (int, error) {
-	lister, ok := s.objects.(mediaObjectLister)
-	if !ok {
-		return 0, nil
-	}
-	objects, temps, err := lister.ListMediaObjectFiles(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if len(objects) == 0 && len(temps) == 0 {
-		return 0, nil
-	}
-	known := make(map[string]struct{})
-	for offset := 0; ; {
-		values, err := s.assets.ListOldestMediaAssets(ctx, offset, cleanupAssetBatchSize)
-		if err != nil {
-			return 0, err
-		}
-		for _, asset := range values {
-			known[asset.StorageKey] = struct{}{}
-		}
-		if len(values) < cleanupAssetBatchSize {
-			break
-		}
-		offset += len(values)
-	}
-	deleted := 0
-	cutoff := now.Add(-orphanGracePeriod)
-	remove := func(key string) error {
-		if err := s.objects.Delete(ctx, key); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	for key, modified := range objects {
-		if _, live := known[key]; live || modified.After(cutoff) {
-			continue
-		}
-		if err := remove(key); err != nil {
-			return deleted, err
-		}
-		deleted++
-	}
-	for key, modified := range temps {
-		if modified.After(cutoff) {
-			continue
-		}
-		if err := remove(key); err != nil {
-			return deleted, err
-		}
-		deleted++
-	}
 	return deleted, nil
 }
 

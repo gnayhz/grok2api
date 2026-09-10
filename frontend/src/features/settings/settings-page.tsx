@@ -16,6 +16,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { isByteSizeUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/features/settings/settings-model";
 import { useSettings } from "@/features/settings/use-settings";
 import { DurationInput, SettingsField, SettingsPane, SettingsSection } from "@/features/settings/settings-ui";
+import { SettingsApplicationStatus } from "@/features/settings/settings-status";
 import { ErrorState } from "@/shared/components/data-state";
 
 export function SettingsPage() {
@@ -30,12 +31,18 @@ export function SettingsPage() {
   const buildForbiddenReauthEnabled = form.watch("accounts.markBuildForbiddenReauth") === true;
   const segmentedSelectorEnabled = form.watch("routing.segmentedSelector.enabled") === true;
 
-  if (settingsQuery.isError) {
+  if (settingsQuery.isError && !settingsQuery.data) {
     return <ErrorState message={settingsQuery.error.message} onRetry={() => void settingsQuery.refetch()} />;
   }
 
   const snapshot = settingsQuery.data;
   const loading = settingsQuery.isPending;
+  const saving = updateMutation.isPending || resetDefaultsMutation.isPending;
+  const retentionSources: Record<string, string> = {
+    default: t("settings.audit.sourceDefault"), file: t("settings.audit.sourceFile"),
+    runtime: t("settings.audit.sourceRuntime"), legacy_runtime: t("settings.audit.sourceLegacyRuntime"),
+    legacy_file: t("settings.audit.sourceLegacyFile"), legacy_file_conflict: t("settings.audit.sourceLegacyConflict"),
+  };
   const statsigMode = form.watch("providerWeb.statsigMode");
   const draftClearanceMode = form.watch("providerWeb.clearanceMode");
   const statsigManualConfigured = form.watch("providerWeb.statsigManualConfigured");
@@ -61,13 +68,13 @@ export function SettingsPage() {
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("common.reset")} disabled={loading || updateMutation.isPending || !form.formState.isDirty} onClick={reset}>
+              <Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("common.reset")} disabled={loading || saving || !form.formState.isDirty} onClick={reset}>
                 <RotateCcw />
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t("common.reset")}</TooltipContent>
           </Tooltip>
-          <Button type="submit" size="sm" disabled={loading || updateMutation.isPending || !form.formState.isDirty}>
+          <Button type="submit" size="sm" disabled={loading || saving || !form.formState.isDirty}>
             {updateMutation.isPending ? <Spinner /> : null}{t("common.save")}
           </Button>
           <Button type="button" variant="outline" size="sm" disabled={loading || updateMutation.isPending || resetDefaultsMutation.isPending} onClick={() => setResetDefaultsConfirm(true)}>
@@ -77,6 +84,9 @@ export function SettingsPage() {
       </header>
 
       {loading ? <div className="flex min-h-64 items-center justify-center"><Spinner /></div> : null}
+      {settingsQuery.isError ? <p role="alert" className="text-sm text-destructive">{settingsQuery.error.message} <Button type="button" variant="link" onClick={() => void settingsQuery.refetch()}>{t("common.retry")}</Button></p> : null}
+      {snapshot ? <SettingsApplicationStatus snapshot={snapshot} /> : null}
+      <fieldset disabled={saving} className="min-w-0">
       {snapshot ? (
         <Tabs defaultValue="build" className="flex min-w-0 flex-col gap-7 lg:flex-row lg:items-start">
           <TabsList className="flex h-auto w-full max-w-full shrink-0 justify-start gap-1 overflow-x-auto overscroll-x-contain rounded-none bg-transparent p-0 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden [&>span]:rounded-md [&>span]:bg-muted/70 [&>span]:shadow-none lg:sticky lg:top-[148px] lg:w-56 lg:flex-col lg:items-stretch lg:overflow-visible">
@@ -353,19 +363,28 @@ export function SettingsPage() {
             <SettingsSection title={t("settings.audit.retentionTitle")}>
               <div className="space-y-0">
                 <SettingsField
-                  controlId="audit-retention-days"
-                  label={t("settings.audit.retentionDays")}
-                  description={t("settings.audit.retentionDaysHelp")}
-                  error={form.formState.errors.audit?.retentionDays?.message}
+                  controlId="audit-retention-period"
+                  label={t("settings.audit.retentionPeriod")}
+                  description={t("settings.audit.retentionPeriodHelp")}
+                  error={form.formState.errors.audit?.retentionPeriod?.message}
                 >
                   <Input
-                    id="audit-retention-days"
-                    type="number"
-                    min={0}
-                    max={365}
-                    {...form.register("audit.retentionDays", { valueAsNumber: true })}
+                    id="audit-retention-period"
+                    placeholder="168h"
+                    {...form.register("audit.retentionPeriod")}
                   />
                 </SettingsField>
+                {snapshot.config.audit.retentionSource ? (
+                  <p className="py-2 text-xs text-muted-foreground">{t("settings.audit.effectiveRetentionSource", {
+                    source: retentionSources[snapshot.config.audit.retentionSource],
+                  })}</p>
+                ) : null}
+                {snapshot.config.audit.fileRetentionPeriod ? (
+                  <p className="py-2 text-xs text-muted-foreground">{t("settings.audit.fileRetentionBaseline", {
+                    period: snapshot.config.audit.fileRetentionPeriod,
+                    source: retentionSources[snapshot.config.audit.fileRetentionSource ?? "default"],
+                  })}</p>
+                ) : null}
 
               </div>
             </SettingsSection>
@@ -575,6 +594,7 @@ export function SettingsPage() {
           </div>
         </Tabs>
       ) : null}
+      </fieldset>
       <AlertDialog open={resetDefaultsConfirm} onOpenChange={setResetDefaultsConfirm}>
         <AlertDialogContent>
           <AlertDialogHeader>

@@ -10,6 +10,7 @@ import (
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestRoutingMutationsNotifyAfterCommit(t *testing.T) {
@@ -37,10 +38,10 @@ func TestRoutingMutationsNotifyAfterCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.SaveBilling(ctx, account.Billing{AccountID: credential.ID, MonthlyLimit: 100, SyncedAt: time.Now().UTC()}); err != nil {
+	if err := testsupport.Billing(ctx, accounts, account.Billing{AccountID: credential.ID, MonthlyLimit: 100, SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, credential.ID, []string{"model-a"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, credential.ID, []string{"model-a"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := models.Create(ctx, model.Route{
@@ -51,6 +52,7 @@ func TestRoutingMutationsNotifyAfterCommit(t *testing.T) {
 
 	want := []repository.InvalidationKind{
 		repository.InvalidationAccountStateChanged,
+		repository.InvalidationAccountRecoveryChanged,
 		repository.InvalidationAccountBillingChanged,
 		repository.InvalidationAccountCapabilityChanged,
 		repository.InvalidationRouteChanged,
@@ -65,14 +67,14 @@ func TestRoutingMutationsNotifyAfterCommit(t *testing.T) {
 		}
 	}
 	events = events[:0]
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"model-a"}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{"model-a"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].Kind != repository.InvalidationRouteChanged {
 		t.Fatalf("managed route creation events = %#v", events)
 	}
 	events = events[:0]
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"model-a"}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{"model-a"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 0 {
@@ -81,7 +83,7 @@ func TestRoutingMutationsNotifyAfterCommit(t *testing.T) {
 
 	before := len(events)
 	credential.ID = 999999
-	if _, err := accounts.Update(ctx, credential); err == nil {
+	if _, err := accounts.UpdateAdministration(ctx, credential.ID, repository.AccountAdminPatch{Name: &credential.Name}); err == nil {
 		t.Fatal("missing account update should fail")
 	}
 	if len(events) != before {
@@ -112,20 +114,20 @@ func TestAccountHealthMutationPublishesPreciseInvalidation(t *testing.T) {
 		events = append(events, event)
 	})
 	cooldownUntil := time.Now().UTC().Add(time.Minute)
-	if err := accounts.UpdateHealth(ctx, credential.ID, account.ProviderWeb, 2, &cooldownUntil, "wrong provider", false); err != repository.ErrNotFound {
+	if _, err := accounts.ApplyHealth(ctx, credential.ID, account.ProviderWeb, account.HealthEvent{Kind: account.HealthFailure}); err != repository.ErrNotFound {
 		t.Fatalf("mismatched provider error = %v, want not found", err)
 	}
 	if len(events) != 0 {
 		t.Fatalf("mismatched provider emitted invalidation: %#v", events)
 	}
-	if err := accounts.UpdateHealth(ctx, credential.ID, credential.Provider, 2, &cooldownUntil, "upstream status 429", false); err != nil {
+	if _, err := accounts.ApplyHealth(ctx, credential.ID, credential.Provider, account.HealthEvent{Kind: account.HealthFailure, Status: 429, RetryAfter: time.Until(cooldownUntil)}); err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 {
 		t.Fatalf("health events = %#v", events)
 	}
 	event := events[0]
-	if event.Kind != repository.InvalidationAccountHealthChanged || event.Provider != account.ProviderBuild || event.AccountID != credential.ID || event.FailureCount != 2 || event.CooldownUntil == nil || !event.CooldownUntil.Equal(cooldownUntil) {
+	if event.Kind != repository.InvalidationAccountHealthChanged || event.Provider != account.ProviderBuild || event.AccountID != credential.ID || event.FailureCount != 1 || event.HealthRevision != 1 || event.CooldownUntil == nil || event.CooldownUntil.Sub(cooldownUntil).Abs() > time.Second {
 		t.Fatalf("health event = %#v", event)
 	}
 	if err := accounts.TouchLastUsed(ctx, credential.ID, time.Now().UTC()); err != nil {
@@ -161,7 +163,7 @@ func TestClientKeyMutationsNotifyAfterCommit(t *testing.T) {
 
 	created.ProviderScope = clientkeydomain.ProviderScopeWeb
 	created.TierScope = clientkeydomain.TierScopeSuper
-	if _, err := keys.Update(ctx, created); err != nil {
+	if _, err := keys.Patch(ctx, created.ID, clientkeydomain.ManagementPatch{ProviderScope: &created.ProviderScope, TierScope: &created.TierScope}); err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].Kind != repository.InvalidationClientKeyChanged || events[0].ClientKeyID != created.ID || !events[0].Valid() {
@@ -170,7 +172,7 @@ func TestClientKeyMutationsNotifyAfterCommit(t *testing.T) {
 
 	missing := created
 	missing.ID = created.ID + 999
-	if _, err := keys.Update(ctx, missing); err == nil {
+	if _, err := keys.Patch(ctx, missing.ID, clientkeydomain.ManagementPatch{ProviderScope: &missing.ProviderScope, TierScope: &missing.TierScope}); err == nil {
 		t.Fatal("missing client-key update should fail")
 	}
 	if len(events) != 1 {
@@ -191,7 +193,7 @@ func TestClientKeyMutationsNotifyAfterCommit(t *testing.T) {
 	}
 }
 
-func TestModelUpdateInvalidationUsesStoredRouteIdentity(t *testing.T) {
+func TestModelPatchInvalidationUsesStoredRouteIdentity(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "model-update-invalidation.db"))
 	if err != nil {
@@ -212,11 +214,9 @@ func TestModelUpdateInvalidationUsesStoredRouteIdentity(t *testing.T) {
 	models.SetInvalidationObserver(func(_ context.Context, event repository.InvalidationEvent) {
 		events = append(events, event)
 	})
-	created.Provider = account.ProviderWeb
-	created.UpstreamModel = "caller-supplied-upstream"
 	created.PublicID = "renamed"
 	bindings := []uint64{}
-	updated, err := models.Update(ctx, created, &bindings)
+	updated, err := models.Patch(ctx, created.ID, model.RoutePatch{PublicID: &created.PublicID, Enabled: &created.Enabled, AccountIDs: &bindings})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,8 @@ func TestAccountUpdatePreservesStoredProvider(t *testing.T) {
 	created.Provider = account.ProviderWeb
 	created.BuildSuperEntitled = true
 	created.BuildRouteMode = account.BuildRouteBuild
-	updated, err := accounts.Update(ctx, created)
+	edited, err := accounts.UpdateAdministration(ctx, created.ID, repository.AccountAdminPatch{BuildSuperEntitled: &created.BuildSuperEntitled, BuildRouteMode: &created.BuildRouteMode})
+	updated := edited.Credential
 	if err != nil {
 		t.Fatal(err)
 	}

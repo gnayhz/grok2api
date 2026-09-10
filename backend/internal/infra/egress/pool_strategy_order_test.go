@@ -20,9 +20,9 @@ func TestStickyAndRotationOrderRuleConsistency(t *testing.T) {
 		{ID: 5, Enabled: true, Health: 1, PoolPriority: 0},
 		{ID: 9, Enabled: true, Health: 1, PoolPriority: 3},
 	}
-	stickyPick := manager.selectPoolNode(domain.Pool{ID: 1, Strategy: domain.PoolStrategySticky}, repoOrder, repoOrder, "")
+	stickyPick := manager.routing.selectPoolNode(domain.Pool{ID: 1, Strategy: domain.PoolStrategySticky}, repoOrder, repoOrder, "")
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRotation}
-	rotationPick := manager.selectPoolNode(domain.Pool{ID: 2, Enabled: true, Strategy: domain.PoolStrategyRotation}, repoOrder, repoOrder, "")
+	rotationPick := manager.routing.selectPoolNode(domain.Pool{ID: 2, Enabled: true, Strategy: domain.PoolStrategyRotation}, repoOrder, repoOrder, "")
 	if stickyPick.ID != rotationPick.ID {
 		t.Fatalf("sticky=%d rotation=%d: 两策略的首必须一致(同一排序规则)", stickyPick.ID, rotationPick.ID)
 	}

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // TestGuardStatsCountRescuedAndFailedWithhold 验证守卫特征统计的端到端
@@ -53,12 +55,12 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, models, time.Now().UTC()); err != nil {
+		if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, credential.ID, models, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		return credential
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
 	// 统一 grok-4.6 池,用优先级控制选号:场景二先跑,选中 failClosed(300)
@@ -67,7 +69,7 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 	failClosedAccount := makeAccount("guard-stats-failclosed", 300, []string{"grok-4.6"})
 	degradedAccount := makeAccount("guard-stats-degraded", 200, []string{"grok-4.6"})
 	cleanAccount := makeAccount("guard-stats-clean", 100, []string{"grok-4.6"})
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll,
 		Name: "guard-stats-key", Prefix: "gstats", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
 	})
@@ -92,7 +94,7 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 		sticky := memory.NewStickyStore()
 		accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 		selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-		service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
+		service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 		service.UpdateQualityRetry(QualityRetryRuntime{
 			Enabled: true, MaxAttempts: maxAttempts,
 			OnExhausted: qualityRetryFailClosed,
@@ -120,15 +122,18 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 		t.Fatal("fail-closed scenario must return the quality failure")
 	}
 
-	// 场景一(后跑):failClosed 已冷却,degraded(200) 扣留 → clean 救回。
+	// 场景一使用新的嵌入实例；显式继承前一场景的本地临时限制。
 	rescuedService := newService(map[uint64][]scriptedBuildResponse{
 		degradedAccount.ID: {{status: http.StatusOK, body: degraded}},
 		cleanAccount.ID:    {{status: http.StatusOK, body: clean}},
 	}, 3)
+	rescuedService.selector.holdLocalQuality(failClosedAccount.ID, "previous-scenario", time.Now().Add(time.Minute))
 	result, err := rescuedService.CreateChatCompletion(ctx, chatInput("req-guard-stats-rescued", "grok-4.6"))
 	if err != nil {
 		t.Fatalf("rescued scenario must deliver: %v", err)
 	}
+	_, _ = io.Copy(io.Discard, result.Body)
+	finishTestResult(t, result, Usage{}, "", "")
 	_ = result.Body.Close()
 
 	after := GuardStatsSnapshotForAPI()

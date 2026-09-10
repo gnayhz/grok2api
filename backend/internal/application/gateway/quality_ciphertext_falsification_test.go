@@ -39,7 +39,7 @@ func TestDegradedCiphertextOnlyStreamIsWithheld(t *testing.T) {
 	if sig.HasThinking {
 		t.Fatalf("密文不得构成思考证据: %#v", sig)
 	}
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("降智流（仅密文+可见输出）= %s，应扣留", v)
 	}
 }
@@ -54,7 +54,7 @@ func TestDegradedStreamWithheldMidStreamBeforeCiphertext(t *testing.T) {
 		`data: {"type":"response.output_text.delta","delta":"`+content+`"}`,
 	)))
 	sig := state.signals()
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("中途降智流 = %s，应尽早扣留（不等待流末密文）", v)
 	}
 }
@@ -77,7 +77,7 @@ func TestCleanVisibleSummaryDeltaStreamDelivers(t *testing.T) {
 	if !sig.HasThinking {
 		t.Fatalf("可见思考增量必须是证据: %#v", sig)
 	}
-	if v := classifyQualityHold(sig); v != QualityDeliver {
+	if v := classifyQualityHoldShadowed(sig); v != QualityDeliver {
 		t.Fatalf("健康流 = %s，应放行", v)
 	}
 }
@@ -97,7 +97,7 @@ func TestAnthropicSignatureDeltaIsNotEvidence(t *testing.T) {
 	if sig.HasThinking {
 		t.Fatalf("signature_delta 不得构成思考证据: %#v", sig)
 	}
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("仅签名的降智流 = %s，应扣留", v)
 	}
 }
@@ -179,7 +179,7 @@ func TestAnthropicDecodedDeltaArmDuplicateTypeThinkingDelivers(t *testing.T) {
 	if !state.hasThinking {
 		t.Fatal("duplicate-type thinking_delta must still be evidence via decoded arm")
 	}
-	if v := classifyQualityHold(state.signals()); v != QualityDeliver {
+	if v := classifyQualityHoldShadowed(state.signals()); v != QualityDeliver {
 		t.Fatalf("verdict=%s, want deliver", v)
 	}
 }
@@ -197,7 +197,7 @@ func TestAnthropicDecodedDeltaArmDuplicateTypeSignatureWithholds(t *testing.T) {
 	if state.hasThinking {
 		t.Fatalf("duplicate-type signature_delta must not be evidence: %#v", state.signals())
 	}
-	if v := classifyQualityHold(state.signals()); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(state.signals()); v != QualityWithhold {
 		t.Fatalf("duplicate-type signature+text = %s, want withhold", v)
 	}
 }
@@ -217,7 +217,7 @@ func TestChatReasoningStartCommentIsNotEvidence(t *testing.T) {
 	if sig.HasThinking {
 		t.Fatalf("reasoning-start 注释不得构成思考证据: %#v", sig)
 	}
-	if v := classifyQualityHold(sig); v != QualityWithhold {
+	if v := classifyQualityHoldShadowed(sig); v != QualityWithhold {
 		t.Fatalf("注释+输出的降智流 = %s，应扣留", v)
 	}
 }
@@ -235,13 +235,13 @@ func TestIdleAccountCooldownNormalizesAndStreams(t *testing.T) {
 // Messages 未请求 thinking（修正）：流式照常 hold——转换器以
 // ThinkingEvidenceComment 内部注释保留思考证据（上游对未指定强度的请求
 // 按默认强度思考，零思考即降智；原整体豁免放行了 15 条零思考交付）。
-// 非流式 body 无注释通道，保留豁免（已知残留缺口，REASONING0_LEDGER §C2）。
+// 非流式同样在转换前读取原始 Responses 思考证据。
 func TestMessagesWithoutThinkingHoldPolicy(t *testing.T) {
 	t.Parallel()
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6"}
 	cfg := QualityRetryRuntime{Enabled: true}
 	gate := func(body string, streaming bool) bool {
-		return shouldHoldQualityStream(Input{Streaming: streaming, Body: []byte(body), PublicModel: "grok-4.6"}, nil, route, audit.OperationMessages, cfg)
+		return shouldHoldQualityStream(Input{Streaming: streaming, Body: []byte(body), PublicModel: "grok-4.6"}, nil, route, audit.OperationMessages, cfg, nil)
 	}
 	for _, tc := range []struct{ name, body string }{
 		{name: "no thinking field", body: `{"model":"grok-4.6","max_tokens":800,"messages":[{"role":"user","content":"hi"}]}`},
@@ -251,19 +251,19 @@ func TestMessagesWithoutThinkingHoldPolicy(t *testing.T) {
 		streamingHold := gate(tc.body, true)
 		if tc.name == "no thinking field" {
 			// 未指定 thinking：流式照常 hold（证据注释通道已补），
-			// 非流式无注释通道保留豁免。
+			// 非流式从转换前原始响应读取证据。
 			if !streamingHold {
 				t.Errorf("[%s] 流式 messages 未请求 thinking 应照常 hold: %s", tc.name, tc.body)
 			}
-			if gate(tc.body, false) {
-				t.Errorf("[%s] 非流式无证据通道保留豁免: %s", tc.name, tc.body)
+			if !gate(tc.body, false) {
+				t.Errorf("[%s] 非流式原始响应必须受守卫保护: %s", tc.name, tc.body)
 			}
 			continue
 		}
 		// 显式关闭思考（disabled/零预算）不再豁免（删除
 		// reasoning_disabled）：白名单内模型（grok-4.5/4.6）不支持 none，
 		// 显式关闭是非法组合——流式照常进守卫（上游将以 400 拒绝，判决
-		// 无从发生）；非流式 messages 仍由 messages_thinking_off 豁免。
+		// 无从发生）；非流式与流式使用相同管辖。
 		if !streamingHold {
 			t.Errorf("[%s] 显式关思考在 none-不支持模型上应照常进守卫: %s", tc.name, tc.body)
 		}
@@ -272,7 +272,7 @@ func TestMessagesWithoutThinkingHoldPolicy(t *testing.T) {
 		t.Error("messages 显式 thinking 应照常 hold")
 	}
 	// 其余协议不受该豁免影响。
-	if !shouldHoldQualityStream(Input{Streaming: true, Body: []byte(`{"input":"hi"}`), PublicModel: "grok-4.6"}, nil, route, audit.OperationResponses, cfg) {
+	if !shouldHoldQualityStream(Input{Streaming: true, Body: []byte(`{"input":"hi"}`), PublicModel: "grok-4.6"}, nil, route, audit.OperationResponses, cfg, nil) {
 		t.Error("responses 请求应照常 hold")
 	}
 }
@@ -325,17 +325,16 @@ func TestPeekQualityBodyClassifiesRealShapes(t *testing.T) {
 		t.Fatalf("非法 JSON 应按空流处理，verdict=%s err=%v", verdict, err)
 	}
 
-	// 未识别形状（既非 Responses 也非转换后的 chat/messages 形态）→ fail-open
-	// 放行。注：chat 形态自 round 41 起会被识别并判决，不再是 fail-open。
+	// 未识别形状不能建立健康结论，也不构成降智证据。
 	alien := `{"result":"ok","status":"fine"}`
 	_, verdict, _, err = peekQualityBody(io.NopCloser(strings.NewReader(alien)), cfg)
-	if err != nil || verdict != QualityDeliver {
-		t.Fatalf("未识别形状应 fail-open，verdict=%s err=%v", verdict, err)
+	if !errors.Is(err, errQualityBodyShape) || verdict != QualityWait {
+		t.Fatalf("未识别形状应拒绝交付但不判降智，verdict=%s err=%v", verdict, err)
 	}
 
 	// 门控：非流式 responses 请求现在也进入 hold。
 	route := modeldomain.Route{Provider: accountdomain.ProviderBuild, UpstreamModel: "grok-4.6"}
-	if !shouldHoldQualityStream(Input{Streaming: false, Body: []byte(`{"input":"hi"}`), PublicModel: "grok-4.6"}, nil, route, audit.OperationResponses, cfg) {
+	if !shouldHoldQualityStream(Input{Streaming: false, Body: []byte(`{"input":"hi"}`), PublicModel: "grok-4.6"}, nil, route, audit.OperationResponses, cfg, nil) {
 		t.Error("非流式 responses 请求应进入 hold（此前的豁免导致降智 body 直接交付）")
 	}
 }

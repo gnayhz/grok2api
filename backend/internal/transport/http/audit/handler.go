@@ -28,6 +28,24 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type auditResponse struct {
+	UpstreamStatusCode  int    `json:"upstreamStatusCode"`
+	ResponseID          string `json:"responseId"`
+	ProviderStateCommit string `json:"providerStateCommit"`
+	AdmissionOutcome    string `json:"admissionOutcome"`
+	GenerationOutcome   string `json:"generationOutcome"`
+	OwnershipCommit     string `json:"ownershipCommit"`
+	DeliveryOutcome     string `json:"deliveryOutcome"`
+	PhysicalReceipt     string `json:"physicalReceipt"`
+	QualityReceipt      string `json:"qualityReceipt"`
+	LedgerOutcome       string `json:"ledgerOutcome"`
+
+	HistoryOutcome       string `json:"historyOutcome"`
+	HistoryScopeHash     string `json:"historyScopeHash"`
+	HistoryGeneration    int64  `json:"historyGeneration"`
+	HistoryRestoredItems int    `json:"historyRestoredItems"`
+	HistoryNormalizer    int    `json:"historyNormalizer"`
+	HistoryCommit        string `json:"historyCommit"`
+
 	ID                      uint64                    `json:"id,string"`
 	RequestID               string                    `json:"requestId"`
 	ClientKeyID             uint64                    `json:"clientKeyId,string"`
@@ -51,6 +69,7 @@ type auditResponse struct {
 	MediaInputImages        int64                     `json:"mediaInputImages"`
 	MediaOutputImages       int64                     `json:"mediaOutputImages"`
 	MediaOutputSeconds      int64                     `json:"mediaOutputSeconds"`
+	AudioDurationMS         int64                     `json:"audioDurationMs"`
 	InputTokens             int64                     `json:"inputTokens"`
 	CachedInputTokens       int64                     `json:"cachedInputTokens"`
 	OutputTokens            int64                     `json:"outputTokens"`
@@ -71,17 +90,21 @@ type auditResponse struct {
 	// terminal_burst 表示"整包末尾爆发+零思考"——这类行 Token/s 是除以
 	// ~0ms 的数学假象、速度列显示为空，此前在一切降智汇总里都隐形
 	// （续聊链连续降智事故的直接表象）。纯 KPI，不参与执行。
-	DegradeClass    string              `json:"degradeClass,omitempty"`
-	DeliveredEvents int64               `json:"deliveredEvents"`
-	DeliveredBytes  int64               `json:"deliveredBytes"`
-	DurationMS      int64               `json:"durationMs"`
-	ErrorCode       string              `json:"errorCode,omitempty"`
-	QualityFailOpen bool                `json:"qualityFailOpen,omitempty"`
-	RequestMethod   string              `json:"requestMethod,omitempty"`
-	RequestPath     string              `json:"requestPath,omitempty"`
-	RequestHeaders  map[string][]string `json:"requestHeaders,omitempty"`
-	AttemptCount    int                 `json:"attemptCount"`
-	CreatedAt       time.Time           `json:"createdAt"`
+	DegradeClass    string `json:"degradeClass,omitempty"`
+	DeliveredEvents int64  `json:"deliveredEvents"`
+	DeliveredBytes  int64  `json:"deliveredBytes"`
+	DurationMS      int64  `json:"durationMs"`
+	ErrorCode       string `json:"errorCode,omitempty"`
+	QualityFailOpen bool   `json:"qualityFailOpen,omitempty"`
+	// QualityExempt 守卫未介入的豁免原因(disabled 等);QualityRule 守卫介入
+	// 时最终交付尝试的判决规则(thinking=观察到思考增量)。
+	QualityExempt  string              `json:"qualityExempt,omitempty"`
+	QualityRule    string              `json:"qualityRule,omitempty"`
+	RequestMethod  string              `json:"requestMethod,omitempty"`
+	RequestPath    string              `json:"requestPath,omitempty"`
+	RequestHeaders map[string][]string `json:"requestHeaders,omitempty"`
+	AttemptCount   int                 `json:"attemptCount"`
+	CreatedAt      time.Time           `json:"createdAt"`
 }
 
 type billingBreakdownResponse struct {
@@ -129,9 +152,35 @@ type auditErrorFrameResponse struct {
 	Message string `json:"message"`
 }
 
+type auditGenerationUsageResponse struct {
+	PhysicalID              string `json:"physicalId"`
+	Ordinal                 uint64 `json:"ordinal"`
+	AccountID               string `json:"accountId"`
+	AccountName             string `json:"accountName"`
+	Model                   string `json:"model"`
+	Selected                bool   `json:"selected"`
+	Outcome                 string `json:"outcome"`
+	UsageSource             string `json:"usageSource"`
+	InputTokens             int64  `json:"inputTokens"`
+	CachedInputTokens       int64  `json:"cachedInputTokens"`
+	CacheCreationTokens     int64  `json:"cacheCreationTokens"`
+	OutputTokens            int64  `json:"outputTokens"`
+	ReasoningTokens         int64  `json:"reasoningTokens"`
+	TotalTokens             int64  `json:"totalTokens"`
+	ContextInputTokens      int64  `json:"contextInputTokens"`
+	ContextOutputTokens     int64  `json:"contextOutputTokens"`
+	NumSourcesUsed          int64  `json:"numSourcesUsed"`
+	NumServerSideToolsUsed  int64  `json:"numServerSideToolsUsed"`
+	CostInUSDTicks          int64  `json:"costInUsdTicks"`
+	EstimatedCostInUSDTicks int64  `json:"estimatedCostInUsdTicks"`
+	PricingModel            string `json:"pricingModel"`
+	PricingVersion          string `json:"pricingVersion"`
+}
+
 type auditDetailResponse struct {
-	Audit    auditResponse          `json:"audit"`
-	Attempts []auditAttemptResponse `json:"attempts"`
+	GenerationUsages []auditGenerationUsageResponse `json:"generationUsages"`
+	Audit            auditResponse                  `json:"audit"`
+	Attempts         []auditAttemptResponse         `json:"attempts"`
 }
 
 func (h *Handler) list(c *gin.Context) {
@@ -226,7 +275,34 @@ func (h *Handler) get(c *gin.Context) {
 			TransportError:        attempt.TransportError, ErrorChain: errorChain,
 		})
 	}
-	response.Success(c, http.StatusOK, auditDetailResponse{Audit: newAuditResponse(value), Attempts: attempts})
+	generations := make([]auditGenerationUsageResponse, 0, len(value.GenerationUsages))
+	for _, v := range value.GenerationUsages {
+		generations = append(generations, auditGenerationUsageResponse{
+			PhysicalID:              v.PhysicalID,
+			Ordinal:                 v.Ordinal,
+			AccountID:               strconv.FormatUint(v.AccountID, 10),
+			AccountName:             v.AccountName,
+			Model:                   v.Model,
+			Selected:                v.Selected,
+			Outcome:                 v.Outcome,
+			UsageSource:             string(v.UsageSource),
+			InputTokens:             v.InputTokens,
+			CachedInputTokens:       v.CachedInputTokens,
+			CacheCreationTokens:     v.CacheCreationTokens,
+			OutputTokens:            v.OutputTokens,
+			ReasoningTokens:         v.ReasoningTokens,
+			TotalTokens:             v.TotalTokens,
+			ContextInputTokens:      v.ContextInputTokens,
+			ContextOutputTokens:     v.ContextOutputTokens,
+			NumSourcesUsed:          v.NumSourcesUsed,
+			NumServerSideToolsUsed:  v.NumServerSideToolsUsed,
+			CostInUSDTicks:          v.CostInUSDTicks,
+			EstimatedCostInUSDTicks: v.EstimatedCostInUSDTicks,
+			PricingModel:            v.PricingModel,
+			PricingVersion:          v.PricingVersion,
+		})
+	}
+	response.Success(c, http.StatusOK, auditDetailResponse{Audit: newAuditResponse(value), Attempts: attempts, GenerationUsages: generations})
 }
 
 type summaryResponse struct {
@@ -308,6 +384,7 @@ func newListFilter(c *gin.Context) auditapp.ListFilter {
 }
 
 func newAuditResponse(value auditdomain.Record) auditResponse {
+	observation := value.ObserveStream()
 	result := auditResponse{
 		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName, ClientIP: value.ClientIP,
 		ModelRouteID: value.ModelRouteID, ModelPublicID: value.ModelPublicID, ModelUpstreamModel: value.ModelUpstreamModel,
@@ -316,89 +393,35 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		AccountID:       value.AccountID, AccountName: value.AccountName,
 		EgressNodeID: value.EgressNodeID, EgressNodeName: value.EgressNodeName, EgressScope: value.EgressScope, EgressMode: string(value.EgressMode),
 		StatusCode: value.StatusCode, Streaming: value.Streaming,
-		MediaInputImages: value.MediaInputImages, MediaOutputImages: value.MediaOutputImages, MediaOutputSeconds: value.MediaOutputSeconds,
+		MediaInputImages: value.MediaInputImages, MediaOutputImages: value.MediaOutputImages, MediaOutputSeconds: value.MediaOutputSeconds, AudioDurationMS: value.AudioDurationMS,
 		InputTokens: value.InputTokens, CachedInputTokens: value.CachedInputTokens, OutputTokens: value.OutputTokens,
 		ReasoningTokens: value.ReasoningTokens, TotalTokens: value.TotalTokens, CostInUSDTicks: value.CostInUSDTicks,
 		EstimatedCostInUSDTicks: value.EstimatedCostInUSDTicks, PricingModel: value.PricingModel, PricingVersion: value.PricingVersion,
 		Billing:        newBillingBreakdown(value),
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens,
-		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DegradeClass: auditDegradeClass(value), DeliveredEvents: value.DeliveredEvents, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
-		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: value.RequestHeaders,
+		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: observation.OutputTokensPerSecond, DegradeClass: observation.DegradeClass, DeliveredEvents: value.DeliveredEvents, HistoryOutcome: value.HistoryOutcome, HistoryScopeHash: value.HistoryScopeHash, HistoryGeneration: value.HistoryGeneration, HistoryRestoredItems: value.HistoryRestoredItems, HistoryNormalizer: value.HistoryNormalizer, HistoryCommit: value.HistoryCommit, UpstreamStatusCode: value.UpstreamStatusCode, ResponseID: value.ResponseID, ProviderStateCommit: value.ProviderStateCommit, AdmissionOutcome: value.AdmissionOutcome, GenerationOutcome: value.GenerationOutcome, OwnershipCommit: value.OwnershipCommit, DeliveryOutcome: value.DeliveryOutcome, PhysicalReceipt: value.PhysicalReceipt, QualityReceipt: value.QualityReceipt, LedgerOutcome: value.LedgerOutcome, DeliveredBytes: value.DeliveredBytes, DurationMS: value.DurationMS,
+		ErrorCode: value.ErrorCode, QualityFailOpen: value.QualityFailOpen, QualityExempt: value.QualityExempt, QualityRule: value.QualityRule, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: value.RequestHeaders,
 		AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
 	}
 	return result
 }
 
 func newBillingBreakdown(value auditdomain.Record) *billingBreakdownResponse {
-	if value.CostInUSDTicks > 0 {
-		return &billingBreakdownResponse{
-			Source: "upstream", Method: "upstream_reported", Components: []billingComponentResponse{}, TotalInUSDTicks: value.CostInUSDTicks,
-		}
-	}
-	if value.PricingModel == "" {
+	explanation, ok := value.ExplainBilling()
+	if !ok {
 		return nil
 	}
-	breakdown := &billingBreakdownResponse{
-		Source: "official", Method: "stored_estimate", Model: value.PricingModel, Version: value.PricingVersion,
-		Components: []billingComponentResponse{}, TotalInUSDTicks: value.EstimatedCostInUSDTicks,
+	result := &billingBreakdownResponse{
+		Source: explanation.Source, Method: explanation.Method, Model: explanation.Model,
+		Version: explanation.Version, Tier: string(explanation.Tier), TotalInUSDTicks: explanation.TotalInUSDTicks,
+		Components: make([]billingComponentResponse, 0, len(explanation.Components)),
 	}
-	if value.PricingVersion != auditdomain.OfficialPricingAsOf {
-		return breakdown
-	}
-	pricing, ok := auditdomain.ReconstructOfficialCost(
-		value.PricingModel,
-		value.InputTokens,
-		value.CachedInputTokens,
-		value.OutputTokens,
-		value.ContextInputTokens,
-		value.MediaInputImages,
-		value.MediaOutputImages,
-		value.MediaOutputSeconds,
-	)
-	if !ok || pricing.CostInUSDTicks != value.EstimatedCostInUSDTicks {
-		return breakdown
-	}
-	breakdown.Method = "official_rates"
-	breakdown.Model = pricing.Model
-	breakdown.Tier = string(pricing.Tier)
-	breakdown.Components = make([]billingComponentResponse, 0, len(pricing.Components))
-	for _, component := range pricing.Components {
-		breakdown.Components = append(breakdown.Components, billingComponentResponse{
+	for _, component := range explanation.Components {
+		result.Components = append(result.Components, billingComponentResponse{
 			Kind: string(component.Kind), Unit: string(component.Unit), Quantity: component.Quantity,
 			UnitPriceInUSDTicks: component.UnitPriceInUSDTicks, SubtotalInUSDTicks: component.CostInUSDTicks,
 		})
 	}
-	return breakdown
-}
-
-// auditDegradeClass 对可分级的行（2xx 流式成功且有测量）返回降智档位。
-// 唯一档位 terminal_burst 是"整包末尾爆发+零思考"的专用档，速度列为空
-// 恰恰是它的形态而不是"无数据"（TPS 时代的 soft/hard/buffered 档位已随
-// 零延迟拦截重构删除）。不可分级的行返回空串。
-func auditDegradeClass(value auditdomain.Record) string {
-	if !value.Streaming || value.StatusCode < 200 || value.StatusCode >= 300 || value.ErrorCode != "" || value.FirstTokenMS == nil || value.OutputTokens <= 0 {
-		return ""
-	}
-	if auditdomain.ClassifyTerminalBurst(value.OutputTokens, value.ReasoningTokens, *value.FirstTokenMS, value.DurationMS) {
-		return auditdomain.DegradeClassTerminalBurst
-	}
-	return ""
-}
-
-func auditOutputTokensPerSecond(value auditdomain.Record) *float64 {
-	if !value.Streaming || value.StatusCode < 200 || value.StatusCode >= 300 || value.ErrorCode != "" || value.FirstTokenMS == nil || value.OutputTokens <= 0 || value.DurationMS <= *value.FirstTokenMS {
-		return nil
-	}
-	// 生成窗口不足最小窗口(默认 1s)时,"速率"是把整包末尾爆发除以几毫秒的
-	// 数学假象(实测 70 token / 2ms = 35000 tok/s),不是物理吞吐。展示为空;
-	// 这些行的降智签名由 terminal_burst 档位在明细里保持可见。
-	if auditdomain.GenerationWindowMS(*value.FirstTokenMS, value.DurationMS, value.ReasoningTokens) < auditdomain.DefaultDegradeMinGenMS {
-		return nil
-	}
-	throughput := auditdomain.OutputTokensPerSecond(value.OutputTokens, value.ReasoningTokens, *value.FirstTokenMS, value.DurationMS)
-	if throughput <= 0 {
-		return nil
-	}
-	return &throughput
+	return result
 }

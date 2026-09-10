@@ -63,7 +63,7 @@ func TestPoolSelectionAffinityStability(t *testing.T) {
 	placement := map[uint64]uint64{}
 	for account := 0; account < 20; account++ {
 		affinity := string(rune('A' + account))
-		node := manager.selectPoolNode(repo.pool[1], repo.member[1], repo.member[1], affinity)
+		node := manager.routing.selectPoolNode(repo.pool[1], repo.member[1], repo.member[1], affinity)
 		placement[uint64(account)] = node.ID
 	}
 	// 移除节点 3:只有落在 3 上的账号应变化
@@ -76,7 +76,7 @@ func TestPoolSelectionAffinityStability(t *testing.T) {
 	moved, kept := 0, 0
 	for account := 0; account < 20; account++ {
 		affinity := string(rune('A' + account))
-		node := manager.selectPoolNode(repo.pool[1], remaining, remaining, affinity)
+		node := manager.routing.selectPoolNode(repo.pool[1], remaining, remaining, affinity)
 		if placement[uint64(account)] == 3 {
 			if node.ID == 3 {
 				t.Fatalf("removed node still selected")
@@ -104,8 +104,8 @@ func TestPoolStrategyZeroValueNormalizesToAffinity(t *testing.T) {
 		t.Fatalf("bogus strategy = %q, want affinity", domain.PoolStrategy("bogus").Normalized())
 	}
 	nodes := []domain.Node{{ID: 1, Health: 1}, {ID: 2, Health: 1}}
-	first := manager.selectPoolNode(domain.Pool{ID: 1, Enabled: true}, nodes, nodes, "account")
-	second := manager.selectPoolNode(domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyAffinity}, nodes, nodes, "account")
+	first := manager.routing.selectPoolNode(domain.Pool{ID: 1, Enabled: true}, nodes, nodes, "account")
+	second := manager.routing.selectPoolNode(domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyAffinity}, nodes, nodes, "account")
 	if first.ID != second.ID {
 		t.Fatalf("zero-value strategy diverged from affinity: %d vs %d", first.ID, second.ID)
 	}
@@ -119,7 +119,7 @@ func TestPoolStrategyRandomSpreadsAcrossMembers(t *testing.T) {
 	seen := map[uint64]int{}
 	const rounds = 300
 	for range rounds {
-		seen[manager.selectPoolNode(pool, nodes, nodes, "same-account").ID]++
+		seen[manager.routing.selectPoolNode(pool, nodes, nodes, "same-account").ID]++
 	}
 	if len(seen) != len(nodes) {
 		t.Fatalf("random strategy covered %d/%d members: %v", len(seen), len(nodes), seen)
@@ -137,71 +137,16 @@ func TestPoolStrategyStickyPicksFirstSchedulableMember(t *testing.T) {
 	nodes := []domain.Node{{ID: 5, Health: 1}, {ID: 2, Health: 1}, {ID: 9, Health: 1}}
 	for range 10 {
 		for _, affinity := range []string{"a", "b", "c"} {
-			if selected := manager.selectPoolNode(pool, nodes, nodes, affinity); selected.ID != 5 {
+			if selected := manager.routing.selectPoolNode(pool, nodes, nodes, affinity); selected.ID != 5 {
 				t.Fatalf("sticky selected %d, want first member 5", selected.ID)
 			}
 		}
 	}
 	remaining := nodes[1:]
 	for _, affinity := range []string{"a", "b", "c"} {
-		if selected := manager.selectPoolNode(pool, remaining, remaining, affinity); selected.ID != 2 {
+		if selected := manager.routing.selectPoolNode(pool, remaining, remaining, affinity); selected.ID != 2 {
 			t.Fatalf("sticky after removal selected %d, want member 2", selected.ID)
 		}
-	}
-}
-
-// 软冷却:证据触发→全池避开;重复证据指数递增;RISK 解除恢复。
-func TestSoftCooldownLifecycle(t *testing.T) {
-	manager, repo := newPoolTestManager(t)
-	manager.SetDegradeEvidenceCooldowns(5*time.Minute, time.Hour)
-	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, FallbackMode: domain.PoolFallbackNone}
-	repo.member[1] = []domain.Node{
-		{ID: 1, Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, manager.cipher, "http://10.0.0.1:1")},
-		{ID: 2, Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, manager.cipher, "http://10.0.0.2:2")},
-	}
-	affinity := "soft-test-account"
-	if got := manager.selectPoolNode(repo.pool[1], repo.member[1], repo.member[1], affinity).ID; got != 1 && got != 2 {
-		t.Fatalf("unexpected placement %d", got)
-	}
-	target := manager.selectPoolNode(repo.pool[1], repo.member[1], repo.member[1], affinity).ID
-
-	manager.MarkDegradeEvidence(target)
-	now := time.Now().UTC()
-	if !manager.nodeSoftCooled(target, now) {
-		t.Fatalf("soft cooldown not applied")
-	}
-	if manager.nodeSoftCooled(target%2+1, now) {
-		t.Fatalf("soft cooldown leaked to the other node")
-	}
-	// 池内选路必须避开软冷却的固定节点
-	candidates := manager.poolCandidates(context.Background(), repo.member[1], now)
-	for _, node := range candidates {
-		if node.ID == target {
-			t.Fatalf("soft-cooled fixed node still a pool candidate")
-		}
-	}
-	// 代理池模式成员豁免 L2 软冷却:旋转端点的单次降智不代表端点坏,
-	// 只靠请求内排除(L1)兜底——否则小规模 resin 池会被一次证据迅速耗尽。
-	rotating := domain.Node{ID: 7, Enabled: true, Health: 1, ProxyPool: true, RotationEnabled: true, EncryptedProxyURL: encryptedProxy(t, manager.cipher, "http://10.0.0.7:7")}
-	manager.MarkDegradeEvidence(7)
-	if !manager.nodeSoftCooled(7, now) {
-		t.Fatalf("precondition: rotating member expected soft-cooled")
-	}
-	exempt := false
-	for _, node := range manager.poolCandidates(context.Background(), []domain.Node{rotating}, now) {
-		if node.ID == 7 {
-			exempt = true
-		}
-	}
-	if !exempt {
-		t.Fatalf("proxy-pool member must be exempt from soft cooldown")
-	}
-	manager.ClearDegradeEvidence(7)
-	// 指数递增:第二次证据冷却时长翻倍
-	manager.MarkDegradeEvidence(target)
-	manager.ClearDegradeEvidence(target)
-	if manager.nodeSoftCooled(target, time.Now().UTC()) {
-		t.Fatalf("soft cooldown not lifted after clear")
 	}
 }
 
@@ -348,6 +293,7 @@ func TestPoolRouteDirectFallbackHonorsAllowDirect(t *testing.T) {
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, FallbackMode: domain.PoolFallbackDirect}
 	// 池无成员,自动调度也无可用节点:唯一去向是回退决策。
 	manager := NewManager(repo, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	lease, outcome, err := manager.AcquirePoolRouted(context.Background(), domain.ScopeBuild, "acct", 1, false, "")
 	if err != nil || outcome != PoolRouteNone || lease != nil {
@@ -391,6 +337,7 @@ func TestAcquirePoolRouteCanceledContextStopsBeforeAutoSchedule(t *testing.T) {
 	repo.member = map[uint64][]domain.Node{}
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, FallbackMode: domain.PoolFallbackNone}
 	manager := NewManager(repo, nil)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -416,28 +363,28 @@ func TestInvalidatePoolCacheResetsRotationPersistState(t *testing.T) {
 	manager, repo := newPoolTestManager(t)
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, FallbackMode: domain.PoolFallbackNone}
 
-	manager.persistRotationCursor(1, 10, 20)
-	manager.rotationMu.Lock()
-	if _, ok := manager.rotationPersists[1]; !ok {
-		manager.rotationMu.Unlock()
+	manager.routing.persistRotationCursor(1, 10, 20)
+	manager.routing.rotationMu.Lock()
+	if _, ok := manager.routing.rotationPersists[1]; !ok {
+		manager.routing.rotationMu.Unlock()
 		t.Fatal("precondition: persist state expected after persistRotationCursor")
 	}
-	manager.rotationMu.Unlock()
+	manager.routing.rotationMu.Unlock()
 
 	manager.InvalidatePoolCache()
-	manager.rotationMu.Lock()
-	if len(manager.rotationCursors) != 0 || len(manager.rotationPersists) != 0 {
-		manager.rotationMu.Unlock()
-		t.Fatalf("rotation bookkeeping not reset: cursors=%d persists=%d", len(manager.rotationCursors), len(manager.rotationPersists))
+	manager.routing.rotationMu.Lock()
+	if len(manager.routing.rotationCursors) != 0 || len(manager.routing.rotationPersists) != 0 {
+		manager.routing.rotationMu.Unlock()
+		t.Fatalf("rotation bookkeeping not reset: cursors=%d persists=%d", len(manager.routing.rotationCursors), len(manager.routing.rotationPersists))
 	}
-	manager.rotationMu.Unlock()
+	manager.routing.rotationMu.Unlock()
 
 	// 模拟失效前已派生的滞留写协程:不得重新登记任何簿记。
-	manager.writeRotationCursor(1, 10, 20)
-	manager.rotationMu.Lock()
-	defer manager.rotationMu.Unlock()
-	if len(manager.rotationPersists) != 0 {
-		t.Fatalf("stale writer resurrected persist state after invalidation: %d", len(manager.rotationPersists))
+	manager.routing.writeRotationCursor(1, 10, 20)
+	manager.routing.rotationMu.Lock()
+	defer manager.routing.rotationMu.Unlock()
+	if len(manager.routing.rotationPersists) != 0 {
+		t.Fatalf("stale writer resurrected persist state after invalidation: %d", len(manager.routing.rotationPersists))
 	}
 }
 
@@ -503,4 +450,25 @@ func TestPoolFallbackChainConflictMatrix(t *testing.T) {
 		}
 		lease.Release()
 	})
+}
+
+// Exercise the complete routing path: selection-only tests miss session overrides.
+func TestRandomPoolHonorsStrategyWithinSameSession(t *testing.T) {
+	manager, repo := newPoolTestManager(t)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRandom}
+	repo.member[1] = sessionTestNodes(1, 2, 3)
+	ctx := WithBuildSession(context.Background(), "same-conversation")
+	seen := map[uint64]bool{}
+	for range 100 {
+		lease, _, err := manager.AcquirePoolRouted(ctx, domain.ScopeBuild, "same-account", 1, false, "")
+		if err != nil || lease == nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		seen[lease.NodeID] = true
+		lease.Release()
+	}
+	if len(seen) != 3 {
+		t.Fatalf("random pool pinned by session: %v", seen)
+	}
 }

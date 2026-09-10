@@ -71,6 +71,28 @@ const (
 
 // Record 表示推理请求审计；成功请求不保存正文，失败请求仅保留受限诊断快照。
 type Record struct {
+	// Completion stages retain independent acknowledgements. Empty means not
+	// recorded. Server delivery cannot prove client consumption; a missing
+	// acknowledgement does not establish that a remote write was rolled back.
+	UpstreamStatusCode  int
+	ResponseID          string
+	AdmissionOutcome    string
+	GenerationOutcome   string
+	ProviderStateCommit string
+	OwnershipCommit     string
+	DeliveryOutcome     string
+	PhysicalReceipt     string
+	QualityReceipt      string
+	LedgerOutcome       string
+	GenerationUsages    []GenerationUsage
+
+	HistoryOutcome       string
+	HistoryScopeHash     string
+	HistoryGeneration    int64
+	HistoryRestoredItems int
+	HistoryNormalizer    int
+	HistoryCommit        string
+
 	ID                      uint64
 	EventID                 string
 	RequestID               string
@@ -95,6 +117,7 @@ type Record struct {
 	MediaInputImages        int64
 	MediaOutputImages       int64
 	MediaOutputSeconds      int64
+	AudioDurationMS         int64
 	InputTokens             int64
 	CachedInputTokens       int64
 	OutputTokens            int64
@@ -117,6 +140,15 @@ type Record struct {
 	ErrorCode       string
 	// QualityFailOpen: 请求经质量守卫判定降级但按 fail-open 策略交付。
 	QualityFailOpen bool
+	// QualityExempt: 守卫未介入该请求的豁免原因 token（disabled/skip_input/
+	// operation/compaction/provider/model_out_of_scope/messages_thinking_off/
+	// model_no_reasoning）。空串=守卫介入。历史事故复盘需容器日志与内存计数器
+	// 交叉才能复原"守卫为何不在场"，该字段让审计行自带答案。
+	QualityExempt string
+	// QualityRule: 守卫介入时最终交付尝试的判决指纹规则（thinking/item_done/
+	// outrun/terminal…）。交付行 rule=thinking 表示流内观察到可见思考增量；
+	// 非 thinking 规则的 200 交付配合 QualityFailOpen 表达 fail-open 形态。
+	QualityRule string
 	// 请求诊断(#983 隐私安全载荷,写入前经 sanitizeRequestMetadata 脱敏)。
 	RequestMethod  string
 	RequestPath    string

@@ -54,6 +54,7 @@ func TestRoutingConfigHotUpdatePropagation(t *testing.T) {
 	}
 
 	manager := infraegress.NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	service := egressapp.NewService(repo, cipher)
 	// 与 app.go 相同的失效器装配——本测试守护的正是这两根线。
 	service.SetOperationsConfigInvalidator(manager)

@@ -41,7 +41,8 @@ func newRouteRuleTestManager(t *testing.T, node domain.Node, config domain.Opera
 		node.EncryptedProxyURL = mustEncryptRouteRuleProxy(t, cipher, "http://proxy.example:8080")
 	}
 	manager := NewManager(&routeRuleRepository{node: node, config: config}, cipher)
-	manager.newBuildClient = func(string, time.Duration) (requestClient, error) {
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}, nil
 		}}, nil
@@ -147,7 +148,7 @@ func TestRoutingTargetNodeUnavailableFailsStrict(t *testing.T) {
 }
 
 // 旋转出口(节点级代理池模式)可以作为固定目标:固定的是隧道而非瞬时出口
-// IP。即使该节点带有硬冷却/软冷却(单个坏 IP 不代表端点坏),固定目标
+// IP。即使该节点带有硬冷却(单个坏 IP 不代表端点坏),固定目标
 // 仍继续服务——与自动调度对池模式节点的豁免口径一致。
 func TestRotatingNodeServesFixedTargetDespiteCooldowns(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -164,7 +165,6 @@ func TestRotatingNodeServesFixedTargetDespiteCooldowns(t *testing.T) {
 		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 11},
 	}
 	manager := newRouteRuleTestManager(t, node, config)
-	manager.MarkDegradeEvidence(11) // L2 软冷却
 	ctx := WithTrafficClass(context.Background(), domain.TrafficClassBilling)
 	lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, "acct")
 	if acquireErr != nil {
@@ -184,6 +184,7 @@ func TestAcquireFailsWhenOperationsConfigUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := NewManager(&failingRouteRuleConfigRepository{}, cipher)
+	t.Cleanup(func() { _ = fresh.Close(context.Background()) })
 	if _, _, err := fresh.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "acct"); err == nil {
 		t.Fatal("config read failure must surface as an error")
 	}
@@ -212,18 +213,18 @@ func TestRoutingTargetNodeCacheIsPerManager(t *testing.T) {
 	}
 	lease.Release()
 
-	manager.routeRuleNodeMu.Lock()
-	cached, ok := manager.routeRuleNodeCache[21]
-	manager.routeRuleNodeMu.Unlock()
+	manager.routing.routeRuleNodeMu.Lock()
+	cached, ok := manager.routing.routeRuleNodeCache[21]
+	manager.routing.routeRuleNodeMu.Unlock()
 	if !ok || cached.node.ID != 21 {
 		t.Fatalf("target node was not cached: %+v ok=%v", cached, ok)
 	}
 
 	// A second manager with the same node ID must not see the first cache.
 	other := newRouteRuleTestManager(t, node, config)
-	other.routeRuleNodeMu.Lock()
-	_, shared := other.routeRuleNodeCache[21]
-	other.routeRuleNodeMu.Unlock()
+	other.routing.routeRuleNodeMu.Lock()
+	_, shared := other.routing.routeRuleNodeCache[21]
+	other.routing.routeRuleNodeMu.Unlock()
 	if shared {
 		t.Fatal("route-rule target cache must be per-manager")
 	}
@@ -312,6 +313,7 @@ func TestFixedTargetDbErrorFailsInsteadOfSilentFallback(t *testing.T) {
 	node.EncryptedProxyURL = mustEncryptRouteRuleProxy(t, cipher, "http://proxy.example:8080")
 	dbErr := errors.New("db temporarily unavailable")
 	manager := NewManager(&routeRuleDbErrorRepo{routeRuleRepository{node: node, config: config}, dbErr}, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	lease, err := manager.Acquire(WithTrafficClass(context.Background(), domain.TrafficClassBilling), domain.ScopeBuild, "acct")
 	if err == nil {

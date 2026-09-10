@@ -2,10 +2,9 @@ package inference
 
 import (
 	"context"
-	"encoding/json"
 	"io"
-	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -48,15 +47,27 @@ func (h *Handler) proxyVoiceWebSocket(c *gin.Context, pathValue string) {
 	if !ok {
 		return
 	}
-	model := strings.TrimSpace(c.Query("model"))
+	query, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil || len(query["model"]) > 1 {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "WebSocket query 无效或 model 重复")
+		return
+	}
+	model := strings.TrimSpace(query.Get("model"))
+	query.Del("model")
 	session, err := h.gateway.OpenVoiceWebSocket(c.Request.Context(), gateway.VoiceWebSocketInput{
-		RequestID: requestID, ClientKey: clientKey, PublicModel: model, Path: pathValue,
+		RequestID: requestID, ClientKey: clientKey, PublicModel: model, Path: pathValue, Query: query,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
 
+	if session.BeginDelivery != nil {
+		if err := session.BeginDelivery(); err != nil {
+			session.Finalize(gateway.VoiceWebSocketOutcome{ErrorCode: "request_canceled"})
+			return
+		}
+	}
 	clientConn, err := voiceWSUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		session.Finalize(gateway.VoiceWebSocketOutcome{ErrorCode: "client_upgrade_failed"})
@@ -64,100 +75,91 @@ func (h *Handler) proxyVoiceWebSocket(c *gin.Context, pathValue string) {
 	}
 	clientConn.SetReadLimit(voiceWSMessageLimit)
 	session.Conn.SetReadLimit(voiceWSMessageLimit)
+	outcome := relayVoiceWebSocket(c.Request.Context(), session.Conn, clientConn)
+	outcome.ClientUpgraded = true
+	session.Finalize(outcome)
+}
 
-	var once sync.Once
-	var outcomeMu sync.Mutex
-	outcome := gateway.VoiceWebSocketOutcome{}
-	closeAll := func() {
-		once.Do(func() {
-			_ = clientConn.Close()
-			if session.Conn != nil {
-				_ = session.Conn.Close()
-			}
-			outcomeMu.Lock()
-			finalOutcome := outcome
-			outcomeMu.Unlock()
-			session.Finalize(finalOutcome)
-		})
-	}
+// The relay owns writes and connection shutdown; the Provider observes upstream
+// protocol facts before forwarding. Join both pumps before handing off receipt
+// counts so a concurrent final upstream frame cannot disappear from accounting.
+func relayVoiceWebSocket(ctx context.Context, upstream, client voiceMessageConn) gateway.VoiceWebSocketOutcome {
+	var closeOnce sync.Once
+	closeAll := func() { closeOnce.Do(func() { _ = client.Close(); _ = upstream.Close() }) }
 	defer closeAll()
-
 	type pumpResult struct {
 		upstreamSide bool
 		result       voiceWSPumpResult
 	}
-	errCh := make(chan pumpResult, 2)
-	// 两个泵 goroutine 直接处理双向 WS 消息, panic 不得击穿进程:batch.Do
-	// 捕获后以 PanicError 送入 errCh, 走既有的流中断路径。
-	go func() {
-		if err := batch.Do(context.Background(), func(context.Context) error {
-			errCh <- pumpResult{result: proxyVoiceWSPump(func() (int, []byte, error) {
-				return clientConn.ReadMessage()
-			}, session.Conn.WriteMessage)}
-			return nil
-		}); err != nil {
-			errCh <- pumpResult{result: voiceWSPumpResult{err: err}}
-		}
-	}()
-	go func() {
-		if err := batch.Do(context.Background(), func(context.Context) error {
-			errCh <- pumpResult{upstreamSide: true, result: proxyVoiceWSPump(func() (int, []byte, error) {
-				messageType, payload, readErr := session.Conn.ReadMessage()
-				if readErr == nil && pathValue == "/stt" {
-					if duration, ok := streamingSTTDuration(payload); ok {
-						outcomeMu.Lock()
-						outcome.AudioDurationSeconds = max(outcome.AudioDurationSeconds, duration)
-						outcomeMu.Unlock()
-					}
-				}
-				return messageType, payload, readErr
-			}, clientConn.WriteMessage)}
-			return nil
-		}); err != nil {
-			errCh <- pumpResult{result: voiceWSPumpResult{err: err}}
-		}
-	}()
-	first := <-errCh
-	if !isNormalVoiceWSClose(first.result.err) {
-		outcomeMu.Lock()
-		if (first.upstreamSide && !first.result.writeFailed) || (!first.upstreamSide && first.result.writeFailed) {
-			outcome.ErrorCode = "upstream_stream_interrupted"
-			outcome.UpstreamFailed = true
-		} else {
-			outcome.ErrorCode = "client_stream_interrupted"
-		}
-		outcomeMu.Unlock()
+	results := make(chan pumpResult, 2)
+	start := func(upstreamSide bool, read func() (int, []byte, error), write func(int, []byte) error) {
+		go func() {
+			result := voiceWSPumpResult{}
+			if err := batch.Do(ctx, func(context.Context) error { result = proxyVoiceWSPump(read, write); return nil }); err != nil {
+				result.err = err
+			}
+			results <- pumpResult{upstreamSide: upstreamSide, result: result}
+		}()
 	}
+	start(false, client.ReadMessage, upstream.WriteMessage)
+	start(true, upstream.ReadMessage, client.WriteMessage)
+	outcome := gateway.VoiceWebSocketOutcome{}
+	collected := 0
+	accept := func(result pumpResult) {
+		if result.upstreamSide {
+			outcome.DeliveredBytes = result.result.bytes
+			outcome.DeliveredEvents = result.result.events
+		}
+	}
+	select {
+	case first := <-results:
+		collected++
+		accept(first)
+		if ctx.Err() != nil {
+			outcome.ErrorCode = "request_canceled"
+		} else if !isNormalVoiceWSClose(first.result.err) {
+			if (first.upstreamSide && !first.result.writeFailed) || (!first.upstreamSide && first.result.writeFailed) {
+				outcome.ErrorCode, outcome.UpstreamFailed = "upstream_stream_interrupted", true
+			} else {
+				outcome.ErrorCode = "client_stream_interrupted"
+			}
+		}
+	case <-ctx.Done():
+		outcome.ErrorCode = "request_canceled"
+	}
+	closeAll()
+	for ; collected < 2; collected++ {
+		accept(<-results)
+	}
+	return outcome
 }
 
-func streamingSTTDuration(payload []byte) (float64, bool) {
-	var event struct {
-		Type     string  `json:"type"`
-		Duration float64 `json:"duration"`
-	}
-	if err := json.Unmarshal(payload, &event); err != nil || strings.TrimSpace(event.Type) != "transcript.done" {
-		return 0, false
-	}
-	if event.Duration <= 0 || math.IsNaN(event.Duration) || math.IsInf(event.Duration, 0) {
-		return 0, false
-	}
-	return event.Duration, true
+type voiceMessageConn interface {
+	ReadMessage() (int, []byte, error)
+	WriteMessage(int, []byte) error
+	Close() error
 }
 
 type voiceWSPumpResult struct {
-	err         error
-	writeFailed bool
+	err           error
+	writeFailed   bool
+	bytes, events int64
 }
 
 func proxyVoiceWSPump(read func() (int, []byte, error), write func(int, []byte) error) voiceWSPumpResult {
+	result := voiceWSPumpResult{}
 	for {
 		messageType, payload, err := read()
 		if err != nil {
-			return voiceWSPumpResult{err: err}
+			result.err = err
+			return result
 		}
 		if err := write(messageType, payload); err != nil {
-			return voiceWSPumpResult{err: err, writeFailed: true}
+			result.err, result.writeFailed = err, true
+			return result
 		}
+		result.bytes += int64(len(payload))
+		result.events++
 	}
 }
 

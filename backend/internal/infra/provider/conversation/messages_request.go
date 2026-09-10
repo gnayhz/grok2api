@@ -1,10 +1,14 @@
 package conversation
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 const anthropicBillingHeaderPrefix = "x-anthropic-billing-header: "
@@ -129,6 +133,9 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 		target["tool_choice"] = choice
 		target["parallel_tool_calls"] = parallel
 	}
+	if err := xaitools.NormalizePayload(target); err != nil {
+		return nil, ResponseOptions{}, err
+	}
 	converted, err := json.Marshal(target)
 	return converted, ResponseOptions{
 		AnthropicThinking:          thinkingEnabled,
@@ -161,8 +168,8 @@ type anthropicRequest struct {
 	OutputConfig *struct {
 		Effort string `json:"effort"`
 		Format *struct {
-			Type   string         `json:"type"`
-			Schema map[string]any `json:"schema"`
+			Type   string                     `json:"type"`
+			Schema map[string]json.RawMessage `json:"schema"`
 		} `json:"format"`
 	} `json:"output_config"`
 	Tools      []map[string]json.RawMessage `json:"tools"`
@@ -256,21 +263,18 @@ func convertAnthropicMessages(messages []anthropicMessage, declaredTools map[str
 					return nil, nil, fmt.Errorf("%s tool_use 只允许出现在 assistant 消息", path)
 				}
 				flushMessage()
-				var value struct {
-					ID    string         `json:"id"`
-					Name  string         `json:"name"`
-					Input map[string]any `json:"input"`
-				}
-				if encoded, _ := json.Marshal(block); json.Unmarshal(encoded, &value) != nil || strings.TrimSpace(value.ID) == "" || strings.TrimSpace(value.Name) == "" || value.Input == nil {
+				var id, name string
+				var argumentsObject map[string]any
+				if json.Unmarshal(block["id"], &id) != nil || json.Unmarshal(block["name"], &name) != nil || strings.TrimSpace(id) == "" || strings.TrimSpace(name) == "" || jsonvalue.Unmarshal(block["input"], &argumentsObject) != nil || argumentsObject == nil {
 					return nil, nil, fmt.Errorf("%s 缺少有效 id、name 或 object input", path)
 				}
-				if _, exists := usedCalls[value.ID]; exists {
-					return nil, nil, fmt.Errorf("%s 包含重复 tool_use id %q", path, value.ID)
+				if _, exists := usedCalls[id]; exists {
+					return nil, nil, fmt.Errorf("%s 包含重复 tool_use id %q", path, id)
 				}
-				arguments, _ := json.Marshal(value.Input)
-				input = append(input, map[string]any{"type": "function_call", "call_id": value.ID, "name": value.Name, "arguments": string(arguments)})
-				pendingCalls[value.ID] = struct{}{}
-				usedCalls[value.ID] = struct{}{}
+				arguments, _ := json.Marshal(argumentsObject)
+				input = append(input, map[string]any{"type": "function_call", "call_id": id, "name": name, "arguments": string(arguments)})
+				pendingCalls[id] = struct{}{}
+				usedCalls[id] = struct{}{}
 			case "tool_result":
 				if role != "user" {
 					return nil, nil, fmt.Errorf("%s tool_result 只允许出现在 user 消息", path)
@@ -601,9 +605,10 @@ func convertAnthropicTools(tools []map[string]json.RawMessage) ([]any, error) {
 		}
 		var schema any = map[string]any{"type": "object", "properties": map[string]any{}}
 		if raw := tool["input_schema"]; !isEmptyJSON(raw) {
-			if json.Unmarshal(raw, &schema) != nil {
+			if !json.Valid(raw) {
 				return nil, fmt.Errorf("tool %q 的 input_schema 无效", name)
 			}
+			schema = raw
 		}
 		converted := map[string]any{"type": "function", "name": name, "description": description, "parameters": schema}
 		var strict bool
@@ -694,66 +699,45 @@ func truncateRunes(value string, limit int) string {
 }
 
 func convertAnthropicWebSearchTool(tool map[string]json.RawMessage, index int) (map[string]any, error) {
-	converted := map[string]any{"type": "web_search"}
-	for key, raw := range tool {
-		switch key {
-		case "type", "name", "cache_control":
-			continue
-		case "allowed_domains", "blocked_domains", "excluded_domains":
-			var value any
-			if json.Unmarshal(raw, &value) != nil {
-				return nil, fmt.Errorf("tools[%d].%s 无效", index, key)
-			}
-			domains, ok := value.([]any)
-			if !ok {
-				return nil, fmt.Errorf("tools[%d].%s 必须是字符串数组", index, key)
-			}
-			if len(domains) > MaxWebSearchDomains {
-				return nil, fmt.Errorf("tools[%d].%s 不能超过 %d 个域名", index, key, MaxWebSearchDomains)
-			}
-			for domainIndex, domain := range domains {
-				if text, ok := domain.(string); !ok || strings.TrimSpace(text) == "" {
-					return nil, fmt.Errorf("tools[%d].%s[%d] 必须是非空字符串", index, key, domainIndex)
-				}
-			}
-			field := key
-			if field == "blocked_domains" {
-				field = "excluded_domains"
-			}
-			filters, _ := converted["filters"].(map[string]any)
-			if filters == nil {
-				filters = make(map[string]any, 2)
-			}
-			if len(domains) > 0 {
-				if _, exists := filters[field]; exists {
-					return nil, fmt.Errorf("tools[%d].%s 与同义域名过滤字段重复", index, key)
-				}
-				other := "allowed_domains"
-				if field == other {
-					other = "excluded_domains"
-				}
-				if existing, ok := filters[other].([]any); ok && len(existing) > 0 {
-					return nil, fmt.Errorf("tools[%d] 不能同时设置 allowed_domains 和 blocked_domains/excluded_domains", index)
-				}
-				filters[field] = value
-				converted["filters"] = filters
-			}
-		case "max_uses", "user_location", "search_context_size":
-			// These Anthropic controls have no equivalent in the Build web-search wire contract,
-			// preventing unknown parameters from causing the upstream to reject the request.
-			continue
-		default:
-			// Preserve forward compatibility with future hosted-tool optional fields.
-			continue
-		}
+	var converted map[string]any
+	if err := jsonvalue.Unmarshal(mustJSON(tool), &converted); err != nil {
+		return nil, err
 	}
-	return converted, nil
+	converted["type"] = "web_search"
+	delete(converted, "name")
+	delete(converted, "cache_control")
+	if blocked, exists := converted["blocked_domains"]; exists {
+		if _, duplicate := converted["excluded_domains"]; duplicate {
+			return nil, fmt.Errorf("tools[%d] 重复的排除域名字段", index)
+		}
+		converted["excluded_domains"] = blocked
+		delete(converted, "blocked_domains")
+	}
+	return xaitools.WebSearch(converted, fmt.Sprintf("tools[%d]", index))
 }
 
 type anthropicMCPServer struct {
-	Name               string `json:"name"`
-	URL                string `json:"url"`
-	AuthorizationToken string `json:"authorization_token"`
+	Type               string                     `json:"type"`
+	Name               string                     `json:"name"`
+	URL                string                     `json:"url"`
+	AuthorizationToken string                     `json:"authorization_token"`
+	ToolConfiguration  map[string]json.RawMessage `json:"tool_configuration"`
+}
+
+// Unknown server fields must not erase a new permission restriction.
+func (s *anthropicMCPServer) UnmarshalJSON(data []byte) error {
+	type wire anthropicMCPServer
+	var value wire
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	if value.Type != "" && value.Type != "url" {
+		return fmt.Errorf("不支持 mcp_servers.type=%q", value.Type)
+	}
+	*s = anthropicMCPServer(value)
+	return nil
 }
 
 func convertAnthropicMCPServers(servers []anthropicMCPServer) ([]any, error) {
@@ -768,7 +752,37 @@ func convertAnthropicMCPServers(servers []anthropicMCPServer) ([]any, error) {
 		if server.AuthorizationToken != "" {
 			tool["authorization"] = server.AuthorizationToken
 		}
-		result = append(result, tool)
+		for field, raw := range server.ToolConfiguration {
+			switch field {
+			case "enabled":
+				var enabled bool
+				if isEmptyJSON(raw) || json.Unmarshal(raw, &enabled) != nil {
+					return nil, fmt.Errorf("mcp_servers[%d].tool_configuration.enabled 必须是布尔值", index)
+				}
+				if !enabled {
+					tool["allowed_tools"] = []any{}
+				}
+			case "allowed_tools":
+			default:
+				return nil, fmt.Errorf("mcp_servers[%d].tool_configuration.%s 不支持", index, field)
+			}
+		}
+		if tool["allowed_tools"] == nil {
+			if raw, exists := server.ToolConfiguration["allowed_tools"]; exists {
+				var allowed []any
+				if isEmptyJSON(raw) || jsonvalue.Unmarshal(raw, &allowed) != nil {
+					return nil, fmt.Errorf("mcp_servers[%d].tool_configuration.allowed_tools 必须是数组", index)
+				}
+				tool["allowed_tools"] = allowed
+			}
+		}
+		normalized, err := xaitools.MCP(tool, fmt.Sprintf("mcp_servers[%d]", index))
+		if err != nil {
+			return nil, err
+		}
+		if normalized != nil {
+			result = append(result, normalized)
+		}
 	}
 	return result, nil
 }
@@ -798,7 +812,7 @@ func convertAnthropicToolChoice(choice anthropicToolChoice, hasHostedWebSearch b
 		// Claude Code secondary search uses a hosted tool with name=web_search.
 		// When only one hosted tool remains, Grok Build accepts only required tool_choice.
 		if hasHostedWebSearch && strings.EqualFold(strings.TrimSpace(choice.Name), "web_search") {
-			return "required", parallel, nil
+			return map[string]any{"type": "web_search"}, parallel, nil
 		}
 		return map[string]any{"type": "function", "name": choice.Name}, parallel, nil
 	default:

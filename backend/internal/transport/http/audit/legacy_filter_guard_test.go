@@ -35,7 +35,7 @@ func TestLegacyPagingRejectsFilterParams(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	service := auditapp.NewService(repository, slog.Default(), 8, 4, time.Second)
+	service := auditapp.NewService(repository, newTestAuditJournal(t, 8), slog.Default(), 4, time.Second)
 	router := gin.New()
 	NewHandler(service).Register(router.Group(""))
 

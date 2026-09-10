@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ const (
 	shardCount        = 64
 )
 
+var errRateCapacity = errors.New("rate limiter capacity exhausted")
+
 type rateWindow struct {
 	startedAt time.Time
 	count     int
@@ -24,7 +27,9 @@ type rateWindow struct {
 
 // RateLimiter 提供单实例固定分钟窗口限流。
 type RateLimiter struct {
-	shards [shardCount]rateShard
+	rollingMu sync.Mutex
+	rolling   map[string][]time.Time
+	shards    [shardCount]rateShard
 }
 
 type rateShard struct {
@@ -47,7 +52,14 @@ func (r *RateLimiter) Allow(_ context.Context, key string, limit int, now time.T
 	shard := &r.shards[shardIndex(key)]
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	window := shard.windows[key]
+	window, exists := shard.windows[key]
+	if !exists && len(shard.windows) >= maxEntriesPerShard() {
+		cleanupRateShard(shard, now)
+		if len(shard.windows) >= maxEntriesPerShard() {
+			// Active windows are authoritative limits, not evictable cache entries.
+			return false, 0, errRateCapacity
+		}
+	}
 	if window.startedAt.IsZero() || now.Sub(window.startedAt) >= time.Minute {
 		window = rateWindow{startedAt: now, count: 0}
 	}
@@ -61,9 +73,6 @@ func (r *RateLimiter) Allow(_ context.Context, key string, limit int, now time.T
 	}
 	window.count++
 	shard.windows[key] = window
-	if len(shard.windows) > maxEntriesPerShard() {
-		cleanupRateShard(shard, now)
-	}
 	return true, 0, nil
 }
 
@@ -72,17 +81,6 @@ func cleanupRateShard(shard *rateShard, now time.Time) {
 		if now.Sub(window.startedAt) >= time.Minute {
 			delete(shard.windows, key)
 		}
-	}
-	for len(shard.windows) > maxEntriesPerShard() {
-		var oldestKey string
-		var oldest time.Time
-		for key, window := range shard.windows {
-			if oldestKey == "" || window.startedAt.Before(oldest) {
-				oldestKey = key
-				oldest = window.startedAt
-			}
-		}
-		delete(shard.windows, oldestKey)
 	}
 }
 
@@ -112,7 +110,10 @@ func NewConcurrencyLimiter() *ConcurrencyLimiter {
 	return limiter
 }
 
-func (l *ConcurrencyLimiter) Acquire(_ context.Context, key string, limit int) (func(), bool, error) {
+func (l *ConcurrencyLimiter) Acquire(ctx context.Context, key string, limit int) (func(), bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if limit <= 0 {
 		return func() {}, true, nil
 	}
@@ -136,6 +137,12 @@ func (l *ConcurrencyLimiter) Acquire(_ context.Context, key string, limit int) (
 			}
 		})
 	}, true, nil
+}
+
+// Memory capacity disappears with the process. A live measurement owns its
+// explicit release; no independent expiry can oversell still-running work.
+func (l *ConcurrencyLimiter) AcquireBounded(ctx context.Context, key string, limit int, _ time.Duration) (func(), bool, error) {
+	return l.Acquire(ctx, key, limit)
 }
 
 func (l *ConcurrencyLimiter) Current(_ context.Context, key string) (int, error) {
@@ -349,23 +356,35 @@ func NewDeviceSessionStore() *DeviceSessionStore {
 	return &DeviceSessionStore{sessions: make(map[string]account.DeviceSession)}
 }
 
-func (s *DeviceSessionStore) Create(_ context.Context, value account.DeviceSession) error {
+func (s *DeviceSessionStore) Create(ctx context.Context, value account.DeviceSession) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	for id, session := range s.sessions {
-		if !now.Before(session.ExpiresAt) {
+		if !now.Before(account.DeviceSessionRetentionUntil(session)) {
 			delete(s.sessions, id)
 		}
 	}
-	if _, exists := s.sessions[value.ID]; !exists && len(s.sessions) >= maxDeviceSessions {
+	if _, exists := s.sessions[value.ID]; exists {
+		return repository.ErrConflict
+	}
+	if len(s.sessions) >= maxDeviceSessions {
 		var earliestID string
 		var earliestExpiry time.Time
 		for id, session := range s.sessions {
+			if session.PollToken != "" && now.Before(session.PollLeaseUntil) {
+				continue
+			}
 			if earliestID == "" || session.ExpiresAt.Before(earliestExpiry) {
 				earliestID = id
 				earliestExpiry = session.ExpiresAt
 			}
+		}
+		if earliestID == "" {
+			return repository.ErrConflict
 		}
 		delete(s.sessions, earliestID)
 	}
@@ -378,27 +397,55 @@ func (s *DeviceSessionStore) Get(_ context.Context, id string, now time.Time) (a
 	defer s.mu.Unlock()
 	value, ok := s.sessions[id]
 	if !ok || !now.Before(value.ExpiresAt) {
-		delete(s.sessions, id)
+		if !ok || !now.Before(account.DeviceSessionRetentionUntil(value)) {
+			delete(s.sessions, id)
+		}
 		return account.DeviceSession{}, repository.ErrNotFound
 	}
 	return value, nil
 }
 
-func (s *DeviceSessionStore) Update(_ context.Context, value account.DeviceSession) error {
+func (s *DeviceSessionStore) ClaimPoll(ctx context.Context, id, token string, now, leaseUntil time.Time) (account.DeviceSession, error) {
+	if err := ctx.Err(); err != nil {
+		return account.DeviceSession{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.sessions[value.ID]; !ok {
-		return repository.ErrNotFound
+	current, ok := s.sessions[id]
+	if !ok || !now.Before(current.ExpiresAt) {
+		if !ok || !now.Before(account.DeviceSessionRetentionUntil(current)) {
+			delete(s.sessions, id)
+		}
+		return account.DeviceSession{}, repository.ErrNotFound
 	}
-	s.sessions[value.ID] = value
-	return nil
+	next, err := account.ClaimDevicePoll(current, token, now, leaseUntil)
+	if err != nil {
+		return account.DeviceSession{}, err
+	}
+	s.sessions[id] = next
+	return next, nil
 }
 
-func (s *DeviceSessionStore) Delete(_ context.Context, id string) error {
+func (s *DeviceSessionStore) FinishPoll(ctx context.Context, receipt account.DevicePollReceipt, event account.DevicePollCompletion) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, id)
-	return nil
+	current, ok := s.sessions[receipt.SessionID]
+	if !ok {
+		return false, nil
+	}
+	next, applied, remove, err := account.CompleteDevicePoll(current, receipt, event)
+	if err != nil || !applied {
+		return false, err
+	}
+	if remove {
+		delete(s.sessions, receipt.SessionID)
+	} else {
+		s.sessions[receipt.SessionID] = next
+	}
+	return true, nil
 }
 
 // LockStore 提供单实例非阻塞短期锁。

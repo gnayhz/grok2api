@@ -41,7 +41,9 @@ func TestEgressOperationsConfigPersistsRoutingTargets(t *testing.T) {
 			egress.TrafficClassVideo:   {Mode: egress.RoutingTargetDirect},
 		},
 	)
-	saved, err := nodes.SaveEgressOperationsConfig(ctx, config)
+	saved, err := nodes.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,9 @@ func TestEgressOperationsConfigRoundTripsEmptyRouting(t *testing.T) {
 	database := openTestDatabase(t)
 	nodes := NewEgressRepository(database)
 
-	saved, err := nodes.SaveEgressOperationsConfig(ctx, routingTargetTestConfig(nil, nil, nil))
+	saved, err := nodes.SaveEgressOperationsConfig(ctx, routingTargetTestConfig(nil, nil, nil), func(egress.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,14 +116,18 @@ func TestEgressOperationsConfigRejectsUnsafeRoutingTarget(t *testing.T) {
 
 	// Unknown node id.
 	_, err := nodes.SaveEgressOperationsConfig(ctx, routingTargetTestConfig(
-		&egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: target.ID + 9999}, nil, nil))
+		&egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: target.ID + 9999}, nil, nil), func(egress.Node) error {
+		return nil
+	})
 	if !errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
 		t.Fatalf("missing node err = %v, want ErrEgressRoutingNodeInUse", err)
 	}
 
 	// 池目标必须真实存在。
 	_, err = nodes.SaveEgressOperationsConfig(ctx, routingTargetTestConfig(
-		&egress.RoutingTarget{Mode: egress.RoutingTargetPool, PoolID: 404}, nil, nil))
+		&egress.RoutingTarget{Mode: egress.RoutingTargetPool, PoolID: 404}, nil, nil), func(egress.Node) error {
+		return nil
+	})
 	if !errors.Is(err, repository.ErrEgressRoutingInvalid) {
 		t.Fatalf("missing pool err = %v, want ErrEgressRoutingInvalid", err)
 	}
@@ -128,11 +136,15 @@ func TestEgressOperationsConfigRejectsUnsafeRoutingTarget(t *testing.T) {
 	// 瞬时出口 IP,运行时对其豁免硬/软冷却。
 	poolNode := createHealthyEgressNode(t, ctx, nodes, cipher, "gateway")
 	poolNode.ProxyPool = true
-	if _, err := nodes.UpdateEgressNode(ctx, poolNode); err != nil {
+	if _, err := nodes.UpdateEgressNodeConfiguration(ctx, poolNode, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := nodes.SaveEgressOperationsConfig(ctx, routingTargetTestConfig(
-		&egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: poolNode.ID}, nil, nil)); err != nil {
+		&egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: poolNode.ID}, nil, nil), func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatalf("rotating (pool-mode) node must be saveable as a fixed target: %v", err)
 	}
 }
@@ -150,7 +162,9 @@ func TestRoutingTargetReferenceIsProtectedAndClearedOnDelete(t *testing.T) {
 		egress.TrafficClassInference: {Mode: egress.RoutingTargetNode, NodeID: target.ID},
 		egress.TrafficClassModelSync: {Mode: egress.RoutingTargetNode, NodeID: other.ID},
 	})
-	if _, err := nodes.SaveEgressOperationsConfig(ctx, config); err != nil {
+	if _, err := nodes.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,7 +203,9 @@ func TestEgressOperationsConfigRechecksTargetInsideTransaction(t *testing.T) {
 	config := egress.DefaultOperationsConfig()
 	config.DefaultTarget = egress.RoutingTarget{Mode: egress.RoutingTargetNode, NodeID: target.ID}
 	config.UpdatedAt = time.Now().UTC()
-	if _, err := nodes.SaveEgressOperationsConfig(ctx, config); !errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
+	if _, err := nodes.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error {
+		return nil
+	}); !errors.Is(err, repository.ErrEgressRoutingNodeInUse) {
 		t.Fatalf("disabled target save error = %v", err)
 	}
 	stored, err := nodes.GetEgressOperationsConfig(ctx)
@@ -223,7 +239,9 @@ func TestEgressOperationsConfigLockCreatesDefaultRow(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("operations config rows = %d before any save, want 0", count)
 	}
-	saved, err := nodes.SaveEgressOperationsConfig(ctx, config)
+	saved, err := nodes.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error {
+		return nil
+	})
 	if err != nil || saved.ProbeProvider != egress.ProbeProviderCloudflare {
 		t.Fatalf("default save = %#v err=%v", saved, err)
 	}

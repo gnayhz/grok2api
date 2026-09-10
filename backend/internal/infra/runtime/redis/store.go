@@ -49,7 +49,8 @@ var acquireLeaseScript = redisclient.NewScript(`
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
 redis.call('ZADD', KEYS[1], ARGV[3], ARGV[4])
-redis.call('PEXPIRE', KEYS[1], ARGV[5])
+-- A short background lease must never shorten an active production lease.
+if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[5]) then redis.call('PEXPIRE', KEYS[1], ARGV[5]) end
 return 1
 `)
 
@@ -118,17 +119,19 @@ if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[3]) then redis.call('PEXPIRE', KE
 return 1
 `)
 
-var updateDeviceSessionScript = redisclient.NewScript(`
-if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2], 'XX')
-redis.call('ZADD', KEYS[2], ARGV[3], KEYS[1])
-if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[2]) then redis.call('PEXPIRE', KEYS[2], ARGV[2]) end
+// Compare the complete payload while applying the same Go domain transition
+// as the memory adapter; Lua owns only the atomic storage mechanism.
+var compareDeviceSessionScript = redisclient.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if ARGV[2] == 'delete' then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', KEYS[2], KEYS[1])
+else
+  redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[4], 'XX')
+  redis.call('ZADD', KEYS[2], ARGV[5], KEYS[1])
+  if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[4]) then redis.call('PEXPIRE', KEYS[2], ARGV[4]) end
+end
 return 1
-`)
-
-var deleteDeviceSessionScript = redisclient.NewScript(`
-redis.call('ZREM', KEYS[2], KEYS[1])
-return redis.call('DEL', KEYS[1])
 `)
 
 var scheduleQuotaRecoveryScript = redisclient.NewScript(`
@@ -216,12 +219,13 @@ if not dirtyExpires or tonumber(dirtyExpires) <= tonumber(ARGV[3]) then
   redis.call('ZREM', KEYS[2], ARGV[1])
   return 0
 end
+if tonumber(retentionExpires) ~= tonumber(ARGV[4]) then return 0 end
 if tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0') ~= tonumber(ARGV[2]) then return 0 end
 redis.call('ZREM', KEYS[2], ARGV[1])
 return 1
 `)
 
-var listQuotaRefreshDirtyScript = redisclient.NewScript(`
+var scanQuotaRefreshDirtyScript = redisclient.NewScript(`
 local limit = tonumber(ARGV[2])
 local now = tonumber(ARGV[1])
 local expired = redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', now, 'LIMIT', 0, 1000)
@@ -231,14 +235,18 @@ for _, member in ipairs(expired) do
   redis.call('HDEL', KEYS[1], member)
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
-local members = redis.call('ZRANGEBYSCORE', KEYS[2], '(' .. ARGV[1], '+inf', 'LIMIT', 0, limit)
-local result = {}
+local cursor = tonumber(ARGV[3])
+local members = redis.call('ZRANGE', KEYS[2], cursor, cursor + limit - 1)
+local next = cursor + #members
+if next >= redis.call('ZCARD', KEYS[2]) then next = 0 end
+local result = {tostring(next)}
 for _, member in ipairs(members) do
   local retentionExpires = redis.call('ZSCORE', KEYS[3], member)
   local generation = redis.call('HGET', KEYS[1], member)
   if retentionExpires and tonumber(retentionExpires) > now and generation then
     table.insert(result, member)
     table.insert(result, generation)
+    table.insert(result, retentionExpires)
   end
 end
 return result
@@ -260,7 +268,7 @@ if not retentionExpires or tonumber(retentionExpires) <= tonumber(ARGV[2]) then
   redis.call('ZREM', KEYS[2], ARGV[1])
   redis.call('HDEL', KEYS[1], ARGV[1])
   generation = '0'
-  return {generation, '0'}
+  return {generation, '0', '0'}
 end
 local dirtyExpires = redis.call('ZSCORE', KEYS[2], ARGV[1])
 local dirty = '0'
@@ -269,7 +277,7 @@ if dirtyExpires and tonumber(dirtyExpires) > tonumber(ARGV[2]) then
 elseif dirtyExpires then
   redis.call('ZREM', KEYS[2], ARGV[1])
 end
-return {generation, dirty}
+return {generation, dirty, retentionExpires}
 `)
 
 var rescheduleQuotaRecoveryScript = redisclient.NewScript(`
@@ -475,6 +483,16 @@ func (s *Store) Allow(ctx context.Context, key string, limit int, _ time.Time) (
 }
 
 func (s *Store) acquireConcurrency(ctx context.Context, key string, limit int) (func(), bool, error) {
+	return s.acquireConcurrencyFor(ctx, key, limit, s.concurrencyLease)
+}
+
+func (s *Store) acquireConcurrencyFor(ctx context.Context, key string, limit int, ttl time.Duration) (func(), bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if ttl <= 0 {
+		return nil, false, errors.New("concurrency lease duration must be positive")
+	}
 	if limit <= 0 {
 		return func() {}, true, nil
 	}
@@ -483,9 +501,9 @@ func (s *Store) acquireConcurrency(ctx context.Context, key string, limit int) (
 		return nil, false, err
 	}
 	now := time.Now().UTC()
-	expiresAt := now.Add(s.concurrencyLease)
+	expiresAt := now.Add(ttl)
 	redisKey := s.key("concurrency", key)
-	result, err := acquireLeaseScript.Run(ctx, s.client, []string{redisKey}, now.UnixMilli(), limit, expiresAt.UnixMilli(), token, (s.concurrencyLease + concurrencyLeaseGrace).Milliseconds()).Int()
+	result, err := acquireLeaseScript.Run(ctx, s.client, []string{redisKey}, now.UnixMilli(), limit, expiresAt.UnixMilli(), token, (ttl + concurrencyLeaseGrace).Milliseconds()).Int()
 	if err != nil || result != 1 {
 		return nil, false, err
 	}
@@ -524,8 +542,14 @@ func (s *Store) runConcurrencyReleaseRetries() {
 	defer ticker.Stop()
 	pending := make(map[string]concurrencyReleaseRetry)
 	for {
+		intake := s.concurrencyReleaseQueue
+		if len(pending) >= concurrencyReleaseRetryQueueCapacity {
+			// Bound both the intake channel and retained failed releases. The
+			// next retry/expiry frees capacity before intake resumes.
+			intake = nil
+		}
 		select {
-		case value := <-s.concurrencyReleaseQueue:
+		case value := <-intake:
 			pending[value.token] = value
 		case <-ticker.C:
 			s.retryConcurrencyReleases(pending)
@@ -728,77 +752,99 @@ func (s *Store) ScheduleQuotaRecovery(ctx context.Context, value account.QuotaRe
 	return nil
 }
 
-func (s *Store) MarkQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, ttl time.Duration) (uint64, error) {
+func (s *Store) MarkQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, ttl time.Duration) (repository.QuotaRefreshVersion, error) {
 	mode = strings.TrimSpace(mode)
 	if accountID == 0 || mode == "" || ttl <= 0 {
-		return 0, fmt.Errorf("quota refresh identity is invalid")
+		return repository.QuotaRefreshVersion{}, fmt.Errorf("quota refresh identity is invalid")
 	}
 	member := strconv.FormatUint(accountID, 10) + ":" + mode
 	now := time.Now().UTC()
-	expiresAt := now.Add(ttl)
+	expiresAt := now.Add(ttl).Truncate(time.Millisecond)
 	generation, err := markQuotaRefreshDirtyScript.Run(ctx, s.client,
 		[]string{s.key("quota-refresh", "generations"), s.key("quota-refresh", "dirty"), s.key("quota-refresh", "expiry")},
 		member, expiresAt.UnixMilli(), maxQuotaRefreshDirty, now.UnixMilli(),
 	).Uint64()
 	if err != nil {
-		return 0, err
+		return repository.QuotaRefreshVersion{}, err
 	}
 	if generation == 0 {
-		return 0, fmt.Errorf("quota refresh dirty set is full")
+		return repository.QuotaRefreshVersion{}, fmt.Errorf("quota refresh dirty set is full")
 	}
-	return generation, nil
+	return repository.QuotaRefreshVersion{Generation: generation, ExpiresAt: expiresAt}, nil
 }
 
-func (s *Store) QuotaRefreshGeneration(ctx context.Context, accountID uint64, mode string) (uint64, bool, error) {
+func (s *Store) GetQuotaRefreshState(ctx context.Context, accountID uint64, mode string) (repository.QuotaRefreshVersion, bool, error) {
 	member := strconv.FormatUint(accountID, 10) + ":" + strings.TrimSpace(mode)
 	values, err := quotaRefreshStateScript.Run(ctx, s.client,
 		[]string{s.key("quota-refresh", "generations"), s.key("quota-refresh", "dirty"), s.key("quota-refresh", "expiry")}, member, time.Now().UTC().UnixMilli(),
 	).StringSlice()
 	if err != nil {
-		return 0, false, err
+		return repository.QuotaRefreshVersion{}, false, err
 	}
-	if len(values) != 2 {
-		return 0, false, fmt.Errorf("quota refresh state response is invalid")
+	if len(values) != 3 {
+		return repository.QuotaRefreshVersion{}, false, fmt.Errorf("quota refresh state response is invalid")
 	}
-	generation, err := strconv.ParseUint(values[0], 10, 64)
-	return generation, values[1] == "1", err
+	version, err := parseQuotaRefreshVersion(values[0], values[2])
+	return version, values[1] == "1", err
 }
 
-func (s *Store) ClearQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, generation uint64) (bool, error) {
+func parseQuotaRefreshVersion(generationValue, expiryValue string) (repository.QuotaRefreshVersion, error) {
+	generation, err := strconv.ParseUint(generationValue, 10, 64)
+	if err != nil {
+		return repository.QuotaRefreshVersion{}, err
+	}
+	expiry, err := strconv.ParseInt(expiryValue, 10, 64)
+	if err != nil {
+		return repository.QuotaRefreshVersion{}, err
+	}
+	if generation == 0 {
+		return repository.QuotaRefreshVersion{}, nil
+	}
+	return repository.QuotaRefreshVersion{Generation: generation, ExpiresAt: time.UnixMilli(expiry).UTC()}, nil
+}
+
+func (s *Store) ClearQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, version repository.QuotaRefreshVersion) (bool, error) {
 	member := strconv.FormatUint(accountID, 10) + ":" + strings.TrimSpace(mode)
 	result, err := clearQuotaRefreshDirtyScript.Run(ctx, s.client,
 		[]string{s.key("quota-refresh", "generations"), s.key("quota-refresh", "dirty"), s.key("quota-refresh", "expiry")},
-		member, generation, time.Now().UTC().UnixMilli(),
+		member, version.Generation, time.Now().UTC().UnixMilli(), version.ExpiresAt.UnixMilli(),
 	).Int()
 	return result == 1, err
 }
 
-func (s *Store) ListQuotaRefreshDirty(ctx context.Context, now time.Time, limit int) ([]repository.QuotaRefreshDirty, error) {
+func (s *Store) ScanQuotaRefreshDirty(ctx context.Context, now time.Time, cursor uint64, limit int) ([]repository.QuotaRefreshDirty, uint64, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	values, err := listQuotaRefreshDirtyScript.Run(ctx, s.client,
+	values, err := scanQuotaRefreshDirtyScript.Run(ctx, s.client,
 		[]string{s.key("quota-refresh", "generations"), s.key("quota-refresh", "dirty"), s.key("quota-refresh", "expiry")},
-		now.UnixMilli(), limit,
+		now.UnixMilli(), limit, cursor,
 	).StringSlice()
 	if err != nil {
-		return nil, err
+		return nil, cursor, err
 	}
-	result := make([]repository.QuotaRefreshDirty, 0, min(limit, len(values)/2))
-	for index := 0; index+1 < len(values); index += 2 {
+	if len(values) == 0 || (len(values)-1)%3 != 0 {
+		return nil, cursor, fmt.Errorf("quota refresh page response is invalid")
+	}
+	next, err := strconv.ParseUint(values[0], 10, 64)
+	if err != nil {
+		return nil, cursor, err
+	}
+	result := make([]repository.QuotaRefreshDirty, 0, min(limit, (len(values)-1)/3))
+	for index := 1; index+2 < len(values); index += 3 {
 		member := values[index]
 		separator := strings.IndexByte(member, ':')
 		if separator <= 0 || separator == len(member)-1 {
 			continue
 		}
 		accountID, parseErr := strconv.ParseUint(member[:separator], 10, 64)
-		generation, generationErr := strconv.ParseUint(values[index+1], 10, 64)
-		if parseErr != nil || generationErr != nil || accountID == 0 || generation == 0 {
+		version, versionErr := parseQuotaRefreshVersion(values[index+1], values[index+2])
+		if parseErr != nil || versionErr != nil || accountID == 0 || version.Generation == 0 {
 			continue
 		}
-		result = append(result, repository.QuotaRefreshDirty{AccountID: accountID, Mode: member[separator+1:], Generation: generation})
+		result = append(result, repository.QuotaRefreshDirty{AccountID: accountID, Mode: member[separator+1:], Version: version})
 	}
-	return result, nil
+	return result, next, nil
 }
 
 func (s *Store) EnsureQuotaRecovery(ctx context.Context, value account.QuotaRecoveryEvent) error {
@@ -911,33 +957,52 @@ func (s *Store) GetDevice(ctx context.Context, id string, now time.Time) (accoun
 		return account.DeviceSession{}, err
 	}
 	if !now.Before(value.ExpiresAt) {
-		_ = deleteDeviceSessionScript.Run(ctx, s.client, []string{s.key("device", id), s.key("device-index", "sessions")}).Err()
+		if !now.Before(account.DeviceSessionRetentionUntil(value)) {
+			_ = compareDeviceSessionScript.Run(ctx, s.client, []string{s.key("device", id), s.key("device-index", "sessions")}, payload, "delete", "", 1, 0).Err()
+		}
 		return account.DeviceSession{}, repository.ErrNotFound
 	}
 	return value, nil
 }
 
-func (s *Store) Update(ctx context.Context, value account.DeviceSession) error {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return err
+func (s *Store) mutateDeviceSession(ctx context.Context, id string, transition func(account.DeviceSession) (account.DeviceSession, bool, bool, error)) (account.DeviceSession, bool, error) {
+	for attempt := 0; attempt < 16; attempt++ {
+		payload, err := s.client.Get(ctx, s.key("device", id)).Bytes()
+		if errors.Is(err, redisclient.Nil) {
+			return account.DeviceSession{}, false, repository.ErrNotFound
+		}
+		if err != nil {
+			return account.DeviceSession{}, false, err
+		}
+		var current account.DeviceSession
+		if err := json.Unmarshal(payload, &current); err != nil {
+			return account.DeviceSession{}, false, err
+		}
+		next, applied, remove, err := transition(current)
+		if err != nil || !applied {
+			return account.DeviceSession{}, false, err
+		}
+		operation, encoded, ttl := "delete", []byte(nil), int64(1)
+		if !remove {
+			if !time.Now().Before(account.DeviceSessionRetentionUntil(next)) {
+				return account.DeviceSession{}, false, repository.ErrNotFound
+			}
+			ttl = max(int64(1), time.Until(account.DeviceSessionRetentionUntil(next)).Milliseconds())
+			encoded, err = json.Marshal(next)
+			if err != nil {
+				return account.DeviceSession{}, false, err
+			}
+			operation = "update"
+		}
+		committed, err := compareDeviceSessionScript.Run(ctx, s.client, []string{s.key("device", id), s.key("device-index", "sessions")}, payload, operation, encoded, ttl, account.DeviceSessionRetentionUntil(next).UnixMilli()).Int()
+		if err != nil {
+			return account.DeviceSession{}, false, err
+		}
+		if committed == 1 {
+			return next, true, nil
+		}
 	}
-	ttl := time.Until(value.ExpiresAt)
-	if ttl <= 0 {
-		return repository.ErrNotFound
-	}
-	result, err := updateDeviceSessionScript.Run(ctx, s.client, []string{s.key("device", value.ID), s.key("device-index", "sessions")}, payload, ttl.Milliseconds(), value.ExpiresAt.UnixMilli()).Int()
-	if err != nil {
-		return err
-	}
-	if result != 1 {
-		return repository.ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) Delete(ctx context.Context, id string) error {
-	return deleteDeviceSessionScript.Run(ctx, s.client, []string{s.key("device", id), s.key("device-index", "sessions")}).Err()
+	return account.DeviceSession{}, false, repository.ErrConflict
 }
 
 func (s *Store) acquireLock(ctx context.Context, key string, ttl time.Duration) (func(), bool, error) {
@@ -980,11 +1045,24 @@ func (s *DeviceSessionStore) Create(ctx context.Context, value account.DeviceSes
 func (s *DeviceSessionStore) Get(ctx context.Context, id string, now time.Time) (account.DeviceSession, error) {
 	return s.store.GetDevice(ctx, id, now)
 }
-func (s *DeviceSessionStore) Update(ctx context.Context, value account.DeviceSession) error {
-	return s.store.Update(ctx, value)
+func (s *DeviceSessionStore) ClaimPoll(ctx context.Context, id, token string, now, leaseUntil time.Time) (account.DeviceSession, error) {
+	next, _, err := s.store.mutateDeviceSession(ctx, id, func(current account.DeviceSession) (account.DeviceSession, bool, bool, error) {
+		next, err := account.ClaimDevicePoll(current, token, now, leaseUntil)
+		return next, err == nil, false, err
+	})
+	if errors.Is(err, account.ErrDeviceSessionExpired) {
+		err = repository.ErrNotFound
+	}
+	return next, err
 }
-func (s *DeviceSessionStore) Delete(ctx context.Context, id string) error {
-	return s.store.Delete(ctx, id)
+func (s *DeviceSessionStore) FinishPoll(ctx context.Context, receipt account.DevicePollReceipt, event account.DevicePollCompletion) (bool, error) {
+	_, applied, err := s.store.mutateDeviceSession(ctx, receipt.SessionID, func(current account.DeviceSession) (account.DeviceSession, bool, bool, error) {
+		return account.CompleteDevicePoll(current, receipt, event)
+	})
+	if errors.Is(err, repository.ErrNotFound) {
+		return false, nil
+	}
+	return applied, err
 }
 
 // ConcurrencyLimiter 适配 ConcurrencyLimiter，避免与 DistributedLock 的 Acquire 签名冲突。
@@ -995,6 +1073,9 @@ func NewConcurrencyLimiter(store *Store) *ConcurrencyLimiter {
 }
 func (l *ConcurrencyLimiter) Acquire(ctx context.Context, key string, limit int) (func(), bool, error) {
 	return l.store.acquireConcurrency(ctx, key, limit)
+}
+func (l *ConcurrencyLimiter) AcquireBounded(ctx context.Context, key string, limit int, ttl time.Duration) (func(), bool, error) {
+	return l.store.acquireConcurrencyFor(ctx, key, limit, ttl)
 }
 func (l *ConcurrencyLimiter) Current(ctx context.Context, key string) (int, error) {
 	return l.store.Current(ctx, key)

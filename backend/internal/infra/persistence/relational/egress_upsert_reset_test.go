@@ -42,7 +42,7 @@ func TestUpsertEgressNodesFromSourceResetsObservationsOnProxyChange(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	returned, err := repo.UpsertEgressNodesFromSource(ctx, source.ID, []egress.Node{{
+	returned, err := commitSourceNodesForTest(t, repo, ctx, source.ID, []egress.Node{{
 		Name: "feed-0", Enabled: true, SourceID: source.ID, SourceKey: "k1",
 		EncryptedProxyURL: newProxy, Health: 1, ProbeStatus: egress.ProbeStatusUnknown,
 	}})

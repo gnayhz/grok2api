@@ -61,10 +61,7 @@ func TestPollDeviceLoginStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session.NextPollAt = time.Now().UTC().Add(-time.Second)
-	if err := store.Update(ctx, session); err != nil {
-		t.Fatal(err)
-	}
+	service.now = func() time.Time { return session.NextPollAt }
 	adapter.pollErr = provider.ErrAuthorizationPending
 	if _, err := service.PollDeviceLogin(ctx, started.SessionID); !errors.Is(err, ErrDevicePending) {
 		t.Fatalf("pending poll: err = %v, want ErrDevicePending", err)
@@ -75,8 +72,7 @@ func TestPollDeviceLoginStateMachine(t *testing.T) {
 
 	// 上游 slow-down：interval +5s 补偿并再次节流。
 	session, _ = store.Get(ctx, started.SessionID, time.Now().UTC())
-	session.NextPollAt = time.Now().UTC().Add(-time.Second)
-	_ = store.Update(ctx, session)
+	service.now = func() time.Time { return session.NextPollAt }
 	adapter.pollErr = provider.ErrSlowDown
 	if _, err := service.PollDeviceLogin(ctx, started.SessionID); !errors.Is(err, ErrDeviceSlowDown) {
 		t.Fatalf("upstream slow-down: err = %v, want ErrDeviceSlowDown", err)
@@ -87,8 +83,7 @@ func TestPollDeviceLoginStateMachine(t *testing.T) {
 	}
 
 	// denied：会话删除，后续轮询回到 expired/denied。
-	session.NextPollAt = time.Now().UTC().Add(-time.Second)
-	_ = store.Update(ctx, session)
+	service.now = func() time.Time { return session.NextPollAt }
 	adapter.pollErr = provider.ErrAuthorizationDenied
 	if _, err := service.PollDeviceLogin(ctx, started.SessionID); !errors.Is(err, ErrDeviceDenied) {
 		t.Fatalf("denied poll: err = %v, want ErrDeviceDenied", err)

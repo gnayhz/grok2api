@@ -1,18 +1,18 @@
 package conversation
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
@@ -56,25 +56,37 @@ func ConvertResponseStreamWithOptions(source io.ReadCloser, operation string, op
 	if operation == OperationResponses {
 		return guardResponseStream(source)
 	}
-	reader, writer := io.Pipe()
-	stream := newStreamPipeReadCloser(reader, source)
-	go func() {
-		defer stream.closeSource()
-		// 转换器直接解析上游字节流, panic 不得击穿进程:streampipe 捕获后以
-		// 错误关闭 pipe, 客户端得到可重试的流错误而非进程崩溃。
-		streampipe.Run(writer, func() error {
-			converter := newStreamConverter(writer, operation, options)
-			err := consumeSSE(source, converter.handle)
-			if err == nil {
-				err = converter.finish()
-			}
-			return err
-		})
-	}()
-	return stream
+	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
+		converter := newStreamConverterWithBudget(writer, operation, options, responsebuffer.BudgetOf(source))
+		defer converter.releaseResources()
+		err := consumeSSE(input, converter.handle)
+		if err == nil {
+			err = converter.finish()
+		}
+		return err
+	})
 }
 
+// ResponseStreamEncoder accepts already assembled Responses events. It lets an
+// adapter combine native filtering and client encoding without another SSE pipe.
+// Event data is borrowed only for the duration of Handle.
+type ResponseStreamEncoder struct{ converter *streamConverter }
+
+func NewResponseStreamEncoder(writer io.Writer, operation string, options ResponseOptions) *ResponseStreamEncoder {
+	return NewResponseStreamEncoderWithBudget(writer, operation, options, responsebuffer.NewRequest())
+}
+func NewResponseStreamEncoderWithBudget(writer io.Writer, operation string, options ResponseOptions, budget *responsebuffer.Budget) *ResponseStreamEncoder {
+	return &ResponseStreamEncoder{converter: newStreamConverterWithBudget(writer, operation, options, budget)}
+}
+func (e *ResponseStreamEncoder) Close() { e.converter.releaseResources() }
+func (e *ResponseStreamEncoder) Handle(event string, data []byte) error {
+	return e.converter.handle(event, data)
+}
+func (e *ResponseStreamEncoder) Finish() error { return e.converter.finish() }
+
 type streamConverter struct {
+	retention         *responsebuffer.State
+	retainedIDs       map[string]struct{}
 	writer            io.Writer
 	operation         string
 	id                string
@@ -84,6 +96,7 @@ type streamConverter struct {
 	finished          bool
 	textStarted       bool
 	textIndex         int
+	seenText          map[streamTextKey]bool
 	thinkingStarted   bool
 	thinkingClosed    bool
 	thinkingIndex     int
@@ -119,35 +132,6 @@ type streamRepeatTracker struct {
 	reasonRepeatCount  int
 }
 
-// streamPipeReadCloser ensures a downstream cancellation immediately closes the
-// upstream body, including while the forwarding goroutine is blocked in Read.
-type streamPipeReadCloser struct {
-	*io.PipeReader
-	source    io.ReadCloser
-	closeOnce sync.Once
-	closeErr  error
-}
-
-func newStreamPipeReadCloser(reader *io.PipeReader, source io.ReadCloser) *streamPipeReadCloser {
-	return &streamPipeReadCloser{PipeReader: reader, source: source}
-}
-
-func (r *streamPipeReadCloser) Close() error {
-	readerErr := r.PipeReader.Close()
-	sourceErr := r.closeSource()
-	if readerErr != nil {
-		return readerErr
-	}
-	return sourceErr
-}
-
-func (r *streamPipeReadCloser) closeSource() error {
-	r.closeOnce.Do(func() {
-		r.closeErr = r.source.Close()
-	})
-	return r.closeErr
-}
-
 type streamTool struct {
 	Index     int
 	ID        string
@@ -165,7 +149,11 @@ type reasoningStreamState struct {
 }
 
 func newStreamConverter(writer io.Writer, operation string, options ResponseOptions) *streamConverter {
+	return newStreamConverterWithBudget(writer, operation, options, nil)
+}
+func newStreamConverterWithBudget(writer io.Writer, operation string, options ResponseOptions, budget *responsebuffer.Budget) *streamConverter {
 	return &streamConverter{
+		retention: responsebuffer.NewState(budget, maxConverterStateBytes), retainedIDs: make(map[string]struct{}),
 		writer: writer, operation: operation, created: time.Now().Unix(), tools: make(map[string]streamTool),
 		webSearchEmitted: make(map[string]bool),
 		reasoningItems:   make(map[string]*reasoningStreamState),
@@ -294,6 +282,9 @@ func (c *streamConverter) handle(event string, data []byte) error {
 	if !ok {
 		return nil
 	}
+	if err := c.reserveEventState(typeName, data, root); err != nil {
+		return err
+	}
 	if err := c.repeatTracker.trackEvent(typeName, root); err != nil {
 		return err
 	}
@@ -302,12 +293,12 @@ func (c *streamConverter) handle(event string, data []byte) error {
 	}
 	if root == nil {
 		switch typeName {
-		case "response.output_item.done":
-			return c.handleHugeOutputItemDone(data)
+		case "response.output_item.added", "response.output_item.done":
+			return c.handleHugeOutputItem(data, typeName)
 		case "response.completed", "response.incomplete":
 			return c.handleHugeCompleted(data, typeName)
 		case "response.failed":
-			return c.streamError(jsonpeek.Prefix(data, 8192))
+			return c.streamError(data)
 		default:
 			return nil
 		}
@@ -315,12 +306,16 @@ func (c *streamConverter) handle(event string, data []byte) error {
 	switch typeName {
 	case "response.created", "response.in_progress":
 		var response responseEnvelope
-		_ = json.Unmarshal(root["response"], &response)
+		_ = json.Unmarshal(root.Response, &response)
 		c.setResponse(response)
 		return c.start()
 	case "response.output_text.delta":
-		var delta string
-		_ = json.Unmarshal(root["delta"], &delta)
+		delta := root.Delta
+		if delta != "" {
+			if err := c.noteText(root.ItemID, root.ContentIndex, false); err != nil {
+				return err
+			}
+		}
 		if err := c.start(); err != nil {
 			return err
 		}
@@ -329,8 +324,12 @@ func (c *streamConverter) handle(event string, data []byte) error {
 		}
 		return c.textDelta(delta)
 	case "response.refusal.delta":
-		var delta string
-		_ = json.Unmarshal(root["delta"], &delta)
+		delta := root.Delta
+		if delta != "" {
+			if err := c.noteText(root.ItemID, root.ContentIndex, true); err != nil {
+				return err
+			}
+		}
 		c.refused = true
 		if c.operation == OperationChat {
 			return c.chatDelta(map[string]any{"refusal": delta})
@@ -341,74 +340,38 @@ func (c *streamConverter) handle(event string, data []byte) error {
 			return nil
 		}
 		var annotation any
-		if json.Unmarshal(root["annotation"], &annotation) != nil || annotation == nil {
+		if json.Unmarshal(root.Annotation, &annotation) != nil || annotation == nil {
 			return nil
 		}
 		return c.chatDelta(map[string]any{"annotations": []any{annotation}})
 	case "response.reasoning_summary_text.delta":
-		var itemID, delta string
-		_ = json.Unmarshal(root["item_id"], &itemID)
-		_ = json.Unmarshal(root["delta"], &delta)
+		itemID, delta := root.ItemID, root.Delta
 		return c.reasoningSummaryDelta(itemID, delta)
 	case "response.reasoning_text.delta":
-		var itemID, delta string
-		_ = json.Unmarshal(root["item_id"], &itemID)
-		_ = json.Unmarshal(root["delta"], &delta)
+		itemID, delta := root.ItemID, root.Delta
 		return c.reasoningTextDelta(itemID, delta)
 	case "response.output_item.added":
 		var item responseItem
-		_ = json.Unmarshal(root["item"], &item)
-		if item.Type == "reasoning" && c.reasoningOutputEnabled() {
-			c.ensureReasoningState(item.ID)
-		}
-		if item.Type == "reasoning" && c.operation == OperationMessages && c.options.AnthropicThinking {
-			return c.thinkingStart(item.ID)
-		}
-		if item.Type == "web_search_call" && c.operation == OperationMessages && c.options.AnthropicWebSearch {
-			if call, ok := parseWebSearchCallItem(item); ok {
-				return c.noteWebSearch(call, false)
-			}
-			return nil
-		}
-		if item.Type != "function_call" {
-			return nil
-		}
-		var outputIndex int
-		_ = json.Unmarshal(root["output_index"], &outputIndex)
-		return c.toolStart(item, outputIndex)
+		_ = json.Unmarshal(root.Item, &item)
+		return c.handleOutputItemAdded(item, root.OutputIndex)
 	case "response.function_call_arguments.delta":
-		var itemID, delta string
-		_ = json.Unmarshal(root["item_id"], &itemID)
-		_ = json.Unmarshal(root["delta"], &delta)
+		itemID, delta := root.ItemID, root.Delta
 		return c.toolDelta(itemID, delta)
 	case "response.function_call_arguments.done":
-		var itemID, arguments string
-		_ = json.Unmarshal(root["item_id"], &itemID)
-		_ = json.Unmarshal(root["arguments"], &arguments)
-		return c.toolArgumentsDone(itemID, arguments)
+		return c.toolArgumentsDone(root.ItemID, root.Arguments)
 	case "response.output_item.done":
 		var item responseItem
-		_ = json.Unmarshal(root["item"], &item)
-		if item.Type == "function_call" {
-			return c.toolArgumentsDone(item.ID, item.Arguments)
-		}
-		if item.Type == "reasoning" {
-			if c.reasoningOutputEnabled() {
-				if err := c.reasoningDone(item); err != nil {
-					return err
-				}
-			}
-			return c.thinkingDone(item)
-		}
-		if item.Type == "web_search_call" && c.operation == OperationMessages && c.options.AnthropicWebSearch {
-			if call, ok := parseWebSearchCallItem(item); ok {
-				return c.noteWebSearch(call, true)
-			}
-		}
+		_ = json.Unmarshal(root.Item, &item)
+		return c.handleOutputItemDone(item)
 	case "response.completed", "response.incomplete":
 		var response responseEnvelope
-		_ = json.Unmarshal(root["response"], &response)
+		_ = json.Unmarshal(root.Response, &response)
 		c.setResponse(response)
+		for _, item := range response.Output {
+			if err := c.emitAggregateText(item); err != nil {
+				return err
+			}
+		}
 		if c.operation == OperationMessages && c.options.AnthropicWebSearch {
 			parsed := parseResponse(response)
 			for _, call := range parsed.WebSearch {
@@ -424,6 +387,48 @@ func (c *streamConverter) handle(event string, data []byte) error {
 		return c.done(status)
 	case "error", "response.failed":
 		return c.streamError(data)
+	}
+	return nil
+}
+
+func (c *streamConverter) handleOutputItemAdded(item responseItem, outputIndex int) error {
+	if item.Type == "reasoning" && c.reasoningOutputEnabled() {
+		c.ensureReasoningState(item.ID)
+	}
+	if item.Type == "reasoning" && c.operation == OperationMessages && c.options.AnthropicThinking {
+		return c.thinkingStart(item.ID)
+	}
+	if item.Type == "web_search_call" && c.operation == OperationMessages && c.options.AnthropicWebSearch {
+		if call, ok := parseWebSearchCallItem(item); ok {
+			return c.noteWebSearch(call, false)
+		}
+		return nil
+	}
+	if item.Type != "function_call" {
+		return nil
+	}
+	return c.toolStart(item, outputIndex)
+}
+
+func (c *streamConverter) handleOutputItemDone(item responseItem) error {
+	if item.Type == "message" {
+		return c.emitAggregateText(item)
+	}
+	if item.Type == "function_call" {
+		return c.toolArgumentsDone(item.ID, item.Arguments)
+	}
+	if item.Type == "reasoning" {
+		if c.reasoningOutputEnabled() {
+			if err := c.reasoningDone(item); err != nil {
+				return err
+			}
+		}
+		return c.thinkingDone(item)
+	}
+	if item.Type == "web_search_call" && c.operation == OperationMessages && c.options.AnthropicWebSearch {
+		if call, ok := parseWebSearchCallItem(item); ok {
+			return c.noteWebSearch(call, true)
+		}
 	}
 	return nil
 }
@@ -723,32 +728,63 @@ func (c *streamConverter) finish() error {
 	if c.finished {
 		return nil
 	}
-	return c.done("")
+	// EOF is a transport boundary, not a Responses completion event. Preserve
+	// observed reasoning, but let the caller report an interrupted stream.
+	if err := c.flushPendingReasoning(); err != nil {
+		return err
+	}
+	return io.ErrUnexpectedEOF
 }
 
 func streamErrorValue(data []byte) any {
-	if raw := jsonpeek.RawValue(data, "error"); len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		var value any
-		if json.Unmarshal(raw, &value) == nil && value != nil {
+	if !json.Valid(data) {
+		return nil
+	}
+	// Error fields belong to the root or its response envelope. A metadata
+	// object or output item named "error" must never supply the client error.
+	for _, raw := range [][]byte{
+		objectField(data, "error"),
+		objectField(objectField(data, "response"), "error"),
+	} {
+		if value := decodeStreamErrorValue(raw); value != nil {
 			return value
 		}
 	}
-	var root map[string]any
-	if json.Unmarshal(data, &root) != nil {
-		return strings.TrimSpace(string(data))
-	}
-	if response, ok := root["response"].(map[string]any); ok {
-		if value, exists := response["error"]; exists && value != nil {
-			return value
-		}
-	}
-	if value, exists := root["error"]; exists && value != nil {
-		return value
-	}
-	if message, ok := root["message"].(string); ok {
+	var message string
+	if json.Unmarshal(objectField(data, "message"), &message) == nil && message != "" {
 		return message
 	}
-	return strings.TrimSpace(string(data))
+	return nil
+}
+
+func decodeStreamErrorValue(raw []byte) any {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil
+	}
+	if raw[0] == '"' {
+		var message string
+		if json.Unmarshal(raw, &message) == nil {
+			return message
+		}
+	}
+	if raw[0] != '{' {
+		return nil
+	}
+	// Decode only fields consumed by the client protocol encoders. Other
+	// fields can include an entire failed response or encrypted reasoning.
+	projected := make(map[string]any)
+	jsonpeek.ObjectFields(raw, func(key, value []byte) bool {
+		switch string(key) {
+		case "message", "type", "code", "param":
+			var field any
+			if json.Unmarshal(value, &field) == nil {
+				projected[string(key)] = field
+			}
+		}
+		return true
+	})
+	return projected
 }
 
 func (c *streamConverter) writeData(value any) error {
@@ -798,76 +834,27 @@ func (c *streamConverter) writeEvent(event string, value any) error {
 }
 
 func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
-	reader := bufio.NewReaderSize(source, 64<<10)
-	var event string
-	var data bytes.Buffer
-	var long []byte
-	firstLine := true
-	for {
-		frag, err := reader.ReadSlice('\n')
-		if len(frag) > 0 {
-			var line []byte
-			if err == bufio.ErrBufferFull {
-				if cap(long) == 0 {
-					long = make([]byte, 0, 64<<10)
-				}
-				long = append(long, frag...)
-				if len(long) > maxSSEEventBytes {
-					return fmt.Errorf("SSE 单事件超过 8 MiB")
-				}
-				continue
-			}
-			if len(long) > 0 {
-				long = append(long, frag...)
-				line = long
-				long = nil
-			} else {
-				line = frag
-			}
-			for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
-				line = line[:len(line)-1]
-			}
-			if firstLine {
-				line = bytes.TrimPrefix(line, []byte("\xef\xbb\xbf"))
-				firstLine = false
-			}
-			if data.Len() > maxSSEEventBytes {
-				return fmt.Errorf("SSE 单事件超过 8 MiB")
-			}
-			switch {
-			case bytes.HasPrefix(line, []byte("event:")):
-				event = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))))
-			case bytes.HasPrefix(line, []byte("data:")):
-				if data.Len() > 0 {
-					data.WriteByte('\n')
-				}
-				data.Write(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))))
-			case len(line) == 0:
-				if data.Len() > 0 {
-					if handleErr := handle(event, data.Bytes()); handleErr != nil {
-						return handleErr
-					}
-				}
-				event = ""
-				data.Reset()
-			}
+	return responseflow.Consume(source, func(event *responseflow.Event) error {
+		if !event.HasData {
+			return nil
 		}
-		if err != nil {
-			if err == bufio.ErrBufferFull {
-				continue
-			}
-			if err == io.EOF {
-				if data.Len() > 0 {
-					return handle(event, data.Bytes())
-				}
-				return nil
-			}
-			return err
-		}
-	}
+		return handle(string(event.Kind), event.Data)
+	})
 }
 
-func parseSSEEvent(event string, data []byte) (string, map[string]json.RawMessage, bool) {
+type streamEvent struct {
+	Type         string          `json:"type"`
+	Delta        string          `json:"delta"`
+	ItemID       string          `json:"item_id"`
+	Arguments    string          `json:"arguments"`
+	OutputIndex  int             `json:"output_index"`
+	ContentIndex int             `json:"content_index"`
+	Response     json.RawMessage `json:"response"`
+	Item         json.RawMessage `json:"item"`
+	Annotation   json.RawMessage `json:"annotation"`
+}
+
+func parseSSEEvent(event string, data []byte) (string, *streamEvent, bool) {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		return "", nil, false
 	}
@@ -892,31 +879,28 @@ func parseSSEEvent(event string, data []byte) (string, map[string]json.RawMessag
 			return typeName, nil, true
 		}
 	}
-	var root map[string]json.RawMessage
+	var root streamEvent
 	if json.Unmarshal(data, &root) != nil {
 		return "", nil, false
 	}
 	typeName := event
 	if typeName == "" {
-		_ = json.Unmarshal(root["type"], &typeName)
+		typeName = root.Type
 	}
-	return typeName, root, true
+	return typeName, &root, true
 }
 
-func (t *streamRepeatTracker) trackEvent(typeName string, root map[string]json.RawMessage) error {
+func (t *streamRepeatTracker) trackEvent(typeName string, root *streamEvent) error {
 	if root == nil {
 		return nil
 	}
-	var delta string
+	delta := root.Delta
 	switch typeName {
 	case "response.output_text.delta":
-		_ = json.Unmarshal(root["delta"], &delta)
 		return t.trackContent(delta)
 	case "response.reasoning_summary_text.delta":
-		_ = json.Unmarshal(root["delta"], &delta)
 		return t.trackReasoning(delta, "model reasoning summary loop detected")
 	case "response.reasoning_text.delta":
-		_ = json.Unmarshal(root["delta"], &delta)
 		return t.trackReasoning(delta, "model reasoning loop detected")
 	default:
 		return nil
@@ -958,19 +942,14 @@ func (t *streamRepeatTracker) trackReasoning(delta, message string) error {
 // guardResponseStream 保持 native Responses SSE 的原始字节不变，同时在读取时
 // 解析事件并在检测到循环时关闭上游。
 func guardResponseStream(source io.ReadCloser) io.ReadCloser {
-	reader, writer := io.Pipe()
-	stream := newStreamPipeReadCloser(reader, source)
-	go func() {
-		defer stream.closeSource()
+	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
 		tracker := streamRepeatTracker{}
-		err := consumeSSE(io.TeeReader(source, writer), func(event string, data []byte) error {
+		return consumeSSE(io.TeeReader(input, writer), func(event string, data []byte) error {
 			typeName, root, ok := parseSSEEvent(event, data)
 			if !ok {
 				return nil
 			}
 			return tracker.trackEvent(typeName, root)
 		})
-		_ = writer.CloseWithError(err)
-	}()
-	return stream
+	})
 }

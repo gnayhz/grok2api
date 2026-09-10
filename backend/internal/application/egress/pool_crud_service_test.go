@@ -152,10 +152,6 @@ func TestPoolFallbackChainValidationOnServicePath(t *testing.T) {
 	if _, err := service.CreatePool(ctx, PoolInput{Name: "bad-mode", Strategy: "random", FallbackMode: "bogus"}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("bogus fallback mode = %v, want ErrInvalidInput", err)
 	}
-	if _, err := service.CreatePool(ctx, PoolInput{Name: "self-fallback", Strategy: "random", FallbackMode: "pool", FallbackPoolID: poolA.ID + 100, Enabled: nil}); err != nil {
-		// 占位:先建一个池再对自身设置回退
-		_ = err
-	}
 	// 自回退:更新 A 指向 A 自己
 	if _, err := service.UpdatePool(ctx, poolA.ID, PoolInput{Name: "chain-a", Strategy: "random", FallbackMode: "pool", FallbackPoolID: poolA.ID}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("self fallback = %v, want ErrInvalidInput", err)
@@ -173,8 +169,6 @@ func TestPoolFallbackChainValidationOnServicePath(t *testing.T) {
 	if _, err := service.UpdatePool(ctx, poolC.ID, PoolInput{Name: "chain-c", Strategy: "random", FallbackMode: "pool", FallbackPoolID: poolA.ID}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("C->A cycle = %v, want ErrInvalidInput", err)
 	}
-	// 指向不存在的池:走查终止于 unknown,合法(保存时目标校验由 DB FK/后续检查兜底)
-	_ = ctx
 }
 
 // 订阅源列表与 reveal 面的覆盖补齐:ListSources/ListSourcePage/SourceProxyURL
@@ -309,7 +303,9 @@ func TestOperationsConfigServicePathInvariants(t *testing.T) {
 	}
 
 	// --- 固定目标节点失效(禁用)后保存必须拒绝 ---
-	if _, err := repo.UpdateEgressNode(ctx, domain.Node{ID: node.ID, Name: "ops-node", Enabled: false, EncryptedProxyURL: encrypted, Health: 1}); err != nil {
+	if _, err := repo.UpdateEgressNodeConfiguration(ctx, domain.Node{ID: node.ID, Name: "ops-node", Enabled: false, EncryptedProxyURL: encrypted, Health: 1}, func(domain.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.UpdateOperationsConfig(ctx, OperationsConfigInput{

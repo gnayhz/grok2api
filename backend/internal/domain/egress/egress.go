@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -54,6 +55,21 @@ func RoutingScope(scope Scope) Scope {
 	}
 }
 
+// ExitAddresses is one node's resolved egress addresses per IP family;
+// an empty string means that family is unresolved/unconfigured. Family
+// separation matters because WARP-style exits share one CGNAT IPv4 while
+// each carries a distinct IPv6: egress identity comparisons must stay
+// per-family and never collapse to a single string.
+type ExitAddresses struct {
+	IPv4 string
+	IPv6 string
+}
+
+// Resolved reports whether at least one family address is known.
+func (e ExitAddresses) Resolved() bool {
+	return e.IPv4 != "" || e.IPv6 != ""
+}
+
 // Node is one proxy exit resource. It carries no scope: whether it serves
 // Build, Web, or Console traffic is decided exclusively by routing.
 type Node struct {
@@ -96,22 +112,25 @@ type Node struct {
 	LastRotationError string
 	// DegradeCount/LastDegradedAt track quality-degraded attributions against
 	// this node's exit IP (RSC-clean account degradations).
-	DegradeCount   int
-	LastDegradedAt *time.Time
-	Health         float64
-	FailureCount   int
-	CooldownUntil  *time.Time
-	LastError      string
-	ProbeStatus    ProbeStatus
-	LastProbedAt   *time.Time
-	ProbeLatencyMS int
-	ExitIP         string
-	ProbeError     string
-	ProbeProvider  ProbeProvider
-	IPv4Probe      ProbeFamilyResult
-	IPv6Probe      ProbeFamilyResult
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	DegradeCount      int
+	LastDegradedAt    *time.Time
+	ClearanceRevision uint64
+	BindingRevision   uint64
+	HealthRevision    uint64
+	Health            float64
+	FailureCount      int
+	CooldownUntil     *time.Time
+	LastError         string
+	ProbeStatus       ProbeStatus
+	LastProbedAt      *time.Time
+	ProbeLatencyMS    int
+	ExitIP            string
+	ProbeError        string
+	ProbeProvider     ProbeProvider
+	IPv4Probe         ProbeFamilyResult
+	IPv6Probe         ProbeFamilyResult
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // NodePoolRef is a lightweight pool reference on public nodes.
@@ -127,7 +146,12 @@ type PublicNode struct {
 	ProxyConfigured  bool
 	ProxyDisplay     string
 	ProxyFingerprint string
+	// ProxyPool 是节点原始"外部代理池"标志(编辑表单回显用,与换 IP Webhook
+	// 互斥);RotatingEndpoint 是"旋转端点"投影(代理池标志或账号模板代理)
+	// ——运行时调度豁免与健康态隐藏都以后者为准。二者曾在管理端列表混用
+	// 同一字段:勾选代理池但未配轮换时回显恒为 false,保存看似无效。
 	ProxyPool        bool
+	RotatingEndpoint bool
 	SourceID         uint64
 	SourceName       string
 	// Pools 列出节点所属的全部代理池（多对多）。
@@ -172,10 +196,14 @@ const (
 	// current member until it breaks, then advance to the next member in
 	// stable order (wrapping) and never regress on recovery.
 	PoolStrategyRotation PoolStrategy = "rotation"
+	// PoolStrategyLeastUsed picks the member with the fewest selections in
+	// the current stats window (G9): evens usage across members; new or
+	// restarted members (count 0) take traffic first.
+	PoolStrategyLeastUsed PoolStrategy = "least-used"
 )
 
 func (value PoolStrategy) IsValid() bool {
-	return value == PoolStrategyAffinity || value == PoolStrategyRandom || value == PoolStrategySticky || value == PoolStrategyRotation
+	return value == PoolStrategyAffinity || value == PoolStrategyRandom || value == PoolStrategySticky || value == PoolStrategyRotation || value == PoolStrategyLeastUsed
 }
 
 // Normalized maps the zero value (pre-strategy rows) onto the historical
@@ -273,6 +301,9 @@ func (value ProbeStatus) IsValid() bool {
 // ProbeResult contains only operational metadata. It never stores or exposes
 // proxy credentials.
 type ProbeResult struct {
+	// Revision is allocated by persistence before measurement, independent of
+	// process clocks. Probers do not choose it; the application attaches it.
+	Revision  uint64
 	Status    ProbeStatus
 	TestedAt  time.Time
 	LatencyMS int
@@ -296,9 +327,11 @@ type ProbeFamilyResult struct {
 // SubscriptionSource stores a write-only remote proxy subscription. The URL
 // remains encrypted at rest and must never be returned by management APIs.
 type SubscriptionSource struct {
-	ID      uint64
-	Name    string
-	Enabled bool
+	// SyncRevision is the durable source-sync generation; never exposed in management DTOs.
+	SyncRevision uint64
+	ID           uint64
+	Name         string
+	Enabled      bool
 	// 订阅只是节点的一种来源：同步产出的节点与手动节点完全同权，
 	// 是否入池在池那边管理，与订阅无关。
 	EncryptedURL           string
@@ -572,10 +605,35 @@ func IsAccountTemplateProxy(proxyURL string) bool {
 	return strings.Contains(proxyURL, ProxyAccountPlaceholder)
 }
 
-// IsPoolModeNode 是"代理池模式节点"的唯一判定:节点级代理池标志且已开
-// 轮换（同节点连续请求出口 IP 不同），或代理 URL 是账号模板（粘性出口
-// 每请求独立，共享健康惩罚无意义）。只亮 ProxyPool、未开轮换的固定 IP
-// 不是池。
+// IsPoolModeNode 是"代理池模式节点"的唯一判定:节点级代理池标志——外部
+// 代理池服务,出口 IP 由服务商自动更换(粘性窗口或每请求切换,不受本系统
+// 控制),或代理 URL 是账号模板（粘性出口每账号独立,共享健康惩罚无意义）。
+// 换 IP Webhook 与代理池互斥:Webhook 属于自建 WARP 出口(固定 IP+强制
+// 切换),由 RotationEnabled 单独表达,与本判定无关。
 func (value Node) IsPoolModeNode(decryptedProxyURL string) bool {
-	return (value.ProxyPool && value.RotationEnabled) || IsAccountTemplateProxy(decryptedProxyURL)
+	return value.ProxyPool || IsAccountTemplateProxy(decryptedProxyURL)
+}
+
+// FixedTargetValidator is the management policy for one current node. The
+// transactional writer invokes it while routing references and node rows are
+// stable. Implementations inspect the supplied value only; they must not issue
+// SQL or network calls. Proxy decryption remains with the policy owner.
+type FixedTargetValidator func(Node) error
+
+// SourceSyncClaim identifies one reserved download. A newer start, a source
+// configuration change, deletion, or completion retires it.
+type SourceSyncClaim struct {
+	SourceID uint64
+	Revision uint64
+}
+
+var ErrSourceSyncStale = errors.New("subscription sync superseded")
+
+// SameSourceSyncConfiguration compares all administrator-owned source inputs.
+// Sync metadata and revisions are deliberately excluded so concurrent starts
+// can reserve a newer generation from the same configuration snapshot.
+func SameSourceSyncConfiguration(a, b SubscriptionSource) bool {
+	return a.ID == b.ID && a.Name == b.Name && a.Enabled == b.Enabled &&
+		a.EncryptedURL == b.EncryptedURL && a.EncryptedProxyURL == b.EncryptedProxyURL &&
+		a.RefreshIntervalSeconds == b.RefreshIntervalSeconds
 }

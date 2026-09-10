@@ -188,7 +188,7 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 		response, requestErr := lease.Do(request)
 		if requestErr != nil {
 			cancel()
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, requestErr)
+			lease.Observe(0, requestErr)
 			return requestErr
 		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, webAccountSettingBodyLimit+1))
@@ -203,7 +203,7 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 		if response.StatusCode == http.StatusForbidden && input.statsig && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, input.endpoint) {
 			continue
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		lease.Observe(response.StatusCode, nil)
 		if response.StatusCode == http.StatusUnauthorized {
 			return provider.ErrUnauthorized
 		}

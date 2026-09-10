@@ -19,12 +19,13 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/sessionidentity"
 	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 const (
@@ -46,7 +47,7 @@ type gatewayEnvelope struct {
 
 type gatewaySender struct {
 	mu         sync.Mutex
-	connection *websocket.Conn
+	connection *infraegress.WebSocket
 }
 
 type gatewayOpenOptions struct {
@@ -80,10 +81,10 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 	}
 	var previous *inferencedomain.WebResponseState
 	if previousResponseID != "" {
-		state, stateErr := a.states.GetWebState(ctx, previousResponseID, time.Now().UTC())
+		state, stateErr := a.states.LookupWeb(ctx, previousResponseID, time.Now().UTC())
 		if stateErr != nil {
 			lease.Release()
-			if errors.Is(stateErr, repository.ErrNotFound) {
+			if errors.Is(stateErr, historydomain.ErrResponseNotFound) {
 				return nil, nil, nil, "", fmt.Errorf("previous_response_id 不存在或已过期")
 			}
 			return nil, nil, nil, "", stateErr
@@ -104,9 +105,9 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 		lease.Release()
 		return nil, nil, nil, "", err
 	}
-	requestCtx, totalCancel := context.WithTimeout(ctx, time.Duration(cfg.ChatTimeoutSeconds)*time.Second)
+	requestCtx, totalCancel := context.WithTimeout(ctx, cfg.ChatTimeout)
 	var idleCancel context.CancelCauseFunc
-	if options.enforceStreamIdle && cfg.StreamIdleTimeoutSeconds > 0 {
+	if options.enforceStreamIdle && cfg.StreamIdleTimeout > 0 {
 		requestCtx, idleCancel = context.WithCancelCause(requestCtx)
 	}
 	cancel := func() {
@@ -115,7 +116,7 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 		}
 		totalCancel()
 	}
-	var connection *websocket.Conn
+	var connection *infraegress.WebSocket
 	var handshake *fhttp.Response
 	var dialErr error
 	if options.deferForbidden {
@@ -128,25 +129,24 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 		if handshake != nil {
 			return gatewayHandshakeResponse(handshake, endpoint), lease, previous, "", nil
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, dialErr)
+		lease.Observe(0, dialErr)
 		lease.Release()
 		return nil, nil, nil, "", dialErr
 	}
 	reader, writer := io.Pipe()
+	producerDone := make(chan struct{})
 	go func() {
-		<-requestCtx.Done()
-		_ = connection.Close()
+		defer close(producerDone)
+		defer cancel()
+		defer connection.Close()
+		streampipe.Run(writer, func() error {
+			return runGatewayStream(requestCtx, connection, writer, spec.Mode, input.Prompt, attachments, previous)
+		})
 	}()
-	go func() {
-		streamErr := runGatewayStream(requestCtx, connection, writer, spec.Mode, input.Prompt, attachments, previous)
-		cancel()
-		_ = connection.Close()
-		_ = writer.CloseWithError(streamErr)
-	}()
-	request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
-	body := io.ReadCloser(&cancelBody{ReadCloser: reader, cancel: cancel})
+	request, _ := http.NewRequestWithContext(connection.Context(), http.MethodGet, endpoint, nil)
+	body := io.ReadCloser(&joinedBody{ReadCloser: &cancelBody{ReadCloser: reader, cancel: cancel}, done: producerDone})
 	if idleCancel != nil {
-		body = providerstreamidle.New(body, time.Duration(cfg.StreamIdleTimeoutSeconds)*time.Second, idleCancel)
+		body = providerstreamidle.New(body, cfg.StreamIdleTimeout, idleCancel)
 	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
@@ -155,6 +155,19 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 		Body:       body,
 		Request:    request,
 	}, lease, previous, "", nil
+}
+
+// joinedBody returns only after the canceled producer has released its socket
+// and published physical close facts. Finalization may then safely snapshot it.
+type joinedBody struct {
+	io.ReadCloser
+	done <-chan struct{}
+}
+
+func (b *joinedBody) Close() error {
+	err := b.ReadCloser.Close()
+	<-b.done
+	return err
 }
 
 func (a *Adapter) resolveGatewayUserID(ctx context.Context, baseURL string, credential account.Credential, token string, lease *infraegress.Lease) (string, error) {
@@ -213,6 +226,9 @@ func gatewayHeaders(origin, userID, token string, lease *infraegress.Lease) fhtt
 
 func gatewayHandshakeResponse(response *fhttp.Response, endpoint string) *http.Response {
 	request, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	if response.Request != nil {
+		request = request.WithContext(response.Request.Context())
+	}
 	status := response.Status
 	if status == "" {
 		status = fmt.Sprintf("%d %s", response.StatusCode, http.StatusText(response.StatusCode))
@@ -230,7 +246,7 @@ func gatewayHandshakeResponse(response *fhttp.Response, endpoint string) *http.R
 	}
 }
 
-func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io.Writer, model, prompt string, attachments []string, previous *inferencedomain.WebResponseState) error {
+func runGatewayStream(ctx context.Context, connection *infraegress.WebSocket, writer io.Writer, model, prompt string, attachments []string, previous *inferencedomain.WebResponseState) error {
 	connection.SetReadLimit(gatewayMaxFrameBytes)
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = connection.SetReadDeadline(deadline)
@@ -417,8 +433,10 @@ func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string
 		parsed.ParentID, _ = response["id"].(string)
 		status, _ := response["status"].(string)
 		if status != "" && status != "completed" {
+			parsed.GenerationOutcome = "failed"
 			return "", "", fmt.Errorf("Grok Gateway response 状态为 %s", status)
 		}
+		parsed.GenerationOutcome = "completed"
 	case "response.search.result":
 		result, _ := event["result"].(map[string]any)
 		if rawURL, _ := result["url"].(string); rawURL != "" {

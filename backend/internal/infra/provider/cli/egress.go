@@ -3,17 +3,22 @@ package cli
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"io"
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 )
 
+// egressTransport consumes M13's routing and lease contract. Quality decorators
+// may observe selected paths without owning route selection. Built-in direct
+// traffic also acquires a managed lease; custom fallback transports are retained.
 type egressTransport struct {
-	manager  *infraegress.Manager
+	manager  infraegress.Dialer
 	fallback http.RoundTripper
 }
 
@@ -30,6 +35,15 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 		return nil, err
 	}
 	if !configured {
+		// The production fallback is managed even without account isolation.
+		// Explicitly injected custom transports retain their existing behavior.
+		if _, builtIn := t.fallback.(*buildDirectTransport); builtIn {
+			lease, err = t.manager.AcquireBuildEnvironmentDirect(request.Context(), affinity)
+			if err != nil {
+				return nil, err
+			}
+			return t.roundTripWithLease(request, lease)
+		}
 		// When account-isolated pools are enabled, still go through the manager's
 		// direct node so different accounts do not share the process-wide fallback
 		// HTTP transport / TCP connection pool. Preserve the fallback transport's
@@ -40,8 +54,20 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 		}
 		if !configured {
 			idleRequest := t.withStreamIdleContext(request)
+			idleRequest = idleRequest.WithContext(attemptmeta.Begin(idleRequest.Context(), attemptmeta.Path{Status: attemptmeta.PathUnknown}))
+			if err := infraegress.BeginDirectPhysicalCall(idleRequest.Context()); err != nil {
+				if idleRequest.Body != nil {
+					_ = idleRequest.Body.Close()
+				}
+				return nil, err
+			}
 			response, requestErr := t.fallback.RoundTrip(idleRequest)
-			infraegress.RecordDirectPhysicalCall(request.Context(), response, requestErr)
+			requestErr = infraegress.MarkPhysicalExecutionError(idleRequest.Context(), requestErr)
+			attemptmeta.Attach(response, idleRequest)
+			infraegress.RecordDirectPhysicalCall(idleRequest.Context(), response, requestErr)
+			if requestErr != nil && response != nil && response.Body != nil {
+				_ = response.Body.Close()
+			}
 			if requestErr != nil || response == nil || response.Body == nil {
 				return response, requestErr
 			}
@@ -72,13 +98,13 @@ func (t *egressTransport) roundTripWithLease(request *http.Request, lease *infra
 	response, err := lease.Do(idleRequest)
 	if err != nil {
 		if shouldReportEgressFailure(request.Context(), err) {
-			t.manager.FeedbackForScope(context.WithoutCancel(request.Context()), domainegress.ScopeBuild, lease.NodeID, 0, err)
+			lease.Observe(0, err)
 		}
 		released = true
 		lease.Release()
 		return nil, err
 	}
-	t.manager.FeedbackForScope(context.WithoutCancel(request.Context()), domainegress.ScopeBuild, lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	if response.Body == nil {
 		released = true
 		lease.Release()
@@ -146,13 +172,27 @@ func shouldReportEgressFailure(ctx context.Context, err error) bool {
 type egressResponseBody struct {
 	io.ReadCloser
 	release func()
+	once    sync.Once
+}
+
+func (b *egressResponseBody) finish() {
+	b.once.Do(func() {
+		if b.release != nil {
+			b.release()
+		}
+	})
+}
+
+func (b *egressResponseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.finish()
+	}
+	return n, err
 }
 
 func (b *egressResponseBody) Close() error {
 	err := b.ReadCloser.Close()
-	if b.release != nil {
-		b.release()
-		b.release = nil
-	}
+	b.finish()
 	return err
 }

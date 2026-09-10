@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 )
 
 // LocalStore 将媒体对象限制在单一根目录内，并使用临时文件与原子硬链接完成提交。
@@ -35,96 +33,6 @@ func NewLocalStore(root string) (*LocalStore, error) {
 
 func (s *LocalStore) SaveImage(ctx context.Context, id, mimeType string, data []byte) (string, error) {
 	return s.saveObject(ctx, "images", ".image-*", id, mimeType, data, imageExtension)
-}
-
-// SaveVideo 将视频对象写入 videos/ 子目录，提交语义与图片一致（原子硬链接、no-replace）。
-func (s *LocalStore) SaveVideo(ctx context.Context, id, mimeType string, data []byte) (string, error) {
-	return s.saveObject(ctx, "videos", ".video-*", id, mimeType, data, mediafile.VideoExtension)
-}
-
-// BeginVideoUpload 创建视频临时文件，供流式限长写入后 CommitVideoUpload 提交。
-func (s *LocalStore) BeginVideoUpload(ctx context.Context, id, mimeType string) (tempPath, storageKey string, err error) {
-	if err := ctx.Err(); err != nil {
-		return "", "", err
-	}
-	extension, ok := mediafile.VideoExtension(mimeType)
-	if !ok || len(id) < 2 {
-		return "", "", fmt.Errorf("视频存储参数无效")
-	}
-	storageKey = filepath.ToSlash(filepath.Join("videos", id[:2], id+extension))
-	path, err := s.resolve(storageKey)
-	if err != nil {
-		return "", "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", "", fmt.Errorf("创建视频目录: %w", err)
-	}
-	// 禁止覆盖已有文件：目标已存在时拒绝新的上传会话。
-	if _, statErr := os.Stat(path); statErr == nil {
-		return "", "", fmt.Errorf("视频对象已存在")
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return "", "", statErr
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".video-*")
-	if err != nil {
-		return "", "", fmt.Errorf("创建视频临时文件: %w", err)
-	}
-	tempPath = temporary.Name()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		_ = s.removeTemporary(tempPath)
-		return "", "", err
-	}
-	if err := temporary.Close(); err != nil {
-		_ = s.removeTemporary(tempPath)
-		return "", "", err
-	}
-	return tempPath, storageKey, nil
-}
-
-// CommitVideoUpload 将临时文件原子提交到 storageKey（硬链接 no-replace）。
-func (s *LocalStore) CommitVideoUpload(ctx context.Context, tempPath, storageKey string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	path, err := s.resolve(storageKey)
-	if err != nil {
-		return err
-	}
-	// 确保临时文件已落盘。
-	// 必须以 O_RDWR 打开：Windows 的 FlushFileBuffers 要求句柄具有写访问权限，
-	// 对 O_RDONLY 句柄调用 Sync 会返回 Access is denied；
-	// Linux 的 fsync 对只读/读写 fd 行为一致，此举不改变 POSIX 平台语义。
-	// O_RDWR 不含 O_TRUNC，不会改动文件内容。
-	file, err := os.OpenFile(tempPath, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("打开视频临时文件: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("同步视频文件: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(tempPath, path); err != nil {
-		return fmt.Errorf("提交视频文件: %w", err)
-	}
-	if cleanupErr := s.removeTemporary(tempPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-		slog.Warn("media_temp_cleanup_failed", "path", tempPath, "error", cleanupErr)
-	}
-	return nil
-}
-
-// AbortVideoUpload 清理未提交的临时文件。
-func (s *LocalStore) AbortVideoUpload(_ context.Context, tempPath string) error {
-	if strings.TrimSpace(tempPath) == "" {
-		return nil
-	}
-	if err := s.removeTemporary(tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
 }
 
 func (s *LocalStore) saveObject(ctx context.Context, kindDir, tempPattern, id, mimeType string, data []byte, extFn func(string) (string, bool)) (string, error) {
@@ -197,7 +105,7 @@ func (s *LocalStore) Open(ctx context.Context, storageKey string) (io.ReadCloser
 }
 
 // ListMediaObjectFiles 枚举已提交对象与残留临时文件，返回存储相对键
-// （正斜杠分隔）→ 修改时间。点前缀的是 saveObject/CommitVideoUpload 的
+// （正斜杠分隔）→ 修改时间。点前缀的是 saveObject/视频提交 的
 // 中间临时文件；其余是已提交对象。孤儿回收用它对账文件系统与元数据。
 func (s *LocalStore) ListMediaObjectFiles(ctx context.Context) (map[string]time.Time, map[string]time.Time, error) {
 	if err := ctx.Err(); err != nil {
@@ -208,6 +116,9 @@ func (s *LocalStore) ListMediaObjectFiles(ctx context.Context) (map[string]time.
 	for _, kindDir := range []string{"images", "videos"} {
 		base := filepath.Join(s.root, kindDir)
 		err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				if errors.Is(walkErr, os.ErrNotExist) {
 					return nil

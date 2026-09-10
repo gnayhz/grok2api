@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"math/rand/v2"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -21,10 +19,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
-	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
+	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -58,26 +55,25 @@ const (
 const (
 	// estimatedFreeTokenLimit is only a fallback until an upstream exhaustion
 	// response supplies the account-specific actual/limit pair.
-	estimatedFreeTokenLimit         int64         = 500_000
-	freeUsageWindow                 time.Duration = 24 * time.Hour
-	forcedRefreshMinInterval        time.Duration = 30 * time.Second
-	paidProbeRetryInterval          time.Duration = 15 * time.Minute
-	credentialRefreshAdvance        time.Duration = 3 * time.Minute
-	credentialRefreshSafetyPoll     time.Duration = time.Minute
-	credentialRefreshTimeout        time.Duration = 30 * time.Second
-	credentialRefreshStateTTL       time.Duration = 5 * time.Second
-	credentialStateWriteTimeout     time.Duration = 5 * time.Second
-	credentialConfigurationRetry    time.Duration = 30 * time.Minute
-	credentialRefreshBatchSize                    = 100
-	credentialRefreshMaxBatches                   = 50
-	credentialUnclassifiedAuthLimit               = 5
-	managedTaskWorkerCeiling                      = 50
-	quotaRefreshQueueSize                         = 4096
-	quotaRefreshTimeout                           = 30 * time.Second
-	quotaRefreshDirtyTTL                          = 24 * time.Hour
-	quotaRefreshPollInterval                      = 500 * time.Millisecond
-	quotaRefreshSharedPoll                        = time.Second
-	quotaRefreshBackoffBase                       = time.Second
+	estimatedFreeTokenLimit     int64         = 500_000
+	freeUsageWindow             time.Duration = 24 * time.Hour
+	forcedRefreshMinInterval    time.Duration = 30 * time.Second
+	credentialRefreshAdvance    time.Duration = 3 * time.Minute
+	credentialRefreshSafetyPoll time.Duration = time.Minute
+	credentialRefreshTimeout    time.Duration = 30 * time.Second
+	credentialRefreshStateTTL   time.Duration = 5 * time.Second
+	credentialStateWriteTimeout time.Duration = 5 * time.Second
+
+	credentialRefreshBatchSize  = 100
+	credentialRefreshMaxBatches = 50
+
+	managedTaskWorkerCeiling = 50
+	quotaRefreshQueueSize    = 4096
+	quotaRefreshTimeout      = 30 * time.Second
+	quotaRefreshDirtyTTL     = 24 * time.Hour
+	quotaRefreshPollInterval = 500 * time.Millisecond
+	quotaRefreshSharedPoll   = time.Second
+	quotaRefreshBackoffBase  = time.Second
 	// quotaRefreshBackoffMax：失败重试的退避上限。历史值 1 分钟在含死凭据/
 	// 被拒账号的 fleet 下构成重试风暴——每个永远失败的账号以 ~1 分钟一轮的
 	// 节奏重试，死凭据规模即可打满工人池（历史线上实测：持续高强度的
@@ -85,13 +81,12 @@ const (
 	// quotaRefreshFailureBudget 熔断停靠。
 	quotaRefreshBackoffMax = 30 * time.Minute
 	// quotaRefreshFailureBudget：同一 (account,mode) 连续失败达到该值后熔断
-	// 停靠——requeue 循环删除状态并告警，不再自动重试；外部再次显式入队
+	// 停靠——保留该轮需求的失败预算，不再自动重试；外部再次显式入队
 	//（请求路径 429 核实 / 迁移任务 / 巡检）会开启全新 episode（failures
 	// 归零，见 QueueQuotaRefresh），重试预算按 episode 有界。
 	quotaRefreshFailureBudget                     = 8
 	consoleQuotaRefreshMinInterval                = 30 * time.Second
 	unknownRemoteQuotaProbeDelay    time.Duration = 5 * time.Minute
-	consolePredictedQuotaProbeDelay time.Duration = 24 * time.Hour
 	observedModelPersistInterval                  = 30 * time.Minute
 	observedModelLocalCacheTTL                    = 5 * time.Second
 	observedModelLockShards                       = 64
@@ -107,12 +102,6 @@ const (
 	accountTaskBatchSize                          = 1000
 	buildBotFlagCacheTTL            time.Duration = 30 * time.Second
 	linkedDeleteRuntimeCleanupLimit               = 3 * time.Second
-	// buildDetectModel 管理端「检测账号」固定使用的 Grok Build 模型。
-	buildDetectModel               = "grok-4.5"
-	buildDetectQuotaRecoveryPause  = 24 * time.Hour
-	buildDetectModelDeniedCooldown = 5 * time.Minute
-	// buildDetectPrompt 探测请求正文，仅用于验证凭据与上游可用性。
-	buildDetectPrompt = "hello,test"
 )
 
 const permanentRefreshExpiredReason = "OAuth refresh token 已永久失效且 access token 已过期"
@@ -126,17 +115,6 @@ type buildBotFlagIndexRepository interface {
 	CountAvailableBuildBotFlagged(ctx context.Context, now time.Time) (int64, error)
 }
 
-type quotaRefreshState struct {
-	generation          uint64
-	publishedGeneration uint64
-	sharedGeneration    uint64
-	queued              bool
-	running             bool
-	pending             bool
-	failures            int
-	nextAttemptAt       time.Time
-}
-
 type observedModelState struct {
 	model       string
 	persistedAt time.Time
@@ -146,12 +124,6 @@ type observedModelShard struct {
 	sync.Mutex
 	values        map[uint64]observedModelState
 	lastCleanupAt time.Time
-}
-
-type quotaRefreshRequest struct {
-	key       string
-	accountID uint64
-	mode      string
 }
 
 type quotaRefreshResult struct {
@@ -272,31 +244,6 @@ type ImportedAccountObserver func(accountID uint64) error
 
 // BatchProgressObserver 在单个账号任务结束后报告批次完成数。
 type BatchProgressObserver func(completed, total int) error
-
-// BuildDetectOutcome 描述单次 Grok Build 可用性探测结果。
-type BuildDetectOutcome string
-
-const (
-	// BuildDetectOutcomeOK 表示探测成功，账号可用。
-	BuildDetectOutcomeOK BuildDetectOutcome = "ok"
-	// BuildDetectOutcomeInvalid 表示已确认失效并标 reauthRequired。
-	BuildDetectOutcomeInvalid BuildDetectOutcome = "invalid"
-	// BuildDetectOutcomeFailed 表示探测失败但未判定为永久失效（网络/5xx/临时额度等）。
-	BuildDetectOutcomeFailed BuildDetectOutcome = "failed"
-)
-
-// BuildDetectItemResult 是单账号探测的结构化结果，供 SSE 增量推送。
-type BuildDetectItemResult struct {
-	AccountID  uint64
-	Name       string
-	Email      string
-	Outcome    BuildDetectOutcome
-	Reason     string
-	HTTPStatus int
-}
-
-// BuildDetectItemObserver 在单个账号探测完成后推送明细；返回错误会取消批次。
-type BuildDetectItemObserver func(item BuildDetectItemResult) error
 
 type ExportResult struct {
 	Data  []byte
@@ -425,6 +372,11 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 
 // Service 负责 OAuth 账号接入、刷新、额度和持久化生命周期。
 type Service struct {
+	rateLimitMu         sync.Mutex
+	rateLimitActive     atomic.Bool
+	rateLimitNextExpiry atomic.Int64
+	rateLimits          map[string]TeamModelRateLimit
+	rateLimitTeams      map[teamRateLimitIdentity]teamRateLimitObservation
 	accounts            repository.AccountRepository
 	audits              repository.AuditRepository
 	deviceSessions      repository.DeviceSessionRepository
@@ -435,19 +387,19 @@ type Service struct {
 	quotaRefreshState   repository.QuotaRefreshCoordinator
 	providers           *provider.Registry
 	cipher              security.Cryptor
-	refreshes           singleflight.Group
-	billingSyncs        singleflight.Group
-	quotaSyncs          singleflight.Group
-	identitySyncs       singleflight.Group
-	observedModelWrites singleflight.Group
+	refreshes           OperationGroup[string]
+	billingSyncs        OperationGroup[string]
+	quotaSyncs          OperationGroup[string]
+	identitySyncs       OperationGroup[accountdomain.CredentialRef]
+	observedModelWrites OperationGroup[string]
 	observedModelStore  repository.ObservedModelStateRepository
-	refreshMu           sync.Mutex
-	lastRefreshAt       map[uint64]time.Time
 	observedModelShards [observedModelLockShards]observedModelShard
 	quotaRefreshMu      sync.Mutex
 	quotaRefreshes      map[string]*quotaRefreshState
 	quotaRefreshQueue   chan quotaRefreshRequest
 	quotaRefreshWake    chan struct{}
+	quotaRefreshCursor  uint64
+	quotaDurableScan    uint64
 	conversionPool      *batch.Pool
 	syncPool            *batch.Pool
 	refreshPool         *batch.Pool
@@ -460,7 +412,6 @@ type Service struct {
 	autoCleanWake          chan struct{}
 	excludeBuildBotFlagged bool
 	buildBotFlagCache      *resultcache.Cache[string, []uint64]
-	riskVerdictClearer     riskVerdictClearer
 	logger                 *slog.Logger
 	now                    func() time.Time
 }
@@ -508,7 +459,7 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 	return &Service{
 		accounts: accounts, audits: audits, deviceSessions: deviceSessions, sticky: sticky,
 		providers: providers, cipher: cipher, refreshLock: refreshLock,
-		lastRefreshAt: make(map[uint64]time.Time), quotaRefreshes: make(map[string]*quotaRefreshState),
+		quotaRefreshes:        make(map[string]*quotaRefreshState),
 		quotaRefreshQueue:     make(chan quotaRefreshRequest, quotaRefreshQueueSize),
 		quotaRefreshWake:      make(chan struct{}, 1),
 		credentialRefreshWake: make(chan struct{}, 1),
@@ -868,9 +819,6 @@ func (s *Service) finishLinkedDelete(ctx context.Context, deletedIDs []uint64) {
 	if failures, err := s.deleteStickyAccounts(cleanupCtx, deletedIDs); err != nil && s.logger != nil {
 		s.logger.Warn("linked_account_runtime_cleanup_failed", "accounts", len(deletedIDs), "failures", failures, "error", err)
 	}
-	for _, id := range deletedIDs {
-		s.clearRefreshState(id)
-	}
 }
 
 // BatchDelete atomically removes roots and quota state without expanding linked accounts.
@@ -1086,7 +1034,7 @@ func (s *Service) ObserveResponseModel(ctx context.Context, id uint64, model str
 	if model == "" {
 		return nil
 	}
-	_, err, _ := s.observedModelWrites.Do(strconv.FormatUint(id, 10)+"\x00"+model, func() (any, error) {
+	_, err := s.observedModelWrites.Do(ctx, strconv.FormatUint(id, 10)+"\x00"+model, func() (any, error) {
 		now := s.now()
 		shard := s.observedModelShard(id)
 		shard.Lock()
@@ -1269,70 +1217,6 @@ func isEstimatedFreeBillingProfile(billing *accountdomain.Billing) bool {
 	return billing != nil && (billing.HasFreeProfileSignal() || billing.HasInferredFreeProfileSignal())
 }
 
-// StartDeviceLogin 启动短期 Device OAuth，会话只保存在有界运行态存储中。
-func (s *Service) StartDeviceLogin(ctx context.Context) (DeviceStartResult, error) {
-	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
-	if !ok {
-		return DeviceStartResult{}, fmt.Errorf("CLI Provider 未注册")
-	}
-	authorization, err := adapter.StartDeviceAuthorization(ctx)
-	if err != nil {
-		return DeviceStartResult{}, err
-	}
-	sessionID, err := security.NewOpaqueToken(18)
-	if err != nil {
-		return DeviceStartResult{}, err
-	}
-	now := time.Now().UTC()
-	session := accountdomain.DeviceSession{ID: sessionID, DeviceCode: authorization.DeviceCode, UserCode: authorization.UserCode, VerificationURI: authorization.VerificationURI, VerificationURIComplete: authorization.VerificationURIComplete, Interval: authorization.Interval, NextPollAt: now.Add(authorization.Interval), ExpiresAt: now.Add(authorization.ExpiresIn)}
-	if err := s.deviceSessions.Create(ctx, session); err != nil {
-		return DeviceStartResult{}, err
-	}
-	return DeviceStartResult{SessionID: sessionID, UserCode: session.UserCode, VerificationURI: session.VerificationURI, VerificationURIComplete: session.VerificationURIComplete, Interval: session.Interval, ExpiresAt: session.ExpiresAt}, nil
-}
-
-// PollDeviceLogin 执行一次上游轮询，成功后立即加密并写入账号仓储。
-func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (View, error) {
-	now := time.Now().UTC()
-	session, err := s.deviceSessions.Get(ctx, sessionID, now)
-	if err != nil {
-		return View{}, ErrDeviceDenied
-	}
-	if now.Before(session.NextPollAt) {
-		return View{}, ErrDeviceSlowDown
-	}
-	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
-	if !ok {
-		return View{}, fmt.Errorf("CLI Provider 未注册")
-	}
-	seed, err := adapter.PollDeviceAuthorization(ctx, session.DeviceCode)
-	session.NextPollAt = now.Add(session.Interval)
-	_ = s.deviceSessions.Update(ctx, session)
-	if errors.Is(err, provider.ErrAuthorizationPending) {
-		return View{}, ErrDevicePending
-	}
-	if errors.Is(err, provider.ErrSlowDown) {
-		session.Interval += 5 * time.Second
-		session.NextPollAt = now.Add(session.Interval)
-		_ = s.deviceSessions.Update(ctx, session)
-		return View{}, ErrDeviceSlowDown
-	}
-	if errors.Is(err, provider.ErrAuthorizationDenied) {
-		_ = s.deviceSessions.Delete(ctx, sessionID)
-		return View{}, ErrDeviceDenied
-	}
-	if err != nil {
-		return View{}, err
-	}
-	value, _, err := s.persistSeed(ctx, seed)
-	if err != nil {
-		return View{}, err
-	}
-	s.reconcileProviderLinksBestEffort(ctx, value.ID)
-	_ = s.deviceSessions.Delete(ctx, sessionID)
-	return s.Get(ctx, value.ID)
-}
-
 // ImportCredentials 导入用户上传的 OAuth 账号凭据。
 func (s *Service) ImportCredentials(ctx context.Context, data []byte) (ImportResult, error) {
 	return s.ImportCredentialsWithObserver(ctx, data, nil)
@@ -1431,8 +1315,27 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 			seeds = append(seeds, value)
 		}
 	}
+	// Preflight avoids unnecessary OAuth preparation for known deletions.
+	// ImportAccounts rechecks current intent inside the actual write transaction.
+	tombstoned, err := s.accounts.TombstonedEmails(ctx, seedEmails(seeds))
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("读取账号墓碑失败: %w", err)
+	}
+	if len(tombstoned) > 0 {
+		kept := seeds[:0]
+		for _, seed := range seeds {
+			if _, hit := tombstoned[accountdomain.ImportEmail(seed.Email)]; hit {
+				skipped++
+				if s.logger != nil {
+					s.logger.Info("account_import_tombstoned_skipped", "email_hash", security.HashToken(seed.Email), "name", seed.Name)
+				}
+				continue
+			}
+			kept = append(kept, seed)
+		}
+		seeds = kept
+	}
 	var result ImportResult
-	var err error
 	if preparer, ok := adapter.(provider.CredentialImportPreparer); ok && hasRefreshTokenOnlySeed(seeds) {
 		result, err = s.persistPreparedImportedSeeds(ctx, seeds, preparer, observer, progress)
 	} else {
@@ -1440,6 +1343,17 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 	}
 	result.Skipped += skipped
 	return result, err
+}
+
+// seedEmails 提取导入种子的邮箱集合(去空)。
+func seedEmails(seeds []provider.CredentialSeed) []string {
+	out := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		if email := strings.TrimSpace(seed.Email); email != "" {
+			out = append(out, email)
+		}
+	}
+	return out
 }
 
 func hasRefreshTokenOnlySeed(seeds []provider.CredentialSeed) bool {
@@ -1508,6 +1422,11 @@ func (s *Service) persistPreparedImportedSeeds(ctx context.Context, seeds []prov
 			cancelPrepare()
 			return
 		}
+		if stored.Skipped != "" {
+			result.Skipped++
+			reportCredentialImportProgress(progress, completed, len(seeds), &firstErr, cancelPrepare)
+			return
+		}
 		persisted = true
 		result.AccountIDs = append(result.AccountIDs, stored.ID)
 		if stored.Created {
@@ -1524,6 +1443,7 @@ func (s *Service) persistPreparedImportedSeeds(ctx context.Context, seeds []prov
 		reportCredentialImportProgress(progress, completed, len(seeds), &firstErr, cancelPrepare)
 	})
 	if persisted {
+		s.invalidateBuildBotFlagCache()
 		s.WakeCredentialRefresh()
 	}
 	return result, errors.Join(firstErr, batchErr)
@@ -1544,64 +1464,93 @@ func (s *Service) persistImportedSeed(ctx context.Context, seed provider.Credent
 	if err != nil {
 		return repository.AccountUpsertResult{}, err
 	}
-	stored, err := s.accounts.UpsertManyByIdentity(ctx, []accountdomain.Credential{value})
+	stored, err := s.accounts.ImportAccounts(ctx, []repository.AccountImport{{Credential: value}})
 	if err != nil {
 		return repository.AccountUpsertResult{}, err
 	}
 	if len(stored) != 1 {
 		return repository.AccountUpsertResult{}, fmt.Errorf("导入账号持久化结果数量无效: %d", len(stored))
 	}
-	s.reconcileProviderLinksBestEffort(ctx, stored[0].ID)
+	if stored[0].Skipped == "" {
+		s.reconcileProviderLinksBestEffort(ctx, stored[0].ID)
+	}
 	return stored[0], nil
 }
 
 func (s *Service) persistImportedSeeds(ctx context.Context, seeds []provider.CredentialSeed, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
-	return s.persistImportedSeedsFromProgress(ctx, seeds, observer, progress, 0, len(seeds), true)
+	return s.persistImportedSeedsWithSources(ctx, seeds, nil, observer, progress)
 }
 
-func (s *Service) persistImportedSeedsFromProgress(ctx context.Context, seeds []provider.CredentialSeed, observer ImportedAccountObserver, progress BatchProgressObserver, completed, total int, reportInitial bool) (ImportResult, error) {
+func (s *Service) persistImportedSeedsWithSources(ctx context.Context, seeds []provider.CredentialSeed, sources []accountdomain.CredentialRef, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
+	if sources != nil && len(sources) != len(seeds) {
+		return ImportResult{}, fmt.Errorf("导入账号与来源数量不一致")
+	}
+	completed, total := 0, len(seeds)
 	result := ImportResult{AccountIDs: make([]uint64, 0, len(seeds))}
-	if progress != nil && reportInitial {
+	defer func() {
+		if result.Created+result.Updated > 0 {
+			s.invalidateBuildBotFlagCache()
+			s.WakeCredentialRefresh()
+		}
+	}()
+	if progress != nil {
 		if err := progress(completed, total); err != nil {
-			return ImportResult{}, err
+			return result, err
 		}
 	}
 	for start := 0; start < len(seeds); start += credentialImportChunkSize {
 		end := min(start+credentialImportChunkSize, len(seeds))
-		values := make([]accountdomain.Credential, 0, end-start)
-		for _, seed := range seeds[start:end] {
+		values := make([]repository.AccountImport, 0, end-start)
+		for index, seed := range seeds[start:end] {
 			value, err := s.credentialFromSeed(seed)
 			if err != nil {
-				return ImportResult{}, err
+				return result, err
 			}
-			values = append(values, value)
+			input := repository.AccountImport{Credential: value}
+			if sources != nil {
+				ref := sources[start+index]
+				input.Source = &ref
+			}
+			values = append(values, input)
 		}
-		stored, err := s.accounts.UpsertManyByIdentity(ctx, values)
+		stored, err := s.accounts.ImportAccounts(ctx, values)
 		if err != nil {
-			return ImportResult{}, err
+			return result, err
 		}
+		if len(stored) != len(values) {
+			return result, fmt.Errorf("导入账号持久化结果数量无效: %d", len(stored))
+		}
+		// The whole chunk committed before callbacks. Preserve all committed
+		// counts even if an observer/progress callback cancels delivery.
 		for _, value := range stored {
+			if value.Skipped != "" {
+				result.Skipped++
+				continue
+			}
 			result.AccountIDs = append(result.AccountIDs, value.ID)
-			s.reconcileProviderLinksBestEffort(ctx, value.ID)
-			if observer != nil {
-				if err := observer(value.ID); err != nil {
-					return ImportResult{}, err
-				}
-			}
-			completed++
-			if progress != nil {
-				if err := progress(completed, total); err != nil {
-					return ImportResult{}, err
-				}
-			}
 			if value.Created {
 				result.Created++
 			} else {
 				result.Updated++
 			}
 		}
+		for _, value := range stored {
+			if value.Skipped == "" {
+				s.reconcileProviderLinksBestEffort(ctx, value.ID)
+				if observer != nil {
+					if err := observer(value.ID); err != nil {
+						return result, err
+					}
+				}
+			}
+			completed++
+			if progress != nil {
+				if err := progress(completed, total); err != nil {
+					return result, err
+				}
+			}
+		}
 	}
-	s.WakeCredentialRefresh()
 	return result, nil
 }
 
@@ -1624,7 +1573,7 @@ func (s *Service) SyncWebAccountsToConsoleWithStrategy(ctx context.Context, ids 
 			return ImportResult{}, mapRepositoryError(err)
 		}
 		result, err := s.syncWebCredentialsToConsole(ctx, values, observer, progress)
-		result.Skipped = len(ids) - len(values)
+		result.Skipped += len(ids) - len(values)
 		return result, err
 	}
 	values := make([]accountdomain.Credential, 0, len(ids))
@@ -1684,6 +1633,8 @@ func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, s
 		current, err := s.syncWebCredentialsToConsole(ctx, values, observer, offsetBatchProgress(progress, completed, total))
 		result.Created += current.Created
 		result.Updated += current.Updated
+		result.Skipped += current.Skipped
+		result.Failed += current.Failed
 		result.AccountIDs = append(result.AccountIDs, current.AccountIDs...)
 		if err != nil {
 			return result, err
@@ -1702,6 +1653,7 @@ func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []acco
 		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
+	sources := make([]accountdomain.CredentialRef, 0, len(values))
 	for _, value := range values {
 		if value.Provider != accountdomain.ProviderWeb || value.AuthType != accountdomain.AuthTypeSSO {
 			return ImportResult{}, fmt.Errorf("%w: 仅 Grok Web SSO 账号支持同步到 Console", ErrUnsupported)
@@ -1738,8 +1690,9 @@ func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []acco
 			seed.CloudflareCookies = cookies
 		}
 		seeds = append(seeds, seed)
+		sources = append(sources, value.CredentialRef())
 	}
-	return s.persistImportedSeeds(ctx, seeds, observer, progress)
+	return s.persistImportedSeedsWithSources(ctx, seeds, sources, observer, progress)
 }
 
 func webConsoleAccountName(webName, fallback string) string {
@@ -2002,6 +1955,7 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 		return value.LinkedAccountID, false, true, nil
 	}
 	linkedBuildSourceKey := ""
+	var target *accountdomain.CredentialRef
 	if value.LinkedAccountID != 0 {
 		linkedBuild, getErr := s.accounts.Get(ctx, value.LinkedAccountID)
 		if getErr != nil {
@@ -2011,6 +1965,8 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 			return 0, false, false, fmt.Errorf("已关联 Grok Build 账号身份无效")
 		}
 		linkedBuildSourceKey = linkedBuild.SourceKey
+		reference := linkedBuild.CredentialRef()
+		target = &reference
 	}
 	converter, ok := s.providers.BuildConverter(accountdomain.ProviderWeb)
 	if !ok {
@@ -2028,17 +1984,23 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 	if linkedBuildSourceKey != "" {
 		seed.SourceKey = linkedBuildSourceKey
 	}
-	buildAccount, created, err := s.persistSeed(ctx, seed)
+	source := value.CredentialRef()
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
+	defer cancel()
+	installed, err := s.persistSeed(persistCtx, seed, &source, target)
 	if err != nil {
 		return 0, false, false, err
 	}
-	if value.LinkedAccountID != 0 && buildAccount.ID != value.LinkedAccountID {
-		return 0, false, false, fmt.Errorf("重新转换后的 Grok Build 账号身份不一致")
+	if installed.Skipped == accountdomain.ImportTargetChanged {
+		return 0, false, false, fmt.Errorf("%w: 已关联账号材料已变化，请重新转换", ErrConflict)
 	}
-	if err := s.accounts.LinkWebToBuild(ctx, id, buildAccount.ID); err != nil {
-		return 0, false, false, mapRepositoryError(err)
+	if installed.Skipped != "" {
+		return 0, false, true, nil
 	}
-	return buildAccount.ID, created, false, nil
+	if err := s.accounts.LinkWebToBuild(persistCtx, source, installed.Material); err != nil {
+		return installed.ID, installed.Created, false, fmt.Errorf("凭据已保存，但账号关联未完成: %w", mapRepositoryError(err))
+	}
+	return installed.ID, installed.Created, false, nil
 }
 
 // ExportCredentials 保留 Grok Build 默认导出语义，供旧调用方兼容。
@@ -2205,42 +2167,39 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	if err != nil {
 		return View{}, mapRepositoryError(err)
 	}
-	enabledChanged := input.Enabled != nil && value.Enabled != *input.Enabled
+	patch := repository.AccountAdminPatch{AccountUpdates: repository.AccountUpdates{
+		Enabled: input.Enabled, Priority: input.Priority, MaxConcurrent: input.MaxConcurrent, MinimumRemaining: input.MinimumRemaining,
+	}, BuildSuperEntitled: input.BuildSuperEntitled, BuildRouteMode: input.BuildRouteMode}
 	if input.Name != nil {
 		value.Name = strings.TrimSpace(*input.Name)
 		if value.Name == "" {
 			return View{}, invalidInput("账号名称不能为空")
 		}
-	}
-	if input.Enabled != nil {
-		value.Enabled = *input.Enabled
-	}
-	if input.Priority != nil {
-		value.Priority = *input.Priority
+		patch.Name = &value.Name
 	}
 	if input.MaxConcurrent != nil {
 		if *input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent {
 			return View{}, invalidInput("maxConcurrent 必须在 1 到 256 之间")
 		}
-		value.MaxConcurrent = *input.MaxConcurrent
 	}
 	if input.MinimumRemaining != nil {
 		if *input.MinimumRemaining < 0 {
 			return View{}, invalidInput("minimumRemaining 不能小于零")
 		}
-		value.MinimumRemaining = *input.MinimumRemaining
 	}
-	previousRiskStatus := ""
 	if input.RiskStatus != nil {
 		status := strings.TrimSpace(*input.RiskStatus)
 		if status != "" && status != accountdomain.RiskStatusRSCDenied {
 			return View{}, invalidInput("riskStatus 仅支持空值或 rsc_denied")
 		}
-		previousRiskStatus = value.RiskStatus
-		value.RiskStatus = status
+		patch.Risk = &repository.RiskAttribution{Status: status}
+		if status != "" {
+			patch.Risk.Trigger = accountdomain.RiskTriggerManual
+		}
 	}
 	if input.ClearCloudflareCookies {
 		value.EncryptedCloudflareCookie = ""
+		patch.EncryptedCloudflareCookie = &value.EncryptedCloudflareCookie
 	} else if input.CloudflareCookies != nil {
 		if value.Provider == accountdomain.ProviderBuild {
 			return View{}, invalidInput("Grok Build 账号不使用 Cloudflare Cookie")
@@ -2258,13 +2217,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 				return View{}, encryptErr
 			}
 			value.EncryptedCloudflareCookie = encrypted
+			patch.EncryptedCloudflareCookie = &value.EncryptedCloudflareCookie
 		}
 	}
 	if input.BuildSuperEntitled != nil {
 		if value.Provider != accountdomain.ProviderBuild {
 			return View{}, invalidInput("仅 Grok Build 账号支持设置 Build Super entitlement")
 		}
-		value.BuildSuperEntitled = *input.BuildSuperEntitled
 	}
 	if input.BuildRouteMode != nil {
 		if value.Provider != accountdomain.ProviderBuild {
@@ -2273,26 +2232,12 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		if !input.BuildRouteMode.IsValid() {
 			return View{}, invalidInput("Build 上游地址必须是 auto、build 或 xai")
 		}
-		value.BuildRouteMode = *input.BuildRouteMode
 	}
-	updated, err := s.accounts.Update(ctx, value)
+	result, err := s.accounts.UpdateAdministration(ctx, id, patch)
 	if err != nil {
 		return View{}, mapRepositoryError(err)
 	}
-	if input.RiskStatus != nil {
-		// 全部字段校验与实体保存成功后才做风控列定向写：组合请求中其他
-		// 字段校验失败（400）时风险状态保持不变（外部复核 9 的原子性）。
-		// 实体 Save 已带同值，此处定向写幂等——但保持独立列写以避免未来
-		// Save 语义变化时覆盖并发定向写。
-		if err := s.accounts.UpdateRiskStatus(ctx, updated.ID, strings.TrimSpace(*input.RiskStatus)); err != nil {
-			return View{}, mapRepositoryError(err)
-		}
-		// 人工解除(此前被标记→现在清空)时级联删除身份组 verdict:
-		// denied/flagged 在 DeniedTTL 内 fresh, 不删会被启动对账与后续降智自动回滚。
-		if previousRiskStatus != "" && strings.TrimSpace(*input.RiskStatus) == "" {
-			s.clearIdentityVerdicts(ctx, updated)
-		}
-	}
+	updated := result.Credential
 	if !updated.Enabled && s.sticky != nil {
 		_ = s.sticky.DeleteByAccount(ctx, updated.ID)
 	} else if updated.Enabled && s.providers != nil && s.providers.SupportsCredentialRefresh(updated.Provider) {
@@ -2302,23 +2247,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	if err != nil {
 		return View{}, err
 	}
-	view.EnabledChanged = enabledChanged
+	view.EnabledChanged = result.EnabledChanged
 	return view, nil
 }
 
-// ClearCooldown resets request-path health so a cooled account can be
-// scheduled again. UpdateHealth publishes InvalidationAccountHealthChanged,
-// which overwrites the selector memory overlay (runtimeStore=memory).
+// ClearCooldown applies an explicit administrator command against current health.
 func (s *Service) ClearCooldown(ctx context.Context, id uint64) (View, error) {
-	value, err := s.accounts.Get(ctx, id)
-	if err != nil {
-		return View{}, mapRepositoryError(err)
-	}
-	// missing_thinking is a durable quality strike, not a transient cooldown
-	// error. Clearing the timer must not turn the next miss into another first
-	// strike and bypass the second-miss disable policy.
-	healthMarker := accountdomain.NormalizeHealthMarker(value.LastError)
-	if err := s.accounts.UpdateHealth(ctx, value.ID, value.Provider, 0, nil, healthMarker, false); err != nil {
+	if _, err := s.accounts.ApplyHealth(ctx, id, "", accountdomain.HealthEvent{Kind: accountdomain.HealthClearCooldown}); err != nil {
 		return View{}, mapRepositoryError(err)
 	}
 	return s.Get(ctx, id)
@@ -2375,23 +2310,22 @@ func (s *Service) PreviewLinkedDelete(ctx context.Context, providerValue account
 	return resolution, nil
 }
 
-func (s *Service) MarkReauthRequired(ctx context.Context, id uint64, reason string) error {
-	value, err := s.accounts.Get(ctx, id)
+func (s *Service) MarkReauthRequired(ctx context.Context, observed accountdomain.CredentialRef, reason string) error {
+	_, err := s.applyCredentialRejection(ctx, observed, reason)
+	return err
+}
+
+// applyCredentialRejection preserves the committed result for consumers that
+// report a state transition. Ordinary request callers may ignore stale events.
+func (s *Service) applyCredentialRejection(ctx context.Context, observed accountdomain.CredentialRef, reason string) (accountdomain.CredentialResult, error) {
+	result, err := s.accounts.ApplyCredential(ctx, observed, accountdomain.CredentialEvent{Kind: accountdomain.CredentialRejected, Reason: reason, OccurredAt: s.now()})
 	if err != nil {
-		return mapRepositoryError(err)
+		return result, mapRepositoryError(err)
 	}
-	value.AuthStatus = accountdomain.AuthStatusReauthRequired
-	value.LastError = reason
-	if len(value.LastError) > 512 {
-		value.LastError = value.LastError[:512]
+	if result.Applied && result.Credential.CredentialGeneration == observed.Generation && s.sticky != nil {
+		_ = s.sticky.DeleteByAccount(ctx, observed.AccountID)
 	}
-	if _, err := s.accounts.Update(ctx, value); err != nil {
-		return mapRepositoryError(err)
-	}
-	if s.sticky != nil {
-		_ = s.sticky.DeleteByAccount(ctx, id)
-	}
-	return nil
+	return result, nil
 }
 
 // markSSOCredentialRejected 在上游明确返回 401 后可靠持久化失效状态。
@@ -2402,7 +2336,7 @@ func (s *Service) markSSOCredentialRejected(ctx context.Context, value accountdo
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
 	defer cancel()
-	if err := s.MarkReauthRequired(writeCtx, value.ID, reason); err != nil {
+	if err := s.MarkReauthRequired(writeCtx, value.CredentialRef(), reason); err != nil {
 		s.logger.Error("account_reauth_required_write_failed", "account_id", value.ID, "provider", value.Provider, "error", err)
 		return err
 	}
@@ -2438,14 +2372,14 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 	if !options.force && value.EncryptedAccessToken != "" && !value.ExpiresAt.IsZero() && now.Add(credentialRefreshAdvance).Before(value.ExpiresAt) {
 		return value, nil
 	}
-	refreshKey := strconv.FormatUint(value.ID, 10)
+	refreshKey := strconv.FormatUint(value.ID, 10) + ":" + strconv.FormatUint(value.CredentialGeneration, 10)
 	if options.respectSchedule {
 		refreshKey += ":scheduled"
 	}
 	if options.retryPermanentOnce {
 		refreshKey += ":manual-retry"
 	}
-	result, err, _ := s.refreshes.Do(refreshKey, func() (any, error) {
+	result, err := s.refreshes.Do(ctx, refreshKey, func() (any, error) {
 		latest, err := s.accounts.Get(ctx, value.ID)
 		if err != nil {
 			return nil, err
@@ -2460,7 +2394,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 		if options.respectSchedule && latest.RefreshDueAt != nil && latest.RefreshDueAt.After(currentTime) {
 			return latest, nil
 		}
-		if options.force && latest.EncryptedAccessToken != "" && latest.EncryptedAccessToken != value.EncryptedAccessToken {
+		if options.force && latest.EncryptedAccessToken != "" && latest.CredentialGeneration != value.CredentialGeneration {
 			return latest, nil
 		}
 		if !options.force && latest.EncryptedAccessToken != "" && !latest.ExpiresAt.IsZero() && currentTime.Add(credentialRefreshAdvance).Before(latest.ExpiresAt) {
@@ -2492,7 +2426,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 			if options.force && !options.bypassCooldown && s.credentialRefreshCoolingDown(latest, currentTime) {
 				return latest, nil
 			}
-			if latest.EncryptedAccessToken != "" && latest.EncryptedAccessToken != value.EncryptedAccessToken {
+			if latest.EncryptedAccessToken != "" && latest.CredentialGeneration != value.CredentialGeneration {
 				return latest, nil
 			}
 			if !options.force && latest.EncryptedAccessToken != "" && !latest.ExpiresAt.IsZero() && currentTime.Add(credentialRefreshAdvance).Before(latest.ExpiresAt) {
@@ -2517,7 +2451,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 			botFlagSource = metadata.BuildBotFlagSource
 		}
 		persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
-		updated, err := s.accounts.UpdateTokens(persistCtx, latest.ID, refreshed.EncryptedAccessToken, refreshed.EncryptedRefreshToken, refreshed.ExpiresAt, botFlagSource)
+		result, err := s.accounts.ApplyCredential(persistCtx, latest.CredentialRef(), accountdomain.CredentialEvent{Kind: accountdomain.CredentialRefreshed, AccessToken: refreshed.EncryptedAccessToken, RefreshToken: refreshed.EncryptedRefreshToken, ExpiresAt: refreshed.ExpiresAt, BuildBotFlagSource: botFlagSource, OccurredAt: s.now()})
 		cancelPersist()
 		if err != nil {
 			s.logger.Error("credential_refresh_token_write_failed",
@@ -2531,9 +2465,8 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 			return nil, err
 		}
 		s.invalidateBuildBotFlagCache()
-		s.markRefreshSuccess(latest.ID, currentTime)
 		s.WakeCredentialRefresh()
-		return updated, nil
+		return result.Credential, nil
 	})
 	if err != nil {
 		return accountdomain.Credential{}, err
@@ -2580,40 +2513,18 @@ func (s *Service) RefreshToken(ctx context.Context, id uint64) (View, error) {
 	return s.Get(ctx, id)
 }
 
-func (s *Service) refreshCoolingDown(accountID uint64, now time.Time) bool {
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-	last := s.lastRefreshAt[accountID]
-	return !last.IsZero() && now.Sub(last) < forcedRefreshMinInterval
-}
-
 func (s *Service) credentialRefreshCoolingDown(credential accountdomain.Credential, now time.Time) bool {
-	if credential.LastRefreshAt != nil {
-		age := now.Sub(*credential.LastRefreshAt)
-		if age >= 0 && age < forcedRefreshMinInterval {
-			return true
-		}
+	if credential.LastRefreshAt == nil {
+		return false
 	}
-	return s.refreshCoolingDown(credential.ID, now)
-}
-
-func (s *Service) markRefreshSuccess(accountID uint64, now time.Time) {
-	s.refreshMu.Lock()
-	s.lastRefreshAt[accountID] = now
-	s.refreshMu.Unlock()
-}
-
-func (s *Service) clearRefreshState(accountID uint64) {
-	s.refreshMu.Lock()
-	delete(s.lastRefreshAt, accountID)
-	s.refreshMu.Unlock()
+	age := now.Sub(*credential.LastRefreshAt)
+	return age >= 0 && age < forcedRefreshMinInterval
 }
 
 func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential accountdomain.Credential, refreshErr error, preservePermanent, distributedLock bool) {
-	if errors.Is(refreshErr, context.Canceled) || errors.Is(refreshErr, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.Canceled) {
+	if neterror.IsLocalExecution(refreshErr) || errors.Is(refreshErr, context.Canceled) || errors.Is(refreshErr, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
-	failureCount := credential.RefreshFailureCount + 1
 	errorCode := "oauth_transport_error"
 	errorMessage := "OAuth request failed"
 	errorStatus := 0
@@ -2637,89 +2548,27 @@ func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential
 		errorCode = "oauth_timeout"
 		errorMessage = "OAuth request timed out"
 	}
-	// Defend against adapters or historical rows that classified every OAuth
-	// 400/401 as terminal. Only explicit credential-specific terminal codes may
-	// stop future refresh attempts.
-	if permanent && !provider.IsPermanentCredentialRefreshErrorCode(errorCode) {
-		permanent = false
-	}
-	// 真正的 OAuth 永久失败（invalid_grant 等）只能由成功换 token 清除。
-	// 非终态错误不得被旧的 status-only permanent 分类粘住。
-	if preservePermanent && credential.RefreshPermanent && !isRecoverableRefreshErrorCode(credential.LastRefreshErrorCode) && !isRecoverableRefreshErrorCode(errorCode) {
-		permanent = true
-	}
-	now := s.now()
-	unclassifiedAuthFailure := provider.IsUnclassifiedCredentialAuthRejection(errorStatus, errorCode)
-	configurationError := provider.IsCredentialRefreshConfigurationErrorCode(errorCode)
-	unclassifiedAuthFailureCount := 0
-	if unclassifiedAuthFailure {
-		unclassifiedAuthFailureCount = 1
-		if credential.LastRefreshErrorStatus == errorStatus && strings.EqualFold(strings.TrimSpace(credential.LastRefreshErrorCode), strings.TrimSpace(errorCode)) {
-			unclassifiedAuthFailureCount = credential.RefreshUnclassifiedAuthCount + 1
-		}
-	}
-	retryAt := now.Add(credentialRefreshBackoff(credential.ID, failureCount, retryAfter))
-	if configurationError && retryAt.Before(now.Add(credentialConfigurationRetry)) {
-		retryAt = now.Add(credentialConfigurationRetry)
-	}
-	accessTokenAlive := credential.EncryptedAccessToken != "" && !credential.ExpiresAt.IsZero() && credential.ExpiresAt.After(now)
-	requiresReauth := unclassifiedAuthFailure && !accessTokenAlive && unclassifiedAuthFailureCount >= credentialUnclassifiedAuthLimit
-	if permanent && accessTokenAlive {
-		// refresh token 已永久失效时，提前重试没有意义；到 access token 到期时再完成失效收敛。
-		retryAt = credential.ExpiresAt
-	} else if permanent {
-		retryAt = now
-	}
-	if err := s.accounts.UpdateCredentialRefreshFailure(ctx, credential.ID, repository.CredentialRefreshFailure{
-		Count: failureCount, UnclassifiedAuthFailureCount: unclassifiedAuthFailureCount,
-		RetryAt: retryAt, Status: errorStatus, Code: errorCode,
-		Message: errorMessage, Response: errorResponse, Permanent: permanent,
-	}); err != nil {
+
+	result, err := s.accounts.ApplyCredential(ctx, credential.CredentialRef(), accountdomain.CredentialEvent{Kind: accountdomain.CredentialRefreshFailed, OccurredAt: s.now(), Failure: accountdomain.CredentialRefreshFailure{
+		Status: errorStatus, Code: errorCode, Message: errorMessage, Response: errorResponse, Permanent: permanent, PreservePermanent: preservePermanent, RetryAfter: retryAfter,
+	}})
+	if err != nil {
 		s.logger.Warn("credential_refresh_state_write_failed", "account_id", credential.ID, "error", err)
-	}
-	s.logger.Warn("credential_refresh_failed",
-		"account_id", credential.ID,
-		"provider", credential.Provider,
-		"http_status", errorStatus,
-		"error_code", errorCode,
-		"error_message", errorMessage,
-		"permanent", permanent,
-		"failure_count", failureCount,
-		"unclassified_auth_failure", unclassifiedAuthFailure,
-		"unclassified_auth_failure_count", unclassifiedAuthFailureCount,
-		"configuration_error", configurationError,
-		"requires_reauth", requiresReauth,
-		"retry_at", retryAt,
-		"access_token_alive", accessTokenAlive,
-		"refresh_token_rotated", false,
-		"build_api_fallback_marked", credential.BuildAPIFallback,
-		"distributed_lock", distributedLock,
-	)
-	if permanent && accessTokenAlive {
-		s.logger.Warn("credential_refresh_permanent_but_token_alive", "account_id", credential.ID, "error_code", errorCode, "expires_at", credential.ExpiresAt, "retry_at", retryAt)
-		s.WakeCredentialRefresh()
 		return
 	}
-	if permanent {
-		if err := s.MarkReauthRequired(ctx, credential.ID, "OAuth refresh failed: "+errorCode); err != nil {
-			s.logger.Warn("credential_refresh_reauth_mark_failed", "account_id", credential.ID, "error", err)
-		}
+	if !result.Applied {
 		return
 	}
-	if requiresReauth {
-		if err := s.MarkReauthRequired(ctx, credential.ID, "OAuth refresh repeatedly rejected without a classifiable error"); err != nil {
-			s.logger.Warn("credential_refresh_unclassified_reauth_mark_failed", "account_id", credential.ID, "error", err)
-			return
-		}
-		s.logger.Warn("credential_refresh_unclassified_reauth_required",
-			"account_id", credential.ID,
-			"http_status", errorStatus,
-			"error_code", errorCode,
-			"failure_count", unclassifiedAuthFailureCount,
-		)
-		return
+	current := result.Credential
+	s.logger.Warn("credential_refresh_failed", "account_id", credential.ID, "provider", credential.Provider,
+		"http_status", errorStatus, "error_code", errorCode, "error_message", errorMessage,
+		"permanent", current.RefreshPermanent, "failure_count", current.RefreshFailureCount,
+		"unclassified_auth_failure_count", current.RefreshUnclassifiedAuthCount,
+		"requires_reauth", current.AuthStatus == accountdomain.AuthStatusReauthRequired, "retry_at", current.RefreshDueAt,
+		"refresh_token_rotated", false, "distributed_lock", distributedLock)
+	if current.AuthStatus == accountdomain.AuthStatusReauthRequired && s.sticky != nil {
+		_ = s.sticky.DeleteByAccount(ctx, credential.ID)
 	}
-	s.logger.Warn("credential_refresh_deferred", "account_id", credential.ID, "failure_count", failureCount, "retry_at", retryAt, "error_code", errorCode)
 	s.WakeCredentialRefresh()
 }
 
@@ -2775,7 +2624,7 @@ func (s *Service) resolvePermanentRefreshFailure(ctx context.Context, credential
 		return credential, nil, true
 	}
 	if !accessTokenAlive {
-		if err := s.MarkReauthRequired(ctx, credential.ID, permanentRefreshExpiredReason); err != nil {
+		if err := s.MarkReauthRequired(ctx, credential.CredentialRef(), permanentRefreshExpiredReason); err != nil {
 			return accountdomain.Credential{}, err, true
 		}
 	}
@@ -2787,21 +2636,11 @@ func (s *Service) resolvePermanentRefreshFailure(ctx context.Context, credential
 
 // isRecoverableRefreshErrorCode 标识“永久标记可被后续成功刷新清除”的本地/临时错误。
 func isRecoverableRefreshErrorCode(code string) bool {
-	return !provider.IsPermanentCredentialRefreshErrorCode(code)
-}
-
-func credentialRefreshBackoff(accountID uint64, failureCount int, retryAfter time.Duration) time.Duration {
-	delays := [...]time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute}
-	index := max(0, min(failureCount-1, len(delays)-1))
-	delay := delays[index]
-	if retryAfter > delay {
-		delay = min(retryAfter, 30*time.Minute)
-	}
-	return delay + time.Duration((accountID*37)%16)*time.Second
+	return !accountdomain.IsPermanentCredentialRefreshErrorCode(code)
 }
 
 func (s *Service) RefreshBilling(ctx context.Context, id uint64) (accountdomain.Billing, error) {
-	result, err, _ := s.billingSyncs.Do(strconv.FormatUint(id, 10), func() (any, error) {
+	result, err := s.billingSyncs.Do(ctx, strconv.FormatUint(id, 10), func() (any, error) {
 		return s.refreshBilling(ctx, id)
 	})
 	if err != nil {
@@ -2815,80 +2654,69 @@ func (s *Service) RefreshBilling(ctx context.Context, id uint64) (accountdomain.
 }
 
 func (s *Service) refreshBilling(ctx context.Context, id uint64) (accountdomain.Billing, error) {
-	value, billing, err := s.fetchAndSaveBilling(ctx, id)
+	value, billing, err := s.fetchBilling(ctx, id)
 	if err != nil {
 		return accountdomain.Billing{}, err
 	}
-	if err := s.reconcilePaidQuotaRecovery(ctx, value, billing, false); err != nil {
+	result, err := s.commitBilling(ctx, value.QuotaRecoveryRef(), billing, false)
+	if err != nil {
 		return accountdomain.Billing{}, err
+	}
+	if !result.Applied {
+		return accountdomain.Billing{}, fmt.Errorf("%w: 额度状态已更新，请重新同步", ErrConflict)
 	}
 	return billing, nil
 }
 
-func (s *Service) fetchAndSaveBilling(ctx context.Context, id uint64) (accountdomain.Credential, accountdomain.Billing, error) {
+// fetchBilling captures the material and recovery revision before upstream IO.
+func (s *Service) fetchBilling(ctx context.Context, id uint64) (accountdomain.Credential, accountdomain.Billing, error) {
 	value, err := s.accounts.Get(ctx, id)
 	if err != nil {
-		return accountdomain.Credential{}, accountdomain.Billing{}, mapRepositoryError(err)
+		return value, accountdomain.Billing{}, mapRepositoryError(err)
 	}
-	value, err = s.EnsureCredential(ctx, value, false)
+	refreshed, err := s.EnsureCredential(ctx, value, false)
 	if err != nil {
-		return accountdomain.Credential{}, accountdomain.Billing{}, err
+		return value, accountdomain.Billing{}, err
 	}
+	value = refreshed
 	adapter, ok := s.providers.Billing(value.Provider)
 	if !ok {
-		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("Provider %s 未注册", value.Provider)
+		return value, accountdomain.Billing{}, fmt.Errorf("Provider %s 未注册", value.Provider)
 	}
 	billing, err := adapter.GetBilling(ctx, value)
-	if err != nil {
-		return accountdomain.Credential{}, accountdomain.Billing{}, err
-	}
 	billing.AccountID = id
-	if err := s.accounts.SaveBilling(ctx, billing); err != nil {
-		return accountdomain.Credential{}, accountdomain.Billing{}, err
-	}
-	return value, billing, nil
+	return value, billing, err
 }
 
-// ProbePaidQuota 在真实账期到期后执行一次 Billing 探测，不消耗模型额度。
-func (s *Service) ProbePaidQuota(ctx context.Context, value accountdomain.Credential) (bool, error) {
-	latest, billing, err := s.fetchAndSaveBilling(ctx, value.ID)
+func (s *Service) commitBilling(ctx context.Context, ref accountdomain.QuotaRecoveryRef, billing accountdomain.Billing, afterProbe bool) (accountdomain.RecoveryResult, error) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
+	defer cancel()
+	return s.accounts.ApplyQuotaRecovery(writeCtx, ref, accountdomain.RecoveryEvent{Kind: accountdomain.RecoveryBillingObserved, Billing: &billing, AfterProbe: afterProbe, OccurredAt: s.now()})
+}
+
+// ProbePaidQuota completes only its claimed revision, even if credential refresh
+// loaded a newer account snapshot. Promotion returns the committed revision for
+// the next model request; obsolete results never promote a lease.
+func (s *Service) ProbePaidQuota(ctx context.Context, value accountdomain.Credential, ref accountdomain.QuotaRecoveryRef) (accountdomain.Credential, bool, error) {
+	latest, billing, err := s.fetchBilling(ctx, value.ID)
+	if latest.ID != 0 {
+		ref.CredentialRef = latest.CredentialRef()
+	}
 	if err != nil {
-		now := time.Now().UTC()
-		next := now.Add(paidProbeRetryInterval)
-		_ = s.accounts.SaveQuotaRecovery(ctx, accountdomain.QuotaRecovery{AccountID: value.ID, Kind: accountdomain.QuotaRecoveryKindPaid, Status: accountdomain.QuotaRecoveryStatusExhausted, NextProbeAt: &next, UpdatedAt: now})
-		return false, err
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
+		defer cancel()
+		_, writeErr := s.accounts.ApplyQuotaRecovery(writeCtx, ref, accountdomain.RecoveryEvent{Kind: accountdomain.RecoveryPaidProbeFailed, OccurredAt: s.now()})
+		return value, false, errors.Join(err, writeErr)
 	}
-	if err := s.reconcilePaidQuotaRecovery(ctx, latest, billing, true); err != nil {
-		return false, err
+	result, err := s.commitBilling(ctx, ref, billing, true)
+	if err != nil {
+		return value, false, err
 	}
-	return !billing.IsExhausted(latest.MinimumRemaining), nil
-}
-
-func (s *Service) reconcilePaidQuotaRecovery(ctx context.Context, credential accountdomain.Credential, billing accountdomain.Billing, afterProbe bool) error {
-	if !billing.IsPaid() || !billing.IsExhausted(credential.MinimumRemaining) {
-		recovery, err := s.accounts.GetQuotaRecovery(ctx, credential.ID)
-		if errors.Is(err, repository.ErrNotFound) || (err == nil && recovery.Kind != accountdomain.QuotaRecoveryKindPaid) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return s.accounts.ClearQuotaRecovery(ctx, credential.ID)
+	if !result.Applied {
+		return value, false, accountdomain.ErrQuotaRecoveryObservationStale
 	}
-	periodEnd, ok := billing.PeriodEnd()
-	if !ok {
-		return nil
-	}
-	now := time.Now().UTC()
-	next := periodEnd
-	if !next.After(now) && afterProbe {
-		next = now.Add(paidProbeRetryInterval)
-	}
-	exhaustedAt := now
-	return s.accounts.SaveQuotaRecovery(ctx, accountdomain.QuotaRecovery{
-		AccountID: credential.ID, Kind: accountdomain.QuotaRecoveryKindPaid, Status: accountdomain.QuotaRecoveryStatusExhausted,
-		ExhaustedAt: &exhaustedAt, NextProbeAt: &next, LastConfirmedAt: &now, UpdatedAt: now,
-	})
+	latest.QuotaRecoveryRevision, latest.QuotaRecoveryResetRevision = result.Ref.Revision, result.ResetRevision
+	return latest, result.Recovered, nil
 }
 
 // HasBillingSnapshot 判断账号是否已经完成过一次额度同步，不触发任何上游请求。
@@ -2902,33 +2730,6 @@ func (s *Service) HasBillingSnapshot(ctx context.Context, id uint64) (bool, erro
 
 func (s *Service) HasQuotaWindows(ctx context.Context, id uint64) (bool, error) {
 	return s.accounts.HasQuotaWindows(ctx, id)
-}
-
-func (s *Service) DecrementQuota(ctx context.Context, id uint64, mode string, amount int) (bool, error) {
-	if amount <= 0 {
-		amount = 1
-	}
-	if repository, ok := s.accounts.(interface {
-		DecrementQuotaWindowBy(context.Context, uint64, string, int, time.Time) (bool, error)
-	}); ok {
-		return repository.DecrementQuotaWindowBy(ctx, id, mode, amount, s.now())
-	}
-	updated := false
-	for range amount {
-		decremented, err := s.accounts.DecrementQuotaWindow(ctx, id, mode, s.now())
-		if err != nil {
-			return updated, err
-		}
-		if !decremented {
-			break
-		}
-		updated = true
-	}
-	return updated, nil
-}
-
-func (s *Service) DecrementWebQuota(ctx context.Context, id uint64, mode string, amount int) (bool, error) {
-	return s.DecrementQuota(ctx, id, mode, amount)
 }
 
 func (s *Service) ExhaustQuota(ctx context.Context, id uint64, mode string, resetAt *time.Time) error {
@@ -2958,7 +2759,7 @@ func (s *Service) ExhaustWebQuota(ctx context.Context, id uint64, mode string, r
 }
 
 func (s *Service) RefreshQuota(ctx context.Context, id uint64) ([]accountdomain.QuotaWindow, error) {
-	result, err, _ := s.quotaSyncs.Do("all:"+strconv.FormatUint(id, 10), func() (any, error) {
+	result, err := s.quotaSyncs.Do(ctx, "all:"+strconv.FormatUint(id, 10), func() (any, error) {
 		return s.refreshQuota(ctx, id)
 	})
 	if err != nil {
@@ -2997,6 +2798,10 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) (quotaRefreshResu
 	if !ok {
 		return quotaRefreshResult{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
 	}
+	revision, err := s.accounts.GetQuotaRevision(ctx, id)
+	if err != nil {
+		return quotaRefreshResult{}, err
+	}
 	snapshot, err := adapter.SyncQuota(ctx, value)
 	if err != nil {
 		if errors.Is(err, provider.ErrUnauthorized) {
@@ -3012,7 +2817,7 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) (quotaRefreshResu
 		}
 		snapshot.Windows = preserveActiveQuotaWindows(existing[id], snapshot.Windows, s.now())
 	}
-	if err := s.accounts.ReplaceQuotaWindows(ctx, id, snapshot.Tier, snapshot.SyncedAt, snapshot.Windows); err != nil {
+	if err := s.saveQuotaSnapshot(ctx, value.Provider, repository.QuotaSnapshotWrite{AccountID: id, Revision: revision, Tier: snapshot.Tier, SyncedAt: snapshot.SyncedAt, Windows: snapshot.Windows, ReplaceAll: true}); err != nil {
 		return quotaRefreshResult{}, err
 	}
 	return quotaRefreshResult{Credential: value, Windows: snapshot.Windows}, nil
@@ -3083,7 +2888,7 @@ func (s *Service) ReconcileWebRateLimit(ctx context.Context, id uint64, mode str
 func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
 	mode = strings.TrimSpace(mode)
 	key := quotaSyncKey(id, mode)
-	result, err, _ := s.quotaSyncs.Do(key, func() (any, error) {
+	result, err := s.quotaSyncs.Do(ctx, key, func() (any, error) {
 		if isWebImagineQuotaMode(mode) {
 			return s.refreshQuotaGroup(ctx, id, accountdomain.QuotaGroupWebImagine)
 		}
@@ -3133,7 +2938,7 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 func (s *Service) ProbeQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
 	mode = strings.TrimSpace(mode)
 	key := quotaSyncKey(id, mode)
-	result, err, _ := s.quotaSyncs.Do(key, func() (any, error) {
+	result, err := s.quotaSyncs.Do(ctx, key, func() (any, error) {
 		if isWebImagineQuotaMode(mode) {
 			return s.refreshQuotaGroup(ctx, id, accountdomain.QuotaGroupWebImagine)
 		}
@@ -3177,6 +2982,10 @@ func (s *Service) refreshQuotaGroup(ctx context.Context, id uint64, group string
 	if !ok {
 		return quotaRefreshResult{}, fmt.Errorf("%s quota group Provider 未注册", value.Provider)
 	}
+	revision, err := s.accounts.GetQuotaRevision(ctx, id)
+	if err != nil {
+		return quotaRefreshResult{}, err
+	}
 	snapshot, err := adapter.SyncQuotaGroup(ctx, value, group)
 	if err != nil {
 		if errors.Is(err, provider.ErrUnauthorized) {
@@ -3190,7 +2999,7 @@ func (s *Service) refreshQuotaGroup(ctx context.Context, id uint64, group string
 	if snapshot.SyncedAt.IsZero() {
 		snapshot.SyncedAt = s.now()
 	}
-	if err := s.accounts.ReplaceQuotaWindowGroup(ctx, id, snapshot.SyncedAt, snapshot.Modes, snapshot.Windows); err != nil {
+	if err := s.saveQuotaSnapshot(ctx, value.Provider, repository.QuotaSnapshotWrite{AccountID: id, Revision: revision, SyncedAt: snapshot.SyncedAt, Windows: snapshot.Windows, ReplaceModes: snapshot.Modes}); err != nil {
 		return quotaRefreshResult{}, err
 	}
 	return quotaRefreshResult{Credential: value, Windows: snapshot.Windows, Modes: snapshot.Modes}, nil
@@ -3209,6 +3018,10 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
 		return quotaRefreshResult{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
+	}
+	revision, err := s.accounts.GetQuotaRevision(ctx, id)
+	if err != nil {
+		return quotaRefreshResult{}, err
 	}
 	var window accountdomain.QuotaWindow
 	var windows []accountdomain.QuotaWindow
@@ -3253,11 +3066,7 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	if syncedAt.IsZero() {
 		syncedAt = s.now()
 	}
-	if value.Provider == accountdomain.ProviderConsole {
-		if err := s.accounts.ReplaceQuotaWindows(ctx, id, tier, syncedAt, windows); err != nil {
-			return quotaRefreshResult{}, err
-		}
-	} else if err := s.accounts.SaveQuotaWindows(ctx, id, tier, syncedAt, windows); err != nil {
+	if err := s.saveQuotaSnapshot(ctx, value.Provider, repository.QuotaSnapshotWrite{AccountID: id, Revision: revision, Tier: tier, SyncedAt: syncedAt, Windows: windows, ReplaceAll: value.Provider == accountdomain.ProviderConsole}); err != nil {
 		return quotaRefreshResult{}, err
 	}
 	return quotaRefreshResult{Credential: value, Windows: windows}, nil
@@ -3327,475 +3136,6 @@ func (s *Service) reconcileQuotaRecoveryWindow(ctx context.Context, providerValu
 		return fmt.Errorf("取消额度恢复事件: %w", err)
 	}
 	return nil
-}
-
-// quotaRecoveryDueAt keeps upstream quota exhaustion recoverable even when
-// the Provider reports no reset timestamp. Console uses a conservative
-// predicted 24-hour probe window; generic remote windows retain the shorter
-// fallback and transport failures use the recovery queue's bounded backoff.
-func quotaRecoveryDueAt(window accountdomain.QuotaWindow, now time.Time, exhausted bool) *time.Time {
-	if !exhausted {
-		return nil
-	}
-	if window.ResetAt != nil && window.ResetAt.After(now) {
-		value := *window.ResetAt
-		return &value
-	}
-	if isConsoleUsageQuotaMode(window.Mode) {
-		value := now.Add(consolePredictedQuotaProbeDelay)
-		return &value
-	}
-	if window.Source == accountdomain.QuotaSourceUpstream {
-		value := now.Add(unknownRemoteQuotaProbeDelay)
-		return &value
-	}
-	return nil
-}
-
-// QueueQuotaRefresh asynchronously refreshes the remote quota window after a successful request.
-func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
-	mode = strings.TrimSpace(mode)
-	if isWebImagineQuotaMode(mode) {
-		mode = accountdomain.QuotaGroupWebImagine
-	}
-	if id == 0 || (!isConsoleUsageQuotaMode(mode) && mode != "weekly" && mode != accountdomain.QuotaGroupWebImagine && !isWebChatQuotaMode(mode)) {
-		return
-	}
-	key := strconv.FormatUint(id, 10) + ":" + mode
-	s.quotaRefreshMu.Lock()
-	state := s.quotaRefreshes[key]
-	now := s.now().UTC()
-	if state != nil && !state.pending && !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
-		delete(s.quotaRefreshes, key)
-		state = nil
-	}
-	if state == nil {
-		state = &quotaRefreshState{}
-		s.quotaRefreshes[key] = state
-	}
-	// 显式入队代表新的刷新需求（429 核实 / 迁移任务 / 巡检扫描）：失败
-	// 计数归零、开启全新重试 episode，避免历史失败把新需求立即推进熔断停靠。
-	state.failures = 0
-	state.generation++
-	state.pending = true
-	enqueued := state.queued || state.running || now.Before(state.nextAttemptAt) || s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: id, mode: mode}, state)
-	s.quotaRefreshMu.Unlock()
-	if !enqueued {
-		perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "enqueue", Outcome: "queue_full"}, 1)
-		s.logger.Warn("quota_refresh_queue_full", "account_id", id, "mode", mode)
-		s.wakeQuotaRefreshRecovery()
-	}
-}
-
-func (s *Service) enqueueQuotaRefreshLocked(request quotaRefreshRequest, state *quotaRefreshState) bool {
-	if state == nil || state.queued || state.running {
-		return state != nil
-	}
-	select {
-	case s.quotaRefreshQueue <- request:
-		state.queued = true
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *Service) wakeQuotaRefreshRecovery() {
-	select {
-	case s.quotaRefreshWake <- struct{}{}:
-	default:
-	}
-}
-
-// RunQuotaRefresh uses a fixed worker set to avoid unbounded goroutine creation.
-func (s *Service) RunQuotaRefresh(ctx context.Context) {
-	var workers sync.WaitGroup
-	workers.Add(managedTaskWorkerCeiling + 1)
-	for range managedTaskWorkerCeiling {
-		go func() {
-			defer workers.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case request := <-s.quotaRefreshQueue:
-					s.quotaRefreshMu.Lock()
-					state := s.quotaRefreshes[request.key]
-					if state == nil || state.running {
-						s.quotaRefreshMu.Unlock()
-						continue
-					}
-					state.queued = false
-					state.running = true
-					state.pending = false
-					s.quotaRefreshMu.Unlock()
-					if err := batch.Do(ctx, func(workCtx context.Context) error {
-						s.runQuotaRefresh(workCtx, request)
-						return nil
-					}); err != nil {
-						s.quotaRefreshMu.Lock()
-						if state := s.quotaRefreshes[request.key]; state != nil {
-							state.running = false
-							state.pending = true
-							state.failures++
-							state.nextAttemptAt = s.now().UTC().Add(quotaRefreshRetryDelay(state.failures))
-						}
-						s.quotaRefreshMu.Unlock()
-						s.wakeQuotaRefreshRecovery()
-						if ctx.Err() == nil {
-							var panicErr *batch.PanicError
-							if errors.As(err, &panicErr) {
-								s.logger.Error("quota_refresh_worker_panicked", "account_id", request.accountID, "mode", request.mode, "error", panicErr, "stack", string(panicErr.Stack))
-							} else {
-								s.logger.Error("quota_refresh_worker_failed", "account_id", request.accountID, "mode", request.mode, "error", err)
-							}
-						}
-					}
-				}
-			}
-		}()
-	}
-	go func() {
-		defer workers.Done()
-		s.runQuotaRefreshRecovery(ctx)
-	}()
-	workers.Wait()
-}
-
-func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRequest) {
-	for {
-		s.quotaRefreshMu.Lock()
-		state := s.quotaRefreshes[request.key]
-		if state == nil {
-			s.quotaRefreshMu.Unlock()
-			return
-		}
-		localGeneration := state.generation
-		publishedGeneration := state.publishedGeneration
-		sharedGeneration := state.sharedGeneration
-		state.pending = false
-		s.quotaRefreshMu.Unlock()
-
-		ctx, cancel := context.WithTimeout(parent, quotaRefreshTimeout)
-		if s.quotaRefreshState != nil && publishedGeneration < localGeneration {
-			generation, err := s.quotaRefreshState.MarkQuotaRefreshDirty(ctx, request.accountID, request.mode, quotaRefreshDirtyTTL)
-			if err != nil {
-				cancel()
-				s.deferQuotaRefresh(request.key)
-				perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "publish", Outcome: "failed"}, 1)
-				s.logger.Warn("quota_refresh_dirty_publish_failed", "account_id", request.accountID, "mode", request.mode, "error", err)
-				return
-			}
-			sharedGeneration = generation
-			s.quotaRefreshMu.Lock()
-			if current := s.quotaRefreshes[request.key]; current != nil && current.publishedGeneration < localGeneration {
-				current.publishedGeneration = localGeneration
-				current.sharedGeneration = generation
-			}
-			s.quotaRefreshMu.Unlock()
-		}
-		if s.quotaRefreshState != nil && publishedGeneration >= localGeneration && sharedGeneration > 0 {
-			generation, dirty, err := s.quotaRefreshState.QuotaRefreshGeneration(ctx, request.accountID, request.mode)
-			if err != nil {
-				cancel()
-				s.deferQuotaRefresh(request.key)
-				return
-			}
-			if generation > sharedGeneration {
-				sharedGeneration = generation
-				s.quotaRefreshMu.Lock()
-				if current := s.quotaRefreshes[request.key]; current != nil {
-					current.sharedGeneration = generation
-				}
-				s.quotaRefreshMu.Unlock()
-			}
-			if !dirty && generation == sharedGeneration {
-				cancel()
-				s.quotaRefreshMu.Lock()
-				if current := s.quotaRefreshes[request.key]; current != nil && current.generation == localGeneration {
-					delete(s.quotaRefreshes, request.key)
-				}
-				s.quotaRefreshMu.Unlock()
-				return
-			}
-		}
-		refreshMode := request.mode
-		consoleMode := isConsoleUsageQuotaMode(request.mode)
-		skipUpstream := false
-		if windows, err := s.accounts.GetQuotaWindows(ctx, []uint64{request.accountID}); err == nil {
-			if consoleMode {
-				for _, window := range windows[request.accountID] {
-					if window.Mode == request.mode && window.SyncedAt != nil && s.now().UTC().Sub(window.SyncedAt.UTC()) < consoleQuotaRefreshMinInterval {
-						skipUpstream = true
-						break
-					}
-				}
-			} else if request.mode != accountdomain.QuotaGroupWebImagine {
-				// Weekly remains a Grok Web capability. Console never inherits this
-				// legacy mode and always refreshes its authoritative /usage snapshot.
-				// Imagine 配额组走 /rest/media/imagine/quota_info，不可被改刷 weekly。
-				for _, window := range windows[request.accountID] {
-					if window.Mode == "weekly" {
-						refreshMode = "weekly"
-						break
-					}
-				}
-			}
-		}
-		var refreshErr error
-		acquired := true
-		var release func()
-		if !skipUpstream && s.refreshLock != nil {
-			lockKey := "quota-refresh:" + strconv.FormatUint(request.accountID, 10) + ":" + refreshMode
-			if consoleMode {
-				// Every Console mode reads the same /usage snapshot. Serialize all
-				// three kinds across instances to avoid duplicate upstream probes.
-				lockKey = consoleQuotaRefreshLockKey(request.accountID)
-			}
-			release, acquired, refreshErr = s.refreshLock.Acquire(ctx, lockKey, quotaRefreshTimeout)
-		}
-		if !skipUpstream && refreshErr == nil && acquired {
-			if err := s.syncPool.Do(ctx, func(workCtx context.Context) error {
-				if refreshMode == accountdomain.QuotaGroupWebImagine {
-					var refreshed quotaRefreshResult
-					refreshed, refreshErr = s.refreshQuotaGroup(workCtx, request.accountID, refreshMode)
-					if refreshErr == nil {
-						refreshErr = s.reconcileQuotaGroupWindows(workCtx, refreshed.Credential.Provider, request.accountID, refreshed.Modes, refreshed.Windows)
-					}
-				} else {
-					_, refreshErr = s.RefreshQuotaMode(workCtx, request.accountID, refreshMode)
-				}
-				return refreshErr
-			}); err != nil {
-				refreshErr = err
-			}
-		}
-		if release != nil {
-			release()
-		}
-		cancel()
-		if refreshErr != nil || !acquired {
-			if refreshErr != nil && !errors.Is(refreshErr, context.Canceled) {
-				s.logger.Warn("quota_refresh_failed", "account_id", request.accountID, "mode", refreshMode, "error", refreshErr)
-			}
-			s.deferQuotaRefresh(request.key)
-			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "retry"}, 1)
-			return
-		}
-
-		currentShared := sharedGeneration
-		sharedDirty := s.quotaRefreshState != nil
-		if s.quotaRefreshState != nil {
-			generationCtx, generationCancel := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
-			var generationErr error
-			currentShared, sharedDirty, generationErr = s.quotaRefreshState.QuotaRefreshGeneration(generationCtx, request.accountID, request.mode)
-			generationCancel()
-			if generationErr != nil {
-				s.deferQuotaRefresh(request.key)
-				return
-			}
-		}
-		s.quotaRefreshMu.Lock()
-		state = s.quotaRefreshes[request.key]
-		localChanged := state != nil && state.generation != localGeneration
-		s.quotaRefreshMu.Unlock()
-		if localChanged || (s.quotaRefreshState != nil && currentShared != sharedGeneration) {
-			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "trailing"}, 1)
-			if consoleMode {
-				s.deferSuccessfulQuotaRefresh(request.key, true)
-				return
-			}
-			continue
-		}
-		if s.quotaRefreshState != nil && sharedDirty {
-			clearCtx, clearCancel := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
-			cleared, clearErr := s.quotaRefreshState.ClearQuotaRefreshDirty(clearCtx, request.accountID, request.mode, sharedGeneration)
-			clearCancel()
-			if clearErr != nil || !cleared {
-				if clearErr != nil {
-					s.logger.Warn("quota_refresh_dirty_clear_failed", "account_id", request.accountID, "mode", request.mode, "error", clearErr)
-				}
-				if consoleMode {
-					s.deferSuccessfulQuotaRefresh(request.key, true)
-					return
-				}
-				continue
-			}
-		}
-		s.quotaRefreshMu.Lock()
-		state = s.quotaRefreshes[request.key]
-		if state != nil && state.generation == localGeneration {
-			if consoleMode {
-				state.running = false
-				state.pending = false
-				state.failures = 0
-				state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
-			} else {
-				delete(s.quotaRefreshes, request.key)
-			}
-			s.quotaRefreshMu.Unlock()
-			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "success"}, 1)
-			return
-		}
-		if consoleMode && state != nil {
-			state.running = false
-			state.pending = true
-			state.failures = 0
-			state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
-			s.quotaRefreshMu.Unlock()
-			s.wakeQuotaRefreshRecovery()
-			return
-		}
-		s.quotaRefreshMu.Unlock()
-	}
-}
-
-func (s *Service) deferQuotaRefresh(key string) {
-	s.quotaRefreshMu.Lock()
-	if state := s.quotaRefreshes[key]; state != nil {
-		state.running = false
-		state.pending = true
-		state.failures++
-		state.nextAttemptAt = s.now().UTC().Add(quotaRefreshRetryDelay(state.failures))
-	}
-	s.quotaRefreshMu.Unlock()
-	s.wakeQuotaRefreshRecovery()
-}
-
-func (s *Service) deferSuccessfulQuotaRefresh(key string, pending bool) {
-	s.quotaRefreshMu.Lock()
-	if state := s.quotaRefreshes[key]; state != nil {
-		state.running = false
-		state.pending = pending
-		state.failures = 0
-		state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
-	}
-	s.quotaRefreshMu.Unlock()
-	s.wakeQuotaRefreshRecovery()
-}
-
-func quotaRefreshRetryDelay(failures int) time.Duration {
-	if failures < 1 {
-		failures = 1
-	}
-	// 11 档让指数曲线在 ~12 次失败后自然逼近 30 分钟上限（1s<<11≈34min，
-	// 由 max 截断）；预算内（8 次）爬到 ~2 分钟，余量留给未来预算上调。
-	shift := min(failures-1, 11)
-	delay := quotaRefreshBackoffBase * time.Duration(1<<shift)
-	if delay > quotaRefreshBackoffMax {
-		delay = quotaRefreshBackoffMax
-	}
-	// Equal jitter keeps retries bounded away from zero while preventing a
-	// shared upstream outage from synchronizing every account worker.
-	half := delay / 2
-	if half <= 0 {
-		return delay
-	}
-	return half + time.Duration(rand.Int64N(int64(half)+1))
-}
-
-func (s *Service) runQuotaRefreshRecovery(ctx context.Context) {
-	retryTicker := time.NewTicker(quotaRefreshPollInterval)
-	sharedTicker := time.NewTicker(quotaRefreshSharedPoll)
-	defer retryTicker.Stop()
-	defer sharedTicker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.quotaRefreshWake:
-			s.requeueQuotaRefreshes()
-		case <-retryTicker.C:
-			s.requeueQuotaRefreshes()
-		case now := <-sharedTicker.C:
-			s.recoverSharedQuotaRefreshes(ctx, now.UTC())
-			s.requeueQuotaRefreshes()
-		}
-	}
-}
-
-func (s *Service) requeueQuotaRefreshes() {
-	now := s.now().UTC()
-	var parked []string
-	s.quotaRefreshMu.Lock()
-	for key, state := range s.quotaRefreshes {
-		if state == nil {
-			delete(s.quotaRefreshes, key)
-			continue
-		}
-		if !state.pending {
-			if !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
-				delete(s.quotaRefreshes, key)
-			}
-			continue
-		}
-		// 熔断停靠：连续失败耗尽预算的 (account,mode) 不再自动重试——删除
-		// 状态并在锁外告警一次。此前退避上限仅 1 分钟且失败永不清除，死凭据
-		// 账号以 ~1 分钟/轮永久重试，死凭据规模即可打满工人池（历史线上
-		// 重试风暴实测）。queued/running 中的在途尝试让
-		// 其自然结束，下一次扫描停靠。
-		if state.failures >= quotaRefreshFailureBudget && !state.queued && !state.running {
-			delete(s.quotaRefreshes, key)
-			parked = append(parked, key)
-			continue
-		}
-		if state.queued || state.running || now.Before(state.nextAttemptAt) {
-			continue
-		}
-		separator := strings.IndexByte(key, ':')
-		if separator <= 0 || separator == len(key)-1 {
-			continue
-		}
-		accountID, err := strconv.ParseUint(key[:separator], 10, 64)
-		if err != nil {
-			continue
-		}
-		if !s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: accountID, mode: key[separator+1:]}, state) {
-			break
-		}
-	}
-	s.quotaRefreshMu.Unlock()
-	for _, key := range parked {
-		accountID, mode := uint64(0), key
-		if separator := strings.IndexByte(key, ':'); separator > 0 && separator < len(key)-1 {
-			if parsed, err := strconv.ParseUint(key[:separator], 10, 64); err == nil {
-				accountID, mode = parsed, key[separator+1:]
-			}
-		}
-		perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "parked"}, 1)
-		s.logger.Warn("quota_refresh_retry_parked", "account_id", accountID, "mode", mode, "failures", quotaRefreshFailureBudget, "hint", "连续配额同步失败已达熔断预算，自动重试已停止；请检查该账号凭据/出口可达性，或手动触发刷新开启新轮次")
-	}
-}
-
-func (s *Service) recoverSharedQuotaRefreshes(parent context.Context, now time.Time) {
-	if s.quotaRefreshState == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	values, err := s.quotaRefreshState.ListQuotaRefreshDirty(ctx, now, 100)
-	cancel()
-	if err != nil {
-		s.logger.Warn("quota_refresh_dirty_list_failed", "error", err)
-		return
-	}
-	s.quotaRefreshMu.Lock()
-	for _, value := range values {
-		key := strconv.FormatUint(value.AccountID, 10) + ":" + value.Mode
-		state := s.quotaRefreshes[key]
-		if state == nil {
-			state = &quotaRefreshState{generation: 1, publishedGeneration: 1, sharedGeneration: value.Generation, pending: true}
-			s.quotaRefreshes[key] = state
-		} else {
-			if value.Generation > state.sharedGeneration {
-				state.sharedGeneration = value.Generation
-			}
-			state.pending = true
-		}
-		if !state.queued && !state.running && !now.Before(state.nextAttemptAt) && !s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: value.AccountID, mode: value.Mode}, state) {
-			break
-		}
-	}
-	s.quotaRefreshMu.Unlock()
 }
 
 func (s *Service) ListDueWebQuotaWindows(ctx context.Context, now time.Time, limit int) ([]accountdomain.QuotaWindow, error) {
@@ -4161,382 +3501,9 @@ func (s *Service) BatchRefreshBilling(ctx context.Context, ids []uint64) (int, i
 	return s.refreshBillings(ctx, values, nil)
 }
 
-// DetectBuildAccountsWithProgress 对指定或全部 Grok Build 账号发起探测请求；all 与 ids 必须且只能提供一个。
-// 该方法同时上报批量进度与单账号明细。
-// itemObserver 在每个账号完成后串行调用：选中检测会推送全部结果，全量检测仅推送已确认失效账号。
-func (s *Service) DetectBuildAccountsWithProgress(ctx context.Context, ids []uint64, all bool, progress BatchProgressObserver, itemObserver BuildDetectItemObserver) (int, int, error) {
-	if all == (len(ids) > 0) {
-		return 0, 0, invalidInput("必须明确选择全部账号或提供非空账号 ID")
-	}
-	if s.providers == nil {
-		return 0, 0, fmt.Errorf("Provider 注册表未初始化")
-	}
-	selectedMode := !all
-	var err error
-	if all {
-		ids, err = s.accounts.ListEnabledAccountIDs(ctx, accountdomain.ProviderBuild, false)
-		if err != nil {
-			return 0, 0, err
-		}
-	} else {
-		ids, err = normalizeBatchIDs(ids)
-		if err != nil {
-			return 0, 0, err
-		}
-	}
-	if len(ids) == 0 {
-		return 0, 0, nil
-	}
-	pool := s.detectPool
-	if pool == nil {
-		pool = s.syncPool
-	}
-	if progress != nil {
-		if err := progress(0, len(ids)); err != nil {
-			return 0, 0, err
-		}
-	}
-	var observerMu sync.Mutex
-	var progressErr error
-	completed := 0
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	summary, err := batch.ForEachObserved(runCtx, ids, batch.Options{Workers: pool.Limit(), Pool: pool}, func(workCtx context.Context, id uint64) (BuildDetectItemResult, error) {
-		item := s.detectBuildAccount(workCtx, id)
-		if itemObserver != nil && (selectedMode || item.Outcome == BuildDetectOutcomeInvalid) {
-			notifyErr := func() error {
-				observerMu.Lock()
-				defer observerMu.Unlock()
-				return itemObserver(item)
-			}()
-			if notifyErr != nil {
-				return item, notifyErr
-			}
-		}
-		if item.Outcome == BuildDetectOutcomeOK {
-			return item, nil
-		}
-		if item.Reason != "" {
-			return item, fmt.Errorf("%s", item.Reason)
-		}
-		return item, fmt.Errorf("账号检测失败")
-	}, func(index int, result batch.Result[BuildDetectItemResult]) {
-		var panicErr *batch.PanicError
-		if errors.As(result.Err, &panicErr) {
-			s.logger.Error("account_bulk_task_panicked", "operation", "build_detect", "account_id", ids[index], "error", panicErr, "stack", string(panicErr.Stack))
-		}
-		observerMu.Lock()
-		defer observerMu.Unlock()
-		completed++
-		if progress != nil {
-			if notifyErr := progress(completed, len(ids)); notifyErr != nil && progressErr == nil {
-				progressErr = notifyErr
-				cancel()
-			}
-		}
-	})
-	s.logBatchSummary("build_detect", pool, summary, err)
-	return summary.Succeeded, summary.Failed, errors.Join(err, progressErr)
-}
-
-// detectBuildAccount 使用现有 Build Responses 链路发送固定探测请求。
-// 失效判定复用 provider.ClassifyCredentialRejection：凭据拒绝标 reauthRequired，
-// spending-limit 写额度恢复状态，PermanentAccountDenial 仅阻断固定探测模型。
-func (s *Service) detectBuildAccount(ctx context.Context, id uint64) BuildDetectItemResult {
-	item := BuildDetectItemResult{AccountID: id, Outcome: BuildDetectOutcomeFailed}
-	value, err := s.accounts.Get(ctx, id)
-	if err != nil {
-		item.Reason = mapRepositoryError(err).Error()
-		return item
-	}
-	item.Name = value.Name
-	item.Email = value.Email
-	if value.Provider != accountdomain.ProviderBuild {
-		item.Reason = "仅 Grok Build 账号支持可用性检测"
-		return item
-	}
-	value, err = s.EnsureCredential(ctx, value, false)
-	if err != nil {
-		return s.finishBuildDetectCredentialError(ctx, value, err)
-	}
-	billing, err := s.loadDetectBilling(ctx, id)
-	if err != nil {
-		item.Reason = err.Error()
-		return item
-	}
-	response, err := s.forwardBuildDetect(ctx, value, billing)
-	if err != nil {
-		return s.finishBuildDetectCredentialError(ctx, value, err)
-	}
-	if response.StatusCode == http.StatusUnauthorized {
-		_ = response.Body.Close()
-		return s.handleBuildDetectUnauthorized(ctx, value, billing)
-	}
-	return s.finishBuildDetectResponse(ctx, response, value, billing)
-}
-
-// handleBuildDetectUnauthorized 复用网关对 Build OAuth 401 的恢复与失效收敛路径。
-func (s *Service) handleBuildDetectUnauthorized(ctx context.Context, value accountdomain.Credential, billing *accountdomain.Billing) BuildDetectItemResult {
-	item := BuildDetectItemResult{AccountID: value.ID, Name: value.Name, Email: value.Email, Outcome: BuildDetectOutcomeFailed, HTTPStatus: http.StatusUnauthorized}
-	if value.RefreshPermanent {
-		reason := fmt.Sprintf("%s OAuth access token rejected after permanent refresh failure", value.Provider)
-		if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
-			item.Reason = markErr.Error()
-			return item
-		}
-		item.Outcome = BuildDetectOutcomeInvalid
-		item.Reason = reason
-		return item
-	}
-	refreshed, refreshErr := s.EnsureCredential(ctx, value, true)
-	if refreshErr != nil {
-		if errors.Is(refreshErr, ErrCredentialRefreshPermanent) {
-			reason := fmt.Sprintf("%s OAuth access token rejected after permanent refresh failure", value.Provider)
-			if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
-				item.Reason = errors.Join(refreshErr, markErr).Error()
-				return item
-			}
-			item.Outcome = BuildDetectOutcomeInvalid
-			item.Reason = reason
-			return item
-		}
-		return s.finishBuildDetectCredentialError(ctx, value, refreshErr)
-	}
-	response, err := s.forwardBuildDetect(ctx, refreshed, billing)
-	if err != nil {
-		return s.finishBuildDetectCredentialError(ctx, refreshed, err)
-	}
-	if response.StatusCode == http.StatusUnauthorized {
-		drainDetectBody(response.Body)
-		_ = response.Body.Close()
-		reason := "Grok Build OAuth credential rejected after refresh"
-		if markErr := s.markBuildDetectReauth(ctx, refreshed.ID, reason); markErr != nil {
-			item.Reason = markErr.Error()
-			return item
-		}
-		item.AccountID = refreshed.ID
-		item.Name = refreshed.Name
-		item.Email = refreshed.Email
-		item.Outcome = BuildDetectOutcomeInvalid
-		item.Reason = reason
-		return item
-	}
-	return s.finishBuildDetectResponse(ctx, response, refreshed, billing)
-}
-
-func (s *Service) finishBuildDetectCredentialError(ctx context.Context, value accountdomain.Credential, err error) BuildDetectItemResult {
-	item := BuildDetectItemResult{
-		AccountID: value.ID,
-		Name:      value.Name,
-		Email:     value.Email,
-		Outcome:   BuildDetectOutcomeFailed,
-		Reason:    err.Error(),
-	}
-	var refreshErr *provider.CredentialRefreshError
-	if errors.Is(err, ErrCredentialRefreshPermanent) || errors.As(err, &refreshErr) && refreshErr.Permanent {
-		reason := fmt.Sprintf("%s OAuth refresh credential permanently rejected", value.Provider)
-		if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
-			item.Reason = errors.Join(err, markErr).Error()
-			return item
-		}
-		item.Outcome = BuildDetectOutcomeInvalid
-		item.Reason = reason
-		return item
-	}
-	if rejection := provider.ClassifyCredentialRejection(0, nil, err); rejection.Rejected {
-		reason := fmt.Sprintf("%s OAuth credential rejected", value.Provider)
-		if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
-			item.Reason = errors.Join(err, markErr).Error()
-			return item
-		}
-		item.Outcome = BuildDetectOutcomeInvalid
-		item.Reason = reason
-	}
-	return item
-}
-
-func (s *Service) loadDetectBilling(ctx context.Context, id uint64) (*accountdomain.Billing, error) {
-	snap, err := s.accounts.GetBilling(ctx, id)
-	if err == nil {
-		return &snap, nil
-	}
-	if errors.Is(err, repository.ErrNotFound) {
-		return nil, nil
-	}
-	return nil, err
-}
-
-func (s *Service) forwardBuildDetect(ctx context.Context, value accountdomain.Credential, billing *accountdomain.Billing) (*provider.Response, error) {
-	adapter, ok := s.providers.Responses(accountdomain.ProviderBuild)
-	if !ok {
-		return nil, fmt.Errorf("Provider %s 未注册 Responses 能力", accountdomain.ProviderBuild)
-	}
-	body := []byte(fmt.Sprintf(`{"model":%q,"input":%q}`, buildDetectModel, buildDetectPrompt))
-	return adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{
-		Credential:    value,
-		Billing:       billing,
-		Method:        http.MethodPost,
-		Path:          "/responses",
-		Model:         buildDetectModel,
-		Body:          body,
-		NormalizeBody: true,
-		Streaming:     false,
-	})
-}
-
-// markBuildDetectReauth 与 markSSOCredentialRejected 一样不继承客户端取消，确保已确认失效的账号落库。
-func (s *Service) markBuildDetectReauth(ctx context.Context, id uint64, reason string) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
-	defer cancel()
-	if err := s.MarkReauthRequired(writeCtx, id, reason); err != nil {
-		s.logger.Error("account_reauth_required_write_failed", "account_id", id, "provider", accountdomain.ProviderBuild, "error", err)
-		return err
-	}
-	return nil
-}
-
-func (s *Service) finishBuildDetectResponse(ctx context.Context, response *provider.Response, credential accountdomain.Credential, billing *accountdomain.Billing) BuildDetectItemResult {
-	item := BuildDetectItemResult{
-		AccountID:  credential.ID,
-		Name:       credential.Name,
-		Email:      credential.Email,
-		Outcome:    BuildDetectOutcomeFailed,
-		HTTPStatus: response.StatusCode,
-	}
-	if response.Body != nil {
-		defer func() { _ = response.Body.Close() }()
-	}
-	body := readDetectBodyForClassification(response.Body)
-	rejection := provider.ClassifyCredentialRejection(response.StatusCode, body, nil)
-	if rejection.Rejected {
-		reason := fmt.Sprintf("%s OAuth credential rejected (HTTP %d)", credential.Provider, response.StatusCode)
-		if markErr := s.markBuildDetectReauth(ctx, credential.ID, reason); markErr != nil {
-			item.Reason = markErr.Error()
-			return item
-		}
-		item.Outcome = BuildDetectOutcomeInvalid
-		item.Reason = reason
-		return item
-	}
-	if rejection.SpendingLimitBlocked {
-		reason := fmt.Sprintf("%s spending limit blocked", credential.Provider)
-		if markErr := s.markBuildDetectQuotaExhausted(ctx, credential, billing); markErr != nil {
-			item.Reason = errors.Join(errors.New(reason), markErr).Error()
-			return item
-		}
-		item.Reason = reason
-		return item
-	}
-	if rejection.ModelQuotaExhausted {
-		reason := fmt.Sprintf("%s model quota exhausted for %s", credential.Provider, buildDetectModel)
-		if markErr := s.markBuildDetectModelQuotaExhausted(ctx, credential, reason); markErr != nil {
-			item.Reason = errors.Join(errors.New(reason), markErr).Error()
-			return item
-		}
-		item.Reason = reason
-		return item
-	}
-	if rejection.QuotaExhausted {
-		reason := fmt.Sprintf("%s quota exhausted", credential.Provider)
-		if markErr := s.markBuildDetectQuotaExhausted(ctx, credential, billing); markErr != nil {
-			item.Reason = errors.Join(errors.New(reason), markErr).Error()
-			return item
-		}
-		item.Reason = reason
-		return item
-	}
-	if rejection.PermanentAccountDenial {
-		reason := fmt.Sprintf("%s chat endpoint access denied for %s", credential.Provider, buildDetectModel)
-		if markErr := s.markBuildDetectModelDenied(ctx, credential, reason); markErr != nil {
-			item.Reason = errors.Join(errors.New(reason), markErr).Error()
-			return item
-		}
-		item.Reason = reason
-		return item
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		item.Reason = fmt.Sprintf("上游检测失败: HTTP %d", response.StatusCode)
-		return item
-	}
-	item.Outcome = BuildDetectOutcomeOK
-	item.Reason = ""
-	return item
-}
-
-func (s *Service) markBuildDetectQuotaExhausted(ctx context.Context, credential accountdomain.Credential, billing *accountdomain.Billing) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
-	defer cancel()
-	now := s.now()
-	recovery := accountdomain.QuotaRecovery{
-		AccountID: credential.ID, Kind: accountdomain.QuotaRecoveryKindFree, Status: accountdomain.QuotaRecoveryStatusExhausted,
-		ExhaustedAt: &now, LastConfirmedAt: &now, UpdatedAt: now,
-	}
-	nextProbeAt := now.Add(buildDetectQuotaRecoveryPause)
-	if billing != nil && billing.IsPaid() {
-		if periodEnd, ok := billing.PeriodEnd(); ok && periodEnd.After(now) {
-			recovery.Kind = accountdomain.QuotaRecoveryKindPaid
-			nextProbeAt = periodEnd
-		}
-	}
-	recovery.NextProbeAt = &nextProbeAt
-	if err := s.accounts.SaveQuotaRecovery(writeCtx, recovery); err != nil {
-		s.logger.Error("account_quota_recovery_write_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
-		return err
-	}
-	if s.sticky != nil {
-		if err := s.sticky.DeleteByAccount(writeCtx, credential.ID); err != nil {
-			s.logger.Warn("account_sticky_delete_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
-		}
-	}
-	return nil
-}
-
-func (s *Service) markBuildDetectModelDenied(ctx context.Context, credential accountdomain.Credential, reason string) error {
-	return s.markBuildDetectModelBlock(ctx, credential, "model_access_denied", buildDetectModelDeniedCooldown, reason)
-}
-
-func (s *Service) markBuildDetectModelQuotaExhausted(ctx context.Context, credential accountdomain.Credential, reason string) error {
-	return s.markBuildDetectModelBlock(ctx, credential, "model_quota_depleted", buildDetectQuotaRecoveryPause, reason)
-}
-
-func (s *Service) markBuildDetectModelBlock(ctx context.Context, credential accountdomain.Credential, blockReason string, cooldown time.Duration, diagnostic string) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
-	defer cancel()
-	now := s.now()
-	if err := s.accounts.UpsertModelQuotaBlock(writeCtx, accountdomain.ModelQuotaBlock{
-		AccountID: credential.ID, UpstreamModel: buildDetectModel, Reason: blockReason,
-		CooldownUntil: now.Add(cooldown), UpdatedAt: now,
-	}); err != nil {
-		s.logger.Error("account_model_block_write_failed", "account_id", credential.ID, "provider", credential.Provider, "model", buildDetectModel, "reason", diagnostic, "block_reason", blockReason, "error", err)
-		return err
-	}
-	return nil
-}
-
-// readDetectBodyForClassification 读取响应正文用于凭据拒绝分类，最多 64 KiB。
-// 返回的副本供 ClassifyCredentialRejection 解析；body 读完后会被消耗，调用方不应再使用。
-func readDetectBodyForClassification(body io.ReadCloser) []byte {
-	if body == nil {
-		return nil
-	}
-	data, err := io.ReadAll(io.LimitReader(body, 64*1024))
-	if err != nil {
-		return nil
-	}
-	return data
-}
-
-func drainDetectBody(body io.ReadCloser) {
-	if body == nil {
-		return
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
-}
-
-// BatchResetQuotaState clears local Build quota recovery state without changing
-// upstream billing snapshots or historical audit usage. Penalty cooldowns
-// (cooldown/failure-count/last-error) are lifted as well, mirroring the healthy
-// baseline a successful request would restore.
+// BatchResetQuotaState clears local Build quota recovery and exhausted-model
+// blocks. Health, auth, risk, model access restrictions, billing and audit
+// history have independent owners and remain in force.
 func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, error) {
 	values, err := normalizeIDs(ids, maxQuotaResetAccounts)
 	if err != nil {
@@ -4567,8 +3534,8 @@ func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, 
 }
 
 // ResetAllBuildQuotaState clears local quota state for every enabled Build
-// account without materializing the complete account ID set in memory. Penalty
-// cooldowns are lifted too (see BatchResetQuotaState).
+// account with active authentication, without materializing the complete ID set
+// in memory. Other restrictions remain in force (see BatchResetQuotaState).
 func (s *Service) ResetAllBuildQuotaState(ctx context.Context) (int64, error) {
 	return s.accounts.ResetProviderQuotaState(ctx, accountdomain.ProviderBuild, true)
 }
@@ -4631,17 +3598,28 @@ func (s *Service) logBatchSummary(operation string, pool *batch.Pool, summary ba
 	s.logger.Info("account_bulk_completed", "operation", operation, "total", summary.Total, "submitted", summary.Submitted, "succeeded", summary.Succeeded, "failed", summary.Failed, "panicked", summary.Panicked, "duration_ms", summary.Duration.Milliseconds(), "canceled", summary.Canceled, "pool_limit", snapshot.Limit, "pool_active", snapshot.Active, "pool_queued", snapshot.Queued, "pool_peak", snapshot.Peak, "error", err)
 }
 
-func (s *Service) persistSeed(ctx context.Context, seed provider.CredentialSeed) (accountdomain.Credential, bool, error) {
+func (s *Service) persistSeed(ctx context.Context, seed provider.CredentialSeed, source, target *accountdomain.CredentialRef) (repository.AccountUpsertResult, error) {
 	value, err := s.credentialFromSeed(seed)
 	if err != nil {
-		return accountdomain.Credential{}, false, err
+		return repository.AccountUpsertResult{}, err
 	}
-	stored, created, err := s.accounts.UpsertByIdentity(ctx, value)
-	if err == nil {
-		s.invalidateBuildBotFlagCache()
-		s.WakeCredentialRefresh()
+	results, err := s.accounts.ImportAccounts(ctx, []repository.AccountImport{{Credential: value, Source: source, Target: target}})
+	if err != nil {
+		return repository.AccountUpsertResult{}, mapRepositoryError(err)
 	}
-	return stored, created, err
+	if len(results) != 1 {
+		return repository.AccountUpsertResult{}, fmt.Errorf("导入账号持久化结果数量无效: %d", len(results))
+	}
+	result := results[0]
+	if result.Skipped != "" {
+		return result, nil
+	}
+	if result.ID == 0 || result.Material.AccountID != result.ID || result.Material.Provider != value.Provider {
+		return repository.AccountUpsertResult{}, fmt.Errorf("导入账号持久化材料引用无效")
+	}
+	s.invalidateBuildBotFlagCache()
+	s.WakeCredentialRefresh()
+	return result, nil
 }
 
 func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomain.Credential, error) {
@@ -4798,70 +3776,10 @@ func (s *Service) LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint
 	return linked.LinkedConsoleAccountIDs(ctx, webAccountID)
 }
 
-// SetAccountEnabled changes one account's scheduling state with a recorded
-// reason used as the admin-visible last-error marker.
-func (s *Service) SetAccountEnabled(ctx context.Context, id uint64, enabled bool, reason string) error {
-	// 单次读改写：先写 LastError 再单独写 Enabled 的两段式会在中途失败时
-	// 留下“已写错误标记但未停用”的中间态，也放大并发丢更新窗口。
-	if !enabled && reason != "" {
-		value, err := s.accounts.Get(ctx, id)
-		if err != nil {
-			return mapRepositoryError(err)
-		}
-		value.LastError = reason
-		value.Enabled = enabled
-		if _, err := s.accounts.Update(ctx, value); err != nil {
-			return mapRepositoryError(err)
-		}
-		return nil
-	}
-	if _, err := s.Update(ctx, id, UpdateInput{Enabled: &enabled}); err != nil {
-		return err
-	}
-	return nil
-}
-
-// riskVerdictClearer 级联清除身份组的 RSC verdict(denied/flagged 在 TTL 内
-// 仍 fresh, 人工解除 risk_status 时必须一并删除, 否则会被对账与降智事件回滚)。
-// 由装配层注入 risk 服务; 未注入时人工清除仅作用于 risk_status 列。
-type riskVerdictClearer interface {
-	ClearIdentityVerdicts(ctx context.Context, credential accountdomain.Credential) error
-}
-
-// SetRiskVerdictClearer wires the RSC verdict cascade-clear hook.
-func (s *Service) SetRiskVerdictClearer(clearer riskVerdictClearer) {
-	s.riskVerdictClearer = clearer
-}
-
-func (s *Service) clearIdentityVerdicts(ctx context.Context, credential accountdomain.Credential) {
-	if s.riskVerdictClearer == nil {
-		return
-	}
-	clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if err := s.riskVerdictClearer.ClearIdentityVerdicts(clearCtx, credential); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("account_risk_verdict_clear_failed", "account_id", credential.ID, "error", err.Error())
-		}
-	}
-}
-
-// SetAccountRiskStatus flags or unflags one account's long-term risk state
-// (see Credential.RiskStatus). Flipping the flag keeps Enabled untouched and
-// writes only the risk_status column: this path is triggered automatically by
-// risk attribution, so a full-entity save could silently roll back concurrent
-// health writes or token refreshes.
-func (s *Service) SetAccountRiskStatus(ctx context.Context, id uint64, flagged bool) error {
-	status := ""
-	if flagged {
-		status = accountdomain.RiskStatusRSCDenied
-	}
-	if err := s.accounts.UpdateRiskStatus(ctx, id, status); err != nil {
-		return mapRepositoryError(err)
-	}
-	return nil
-}
-
+// SetAccountRiskAttribution writes the risk attribution columns for one
+// account. 旧 risk 服务与仲裁院执行器已删除(切换手册第2步);risk_status
+// 列的人工读写(PATCH /accounts/:id)照旧,自动归因写入仅剩本方法的
+// 显式调用方。
 func (s *Service) SetAccountRiskAttribution(ctx context.Context, id uint64, flagged bool, trigger string, originAccountID uint64, detail string, checkedAt time.Time) error {
 	status := ""
 	var at *time.Time
@@ -4895,8 +3813,11 @@ func (s *Service) SetAccountRiskAttribution(ctx context.Context, id uint64, flag
 // Generic 5xx/429 penalties stay: a clean verdict does not prove the account
 // is healthy.
 func (s *Service) ClearMissingThinkingCooldown(ctx context.Context, id uint64) error {
-	if err := s.accounts.ClearMissingThinkingCooldown(ctx, id); err != nil {
-		return mapRepositoryError(err)
-	}
-	return nil
+	return s.ClearMissingThinkingCooldownAfterGrace(ctx, id, 0)
+}
+
+// The minimum hold and marker are evaluated atomically with the clear command.
+func (s *Service) ClearMissingThinkingCooldownAfterGrace(ctx context.Context, id uint64, minHold time.Duration) error {
+	_, err := s.accounts.ApplyHealth(ctx, id, "", accountdomain.HealthEvent{Kind: accountdomain.HealthClearQuality, MinHold: minHold})
+	return mapRepositoryError(err)
 }

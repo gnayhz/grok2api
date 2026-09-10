@@ -95,6 +95,7 @@ func TestClientCacheLifecycleUnderProxyURLEditAndHotUpdates(t *testing.T) {
 	node := domain.Node{ID: 7, Name: "edit-lifecycle", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, cipher, proxyA.server.URL)}
 	repo.nodes = []domain.Node{node}
 	manager := NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	roundTrip := func() {
 		t.Helper()
@@ -134,17 +135,17 @@ func TestClientCacheLifecycleUnderProxyURLEditAndHotUpdates(t *testing.T) {
 
 	// 2. 旧客户端逐出时真实关闭旧代理连接:把旧键的 lastUsed 回拨超过
 	//    idle TTL, 再触发一次 clientFor(任意获取)。
-	manager.clientMu.Lock()
+	manager.transport.clientMu.Lock()
 	aged := time.Now().UTC().Add(-clientCacheIdleTTL - time.Minute)
-	for key, cached := range manager.clients {
+	for key, cached := range manager.transport.clients {
 		// 只回拨指纹属于代理 A 的旧条目:B 的条目 lastUsed 刚更新。
 		if key.nodeID == node.ID && key.fingerprint != "" && cached.lastUsed.Before(time.Now().UTC().Add(-time.Second)) {
 			cached.lastUsed = aged
-			manager.clients[key] = cached
+			manager.transport.clients[key] = cached
 		}
 	}
-	manager.lastClientCleanup = time.Time{} // 强制下一轮执行清理
-	manager.clientMu.Unlock()
+	manager.transport.lastClientCleanup = time.Time{} // 强制下一轮执行清理
+	manager.transport.clientMu.Unlock()
 	roundTrip() // 触发 cleanupClientCacheLocked → CloseIdleConnections
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && proxyA.open.Load() > 0 {
@@ -162,9 +163,9 @@ func TestClientCacheLifecycleUnderProxyURLEditAndHotUpdates(t *testing.T) {
 	repo.nodes[0].EncryptedProxyURL = encryptedProxy(t, cipher, proxyA.server.URL)
 	manager.invalidateNodes()
 	roundTrip()
-	manager.clientMu.Lock()
-	size := len(manager.clients)
-	manager.clientMu.Unlock()
+	manager.transport.clientMu.Lock()
+	size := len(manager.transport.clients)
+	manager.transport.clientMu.Unlock()
 	if size > 8 {
 		t.Fatalf("client cache grew unbounded across edits/hot-updates: %d entries", size)
 	}

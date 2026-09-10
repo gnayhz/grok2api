@@ -1,4 +1,4 @@
-import { Bot, Compass, Handshake, ShieldAlert, SquareTerminal, VenusAndMars, Webhook, type LucideIcon } from "lucide-react";
+import { Bot, Compass, Gavel, Handshake, ShieldAlert, SquareTerminal, VenusAndMars, Webhook, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -117,6 +117,37 @@ export function AccountNameCell({ account }: { account: AccountDTO }) {
                 </Tooltip>
               ) : null}
             </span>
+          </>
+        ) : null}
+        {account.quality ? (
+          <>
+            <span className="mx-2 h-3 w-px shrink-0 bg-border" aria-hidden="true" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  tabIndex={0}
+                  aria-label={t("accounts.qualityState")}
+                  className={cn(
+                    "inline-flex cursor-help focus-visible:outline-none",
+                    account.quality.state === "sentenced"
+                      ? "text-rose-500 dark:text-rose-400"
+                      : account.quality.state === "remanded"
+                        ? "text-violet-500 dark:text-violet-400"
+                        : "text-amber-500 dark:text-amber-400",
+                  )}
+                >
+                  <Gavel className="size-3.5" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>
+                {t(
+                  account.quality.state === "sentenced"
+                    ? "accounts.qualityStateSentenced"
+                    : "accounts.qualityStateRemanded",
+                )}
+                {account.quality.caseId ? " · " + t("accounts.qualityStateCase", { case: account.quality.caseId }) : ""}
+              </TooltipContent>
+            </Tooltip>
           </>
         ) : null}
         {account.riskStatus ? (

@@ -16,22 +16,46 @@ import (
 //   - pool:      类别规则 → 100 成员 affinity 池
 //   - fixed:     作用域规则 → 固定节点目标
 //
-// 稳态运行(快照/池缓存 TTL 内), DB 读为零, 反映纯内存决策成本。
+// 使用内存仓储桩且未接入质量准入数据库检查,反映本地决策成本;
+// 不包含真实 SQL、拨号、握手、网络或上游首字延迟。
 func newAcquireBenchManager(b *testing.B) (*Manager, *e2eRepo) {
+	return newAcquireBenchManagerSize(b, 100)
+}
+
+func newAcquireBenchManagerSize(b *testing.B, size int) (*Manager, *e2eRepo) {
 	b.Helper()
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		b.Fatal(err)
 	}
 	repo := &e2eRepo{pools: map[uint64]domain.Pool{}}
-	for i := uint64(1); i <= 100; i++ {
+	for i := uint64(1); i <= uint64(size); i++ {
 		encrypted, cipherErr := cipher.Encrypt(fmt.Sprintf("http://10.0.%d.%d:8080", i/256, i%256))
 		if cipherErr != nil {
 			b.Fatal(cipherErr)
 		}
 		repo.nodes = append(repo.nodes, domain.Node{ID: i, Enabled: true, Health: 1, EncryptedProxyURL: encrypted})
 	}
-	return NewManager(repo, cipher), repo
+	manager := NewManager(repo, cipher)
+	b.Cleanup(func() { _ = manager.Close(context.Background()) })
+	return manager, repo
+}
+
+func BenchmarkAcquireNodeScale(b *testing.B) {
+	for _, size := range []int{100, 1000} {
+		b.Run(fmt.Sprint(size), func(b *testing.B) {
+			manager, _ := newAcquireBenchManagerSize(b, size)
+			ctx := context.Background()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				lease, err := manager.Acquire(ctx, domain.ScopeBuild, "account")
+				if err != nil {
+					b.Fatal(err)
+				}
+				lease.Release()
+			}
+		})
+	}
 }
 
 func BenchmarkAcquireAutoSchedule(b *testing.B) {
@@ -84,7 +108,8 @@ func BenchmarkAcquireFixedNodeTarget(b *testing.B) {
 	}
 }
 
-// 并发基准:64 goroutine 同时获取+释放, 观察锁竞争下的伸缩性
+// 并发基准:RunParallel 默认使用 GOMAXPROCS 个 goroutine(名称沿用历史值),观察
+// 同时获取+释放时锁竞争下的伸缩性
 // (节点快照 RLock、inflight 计数、统计记账都在热路径上)。
 func BenchmarkAcquireConcurrent64(b *testing.B) {
 	manager, _ := newAcquireBenchManager(b)

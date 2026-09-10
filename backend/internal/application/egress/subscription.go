@@ -16,9 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	_ "github.com/bdandy/go-socks4"
+	"github.com/chenyme/grok2api/backend/internal/pkg/proxydial"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
-	xproxy "golang.org/x/net/proxy"
 )
 
 const (
@@ -26,7 +25,6 @@ const (
 	maxSubscriptionEntries   = 10000
 	maxSubscriptionHops      = 3
 	subscriptionFetchTimeout = 20 * time.Second
-	proxyHandshakeTimeout    = 10 * time.Second
 )
 
 var blockedSubscriptionPrefixes = []netip.Prefix{
@@ -63,7 +61,7 @@ func normalizeSubscriptionURL(value string) (string, error) {
 	return parsed.String(), nil
 }
 
-func fetchProxySubscription(ctx context.Context, value string, viaProxy string) ([]byte, error) {
+func fetchProxySubscription(ctx context.Context, value string, viaProxy string, owners ...HTTPTransportOwner) ([]byte, error) {
 	normalized, err := normalizeSubscriptionURL(value)
 	if err != nil {
 		return nil, err
@@ -73,9 +71,18 @@ func fetchProxySubscription(ctx context.Context, value string, viaProxy string) 
 		return nil, err
 	}
 	defer transport.CloseIdleConnections()
+	var requestTransport http.RoundTripper = transport
+	if len(owners) > 0 && owners[0] != nil {
+		managed, closeTransport, err := owners[0].ManageHTTPTransport(ctx, transport)
+		if err != nil {
+			return nil, err
+		}
+		defer closeTransport()
+		requestTransport = managed
+	}
 	proxied := strings.TrimSpace(viaProxy) != ""
 	client := &http.Client{
-		Transport: transport,
+		Transport: requestTransport,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if len(via) >= maxSubscriptionHops {
 				return errors.New("订阅重定向次数过多")
@@ -155,15 +162,11 @@ func subscriptionTransport(viaProxy string) (*http.Transport, error) {
 		// Dial the proxy endpoint itself; private admin proxies are allowed.
 		transport.DialContext = direct.DialContext
 	case "socks4", "socks4a", "socks5", "socks5h":
-		// SOCKS4 dialers do not implement ContextDialer. Bound the complete
-		// proxy handshake at the underlying connection so cancellation cannot
-		// leave an unbounded goroutine and socket behind.
-		forward := &subscriptionProxyForwardDialer{dialer: direct, timeout: proxyHandshakeTimeout}
-		dialer, err := xproxy.FromURL(parsed, forward)
+		dialer, err := proxydial.New(viaProxy)
 		if err != nil {
 			return nil, fmt.Errorf("创建订阅拉取 SOCKS 代理: %w", err)
 		}
-		transport.DialContext = subscriptionProxyDialContext(dialer)
+		transport.DialContext = dialer.DialContext
 	case "trojan", "vless", "ss", "vmess":
 		dialer, err := tunnelproxy.NewDialer(viaProxy)
 		if err != nil {
@@ -174,76 +177,6 @@ func subscriptionTransport(viaProxy string) (*http.Transport, error) {
 		return nil, errors.New("订阅拉取代理协议不受支持")
 	}
 	return transport, nil
-}
-
-type subscriptionProxyForwardDialer struct {
-	dialer  *net.Dialer
-	timeout time.Duration
-}
-
-func (d *subscriptionProxyForwardDialer) Dial(network, address string) (net.Conn, error) {
-	connection, err := d.dialer.Dial(network, address)
-	return d.withDeadline(connection, err)
-}
-
-func (d *subscriptionProxyForwardDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	connection, err := d.dialer.DialContext(ctx, network, address)
-	return d.withDeadline(connection, err)
-}
-
-func (d *subscriptionProxyForwardDialer) withDeadline(connection net.Conn, err error) (net.Conn, error) {
-	if err != nil || connection == nil {
-		return connection, err
-	}
-	if err := connection.SetDeadline(time.Now().Add(d.timeout)); err != nil {
-		_ = connection.Close()
-		return nil, err
-	}
-	return connection, nil
-}
-
-func subscriptionProxyDialContext(dialer xproxy.Dialer) func(context.Context, string, string) (net.Conn, error) {
-	clearDeadline := func(connection net.Conn, err error) (net.Conn, error) {
-		if err != nil || connection == nil {
-			return connection, err
-		}
-		if clearErr := connection.SetDeadline(time.Time{}); clearErr != nil {
-			_ = connection.Close()
-			return nil, clearErr
-		}
-		return connection, nil
-	}
-	if contextual, ok := dialer.(xproxy.ContextDialer); ok {
-		return func(ctx context.Context, network, address string) (net.Conn, error) {
-			return clearDeadline(contextual.DialContext(ctx, network, address))
-		}
-	}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		type result struct {
-			connection net.Conn
-			err        error
-		}
-		completed := make(chan result, 1)
-		go func() {
-			connection, dialErr := dialer.Dial(network, address)
-			connection, dialErr = clearDeadline(connection, dialErr)
-			completed <- result{connection: connection, err: dialErr}
-		}()
-		select {
-		case value := <-completed:
-			return value.connection, value.err
-		case <-ctx.Done():
-			// The underlying handshake deadline guarantees this cleanup waiter is
-			// bounded even for SOCKS4 proxies that never send a response.
-			go func() {
-				value := <-completed
-				if value.connection != nil {
-					_ = value.connection.Close()
-				}
-			}()
-			return nil, ctx.Err()
-		}
-	}
 }
 
 // validatePublicSubscriptionTarget closes the SSRF gap introduced by remote

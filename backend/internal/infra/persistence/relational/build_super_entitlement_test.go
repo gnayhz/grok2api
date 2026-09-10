@@ -7,6 +7,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestBuildSuperEntitledDefaultsFalseAndSurvivesUpsert(t *testing.T) {
@@ -27,7 +28,7 @@ func TestBuildSuperEntitledDefaultsFalseAndSurvivesUpsert(t *testing.T) {
 	}
 	created.BuildSuperEntitled = true
 	created.BuildRouteMode = account.BuildRouteXAI
-	if _, err := repo.Update(ctx, created); err != nil {
+	if _, err := repo.UpdateAdministration(ctx, created.ID, repository.AccountAdminPatch{BuildSuperEntitled: &created.BuildSuperEntitled, BuildRouteMode: &created.BuildRouteMode}); err != nil {
 		t.Fatal(err)
 	}
 	// 普通 upsert 不得清除 entitlement。
@@ -43,7 +44,7 @@ func TestBuildSuperEntitledDefaultsFalseAndSurvivesUpsert(t *testing.T) {
 		t.Fatalf("entitlement must survive upsert: %#v", updated)
 	}
 	// token refresh 路径不改 account 表 entitlement 列。
-	refreshed, err := repo.UpdateTokens(ctx, updated.ID, "encrypted-new", "encrypted-refresh", time.Now().UTC().Add(time.Hour), 0)
+	refreshed, err := rotateOAuthFixture(repo, ctx, updated.ID, "encrypted-new", "encrypted-refresh", time.Now().UTC().Add(time.Hour), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestListRoutingCandidatesSharesEntitledBuildModels(t *testing.T) {
 	}
 	// re-set after upsert create (fromAccountDomain true only when ProviderBuild — create path uses input)
 	observer.BuildSuperEntitled = true
-	if _, err := accounts.Update(ctx, observer); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, observer.ID, repository.AccountAdminPatch{BuildSuperEntitled: &observer.BuildSuperEntitled}); err != nil {
 		t.Fatal(err)
 	}
 	peer, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
@@ -97,18 +98,18 @@ func TestListRoutingCandidatesSharesEntitledBuildModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer.BuildSuperEntitled = true
-	if _, err := accounts.Update(ctx, peer); err != nil {
+	if _, err := accounts.UpdateAdministration(ctx, peer.ID, repository.AccountAdminPatch{BuildSuperEntitled: &peer.BuildSuperEntitled}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	const sharedModel = "grok-imagine-video-1.5"
-	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{sharedModel}); err != nil {
+	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{sharedModel}); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, observer.ID, []string{sharedModel}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, observer.ID, []string{sharedModel}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := models.ReplaceAccountCapabilities(ctx, peer.ID, []string{"grok-4.5"}, now); err != nil {
+	if err := testsupport.Capabilities(ctx, models, accounts, peer.ID, []string{"grok-4.5"}, now); err != nil {
 		t.Fatal(err)
 	}
 	candidates, err := accounts.ListRoutingCandidates(ctx, account.ProviderBuild, 0, sharedModel, "")

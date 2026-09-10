@@ -236,6 +236,7 @@ type Key struct {
 	// AllowModelAliases enables discovery and use of dynamically generated reasoning-effort aliases.
 	// Registered compatibility aliases remain available to avoid breaking existing clients.
 	AllowModelAliases bool
+	ModelScope        ModelScope
 	AllowedModels     []uint64
 	// ProviderScope and TierScope narrow routing without adding request-time storage lookups.
 	ProviderScope ProviderScope
@@ -254,8 +255,14 @@ func (k Key) IsAvailable(now time.Time) bool {
 }
 
 func (k Key) AllowsModel(modelID uint64) bool {
-	if len(k.AllowedModels) == 0 {
-		return true
+	if modelID == 0 {
+		return false
+	}
+	if k.ModelScope == ModelScopeAll {
+		return len(k.AllowedModels) == 0
+	}
+	if k.ModelScope != ModelScopeRestricted {
+		return false
 	}
 	for _, allowed := range k.AllowedModels {
 		if allowed == modelID {

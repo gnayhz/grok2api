@@ -22,7 +22,9 @@ func TestEgressOperationsConfigCorruptRoutingDegrades(t *testing.T) {
 		ProbeProvider: egress.ProbeProviderCloudflare, ProbeIntervalSeconds: 900,
 		DefaultTarget: egress.RoutingTarget{Mode: egress.RoutingTargetDirect},
 	}
-	saved, err := nodes.SaveEgressOperationsConfig(ctx, config)
+	saved, err := nodes.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +145,7 @@ func TestSubscriptionSyncClearsStaleRoutingTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, []egress.Node{{
+	if _, err := commitSourceNodesForTest(t, nodes, ctx, source.ID, []egress.Node{{
 		Name: "subscription", Enabled: true, SourceID: source.ID,
 		SourceKey: "one", EncryptedProxyURL: encryptedProxy, Health: 1,
 	}}); err != nil {
@@ -157,11 +159,13 @@ func TestSubscriptionSyncClearsStaleRoutingTarget(t *testing.T) {
 	config.ScopeTargets = map[egress.Scope]egress.RoutingTarget{
 		egress.ScopeBuild: {Mode: egress.RoutingTargetNode, NodeID: listed[0].ID},
 	}
-	if _, err := nodes.SaveEgressOperationsConfig(ctx, config); err != nil {
+	if _, err := nodes.SaveEgressOperationsConfig(ctx, config, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	// 订阅同步移除该节点后,目标被清空。
-	if _, err := nodes.UpsertEgressNodesFromSource(ctx, source.ID, nil); err != nil {
+	if _, err := commitSourceNodesForTest(t, nodes, ctx, source.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := nodes.GetEgressOperationsConfig(ctx)

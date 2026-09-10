@@ -53,7 +53,7 @@ func TestPhysicalCallTraceNormalizesCompactionOperation(t *testing.T) {
 	}
 }
 
-func TestProxyPoolConnectionRetriesCountAsOneProviderCall(t *testing.T) {
+func TestProxyPoolConnectionRetriesEachHavePhysicalAccounting(t *testing.T) {
 	registry := perfmetrics.NewRegistry()
 	previous := perfmetrics.Default
 	perfmetrics.Default = registry
@@ -76,15 +76,16 @@ func TestProxyPoolConnectionRetriesCountAsOneProviderCall(t *testing.T) {
 		t.Fatalf("response=%#v calls=%d err=%v", response, client.calls, err)
 	}
 	samples := registry.CollectAndReset()
-	assertPhysicalCallMetric(t, samples, "grok_web", "web", "primary", "1", "success")
+	assertPhysicalCallMetric(t, samples, "grok_web", "web", "primary", "1", "transport_error")
+	assertPhysicalCallMetric(t, samples, "grok_web", "web", "connection_retry", "2", "success")
 	var total uint64
 	for _, sample := range samples {
 		if sample.Name == "upstream_physical_call_total" {
 			total += sample.Count
 		}
 	}
-	if total != 1 {
-		t.Fatalf("physical call count = %d, want 1: %#v", total, samples)
+	if total != 2 {
+		t.Fatalf("physical call count = %d, want 2: %#v", total, samples)
 	}
 }
 

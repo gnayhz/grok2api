@@ -2,7 +2,9 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"testing"
+	"time"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -23,7 +25,11 @@ func (r *routingHygieneStub) GetEgressOperationsConfig(context.Context) (domain.
 	return r.config, nil
 }
 
-func (r *routingHygieneStub) SaveEgressOperationsConfig(_ context.Context, config domain.OperationsConfig) (domain.OperationsConfig, error) {
+func (r *routingHygieneStub) SaveEgressOperationsConfigIfCurrent(_ context.Context, config domain.OperationsConfig, since time.Time, validate domain.FixedTargetValidator) (domain.OperationsConfig, error) {
+	if !r.config.UpdatedAt.Equal(since) {
+		return domain.OperationsConfig{}, repository.ErrEgressConfigStale
+	}
+	r.config = config
 	r.saveCalls++
 	r.saved = append(r.saved, config)
 	return config, nil

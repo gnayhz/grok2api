@@ -65,7 +65,7 @@ func FetchWithLease(ctx context.Context, baseURL, token string, lease *infraegre
 	request.Header = browserHeaders(token, origin, lease)
 	response, err := lease.Do(request)
 	if err != nil {
-		egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, 0, err)
+		lease.Observe(0, err)
 		return provider.AccountIdentity{}, err
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -76,7 +76,7 @@ func FetchWithLease(ctx context.Context, baseURL, token string, lease *infraegre
 	if len(body) > responseBodyLimit {
 		return provider.AccountIdentity{}, fmt.Errorf("Grok Session 响应超过安全上限")
 	}
-	egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, response.StatusCode, nil)
+	lease.Observe(response.StatusCode, nil)
 	if response.StatusCode == http.StatusUnauthorized {
 		return provider.AccountIdentity{}, provider.ErrUnauthorized
 	}

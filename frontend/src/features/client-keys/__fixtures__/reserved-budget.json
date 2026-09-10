@@ -1,0 +1,1 @@
+{"data":{"items":[{"id":"1","name":"pending-budget","prefix":"64cc33816f60","enabled":true,"rpmLimit":120,"maxConcurrent":8,"billingLimitUsdTicks":10000000000,"reservedUsageUsdTicks":80000000,"billedUsageUsdTicks":0,"allowModelAliases":false,"allowedModelIds":[],"providerScope":["all"],"tierScope":["all"]}],"page":1,"pageSize":20,"total":1}}

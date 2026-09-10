@@ -3,11 +3,15 @@ package conversation
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // ResponseOptions 保留无法直接交给 Responses 上游执行的下游协议语义。
 type ResponseOptions struct {
+	// Store preserves the client's preference when a provider renders local
+	// Responses resources. Nil keeps that provider's default behavior.
+	Store             *bool
 	AnthropicThinking bool
 	// ReasoningEffort is the effective client-facing Messages setting after
 	// budget and effort aliases have been converted to a canonical level.
@@ -152,6 +156,7 @@ func parseResponse(value responseEnvelope) parsedResponse {
 		parsed.CreatedAt = time.Now().Unix()
 	}
 	var annotations []map[string]any
+	var text, refusal, reasoning strings.Builder
 	for _, item := range value.Output {
 		switch item.Type {
 		case "message":
@@ -160,24 +165,23 @@ func parseResponse(value responseEnvelope) parsedResponse {
 				parsed.Annotations = append(parsed.Annotations, content.Annotations...)
 				switch content.Type {
 				case "output_text":
-					parsed.Text += content.Text
+					text.WriteString(content.Text)
 				case "refusal":
-					parsed.Refusal += content.Refusal
+					refusal.WriteString(content.Refusal)
 				}
 			}
 		case "reasoning":
-			reasoning := ""
+			start := reasoning.Len()
 			for _, content := range item.Content {
 				if content.Type == "reasoning_text" {
-					reasoning += content.Text
+					reasoning.WriteString(content.Text)
 				}
 			}
-			if reasoning == "" {
+			if reasoning.Len() == start {
 				for _, summary := range item.Summary {
-					reasoning += summary.Text
+					reasoning.WriteString(summary.Text)
 				}
 			}
-			parsed.Reasoning += reasoning
 			if item.Encrypted != "" {
 				parsed.Signature = item.Encrypted
 			}
@@ -194,6 +198,7 @@ func parseResponse(value responseEnvelope) parsedResponse {
 			}
 		}
 	}
+	parsed.Text, parsed.Refusal, parsed.Reasoning = text.String(), refusal.String(), reasoning.String()
 	if len(parsed.WebSearch) > 0 {
 		parsed.WebSearch = dedupeWebSearchCalls(parsed.WebSearch)
 		parsed.WebSearch = mergeAnnotationTitles(parsed.WebSearch, annotations)

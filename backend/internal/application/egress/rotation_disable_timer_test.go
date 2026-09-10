@@ -22,7 +22,7 @@ func queueLength(s *Service) int {
 func TestSetRotationConfigDisabledDropsPendingRequeueTimers(t *testing.T) {
 	scheduler := &rotationScheduler{set: make(map[uint64]struct{}), wake: make(chan struct{}, 1)}
 	service := &Service{rotation: scheduler}
-	service.SetRotationConfig(fastRotationConfig())
+	setTestRotationConfig(service, fastRotationConfig())
 
 	// 模拟限速/最小间隔触发的挂起重排(短延迟,足以跨过禁用时刻)。
 	service.rotation.requeueAfter(42, 30*time.Millisecond)
@@ -33,7 +33,7 @@ func TestSetRotationConfigDisabledDropsPendingRequeueTimers(t *testing.T) {
 	// 禁用:契约承诺丢弃全部排队工作。
 	disabled := fastRotationConfig()
 	disabled.Enabled = false
-	service.SetRotationConfig(disabled)
+	setTestRotationConfig(service, disabled)
 
 	// 等待挂起定时器越过禁用时刻到点。
 	time.Sleep(120 * time.Millisecond)

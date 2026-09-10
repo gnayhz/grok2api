@@ -18,9 +18,9 @@ type selectionSession struct {
 	modelRouteID     uint64
 	upstreamModel    string
 	quotaMode        string
+	accountScope     clientkeydomain.AccountScope
 	stickyKey        string
 	values           []account.RoutingCandidate
-	quotaConsumed    map[accountQuotaConsumptionKey]int
 	normalCandidates []int
 	probeCandidates  []int
 	normalPlan       *candidatePlan
@@ -28,9 +28,9 @@ type selectionSession struct {
 	retryAccountID   uint64
 	stickyTried      bool
 	staleCandidates  map[uint64]bool
-	// materialFailures 跨本会话多次选号累计瞬态凭据材料故障，超过上限后
+	// claimFailures 跨本会话多次选号累计瞬态凭据材料故障，超过上限后
 	// 保留存储根因，避免大池把系统性故障无限吞成"无可用账号"。
-	materialFailures credentialMaterialFailureTracker
+	claimFailures selectionClaimTracker
 }
 
 func (s *Selector) beginSelectionSession(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*selectionSession, error) {
@@ -48,7 +48,6 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 	if err != nil {
 		return nil, err
 	}
-	quotaConsumed := s.quotaConsumptionSnapshot(provider)
 	healthOverrides := s.routingHealthSnapshot(provider, now)
 
 	session = &selectionSession{
@@ -57,9 +56,9 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 		modelRouteID:    modelRouteID,
 		upstreamModel:   upstreamModel,
 		quotaMode:       quotaMode,
+		accountScope:    accountScope,
 		stickyKey:       stickySessionKey(affinityKey),
 		values:          values,
-		quotaConsumed:   quotaConsumed,
 		staleCandidates: make(map[uint64]bool),
 	}
 	consideredCandidates := 0
@@ -80,6 +79,9 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 		// 长期风险标记（如 RSC 注册风控）永不参与调度；与冷却不同，它不随
 		// 时间恢复，只有人工解除标记。
 		if value.RiskStatus != "" {
+			continue
+		}
+		if eligibility := s.qualityEligibilityObserver(); eligibility != nil && !eligibility.AccountSchedulable(value.ID) {
 			continue
 		}
 		consideredCandidates++
@@ -117,7 +119,7 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 			quotaCandidates++
 			continue
 		}
-		if quotaWindowExhausted(candidate, quotaConsumed) {
+		if s.quotaWindowExhausted(candidate) {
 			quotaCandidates++
 			if candidate.QuotaWindow.ResetAt != nil {
 				earliestRetry = earlierFuture(earliestRetry, *candidate.QuotaWindow.ResetAt, now)
@@ -145,13 +147,14 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 }
 
 // Acquire 从请求级候选计划中获取下一个账号。被 excluded 的账号不会重新入选。
-func (session *selectionSession) Acquire(ctx context.Context, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
+func (session *selectionSession) Acquire(ctx context.Context, excluded map[uint64]bool, allowQuotaProbe bool) (lease *accountLease, err error) {
+	defer annotateSelectionAccountScope(&err, session.accountScope)
 	if session.retryAccountID != 0 {
 		accountID := session.retryAccountID
 		session.retryAccountID = 0
 		if !session.candidateExcluded(excluded, accountID) {
 			if candidate, ok := routingCandidateByID(session.values, session.normalCandidates, accountID); ok {
-				lease, err := session.selector.claimAccountSlotTracked(ctx, candidate.Credential, &session.materialFailures)
+				lease, err := session.selector.claimAccountSlotTracked(ctx, candidate, session.criteria(), &session.claimFailures)
 				if err != nil {
 					if errors.Is(err, errRoutingCredentialStale) {
 						session.markCandidateStale(accountID)
@@ -159,7 +162,7 @@ func (session *selectionSession) Acquire(ctx context.Context, excluded map[uint6
 						return nil, err
 					}
 				} else if lease != nil {
-					return session.completeNormalLease(ctx, lease, candidate, excluded)
+					return session.completeNormalLease(ctx, lease, excluded)
 				}
 			}
 		}
@@ -220,7 +223,7 @@ func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded
 		if session.candidateExcluded(excluded, candidate.Credential.ID) {
 			continue
 		}
-		lease, err := session.selector.claimAccountSlotTracked(ctx, candidate.Credential, &session.materialFailures)
+		lease, err := session.selector.claimAccountSlotTracked(ctx, candidate, session.criteria().withQuotaRecovery(), &session.claimFailures)
 		if err != nil {
 			if errors.Is(err, errRoutingCredentialStale) {
 				session.markCandidateStale(candidate.Credential.ID)
@@ -231,18 +234,6 @@ func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded
 		if lease == nil {
 			continue
 		}
-		now := time.Now().UTC()
-		claimed, err := session.selector.accounts.ClaimQuotaProbe(ctx, candidate.Credential.ID, now, now.Add(quotaProbeLease))
-		if err != nil || !claimed {
-			lease.Release()
-			if err != nil {
-				return nil, err
-			}
-			continue
-		}
-		lease.QuotaProbe = true
-		lease.QuotaProbeKind = candidate.QuotaRecovery.Kind
-		lease.Billing = candidate.Billing
 		return lease, nil
 	}
 	return nil, nil
@@ -250,7 +241,7 @@ func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded
 
 func (session *selectionSession) acquireNormal(ctx context.Context, excluded map[uint64]bool) (*accountLease, error) {
 	if len(session.normalCandidates) == 0 {
-		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
+		return nil, session.claimFailures.unavailableError()
 	}
 	_, _, _, capacityWait := session.selector.routingConfig()
 	if !session.stickyTried && session.stickyKey != "" && session.selector.sticky != nil {
@@ -265,7 +256,7 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 				if candidate.Credential.ID != stickyID {
 					continue
 				}
-				lease, err := session.selector.acquirePinnedCapacity(ctx, candidate.Credential, &session.materialFailures)
+				lease, err := session.selector.acquirePinnedCapacity(ctx, candidate, session.criteria(), &session.claimFailures)
 				if err != nil {
 					if errors.Is(err, errRoutingCredentialStale) {
 						session.markCandidateStale(stickyID)
@@ -280,22 +271,18 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 					capacityWait = 0
 					break
 				}
-				return session.completeNormalLease(ctx, lease, candidate, excluded)
+				return session.completeNormalLease(ctx, lease, excluded)
 			}
 		}
 	}
 	indexes := session.unexcludedNormalIndexes(excluded)
 	activeRequest := session.selector.nextSegmentedActiveRequest(session.provider, session.upstreamModel, session.quotaMode, len(indexes))
 	if activeRequest != nil {
-		lease, err := session.selector.acquireSegmentedCandidates(ctx, session.values, indexes, session.quotaMode, session.selector.resolveTierOrder(session.provider, session.upstreamModel, session.quotaMode), *activeRequest, &session.materialFailures)
+		lease, err := session.selector.acquireSegmentedCandidates(ctx, session.values, indexes, session.criteria(), session.selector.resolveTierOrder(session.provider, session.upstreamModel, session.quotaMode), *activeRequest, &session.claimFailures)
 		if err != nil || lease == nil || session.stickyKey == "" {
 			return lease, err
 		}
-		if lease.routingCandidate == nil {
-			lease.Release()
-			return nil, errors.New("分段选号缺少候选上下文")
-		}
-		return session.completeNormalLease(ctx, lease, *lease.routingCandidate, excluded)
+		return session.completeNormalLease(ctx, lease, excluded)
 	}
 
 	deadline := time.Now().Add(capacityWait)
@@ -311,7 +298,7 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 			if session.candidateExcluded(excluded, candidate.Credential.ID) {
 				continue
 			}
-			lease, err := session.selector.claimAccountSlotTracked(ctx, candidate.Credential, &session.materialFailures)
+			lease, err := session.selector.claimAccountSlotTracked(ctx, candidate, session.criteria(), &session.claimFailures)
 			if err != nil {
 				if errors.Is(err, errRoutingCredentialStale) {
 					session.markCandidateStale(candidate.Credential.ID)
@@ -320,11 +307,11 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 				return nil, err
 			}
 			if lease != nil {
-				return session.completeNormalLease(ctx, lease, candidate, excluded)
+				return session.completeNormalLease(ctx, lease, excluded)
 			}
 		}
 		if !session.hasUnexcludedNormal(excluded) {
-			return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
+			return nil, session.claimFailures.unavailableError()
 		}
 		if capacityWait <= 0 {
 			return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
@@ -341,23 +328,23 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 	}
 }
 
-func (session *selectionSession) completeNormalLease(ctx context.Context, lease *accountLease, candidate account.RoutingCandidate, excluded map[uint64]bool) (*accountLease, error) {
+func (session *selectionSession) completeNormalLease(ctx context.Context, lease *accountLease, excluded map[uint64]bool) (*accountLease, error) {
 	if session.stickyKey != "" && session.selector.sticky != nil {
 		stickyTTL, _, _, _ := session.selector.routingConfig()
 		now := time.Now().UTC()
-		boundID, err := session.selector.sticky.Bind(ctx, session.stickyKey, candidate.Credential.ID, now, now.Add(stickyTTL))
+		boundID, err := session.selector.sticky.Bind(ctx, session.stickyKey, lease.Credential.ID, now, now.Add(stickyTTL))
 		if err != nil {
 			lease.Release()
 			return nil, fmt.Errorf("写入会话粘滞状态: %w", err)
 		}
-		if boundID != candidate.Credential.ID {
+		if boundID != lease.Credential.ID {
 			if boundCandidate, eligible := routingCandidateByID(session.values, session.normalCandidates, boundID); eligible && !session.candidateExcluded(excluded, boundID) {
-				boundLease, acquireErr := session.selector.claimAccountSlotTracked(ctx, boundCandidate.Credential, &session.materialFailures)
+				boundLease, acquireErr := session.selector.claimAccountSlotTracked(ctx, boundCandidate, session.criteria(), &session.claimFailures)
 				if acquireErr != nil {
 					if errors.Is(acquireErr, errRoutingCredentialStale) {
 						session.markCandidateStale(boundID)
 						_ = session.selector.sticky.DeleteByAccount(ctx, boundID)
-						if err := session.selector.sticky.Set(ctx, session.stickyKey, candidate.Credential.ID, now.Add(stickyTTL)); err != nil {
+						if err := session.selector.sticky.Set(ctx, session.stickyKey, lease.Credential.ID, now.Add(stickyTTL)); err != nil {
 							lease.Release()
 							return nil, fmt.Errorf("重建会话粘滞状态: %w", err)
 						}
@@ -368,16 +355,13 @@ func (session *selectionSession) completeNormalLease(ctx context.Context, lease 
 				} else if boundLease != nil {
 					lease.Release()
 					lease = boundLease
-					candidate = boundCandidate
 				}
-			} else if err := session.selector.sticky.Set(ctx, session.stickyKey, candidate.Credential.ID, now.Add(stickyTTL)); err != nil {
+			} else if err := session.selector.sticky.Set(ctx, session.stickyKey, lease.Credential.ID, now.Add(stickyTTL)); err != nil {
 				lease.Release()
 				return nil, fmt.Errorf("重建会话粘滞状态: %w", err)
 			}
 		}
 	}
-	lease.Billing = candidate.Billing
-	lease.QuotaMode = effectiveQuotaMode(candidate, session.quotaMode)
 	return lease, nil
 }
 

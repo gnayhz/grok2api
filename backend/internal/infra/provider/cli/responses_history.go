@@ -65,7 +65,6 @@ func (c *responsesToolCompatibility) normalizeInputItems(items []any) ([]any, []
 			}
 			execution := strings.ToLower(strings.TrimSpace(stringField(item, "execution")))
 			if execution == "" || execution == "server" {
-				c.serverSearchEager = true
 				c.changed = true
 				c.addWarning("server_tool_search_history_approximated")
 				rewritten = append(rewritten, compatibilityBoundaryMessage("A server-side tool search occurred here; selected tools are made available directly."))
@@ -109,7 +108,6 @@ func (c *responsesToolCompatibility) normalizeInputItems(items []any) ([]any, []
 			if execution == "client" {
 				rewritten = append(rewritten, map[string]any{"type": "function_call_output", "call_id": callID, "output": message})
 			} else {
-				c.serverSearchEager = true
 				c.addWarning("server_tool_search_history_approximated")
 				rewritten = append(rewritten, compatibilityBoundaryMessage(message))
 			}

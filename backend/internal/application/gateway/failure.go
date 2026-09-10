@@ -9,12 +9,17 @@ import (
 	"time"
 	"unicode"
 
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 )
 
 // UpstreamFailure 保存可安全暴露给下游和审计的上游失败分类，不包含响应正文或凭据。
 type UpstreamFailure struct {
+	// HistoryRecovery contains local facts that remain visible even if recovery ultimately fails.
+	HistoryRecovery        historydomain.RecoveryOutcome
 	HTTPStatus             int
 	Code                   string
 	PublicMessage          string
@@ -177,12 +182,33 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 func newTransportUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	code, message := "upstream_network_error", "连接上游服务失败"
 	status := http.StatusBadGateway
-	if neterrorpkg.IsResponseHeaderTimeout(err) {
+	if errors.Is(err, historydomain.ErrIdentityLossNotAuthorized) {
+		return &UpstreamFailure{HTTPStatus: http.StatusConflict, Code: "history_identity_context_unavailable", PublicMessage: "会话身份已隔离，无法安全恢复旧历史；请携带完整原生历史或使用已验证的父响应", Fingerprint: "history_identity_context_unavailable", Cause: err}
+	}
+	if errors.Is(err, historydomain.ErrHistoryPrepare) {
+		reason := historydomain.HistoryFailureReason(err)
+		status, code, message = http.StatusConflict, "history_"+reason, "无法确认会话历史连续性，请检查父响应或开始新会话"
+		if reason == "store_error" {
+			status, code, message = http.StatusServiceUnavailable, "history_store_unavailable", "会话历史存储暂时不可用"
+		}
+		return &UpstreamFailure{HTTPStatus: status, Code: code, PublicMessage: message, Fingerprint: code, Cause: err}
+	}
+	if errors.Is(err, responsebuffer.ErrExhausted) {
+		status, code, message = http.StatusServiceUnavailable, "response_resource_exhausted", "响应处理容量暂时不足，请稍后重试"
+	} else if provider.IsMediaPostProcessingError(err) {
+		status, code, message = http.StatusBadGateway, "media_post_processing_failed", "上游已完成生成，但媒体资源处理失败"
+	} else if errors.Is(err, responsebuffer.ErrLimit) {
+		status, code, message = http.StatusBadGateway, "response_too_large", "上游响应超过处理大小上限"
+	} else if errors.Is(err, responsecheck.ErrToolChoice) {
+		status, code, message = http.StatusBadGateway, "upstream_tool_choice_mismatch", "上游未返回请求要求的工具调用"
+	} else if neterrorpkg.IsResponseHeaderTimeout(err) {
 		status, code, message = http.StatusGatewayTimeout, "upstream_header_timeout", "等待上游响应头超时"
 	} else if neterrorpkg.IsUpstreamStreamIdleTimeout(err) {
 		status, code, message = http.StatusGatewayTimeout, "upstream_stream_idle_timeout", "上游流式响应长时间无数据"
 	} else if errors.Is(err, errQualityEmptyStream) {
 		status, code, message = http.StatusBadGateway, "upstream_stream_empty", "上游流式响应为空"
+	} else if errors.Is(err, responsecheck.ErrEmptyOutput) {
+		status, code, message = http.StatusBadGateway, "upstream_empty_output", "上游已结束但未返回答案或工具输出"
 	} else if errors.Is(err, errQualityEvidenceTimeout) {
 		status, code, message = http.StatusGatewayTimeout, "quality_evidence_timeout", "上游流式响应长时间无思考证据"
 	} else if errors.Is(err, errQualityCreatedTimeout) {

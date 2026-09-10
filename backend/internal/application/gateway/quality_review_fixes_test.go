@@ -17,7 +17,7 @@ func TestResponsesMarkerAloneWithholds(t *testing.T) {
 		`data: {"type":"response.completed","response":{"usage":{"output_tokens":64,"output_tokens_details":{"reasoning_tokens":60}}}}`,
 		"",
 	}, "\n")))
-	if classifyQualityHold(state.signals()) != QualityWithhold {
+	if classifyQualityHoldShadowed(state.signals()) != QualityWithhold {
 		t.Fatalf("responses item header alone must withhold: %#v", state.signals())
 	}
 }
@@ -31,7 +31,7 @@ func TestAnthropicMarkerAloneWithholds(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 		"",
 	}, "\n")))
-	if classifyQualityHold(state.signals()) != QualityWithhold {
+	if classifyQualityHoldShadowed(state.signals()) != QualityWithhold {
 		t.Fatalf("anthropic thinking block header alone must withhold: %#v", state.signals())
 	}
 }

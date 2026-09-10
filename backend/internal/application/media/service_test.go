@@ -109,16 +109,16 @@ func TestTransientInputIsHiddenReadableAndExpires(t *testing.T) {
 	}
 
 	expiredAt := time.Now().UTC().Add(-time.Minute)
-	expiredID := "input_expired_abcdefghijklmnopqrstuv"
+	expiredID := "input_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
 	storageKey, err := objects.SaveImage(ctx, expiredID, "image/png", raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(raw)
-	if err := assets.CreateMediaAsset(ctx, mediadomain.Asset{
+	if err := assets.CreateMediaInputAsset(ctx, mediadomain.Asset{
 		ID: expiredID, Kind: "image", StorageKey: storageKey, MIMEType: "image/png", SizeBytes: int64(len(raw)),
 		SHA256: hex.EncodeToString(digest[:]), ExpiresAt: &expiredAt, CreatedAt: expiredAt.Add(-time.Hour),
-	}); err != nil {
+	}, 1<<30); err != nil {
 		t.Fatal(err)
 	}
 	deleted, err := service.Cleanup(ctx)
@@ -129,57 +129,6 @@ func TestTransientInputIsHiddenReadableAndExpires(t *testing.T) {
 		t.Fatalf("expired metadata error=%v", err)
 	}
 
-	activeInputID := "input_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	activeStorageKey, err := objects.SaveImage(ctx, activeInputID, "image/png", raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assets.CreateMediaAsset(ctx, mediadomain.Asset{
-		ID: activeInputID, Kind: "image", StorageKey: activeStorageKey, MIMEType: "image/png", SizeBytes: int64(len(raw)),
-		SHA256: hex.EncodeToString(digest[:]), ExpiresAt: &expiredAt, CreatedAt: expiredAt.Add(-time.Hour),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	accountValue, _, err := relational.NewAccountRepository(database).UpsertByIdentity(ctx, accountdomain.Credential{
-		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, WebTier: accountdomain.WebTierBasic,
-		Name: "active-input-account", SourceKey: "active-input-account", EncryptedAccessToken: "encrypted-access-token", AuthStatus: accountdomain.AuthStatusActive,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := relational.NewClientKeyRepository(database).Create(ctx, clientkeydomain.Key{
-		Name: "active-input-key", Prefix: "active-input", SecretHash: strings.Repeat("b", 64), EncryptedSecret: "encrypted-secret",
-		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobs := relational.NewMediaJobRepository(database)
-	if err := jobs.CreateMediaJob(ctx, mediadomain.Job{
-		ID: "video_active_input", RequestID: "request-active-input", ClientKeyID: key.ID, ClientKeyName: key.Name,
-		AccountID: accountValue.ID, AccountName: accountValue.Name, Provider: string(accountdomain.ProviderWeb),
-		Model: "grok-imagine-video", ModelRouteID: 1, UpstreamModel: "grok-imagine-video", Prompt: "active input",
-		Seconds: 6, Size: "16:9", Quality: "720p", Status: mediadomain.StatusQueued, Progress: 0,
-		InputJSON: `{"image_urls":["` + mediadomain.InputReference(activeInputID) + `"]}`, InputImageCount: 1,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := service.OpenInputAsset(ctx, activeInputID); !errors.Is(err, ErrInputAssetNotFound) {
-		t.Fatalf("open active expired input error=%v", err)
-	}
-	if err := service.ReleaseInputAssets(ctx, []string{mediadomain.InputReference(activeInputID)}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := assets.GetMediaAsset(ctx, activeInputID); err != nil {
-		t.Fatalf("active input was released before hard TTL cleanup: %v", err)
-	}
-	if deleted, err := service.Cleanup(ctx); err != nil || deleted != 1 {
-		t.Fatalf("cleanup active expired input deleted=%d err=%v", deleted, err)
-	}
-	if _, err := assets.GetMediaAsset(ctx, activeInputID); !errors.Is(err, repository.ErrNotFound) {
-		t.Fatalf("active expired input metadata error=%v", err)
-	}
 	if err := service.ReleaseInputAssets(ctx, []string{mediadomain.InputReference(input.ID)}); err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +233,21 @@ func TestAdminDeleteVideoJobsRemovesTerminalJobAssetAndTicket(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if deleted, err := service.AdminDeleteVideoJobs(ctx, []string{job.ID}); deleted != 0 || !errors.Is(err, ErrVideoCompletionPending) {
+		t.Fatalf("pending quota deleted source: %d %v", deleted, err)
+	}
+	if _, err := assets.GetMediaAsset(ctx, asset.ID); err != nil {
+		t.Fatalf("pending quota deleted asset: %v", err)
+	}
+	if err := jobs.MarkMediaJobQuotaRecorded(ctx, job, now); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := service.AdminDeleteVideoJobs(ctx, []string{job.ID}); deleted != 0 || !errors.Is(err, ErrVideoCompletionPending) {
+		t.Fatalf("pending usage deleted source: %d %v", deleted, err)
+	}
+	if err := jobs.MarkMediaJobUsageRecorded(ctx, job.ID, now); err != nil {
+		t.Fatal(err)
+	}
 	deleted, err := service.AdminDeleteVideoJobs(ctx, []string{job.ID})
 	if err != nil || deleted != 1 {
 		t.Fatalf("deleted=%d err=%v", deleted, err)

@@ -1,0 +1,13 @@
+{
+  "account_need_exits": 3,
+  "account_span_nodes": 2,
+  "exit_need_n": 4,
+  "exit_need_k": 3,
+  "differential_exits": 3,
+  "jurors_per_exit": 4,
+  "probe_budget": 7,
+  "max_rotations_per_hour": 6,
+  "retention": "168h0m0s",
+  "evidence_window": "30m0s",
+  "investigation_timeout": "10m0s"
+}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 func TestMultiplePublicIDsCanShareUpstream(t *testing.T) {
@@ -21,7 +22,7 @@ func TestMultiplePublicIDsCanShareUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-4.5"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, repo, accounts, buildAccount.ID, []string{"grok-4.5"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -92,11 +93,11 @@ func TestProviderPrefixedPublicNameTakesPriorityAndKeepsQualifiedFallback(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-4.5"}, time.Now().UTC()); err != nil {
+	if err := testsupport.Capabilities(ctx, repo, accounts, buildAccount.ID, []string{"grok-4.5"}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
 		t.Fatal(err)
 	}
 	literal, err := repo.Create(ctx, model.Route{
@@ -136,7 +137,7 @@ func TestSharedUpstreamRoutesKeepAccountBindingsIsolated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := models.ReplaceAccountCapabilities(ctx, value.ID, []string{"shared-upstream"}, time.Now().UTC()); err != nil {
+		if err := testsupport.Capabilities(ctx, models, accounts, value.ID, []string{"shared-upstream"}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		return value
@@ -192,7 +193,7 @@ func TestUpsertDiscoveredCreatesCanonicalWhenManualAliasExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
 		t.Fatal(err)
 	}
 	var rows []modelRouteModel
@@ -225,10 +226,10 @@ func TestManualRouteTargetsMaySharePublicID(t *testing.T) {
 	}
 	// The managed canonical route remains independently idempotent and may join
 	// the same target pool without being shadowed by a manual row.
-	if err := repo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"shared-model"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderBuild, []string{"shared-model"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"shared-model"}); err != nil {
+	if err := testsupport.Discover(ctx, repo, account.ProviderBuild, []string{"shared-model"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,8 +256,8 @@ func TestReplaceProviderRoutesKeepsManualAliasesWithSharedUpstream(t *testing.T)
 	database := openTestDatabase(t)
 	repo := NewModelRepository(database)
 
-	if err := repo.UpsertRoutes(ctx, []model.Route{
-		{PublicID: "grok-chat-fast", Provider: account.ProviderWeb, UpstreamModel: "fast", Capability: model.CapabilityChat, Enabled: true},
+	if err := testsupport.Routes(ctx, repo, []model.Route{
+		{Origin: model.OriginCatalog, PublicID: "grok-chat-fast", Provider: account.ProviderWeb, UpstreamModel: "fast", Capability: model.CapabilityChat, Enabled: true},
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ func TestPeekQualityBodyClassifiesConvertedClientShapes(t *testing.T) {
 		// 但也可能是健康账号的隐私脱敏——不定罪，走 15m 空闲路径（round 34 同理）。
 		{name: "redacted-only messages takes empty-stream path", body: `{"content":[{"type":"redacted_thinking","data":"sig"}]}`, want: QualityWait, wantErr: true},
 		{name: "tool-only chat delivers", body: toolOnlyChat, want: QualityDeliver},
-		{name: "alien shape still fail-opens", body: alien, want: QualityDeliver},
+		{name: "alien shape is inconclusive", body: alien, want: QualityWait, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 const (
@@ -41,14 +43,12 @@ type responsesToolCompatibility struct {
 	deferredSurfaces    []string
 	clientSearchTool    map[string]any
 	clientSearchParam   string
-	serverSearchEager   bool
 	streamCalls         map[string]*responsesStreamCall
 	streamArgumentBytes int
 	streamSequenceNext  int64
 	streamSequenceSet   bool
 	legacyLocalShell    bool
 	nativeShell         bool
-	webSearchDisabled   bool
 	compactionRequested bool
 	warnings            []string
 	warningSet          map[string]struct{}
@@ -143,12 +143,31 @@ func cloneJSONObject(value map[string]any) map[string]any {
 }
 
 func cloneJSONValue(value any) any {
+	// Request trees are already decoded JSON. Copy containers directly instead
+	// of serializing every subtree, keeping schema numbers exact and immutable
+	// scalars shared while isolating all mutable maps and slices.
+	switch typed := value.(type) {
+	case map[string]any:
+		if typed == nil {
+			return nil
+		}
+		return cloneJSONObject(typed)
+	case []any:
+		if typed == nil {
+			return nil
+		}
+		return cloneJSONArray(typed)
+	case nil, string, bool, float64, json.Number:
+		return value
+	}
+	// Locally constructed typed values (including RawMessage) retain the same
+	// JSON projection as decoded trees.
 	data, err := json.Marshal(value)
 	if err != nil {
 		return value
 	}
 	var cloned any
-	if json.Unmarshal(data, &cloned) != nil {
+	if jsonvalue.Unmarshal(data, &cloned) != nil {
 		return value
 	}
 	return cloned

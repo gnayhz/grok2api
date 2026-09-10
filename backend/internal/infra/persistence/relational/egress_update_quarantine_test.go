@@ -36,7 +36,7 @@ func TestUpdateEgressNodeConfigResetPreservesInFlightQuarantine(t *testing.T) {
 	// 窗口内质量隔离落库(与 QuarantineNodeForQuality 同参数形状)。
 	cooldown := time.Now().UTC().Add(30 * time.Minute)
 	degradedAt := time.Now().UTC()
-	if err := repo.UpdateEgressNodeQualityState(ctx, created.ID, 0.05, 3, &cooldown, egress.LastErrorExitIPQuality, 2, &degradedAt); err != nil {
+	if err := seedLegacyEgressQuality(repo, ctx, created.ID, 0.05, 3, &cooldown, egress.LastErrorExitIPQuality, 2, &degradedAt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -47,7 +47,9 @@ func TestUpdateEgressNodeConfigResetPreservesInFlightQuarantine(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale.EncryptedProxyURL = newProxy
-	if _, err := repo.UpdateEgressNode(ctx, stale); err != nil {
+	if _, err := repo.UpdateEgressNodeConfiguration(ctx, stale, func(egress.Node) error {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 

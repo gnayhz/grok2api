@@ -4,28 +4,29 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 type Config struct {
-	BaseURL                  string
-	StatsigMode              string
-	StatsigManualValue       string
-	StatsigSignerURL         string
-	QuotaTimeoutSeconds      int
-	ChatTimeoutSeconds       int
-	StreamIdleTimeoutSeconds int
-	ImageTimeoutSeconds      int
-	VideoTimeoutSeconds      int
-	MaxInputImageBytes       int64
-	AllowNSFW                bool
+	BaseURL            string
+	StatsigMode        string
+	StatsigManualValue string
+	StatsigSignerURL   string
+	QuotaTimeout       time.Duration
+	ChatTimeout        time.Duration
+	StreamIdleTimeout  time.Duration
+	ImageTimeout       time.Duration
+	VideoTimeout       time.Duration
+	MaxInputImageBytes int64
+	AllowNSFW          bool
 }
 
 type Adapter struct {
@@ -34,13 +35,13 @@ type Adapter struct {
 	accountsBaseURL string
 	egress          *infraegress.Manager
 	cipher          security.Cryptor
-	states          repository.ResponseRepository
+	states          historydomain.NativeResponseState
 	assets          provider.ImageAssetStore
 	statsig         *statsigSigner
 	logger          *slog.Logger
 }
 
-func NewAdapter(cfg Config, egress *infraegress.Manager, cipher security.Cryptor, states repository.ResponseRepository, assets provider.ImageAssetStore) *Adapter {
+func NewAdapter(cfg Config, egress *infraegress.Manager, cipher security.Cryptor, states historydomain.NativeResponseState, assets provider.ImageAssetStore) *Adapter {
 	cfg = normalizedConfig(cfg)
 	return &Adapter{cfg: cfg, accountsBaseURL: officialAccountsBaseURL, egress: egress, cipher: cipher, states: states, assets: assets, statsig: newStatsigSigner(), logger: slog.Default()}
 }
@@ -68,20 +69,20 @@ func normalizedConfig(cfg Config) Config {
 	if cfg.StatsigSignerURL == "" {
 		cfg.StatsigSignerURL = defaultStatsigSignerURL
 	}
-	if cfg.QuotaTimeoutSeconds <= 0 {
-		cfg.QuotaTimeoutSeconds = 25
+	if cfg.QuotaTimeout <= 0 {
+		cfg.QuotaTimeout = 25 * time.Second
 	}
-	if cfg.ChatTimeoutSeconds <= 0 {
-		cfg.ChatTimeoutSeconds = 120
+	if cfg.ChatTimeout <= 0 {
+		cfg.ChatTimeout = 120 * time.Second
 	}
-	if cfg.StreamIdleTimeoutSeconds <= 0 {
-		cfg.StreamIdleTimeoutSeconds = int(settingsdomain.DefaultWebStreamIdleTimeout.Seconds())
+	if cfg.StreamIdleTimeout <= 0 {
+		cfg.StreamIdleTimeout = settingsdomain.DefaultWebStreamIdleTimeout
 	}
-	if cfg.ImageTimeoutSeconds <= 0 {
-		cfg.ImageTimeoutSeconds = 180
+	if cfg.ImageTimeout <= 0 {
+		cfg.ImageTimeout = 180 * time.Second
 	}
-	if cfg.VideoTimeoutSeconds <= 0 {
-		cfg.VideoTimeoutSeconds = 900
+	if cfg.VideoTimeout <= 0 {
+		cfg.VideoTimeout = 900 * time.Second
 	}
 	if cfg.MaxInputImageBytes <= 0 {
 		cfg.MaxInputImageBytes = 32 << 20

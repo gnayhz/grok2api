@@ -2,57 +2,96 @@ package egress
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
-	tlsclient "github.com/bogdanfinn/tls-client"
+	fhttptrace "github.com/bogdanfinn/fhttp/httptrace"
 	"github.com/bogdanfinn/tls-client/profiles"
+	utls "github.com/bogdanfinn/utls"
 	"github.com/bogdanfinn/websocket"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/browsertransport"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/proxydial"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 )
 
-type browserClient struct{ inner tlsclient.HttpClient }
+type browserClient struct {
+	inner     *fhttp.Client
+	transport *browsertransport.Transport
+}
 
 var chromeMajorPattern = regexp.MustCompile(`(?i)Chrome/(\d+)`)
 
-func (l *Lease) DialWebSocket(ctx context.Context, endpoint string, headers fhttp.Header, handshakeTimeout time.Duration) (*websocket.Conn, *fhttp.Response, error) {
+func (l *Lease) DialWebSocket(ctx context.Context, endpoint string, headers fhttp.Header, handshakeTimeout time.Duration) (*WebSocket, *fhttp.Response, error) {
 	return l.dialWebSocket(ctx, endpoint, headers, handshakeTimeout, true)
 }
 
 // DialWebSocketDeferredForbidden leaves a 403 handshake response for the
 // caller to classify before invalidating the browser-session Clearance.
-func (l *Lease) DialWebSocketDeferredForbidden(ctx context.Context, endpoint string, headers fhttp.Header, handshakeTimeout time.Duration) (*websocket.Conn, *fhttp.Response, error) {
+func (l *Lease) DialWebSocketDeferredForbidden(ctx context.Context, endpoint string, headers fhttp.Header, handshakeTimeout time.Duration) (*WebSocket, *fhttp.Response, error) {
 	return l.dialWebSocket(ctx, endpoint, headers, handshakeTimeout, false)
 }
 
-func (l *Lease) dialWebSocket(ctx context.Context, endpoint string, headers fhttp.Header, handshakeTimeout time.Duration, invalidateForbidden bool) (*websocket.Conn, *fhttp.Response, error) {
+func (l *Lease) dialWebSocket(ctx context.Context, endpoint string, headers fhttp.Header, handshakeTimeout time.Duration, invalidateForbidden bool) (*WebSocket, *fhttp.Response, error) {
 	if l == nil || l.browser == nil {
 		return nil, nil, errors.New("当前出口客户端不支持浏览器 WebSocket")
 	}
 	for attempt := 0; ; attempt++ {
+		attemptCtx := ctx
+		if attempt > 0 {
+			attemptCtx = WithPhysicalCallStage(attemptCtx, "connection_retry")
+		}
+		attemptCtx = attemptmeta.Begin(attemptCtx, l.attemptPath())
+		finish := func() {}
+		if l.clientHandle != nil {
+			callCtx, done, err := l.clientHandle.begin(attemptCtx)
+			if err != nil {
+				return nil, nil, err
+			}
+			attemptCtx, finish = callCtx, done
+		}
+		if err := beginPhysicalCall(attemptCtx); err != nil {
+			finish()
+			return nil, nil, err
+		}
 		dialer := &websocket.Dialer{
 			HandshakeTimeout:  handshakeTimeout,
-			NetDialTLSContext: l.browser.inner.GetTLSDialer(),
-			NetDialContext:    l.browser.inner.GetDialer().DialContext,
+			NetDialTLSContext: completionDial(attemptCtx, l.browser.transport.DialWebSocketTLS, finish),
+			NetDialContext:    completionDial(attemptCtx, l.browser.transport.DialContext, finish),
 		}
-		connection, response, err := dialer.DialContext(ctx, endpoint, headers)
+		connection, response, err := dialer.DialContext(attemptCtx, endpoint, headers)
+		recordWebSocketHandshake(attemptCtx, endpoint, response, err)
 		if err == nil || !l.proxyPool || attempt >= proxyPoolRetryLimit || !safeProxyConnectionFailure(err, fhttpResponseAsHTTP(response)) {
 			if l.proxyPool && safeProxyConnectionFailure(err, fhttpResponseAsHTTP(response)) {
 				l.browser.CloseIdleConnections()
 			}
 			if invalidateForbidden && response != nil && response.StatusCode == http.StatusForbidden && l.clearanceManager != nil && l.clearanceKey != "" {
-				l.clearanceManager.invalidateClearanceKey(l.clearanceKey, l.client)
+				l.InvalidateClearance()
 			}
-			return connection, response, err
+			if err != nil {
+				finish()
+			}
+			if connection != nil && err == nil {
+				return newPhysicalWebSocket(attemptCtx, connection), response, nil
+			}
+			return nil, response, neterrorpkg.MarkTransport(err, neterrorpkg.PhaseWebSocket)
 		}
+		finish()
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
@@ -68,40 +107,40 @@ func fhttpResponseAsHTTP(response *fhttp.Response) *http.Response {
 }
 
 func newBrowserClient(proxyURL, userAgent string) (*browserClient, error) {
-	options := []tlsclient.HttpClientOption{
-		tlsclient.WithTimeoutSeconds(7200),
-		tlsclient.WithClientProfile(browserProfile(userAgent)),
-		tlsclient.WithNotFollowRedirects(),
-		// 连接池:不设置时底层 Transport 落到 Go 默认 MaxIdleConnsPerHost=2。
-		// 浏览器客户端按(节点,scope,出口指纹)共享,同出口并发>2 的请求每条
-		// 都重复 TCP+uTLS(+代理 CONNECT)握手,直接抬高 Web/Console 首字延迟
-		// 与 CPU。对齐 Build 通道的显式池配置(见 buildclient.go);空闲超时
-		// 保持指针为零值→库默认 90s,不改变现有空闲行为。
-		tlsclient.WithTransportOptions(&tlsclient.TransportOptions{
-			MaxIdleConns:        256,
-			MaxIdleConnsPerHost: 64,
-		}),
-	}
+	return newBrowserClientWithBudget(proxyURL, userAgent, nil)
+}
+func newBrowserClientWithBudget(proxyURL, userAgent string, budget *netbudget.Runtime) (*browserClient, error) {
+	var dial browsertransport.DialContextFunc
 	if proxyURL != "" {
 		parsed, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("解析浏览器出口代理: %w", err)
 		}
+		var proxy interface {
+			DialContext(context.Context, string, string) (net.Conn, error)
+		}
 		if tunnelproxy.IsSupportedScheme(parsed.Scheme) {
-			dialer, err := tunnelproxy.NewDialer(proxyURL)
-			if err != nil {
-				return nil, fmt.Errorf("创建浏览器隧道代理: %w", err)
-			}
-			options = append(options, tlsclient.WithDialContext(dialer.DialContext))
+			proxy, err = tunnelproxy.NewDialer(proxyURL)
 		} else {
-			options = append(options, tlsclient.WithProxyUrl(proxyURL))
+			proxy, err = proxydial.New(proxyURL)
+		}
+		if err != nil {
+			return nil, err
+		}
+		dial = proxy.DialContext
+	}
+	if budget != nil {
+		inner := dial
+		if inner == nil {
+			inner = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+		}
+		dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return budget.Dial(ctx, netbudget.DialFunc(inner), network, address)
 		}
 	}
-	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), options...)
-	if err != nil {
-		return nil, err
-	}
-	return &browserClient{inner: client}, nil
+	transport := browsertransport.New(browsertransport.Config{Profile: browserProfile(userAgent), DialContext: dial})
+	client := &fhttp.Client{Transport: transport, CheckRedirect: func(*fhttp.Request, []*fhttp.Request) error { return fhttp.ErrUseLastResponse }}
+	return &browserClient{inner: client, transport: transport}, nil
 }
 
 func browserProfile(userAgent string) profiles.ClientProfile {
@@ -130,22 +169,50 @@ func browserProfile(userAgent string) profiles.ClientProfile {
 	return profiles.Chrome_146
 }
 
-// browserClientDefaultRequestTimeout 是无 deadline 调用方的保守上限:
-// tls-client 的连接阶段(TCP+代理 CONNECT+uTLS)没有独立超时(拨号超时
-// 直接取整请求超时 7200s),挂起的握手会把无 deadline 的调用方拖满预算。
-// 带自身 deadline 的主链路(Console/Web/WS)不受影响;变量形式仅供测试
-// 覆盖,生产行为恒定 10 分钟。
+// browserClientDefaultRequestTimeout bounds requests without a caller deadline.
+// Establishment has its own budget in browsertransport and is removed before
+// streaming. A caller deadline continues to control the complete request.
 var browserClientDefaultRequestTimeout = 10 * time.Minute
 
 // cancelOnCloseBody 把 ctx 取消绑定到响应体 Close:Do 返回后 body 仍在
 // 读取,不能在 Do 出口取消——那会截断在途下载。
 type cancelOnCloseBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	ctx      context.Context
+	finished atomic.Bool
+	cancel   context.CancelFunc
+	once     sync.Once
+}
+
+// finish releases the locally installed timeout after a terminal read/Close.
+// Its cancellation must not turn a later ordinary EOF into context.Canceled.
+func (b *cancelOnCloseBody) finish() {
+	b.once.Do(func() { b.finished.Store(true); b.cancel() })
+}
+
+func (b *cancelOnCloseBody) Read(p []byte) (int, error) {
+	if !b.finished.Load() {
+		if err := b.ctx.Err(); err != nil {
+			b.finish()
+			return 0, err
+		}
+	}
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		// fhttp can close a response before Read observes the canceled request.
+		// Recover that request cause before our own cleanup cancels its timeout.
+		if !b.finished.Load() {
+			if ctxErr := b.ctx.Err(); ctxErr != nil {
+				err = ctxErr
+			}
+		}
+		b.finish()
+	}
+	return n, err
 }
 
 func (b *cancelOnCloseBody) Close() error {
-	b.cancel()
+	b.finish()
 	return b.ReadCloser.Close()
 }
 
@@ -167,7 +234,7 @@ func (c *browserClient) Do(request *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	response := fromFHTTPResponse(fresponse)
-	response.Body = &cancelOnCloseBody{ReadCloser: response.Body, cancel: cancel}
+	response.Body = &cancelOnCloseBody{ReadCloser: response.Body, ctx: request.Context(), cancel: cancel}
 	return response, nil
 }
 
@@ -200,7 +267,45 @@ func toFHTTPRequest(request *http.Request) (*fhttp.Request, error) {
 	if request.Body != nil {
 		body = request.Body
 	}
-	result, err := fhttp.NewRequestWithContext(request.Context(), request.Method, request.URL.String(), body)
+	ctx := request.Context()
+	// fhttp has a distinct trace context key. Bridge submission callbacks so
+	// browser retries cannot replay a POST that has already reached the origin.
+	if trace := httptrace.ContextClientTrace(ctx); trace != nil {
+		bridge := &fhttptrace.ClientTrace{}
+		bridge.GetConn = trace.GetConn
+		bridge.ConnectStart = trace.ConnectStart
+		bridge.ConnectDone = trace.ConnectDone
+		bridge.TLSHandshakeStart = trace.TLSHandshakeStart
+		if trace.TLSHandshakeDone != nil {
+			bridge.TLSHandshakeDone = func(state utls.ConnectionState, err error) {
+				trace.TLSHandshakeDone(tls.ConnectionState{Version: state.Version, HandshakeComplete: state.HandshakeComplete, DidResume: state.DidResume, CipherSuite: state.CipherSuite, NegotiatedProtocol: state.NegotiatedProtocol, ServerName: state.ServerName, PeerCertificates: state.PeerCertificates, VerifiedChains: state.VerifiedChains}, err)
+			}
+		}
+		if trace.DNSStart != nil {
+			bridge.DNSStart = func(info fhttptrace.DNSStartInfo) { trace.DNSStart(httptrace.DNSStartInfo{Host: info.Host}) }
+		}
+		if trace.DNSDone != nil {
+			bridge.DNSDone = func(info fhttptrace.DNSDoneInfo) {
+				trace.DNSDone(httptrace.DNSDoneInfo{Addrs: info.Addrs, Err: info.Err, Coalesced: info.Coalesced})
+			}
+		}
+		if trace.GotConn != nil {
+			bridge.GotConn = func(info fhttptrace.GotConnInfo) {
+				trace.GotConn(httptrace.GotConnInfo{Conn: info.Conn, Reused: info.Reused, WasIdle: info.WasIdle, IdleTime: info.IdleTime})
+			}
+		}
+		if trace.WroteRequest != nil {
+			bridge.WroteRequest = func(info fhttptrace.WroteRequestInfo) { trace.WroteRequest(httptrace.WroteRequestInfo{Err: info.Err}) }
+		}
+		if trace.WroteHeaders != nil {
+			bridge.WroteHeaders = trace.WroteHeaders
+		}
+		if trace.GotFirstResponseByte != nil {
+			bridge.GotFirstResponseByte = trace.GotFirstResponseByte
+		}
+		ctx = fhttptrace.WithClientTrace(ctx, bridge)
+	}
+	result, err := fhttp.NewRequestWithContext(ctx, request.Method, request.URL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -220,4 +325,33 @@ func toFHTTPRequest(request *http.Request) (*fhttp.Request, error) {
 		}
 	}
 	return result, nil
+}
+
+// WebSocket ownership transfers from the handshake to the real connection.
+// Its Close and caller cancellation release the request slot exactly once.
+type completionConn struct {
+	net.Conn
+	stop   func() bool
+	finish func()
+	once   sync.Once
+}
+
+func (c *completionConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { c.stop(); c.finish() })
+	return err
+}
+func completionDial(ctx context.Context, dial browsertransport.DialContextFunc, finish func()) browsertransport.DialContextFunc {
+	return func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(dialCtx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		idle := netbudget.MarkActive(conn)
+		done := func() { idle(); finish() }
+		var once sync.Once
+		complete := func() { once.Do(done) }
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close(); complete() })
+		return &completionConn{Conn: conn, stop: stop, finish: complete}, nil
+	}
 }

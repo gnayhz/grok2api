@@ -1,5 +1,5 @@
 import { apiRequest } from "@/shared/api/client";
-import { createObjectDecoder, decodeBooleanResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
+import { createObjectDecoder, decodeBooleanResult, hasShape, isArrayOf, isBoolean, isNumber, isObject, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 import type { SortOrder } from "@/shared/lib/table-sort";
 
 export type SettingsConfigDTO = {
@@ -24,7 +24,7 @@ export type SettingsConfigDTO = {
     accountIsolatedConnections: boolean;
     segmentedSelector: { enabled: boolean; minCandidates: number; windowSize: number };
   };
-  audit: { bufferSize: number; batchSize: number; flushInterval: string; commitDelayMS: number; retentionDays?: number };
+  audit: { bufferSize: number; batchSize: number; flushInterval: string; commitDelayMS: number; retentionDays?: number; retentionPeriod?: string; retentionSource?: string; fileRetentionPeriod?: string; fileRetentionSource?: string };
   clientKeyDefaults: { rpmLimit: number; maxConcurrent: number };
   accounts: {
     markBuildForbiddenReauth: boolean;
@@ -38,19 +38,12 @@ export type SettingsConfigDTO = {
   // 旧后端不返回这两节;withSettingsDefaults 提供本地默认。
   requestRetry?: {
     enabled: boolean; maxAttempts: number; onExhausted: string;
-    accountCooldown: string; sameAccountRetry: boolean;
+    accountCooldown: string;
     evidenceTimeout: string; createdTimeout: string; idleAccountCooldown: string;
   };
   egressRotation?: {
     enabled: boolean; maxAttemptsPerQuarantine: number; minNodeInterval: string; maxGlobalPerHour: number;
     webhookTimeout: string; webhookRetries: number; settleDelay: string; probeTimeout: string; probeInterval: string;
-    canaryModelPublicId: string; canaryCreatedTimeout: string;
-  };
-  // 旧后端不返回该节;withSettingsDefaults 提供本地默认。
-  accountRisk?: {
-    enabled: boolean; method: string; concurrency: number; timeout: string; onDenied: string;
-    patrolEnabled: boolean; patrolBucketDays: number; patrolInterval?: string; patrolBatchSize?: number; buildProbeEnabled: boolean;
-    probeProxyURL?: string; deniedConfirmations?: number; deniedTTL?: string;
   };
 };
 
@@ -61,6 +54,8 @@ export type EgressNodePoolRef = { id: string; name: string };
 export type EgressNodeDTO = {
 	id: string; name: string; enabled: boolean;
 	proxyConfigured: boolean; proxyDisplay?: string; proxyFingerprint?: string; proxyPool: boolean;
+	/** 旋转端点投影(外部代理池标志或账号模板代理):调度豁免与健康态隐藏以此为准。 */
+	rotatingEndpoint: boolean;
 	sourceId?: string; sourceName?: string; pools?: EgressNodePoolRef[];
 	accountBoundProxy: boolean;
 	rotationConfigured: boolean; rotationEnabled: boolean; lastRotatedAt?: string; rotationAttempts: number; lastRotationError?: string;
@@ -68,6 +63,8 @@ export type EgressNodeDTO = {
 	health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
 	probeStatus: "unknown" | "healthy" | "unhealthy"; lastProbedAt?: string; probeLatencyMs: number; exitIp?: string; probeError?: string; probeProvider?: "ipinfo" | "cloudflare";
 	ipv4Probe: EgressIPProbeDTO; ipv6Probe: EgressIPProbeDTO;
+	/** 质量轴状态(质量层注入时才有:remanded 羁押/banned IP 禁;缺席=可用)。 */
+	quality?: { state: "remanded" | "banned"; caseId?: string };
 };
 
 export type EgressNodeInput = {
@@ -76,7 +73,7 @@ export type EgressNodeInput = {
 	rotationURL?: string; clearRotationURL?: boolean; rotationEnabled?: boolean;
 };
 
-export type EgressPoolStrategy = "affinity" | "random" | "sticky" | "rotation";
+export type EgressPoolStrategy = "affinity" | "random" | "sticky" | "rotation" | "least-used";
 export type EgressPoolFallbackMode = "none" | "pool" | "direct";
 
 export type EgressRoutingScope = "grok_build" | "grok_web" | "grok_console";
@@ -128,12 +125,26 @@ export type EgressProbeResultDTO = { status: "unknown" | "healthy" | "unhealthy"
 export type EgressProbeBatchResultDTO = { requested: number; healthy: number; unhealthy: number };
 export type EgressUnhealthyCleanupPreviewDTO = { nodes: number; subscriptionManaged: number };
 
+export type SettingsApplyStatus = {
+  name: string; appliedRevision: string; pending: boolean; error?: string; lastAttemptAt?: string;
+};
+export type SettingsNotificationStatus = {
+  revision: string; state: "disabled" | "observed" | "pending" | "published" | "failed";
+  error?: string; lastAttemptAt?: string;
+};
 export type SettingsSnapshotDTO = {
   config: SettingsConfigDTO;
   recommendedProviderBuild: { clientVersion: string; userAgent: string };
   updatedAt: string;
   revision: string;
   restartRequired: string[];
+  // Optional during rolling upgrades: missing metadata means unknown status.
+  appliedRevision?: string;
+  applyPending?: boolean;
+  applyTargets?: SettingsApplyStatus[];
+  notification?: SettingsNotificationStatus;
+  /** 文件配置基线的 requestRetry 节:与 config.requestRetry 不同即处于运行时覆盖态。 */
+  fileRequestRetry?: NonNullable<SettingsConfigDTO["requestRetry"]>;
 };
 
 const settingsConfigValidator = hasShape({
@@ -156,7 +167,8 @@ const settingsConfigValidator = hasShape({
   }),
   audit: hasShape({
     bufferSize: isNumber, batchSize: isNumber, flushInterval: isString, commitDelayMS: isOptional(isNumber),
-    retentionDays: isOptional(isNumber),
+    retentionDays: isOptional(isNumber), retentionPeriod: isOptional(isString), retentionSource: isOptional(isString),
+    fileRetentionPeriod: isOptional(isString), fileRetentionSource: isOptional(isString),
   }),
   clientKeyDefaults: hasShape({ rpmLimit: isNumber, maxConcurrent: isNumber }),
   // Older backends may omit accounts; withSettingsDefaults supplies a safe local default.
@@ -171,19 +183,12 @@ const settingsConfigValidator = hasShape({
   })),
   requestRetry: isOptional(hasShape({
     enabled: isBoolean, maxAttempts: isNumber, onExhausted: isString,
-    accountCooldown: isString, sameAccountRetry: isBoolean,
+    accountCooldown: isString,
     evidenceTimeout: isString, createdTimeout: isString, idleAccountCooldown: isString,
-  })),
-  accountRisk: isOptional(hasShape({
-    enabled: isBoolean, method: isString, concurrency: isNumber, timeout: isString, onDenied: isString,
-    patrolEnabled: isBoolean, patrolBucketDays: isNumber, patrolInterval: isOptional(isString), patrolBatchSize: isOptional(isNumber),
-    buildProbeEnabled: isOptional(isBoolean),
-    probeProxyURL: isOptional(isString), deniedConfirmations: isOptional(isNumber), deniedTTL: isOptional(isString),
   })),
   egressRotation: isOptional(hasShape({
     enabled: isBoolean, maxAttemptsPerQuarantine: isNumber, minNodeInterval: isString, maxGlobalPerHour: isNumber,
     webhookTimeout: isString, webhookRetries: isNumber, settleDelay: isString, probeTimeout: isString, probeInterval: isString,
-    canaryModelPublicId: isString, canaryCreatedTimeout: isString,
   })),
 });
 const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
@@ -197,18 +202,12 @@ const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
 });
 export const defaultRequestRetryConfig = (): NonNullable<SettingsConfigDTO["requestRetry"]> => ({
   enabled: true, maxAttempts: 2, onExhausted: "fail_closed",
-  accountCooldown: "24h", sameAccountRetry: true,
+  accountCooldown: "24h",
   evidenceTimeout: "3.5s", createdTimeout: "5s", idleAccountCooldown: "15m",
 });
 export const defaultEgressRotationConfig = (): NonNullable<SettingsConfigDTO["egressRotation"]> => ({
   enabled: true, maxAttemptsPerQuarantine: 3, minNodeInterval: "3m", maxGlobalPerHour: 6,
   webhookTimeout: "15s", webhookRetries: 2, settleDelay: "20s", probeTimeout: "2m", probeInterval: "5s",
-  canaryModelPublicId: "", canaryCreatedTimeout: "10s",
-});
-export const defaultAccountRiskConfig = (): NonNullable<SettingsConfigDTO["accountRisk"]> => ({
-  enabled: false, method: "ssoProbe", concurrency: 2, timeout: "30s", onDenied: "flag",
-  patrolEnabled: false, patrolBucketDays: 30, patrolInterval: "15m", patrolBatchSize: 50, buildProbeEnabled: false,
-  probeProxyURL: "", deniedConfirmations: 2, deniedTTL: "24h",
 });
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();
@@ -218,25 +217,11 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
     ...requestRetryRaw,
   };
   const egressRotation = snapshot.config.egressRotation ?? defaultEgressRotationConfig();
-  const accountRisk = snapshot.config.accountRisk ?? defaultAccountRiskConfig();
   const segmentedSelector = snapshot.config.routing.segmentedSelector ?? { enabled: true, minCandidates: 3000, windowSize: 64 };
   return {
     ...snapshot,
     config: {
       ...snapshot.config,
-      accountRisk: {
-        ...accountRisk,
-        method: accountRisk.method || "ssoProbe",
-        onDenied: accountRisk.onDenied || "flag",
-        concurrency: accountRisk.concurrency || 2,
-        // 后端 0 = 用默认(30s)。"0s" 是非空字符串(真值),必须显式归一,
-        // 否则 zod 正数校验会卡死整个设置表单的保存。
-        timeout: accountRisk.timeout && accountRisk.timeout !== "0s" ? accountRisk.timeout : "30s",
-        patrolBucketDays: accountRisk.patrolBucketDays || 30,
-        patrolInterval: accountRisk.patrolInterval && accountRisk.patrolInterval !== "0s" ? accountRisk.patrolInterval : "15m",
-        patrolBatchSize: accountRisk.patrolBatchSize || 50,
-        buildProbeEnabled: accountRisk.buildProbeEnabled ?? false,
-      },
       providerWeb: {
         ...snapshot.config.providerWeb,
         streamIdleTimeout: snapshot.config.providerWeb.streamIdleTimeout || "1m30s",
@@ -248,7 +233,7 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
       audit: {
         ...snapshot.config.audit,
         commitDelayMS: snapshot.config.audit.commitDelayMS ?? 5,
-        retentionDays: snapshot.config.audit.retentionDays ?? 7,
+        retentionPeriod: snapshot.config.audit.retentionPeriod ?? `${(snapshot.config.audit.retentionDays ?? 7) * 24}h`,
       },
       routing: {
         ...snapshot.config.routing,
@@ -280,6 +265,15 @@ const decodeSettingsSnapshotRaw = createObjectDecoder<SettingsSnapshotDTO>("sett
   updatedAt: isString,
   revision: isString,
   restartRequired: isArrayOf(isString),
+  appliedRevision: isOptional(isString),
+  applyPending: isOptional(isBoolean),
+  applyTargets: isOptional(isArrayOf(hasShape({ name: isString, appliedRevision: isString, pending: isBoolean, error: isOptional(isString), lastAttemptAt: isOptional(isString) }))),
+  notification: isOptional(hasShape({ revision: isString, state: isOneOf("disabled", "observed", "pending", "published", "failed"), error: isOptional(isString), lastAttemptAt: isOptional(isString) })),
+  fileRequestRetry: isOptional(hasShape({
+    enabled: isBoolean, maxAttempts: isNumber, onExhausted: isString,
+    accountCooldown: isString,
+    evidenceTimeout: isString, createdTimeout: isString, idleAccountCooldown: isString,
+  })),
 });
 const decodeSettingsSnapshot = (value: unknown) => withSettingsDefaults(decodeSettingsSnapshotRaw(value));
 const egressIPProbeValidator = hasShape({
@@ -305,7 +299,7 @@ const egressNodePoolRefValidator = hasShape({ id: isString, name: isString });
 
 const egressNodeValidator = hasShape({
   id: isString, name: isString, enabled: isBoolean,
-  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), proxyPool: isBoolean,
+  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), proxyPool: isBoolean, rotatingEndpoint: isBoolean,
   sourceId: isOptional(isString), sourceName: isOptional(isString), pools: isOptional(isArrayOf(egressNodePoolRefValidator)),
   accountBoundProxy: isBoolean,
   rotationConfigured: isBoolean, rotationEnabled: isBoolean, lastRotatedAt: isOptional(isString), rotationAttempts: isNumber, lastRotationError: isOptional(isString),
@@ -313,11 +307,12 @@ const egressNodeValidator = hasShape({
   health: isNumber, failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString),
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
+  quality: isOptional(isObject),
 });
 
 const decodeEgressNodeRaw = createObjectDecoder<EgressNodeWireDTO>("egress node", {
   id: isString, name: isString, enabled: isBoolean,
-  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), proxyPool: isBoolean,
+  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), proxyPool: isBoolean, rotatingEndpoint: isBoolean,
   sourceId: isOptional(isString), sourceName: isOptional(isString), pools: isOptional(isArrayOf(egressNodePoolRefValidator)),
   accountBoundProxy: isBoolean,
   rotationConfigured: isBoolean, rotationEnabled: isBoolean, lastRotatedAt: isOptional(isString), rotationAttempts: isNumber, lastRotationError: isOptional(isString),
@@ -325,6 +320,7 @@ const decodeEgressNodeRaw = createObjectDecoder<EgressNodeWireDTO>("egress node"
   health: isNumber, failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString),
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
+  quality: isOptional(isObject),
 });
 const decodeEgressNode = (value: unknown) => withEgressNodeProbeDefaults(decodeEgressNodeRaw(value));
 type EgressNodeListWireDTO = {
@@ -418,14 +414,14 @@ const decodeEgressProbeResult = (value: unknown): EgressProbeResultDTO => {
 
 const egressPoolValidator = hasShape({
 	id: isString, name: isString, enabled: isBoolean,
-	strategy: isOneOf("affinity", "random", "sticky", "rotation"),
+	strategy: isOneOf("affinity", "random", "sticky", "rotation", "least-used"),
 	fallbackMode: isOneOf("none", "pool", "direct"), fallbackPoolId: isOptional(isString), fallbackPoolName: isOptional(isString),
 	memberCount: isNumber, healthyCount: isNumber, quarantinedCount: isNumber, memberIds: isArrayOf(isString), preferredNodeId: isOptional(isString), rotationCursorNodeId: isOptional(isString), lastSelectedNodeId: isOptional(isString), createdAt: isString, updatedAt: isString,
 });
 
 const decodeEgressPool = createObjectDecoder<EgressPoolDTO>("egress pool", {
 	id: isString, name: isString, enabled: isBoolean,
-	strategy: isOneOf("affinity", "random", "sticky", "rotation"),
+	strategy: isOneOf("affinity", "random", "sticky", "rotation", "least-used"),
 	fallbackMode: isOneOf("none", "pool", "direct"), fallbackPoolId: isOptional(isString), fallbackPoolName: isOptional(isString),
 	memberCount: isNumber, healthyCount: isNumber, quarantinedCount: isNumber, memberIds: isArrayOf(isString), preferredNodeId: isOptional(isString), rotationCursorNodeId: isOptional(isString), lastSelectedNodeId: isOptional(isString), createdAt: isString, updatedAt: isString,
 });
@@ -434,19 +430,24 @@ type EgressPoolListWire = { items: EgressPoolDTO[] };
 const decodeEgressPools = createObjectDecoder<EgressPoolListWire>("egress pools", { items: isArrayOf(egressPoolValidator) });
 
 
-export function getSettings(): Promise<SettingsSnapshotDTO> {
-  return apiRequest("/api/admin/v1/settings", {}, decodeSettingsSnapshot);
+export function getSettings(signal?: AbortSignal): Promise<SettingsSnapshotDTO> {
+  return apiRequest("/api/admin/v1/settings", { signal }, decodeSettingsSnapshot);
 }
 
-export function updateSettings(revision: string, config: SettingsConfigDTO): Promise<SettingsSnapshotDTO> {
-  return apiRequest("/api/admin/v1/settings", { method: "PUT", body: { revision, config } }, decodeSettingsSnapshot);
+export function updateSettings(revision: string, config: SettingsConfigDTO, signal?: AbortSignal): Promise<SettingsSnapshotDTO> {
+  return apiRequest("/api/admin/v1/settings", { method: "PUT", body: { revision, config }, signal }, decodeSettingsSnapshot);
 }
 
-// resetSettings 删除持久化运行设置：可编辑字段恢复以 config.yaml
+// resetSettings 移除运行覆盖并推进持久版本：可编辑字段恢复以 config.yaml
 // 为默认（后台保存过的覆盖被移除），返回重置后的快照。
-export function resetSettings(): Promise<SettingsSnapshotDTO> {
-  return apiRequest("/api/admin/v1/settings", { method: "DELETE" }, decodeSettingsSnapshot);
+export function resetSettings(revision: string, signal?: AbortSignal): Promise<SettingsSnapshotDTO> {
+  return apiRequest("/api/admin/v1/settings", { method: "DELETE", body: { revision }, signal }, decodeSettingsSnapshot);
 }
+
+export function resetSettingsRotation(revision: string, signal?: AbortSignal): Promise<SettingsSnapshotDTO> {
+  return apiRequest("/api/admin/v1/settings/egress-rotation/reset", { method: "POST", body: { revision }, signal }, decodeSettingsSnapshot);
+}
+
 
 export function runAccountRiskPatrol(): Promise<{ due: number }> {
   return apiRequest("/api/admin/v1/settings/account-risk/patrol", { method: "POST" }, createObjectDecoder<{ due: number }>("patrol run", { due: isNumber }));
@@ -642,12 +643,12 @@ export function importEgressText(input: { name: string; content: string }): Prom
   return apiRequest("/api/admin/v1/egress-imports", { method: "POST", body: input }, decodeEgressImportResult);
 }
 
-export function getEgressOperationsConfig(): Promise<EgressOperationsConfigDTO> {
-  return apiRequest("/api/admin/v1/egress-operations", {}, decodeEgressOperationsConfig);
+export function getEgressOperationsConfig(signal?: AbortSignal): Promise<EgressOperationsConfigDTO> {
+  return apiRequest("/api/admin/v1/egress-operations", { signal }, decodeEgressOperationsConfig);
 }
 
-export function updateEgressOperationsConfig(input: Omit<EgressOperationsConfigDTO, "updatedAt">): Promise<EgressOperationsConfigDTO> {
-  return apiRequest("/api/admin/v1/egress-operations", { method: "PUT", body: input }, decodeEgressOperationsConfig);
+export function updateEgressOperationsConfig(input: Omit<EgressOperationsConfigDTO, "updatedAt">, signal?: AbortSignal): Promise<EgressOperationsConfigDTO> {
+  return apiRequest("/api/admin/v1/egress-operations", { method: "PUT", body: input, signal }, decodeEgressOperationsConfig);
 }
 
 export function getEgressRoutingStats(): Promise<{ items: EgressRoutingStatDTO[] }> {

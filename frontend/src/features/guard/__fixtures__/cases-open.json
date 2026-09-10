@@ -1,0 +1,106 @@
+{
+  "items": [
+    {
+      "evidence": {
+        "account_est": {
+          "degraded_exits": 0,
+          "span_nodes": 0,
+          "witness_exits": 0
+        },
+        "defendant": 3068,
+        "exit": {
+          "epoch": 0,
+          "node": 113
+        },
+        "trigger": "traffic_degraded"
+      },
+      "id": 49,
+      "live": {
+        "account_degraded_exits": 1,
+        "account_need_exits": 3,
+        "account_need_span_nodes": 2,
+        "account_span_nodes": 1,
+        "case_id": 49,
+        "defendant": 3068,
+        "exit_degraded": 1,
+        "exit_need_k": 3,
+        "exit_need_n": 4,
+        "exit_witnesses": 2,
+        "pending_probes": 2,
+        "waiting_reason": "等待本轮取证探针结论"
+      },
+      "opened_at": "2026-09-03T14:00:13.191719985Z",
+      "parties": [
+        {
+          "account_id": 3068,
+          "disposition": "remanded",
+          "epoch": 0,
+          "kind": "account",
+          "node_id": 0,
+          "role": "defendant"
+        },
+        {
+          "account_id": 0,
+          "disposition": "remanded",
+          "epoch": 0,
+          "kind": "exit",
+          "node_id": 113,
+          "role": "co_remanded"
+        }
+      ],
+      "status": "investigating",
+      "verdict": ""
+    },
+    {
+      "evidence": {
+        "account_est": {
+          "degraded_exits": 0,
+          "span_nodes": 0,
+          "witness_exits": 0
+        },
+        "defendant": 3065,
+        "exit": {
+          "epoch": 0,
+          "node": 116
+        },
+        "trigger": "traffic_degraded"
+      },
+      "id": 48,
+      "live": {
+        "account_degraded_exits": 2,
+        "account_need_exits": 3,
+        "account_need_span_nodes": 2,
+        "account_span_nodes": 2,
+        "case_id": 48,
+        "defendant": 3065,
+        "exit_degraded": 3,
+        "exit_need_k": 3,
+        "exit_need_n": 4,
+        "exit_witnesses": 3,
+        "pending_probes": 1,
+        "waiting_reason": "等待本轮取证探针结论"
+      },
+      "opened_at": "2026-09-03T13:59:58.191067479Z",
+      "parties": [
+        {
+          "account_id": 3065,
+          "disposition": "remanded",
+          "epoch": 0,
+          "kind": "account",
+          "node_id": 0,
+          "role": "defendant"
+        },
+        {
+          "account_id": 0,
+          "disposition": "remanded",
+          "epoch": 0,
+          "kind": "exit",
+          "node_id": 113,
+          "role": "co_remanded"
+        }
+      ],
+      "status": "investigating",
+      "verdict": ""
+    }
+  ]
+}

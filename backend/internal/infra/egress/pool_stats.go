@@ -1,7 +1,7 @@
 package egress
 
 import (
-	"sort"
+	"container/list"
 	"sync"
 	"time"
 )
@@ -10,7 +10,9 @@ import (
 // 选中次数证明策略分布，失败次数证明故障切换行为。这是验证调度策略
 // 是否生效的最直接证据；重启或手动清零后归零，不落库。
 type poolNodeStatCounters struct {
-	mu sync.RWMutex
+	mu      sync.RWMutex
+	lru     list.List
+	entries map[poolStatKey]*list.Element
 	// since 全局起点;poolSince 按池记录清零时刻,避免重置一个池时
 	// 悄悄改掉所有池的统计起点。
 	since     time.Time
@@ -20,6 +22,11 @@ type poolNodeStatCounters struct {
 }
 
 // poolNodeFailure 带最近写入时间, 供容量驱逐挑选最旧条目。
+type poolStatKey struct {
+	poolID, nodeID uint64
+	failure        bool
+}
+
 type poolNodeFailure struct {
 	count uint64
 	at    time.Time
@@ -64,57 +71,37 @@ func RecordPoolSelection(poolID, nodeID uint64) {
 	now := time.Now().UTC()
 	stat.Selections++
 	stat.LastSelectedAt = now
-	poolNodeStats.evictLocked(now)
+	poolNodeStats.touchLocked(poolStatKey{poolID: poolID, nodeID: nodeID})
 }
 
-// evictLocked 在条目总数超限时逐出最旧的统计。仅在越过上限时才付出
-// O(n log n) 排序代价, 常态路径为 O(1)。
-func (c *poolNodeStatCounters) evictLocked(now time.Time) {
-	total := len(c.failures)
-	for _, nodes := range c.pools {
-		total += len(nodes)
+// touchLocked maintains one bounded LRU for selection and failure records.
+// Recording an existing member does constant work regardless of pool count;
+// admitting a new member evicts at most one old record.
+func (c *poolNodeStatCounters) touchLocked(key poolStatKey) {
+	if c.entries == nil {
+		c.entries = make(map[poolStatKey]*list.Element)
 	}
-	if total <= poolStatsMaxEntries {
+	if item := c.entries[key]; item != nil {
+		c.lru.MoveToBack(item)
 		return
 	}
-	type aged struct {
-		poolID, nodeID uint64
-		at             time.Time
+	c.entries[key] = c.lru.PushBack(key)
+	if c.lru.Len() <= poolStatsMaxEntries {
+		return
 	}
-	entries := make([]aged, 0, total)
-	for poolID, nodes := range c.pools {
-		for nodeID, stat := range nodes {
-			entries = append(entries, aged{poolID, nodeID, stat.LastSelectedAt})
-		}
+	oldest := c.lru.Front()
+	removed := oldest.Value.(poolStatKey)
+	c.lru.Remove(oldest)
+	delete(c.entries, removed)
+	if removed.failure {
+		delete(c.failures, removed.nodeID)
+		return
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
-	excess := total - poolStatsMaxEntries
-	evicted := 0
-	for i := 0; i < excess && i < len(entries); i++ {
-		poolID, nodeID := entries[i].poolID, entries[i].nodeID
-		if nodes := c.pools[poolID]; nodes != nil {
-			delete(nodes, nodeID)
-			if len(nodes) == 0 {
-				delete(c.pools, poolID)
-				delete(c.poolSince, poolID)
-			}
-		}
-		evicted++
-	}
-	// 池条目不足抵扣超限时, 继续按最近写入时间逐出最旧的失败计数。
-	if evicted < excess && len(c.failures) > 0 {
-		failureAges := make([]aged, 0, len(c.failures))
-		for nodeID, failure := range c.failures {
-			failureAges = append(failureAges, aged{nodeID: nodeID, at: failure.at})
-		}
-		sort.Slice(failureAges, func(i, j int) bool { return failureAges[i].at.Before(failureAges[j].at) })
-		for _, entry := range failureAges {
-			if evicted >= excess {
-				break
-			}
-			delete(c.failures, entry.nodeID)
-			evicted++
-		}
+	nodes := c.pools[removed.poolID]
+	delete(nodes, removed.nodeID)
+	if len(nodes) == 0 {
+		delete(c.pools, removed.poolID)
+		delete(c.poolSince, removed.poolID)
 	}
 }
 
@@ -122,14 +109,30 @@ func (c *poolNodeStatCounters) evictLocked(now time.Time) {
 // 失败/防爬拒绝）。失败按节点计数:租约上下文不透传到反馈路径,无法
 // 归因到具体池——同一节点在 N 个池里各 +1 会伪装成池归因,这里只记
 // 全局节点计数,快照读取时按节点合并展示。
-func RecordPoolNodeFailure(nodeID uint64) {
+func RecordPoolNodeFailure(nodeID uint64) { recordPoolNodeFailures(nodeID, 1) }
+
+func recordPoolNodeFailures(nodeID uint64, count int) {
 	poolNodeStats.mu.Lock()
 	defer poolNodeStats.mu.Unlock()
 	failure := poolNodeStats.failures[nodeID]
-	failure.count++
+	failure.count += uint64(max(1, count))
 	failure.at = time.Now().UTC()
 	poolNodeStats.failures[nodeID] = failure
-	poolNodeStats.evictLocked(failure.at)
+	poolNodeStats.touchLocked(poolStatKey{nodeID: nodeID, failure: true})
+}
+
+// poolSelectionCounts 返回一个池内各成员的累计选中次数(least-used
+// 策略消费;无记录的成员缺席=0,新成员优先承接)。
+func poolSelectionCounts(poolID uint64) map[uint64]uint64 {
+	poolNodeStats.mu.RLock()
+	defer poolNodeStats.mu.RUnlock()
+	counts := make(map[uint64]uint64, len(poolNodeStats.pools[poolID]))
+	for nodeID, stat := range poolNodeStats.pools[poolID] {
+		if stat != nil {
+			counts[nodeID] = stat.Selections
+		}
+	}
+	return counts
 }
 
 // PoolStatsSnapshot 返回一个池的统计快照（只含有记录的节点；前端与
@@ -155,6 +158,17 @@ func PoolStatsSnapshot(poolID uint64) ([]PoolNodeStat, time.Time) {
 func ResetPoolStats(poolID uint64) {
 	poolNodeStats.mu.Lock()
 	defer poolNodeStats.mu.Unlock()
+	for nodeID := range poolNodeStats.pools[poolID] {
+		key := poolStatKey{poolID: poolID, nodeID: nodeID}
+		if element := poolNodeStats.entries[key]; element != nil {
+			poolNodeStats.lru.Remove(element)
+			delete(poolNodeStats.entries, key)
+		}
+	}
 	delete(poolNodeStats.pools, poolID)
+	// Unknown/deleted pools must not create an unbounded timestamp tombstone map.
+	if len(poolNodeStats.poolSince) >= poolStatsMaxEntries {
+		clear(poolNodeStats.poolSince)
+	}
 	poolNodeStats.poolSince[poolID] = time.Now().UTC()
 }

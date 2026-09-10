@@ -5,9 +5,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type MediaJobRepository struct{ db *Database }
@@ -20,23 +22,89 @@ func NewMediaAssetRepository(db *Database) *MediaAssetRepository {
 	return &MediaAssetRepository{db: db}
 }
 
+// Explicit columns let a SQLite connection notice a concurrently added source
+// column while preparing the statement. SELECT * can expose the old column list
+// before the driver steps and refreshes its schema on that connection.
+func (r *MediaAssetRepository) assetRows(ctx context.Context) *gorm.DB {
+	return r.db.db.WithContext(ctx).Session(&gorm.Session{QueryFields: true})
+}
+
 func (r *MediaAssetRepository) CreateMediaAsset(ctx context.Context, value media.Asset) error {
+	if value.ExpiresAt != nil || strings.HasPrefix(value.ID, media.InputAssetIDPrefix) {
+		return repository.ErrInvalidRecord
+	}
 	row := mediaAssetModel{
 		ID: value.ID, Kind: value.Kind, StorageKey: value.StorageKey, MIMEType: value.MIMEType,
 		SizeBytes: value.SizeBytes, SHA256: value.SHA256, ExpiresAt: value.ExpiresAt, CreatedAt: value.CreatedAt,
+		SourceJobID: value.SourceJobID,
 	}
-	return r.db.db.WithContext(ctx).Create(&row).Error
+	if value.SourceJobID == "" {
+		return r.db.db.WithContext(ctx).Create(&row).Error
+	}
+	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var job mediaJobModel
+		// Serialize provenance registration with terminal state and deletion.
+		// This lock does not select or mutate the job's final result.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").Where("id = ?", value.SourceJobID).First(&job).Error; err != nil {
+			return mapError(err)
+		}
+		if job.Status != string(media.StatusQueued) && job.Status != string(media.StatusInProgress) {
+			return repository.ErrConflict
+		}
+		return tx.Create(&row).Error
+	})
 }
 
 func (r *MediaAssetRepository) GetMediaAsset(ctx context.Context, id string) (media.Asset, error) {
 	var row mediaAssetModel
-	if err := r.db.db.WithContext(ctx).Where("id = ?", id).First(&row).Error; err != nil {
+	if err := r.assetRows(ctx).Where("id = ?", id).First(&row).Error; err != nil {
 		return media.Asset{}, mapError(err)
 	}
 	return media.Asset{
 		ID: row.ID, Kind: row.Kind, StorageKey: row.StorageKey, MIMEType: row.MIMEType,
 		SizeBytes: row.SizeBytes, SHA256: row.SHA256, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt,
+		SourceJobID: row.SourceJobID,
 	}, nil
+}
+
+func (r *MediaAssetRepository) ListMediaAssetsBySourceJob(ctx context.Context, jobID string, limit int) ([]media.Asset, error) {
+	if limit < 1 || limit > repository.MaxMediaAssetLookupKeys {
+		return nil, repository.ErrLimitExceeded
+	}
+	var rows []mediaAssetModel
+	if jobID == "" {
+		return []media.Asset{}, nil
+	}
+	if err := r.assetRows(ctx).Where("source_job_id = ?", jobID).Order("id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	values := make([]media.Asset, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, media.Asset{ID: row.ID, Kind: row.Kind, StorageKey: row.StorageKey, MIMEType: row.MIMEType, SizeBytes: row.SizeBytes, SHA256: row.SHA256, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, SourceJobID: row.SourceJobID})
+	}
+	return values, nil
+}
+
+func (r *MediaAssetRepository) FindMediaAssetStorageKeys(ctx context.Context, keys []string) (map[string]struct{}, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) > repository.MaxMediaAssetLookupKeys {
+		return nil, repository.ErrLimitExceeded
+	}
+	known := make(map[string]struct{}, len(keys))
+	if len(keys) == 0 {
+		return known, nil
+	}
+	var existing []string
+	if err := r.db.db.WithContext(ctx).Model(&mediaAssetModel{}).
+		Where("storage_key IN ?", keys).Pluck("storage_key", &existing).Error; err != nil {
+		return nil, err
+	}
+	for _, key := range existing {
+		known[key] = struct{}{}
+	}
+	return known, nil
 }
 
 // ListMediaAssets 通过字段投影返回符合筛选条件的稳定分页结果。
@@ -88,14 +156,14 @@ func (r *MediaAssetRepository) ListOldestMediaAssets(ctx context.Context, offset
 		offset = 0
 	}
 	var rows []mediaAssetModel
-	if err := r.db.db.WithContext(ctx).Order("created_at ASC, id ASC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
+	if err := r.assetRows(ctx).Order("created_at ASC, id ASC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	values := make([]media.Asset, 0, len(rows))
 	for _, row := range rows {
 		values = append(values, media.Asset{
 			ID: row.ID, Kind: row.Kind, StorageKey: row.StorageKey, MIMEType: row.MIMEType,
-			SizeBytes: row.SizeBytes, SHA256: row.SHA256, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt,
+			SizeBytes: row.SizeBytes, SHA256: row.SHA256, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, SourceJobID: row.SourceJobID,
 		})
 	}
 	return values, nil
@@ -109,7 +177,7 @@ func (r *MediaAssetRepository) ListExpiredMediaAssets(ctx context.Context, befor
 		offset = 0
 	}
 	var rows []mediaAssetModel
-	if err := r.db.db.WithContext(ctx).
+	if err := r.assetRows(ctx).
 		Where("expires_at IS NOT NULL AND expires_at <= ?", before).
 		Order("expires_at ASC, id ASC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
@@ -118,21 +186,10 @@ func (r *MediaAssetRepository) ListExpiredMediaAssets(ctx context.Context, befor
 	for _, row := range rows {
 		values = append(values, media.Asset{
 			ID: row.ID, Kind: row.Kind, StorageKey: row.StorageKey, MIMEType: row.MIMEType,
-			SizeBytes: row.SizeBytes, SHA256: row.SHA256, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt,
+			SizeBytes: row.SizeBytes, SHA256: row.SHA256, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, SourceJobID: row.SourceJobID,
 		})
 	}
 	return values, nil
-}
-
-func (r *MediaAssetRepository) ExpireMediaInputIfUnreferenced(ctx context.Context, id string, expiresAt time.Time) (bool, error) {
-	referencePattern := "%" + media.InputReference(id) + "%"
-	activeReference := r.db.db.Model(&mediaJobModel{}).Select("1").
-		Where("status IN ? AND input_json LIKE ?", []string{string(media.StatusQueued), string(media.StatusInProgress)}, referencePattern)
-	result := r.db.db.WithContext(ctx).Model(&mediaAssetModel{}).
-		Where("id = ? AND kind IN ? AND expires_at IS NOT NULL", id, []string{"image", "video"}).
-		Where("NOT EXISTS (?)", activeReference).
-		Update("expires_at", expiresAt)
-	return result.RowsAffected > 0, result.Error
 }
 
 func (r *MediaAssetRepository) DeleteMediaAsset(ctx context.Context, id string) error {
@@ -155,6 +212,19 @@ func (r *MediaAssetRepository) ListProtectedMediaAssetIDs(ctx context.Context) (
 		Pluck("result_asset_id", &jobAssetIDs).Error; err != nil {
 		return nil, err
 	}
+	var uploadAssetIDs []string
+	if err := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("upload_asset_id <> '' AND status IN ?", []string{string(media.StatusQueued), string(media.StatusInProgress)}).Pluck("upload_asset_id", &uploadAssetIDs).Error; err != nil {
+		return nil, err
+	}
+	jobAssetIDs = append(jobAssetIDs, uploadAssetIDs...)
+	var sourceAssetIDs []string
+	if err := r.db.db.WithContext(ctx).Model(&mediaAssetModel{}).
+		Joins("JOIN media_jobs ON media_jobs.id = media_assets.source_job_id").
+		Where("media_jobs.status IN ?", []media.Status{media.StatusQueued, media.StatusInProgress}).
+		Pluck("media_assets.id", &sourceAssetIDs).Error; err != nil {
+		return nil, err
+	}
+	jobAssetIDs = append(jobAssetIDs, sourceAssetIDs...)
 	for _, id := range jobAssetIDs {
 		if id != "" {
 			protected[id] = struct{}{}
@@ -273,9 +343,9 @@ func (r *MediaUploadTicketRepository) DeleteExpiredUploadTickets(ctx context.Con
 	return result.RowsAffected, result.Error
 }
 
-func (r *MediaUploadTicketRepository) BindJobResultAsset(ctx context.Context, jobID, assetID string) error {
+func (r *MediaUploadTicketRepository) BindLegacyJobResultAsset(ctx context.Context, jobID, assetID string) error {
 	result := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
-		Where("id = ?", jobID).
+		Where("id = ? AND execution_revision = 0 AND status IN ?", jobID, []media.Status{media.StatusQueued, media.StatusInProgress}).
 		Updates(map[string]any{"result_asset_id": assetID, "updated_at": time.Now().UTC()})
 	if result.Error != nil {
 		return result.Error
@@ -295,7 +365,40 @@ func ticketToDomain(row mediaUploadTicketModel) repository.MediaUploadTicket {
 }
 
 func (r *MediaJobRepository) CreateMediaJob(ctx context.Context, value media.Job) error {
-	return r.db.db.WithContext(ctx).Create(mediaJobFromDomain(value)).Error
+	if err := value.Limits.Validate(); err != nil {
+		return err
+	}
+	if value.Execution != (media.VideoExecution{}) {
+		if err := value.Execution.Validate(); err != nil {
+			return err
+		}
+	}
+	if !value.AccessPolicy.IsLegacy() {
+		if _, err := value.AccessPolicy.Scope(); err != nil {
+			return err
+		}
+	}
+	return r.createMediaJobWithInputs(ctx, value)
+}
+
+func (r *MediaJobRepository) SaveMediaJobAccessPolicy(ctx context.Context, id, claimToken string, policy media.JobAccessPolicy) error {
+	scope, err := policy.Scope()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(claimToken) == "" {
+		return repository.ErrConflict
+	}
+	result := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
+		Where("id = ? AND claim_token = ? AND status = ? AND access_policy_version = 0", id, claimToken, media.StatusInProgress).
+		Updates(map[string]any{"access_policy_version": policy.Version, "account_provider_scope": scope.Providers, "account_tier_scope": scope.Tiers})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return repository.ErrConflict
+	}
+	return nil
 }
 
 func (r *MediaJobRepository) GetMediaJob(ctx context.Context, id string, clientKeyID uint64) (media.Job, error) {
@@ -326,31 +429,38 @@ func (r *MediaJobRepository) GetMediaJobsByIDs(ctx context.Context, ids []string
 
 func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job) error {
 	updates := mediaJobFromDomain(value)
-	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", value.ID)
-	if value.ClaimToken != "" {
-		query = query.Where("claim_token = ?", value.ClaimToken)
-	}
+	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ? AND execution_revision = ?", value.ID, value.Execution.Revision)
+	query = query.Where("claim_token = ?", value.ClaimToken).
+		Where("status IN ?", []media.Status{media.StatusQueued, media.StatusInProgress})
 	// InputJSON and InputImageCount are immutable creation metadata. Progress and
 	// terminal updates must not resend a multi-megabyte Base64 payload.
-	result := query.Select("request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "upstream_url", "result_asset_id", "content_type", "error_code", "error_message", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
+	// Usage handoff belongs exclusively to MarkMediaJobUsageRecorded. A worker's
+	// older snapshot must neither forge it nor clear a peer's acknowledgement.
+	columns := []string{"egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "status", "progress", "error_code", "error_message", "lease_until", "updated_at", "completed_at"}
+	// New jobs bind account and output only through a fenced execution checkpoint.
+	// Legacy writers retain their existing terminal update until migration/adoption.
+	if value.Execution.Revision == 0 {
+		columns = append(columns, "account_id", "account_name", "upstream_url", "result_asset_id", "content_type")
+	}
+	result := query.Select(columns).Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
-}
-
-// DeleteMediaJob 仅删除终态任务，避免管理端与视频 Worker 并发修改同一任务。
-func (r *MediaJobRepository) DeleteMediaJob(ctx context.Context, id string) error {
-	result := r.db.db.WithContext(ctx).
-		Where("id = ? AND status IN ?", id, []media.Status{media.StatusCompleted, media.StatusFailed}).
-		Delete(&mediaJobModel{})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
+		// The first terminal write freezes completion facts. A retry after a lost
+		// commit acknowledgement can confirm that terminal state, but cannot
+		// rewrite it or erase subsequent completion handoffs.
+		if value.Status == media.StatusCompleted || value.Status == media.StatusFailed {
+			var count int64
+			if err := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
+				Where("id = ? AND execution_revision = ? AND claim_token = ? AND status = ?", value.ID, value.Execution.Revision, value.ClaimToken, value.Status).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 1 {
+				return nil
+			}
+		}
 		return repository.ErrNotFound
 	}
 	return nil
@@ -466,20 +576,32 @@ func (r *MediaJobRepository) TryClaimMediaJob(ctx context.Context, id string, no
 	if claimToken == "" {
 		return media.Job{}, false, repository.ErrConflict
 	}
+	from := media.StatusQueued
 	result := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
-		Where("id = ? AND (status = ? OR (status = ? AND (lease_until IS NULL OR lease_until <= ?)))", id, media.StatusQueued, media.StatusInProgress, now).
-		Updates(map[string]any{"status": media.StatusInProgress, "lease_until": leaseUntil, "claim_token": claimToken, "updated_at": now})
+		Where("id = ? AND status = ?", id, from).
+		Updates(map[string]any{"status": media.StatusInProgress, "lease_until": leaseUntil.UTC(), "claim_token": claimToken, "updated_at": now.UTC()})
 	if result.Error != nil {
 		return media.Job{}, false, result.Error
 	}
 	if result.RowsAffected == 0 {
-		return media.Job{}, false, nil
+		from = media.StatusInProgress
+		result = r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
+			Where("id = ? AND status = ? AND (lease_until IS NULL OR lease_until <= ?)", id, from, now.UTC()).
+			Updates(map[string]any{"lease_until": leaseUntil.UTC(), "claim_token": claimToken, "updated_at": now.UTC()})
+		if result.Error != nil {
+			return media.Job{}, false, result.Error
+		}
+		if result.RowsAffected == 0 {
+			return media.Job{}, false, nil
+		}
 	}
 	var row mediaJobModel
-	if err := r.db.db.WithContext(ctx).Where("id = ?", id).First(&row).Error; err != nil {
+	if err := r.db.db.WithContext(ctx).Where("id = ? AND claim_token = ?", id, claimToken).First(&row).Error; err != nil {
 		return media.Job{}, false, mapError(err)
 	}
-	return mediaJobToDomain(row), true, nil
+	value := mediaJobToDomain(row)
+	value.ClaimedFromStatus = from
+	return value, true, nil
 }
 
 func mediaJobFromDomain(value media.Job) *mediaJobModel {
@@ -488,6 +610,9 @@ func mediaJobFromDomain(value media.Job) *mediaJobModel {
 		operation = media.VideoOperationGenerate
 	}
 	return &mediaJobModel{
+		LimitsVersion: value.Limits.Version, ExecutionDeadline: value.Limits.Deadline, PhysicalLimit: value.Limits.PhysicalLimit, PhysicalReserved: value.Limits.Reserved, PhysicalConfirmed: value.Limits.Confirmed,
+		ExecutionRevision: value.Execution.Revision, ExecutionPhase: string(value.Execution.Phase), NativeRoute: value.Execution.Route, NativeEndpoint: value.Execution.Endpoint, NativeJobID: value.Execution.NativeJobID, UploadAssetID: value.Execution.UploadAssetID, GeneratedAt: value.Execution.GeneratedAt,
+		AccessPolicyVersion: value.AccessPolicy.Version, AccountProviderScope: uint8(value.AccessPolicy.AccountScope.Providers), AccountTierScope: uint8(value.AccessPolicy.AccountScope.Tiers),
 		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName, ClientIP: value.ClientIP,
 		AccountID: mediaJobAccountID(value.AccountID), AccountName: value.AccountName,
 		EgressNodeID: value.EgressNodeID, EgressNodeName: value.EgressNodeName, EgressScope: value.EgressScope, EgressMode: value.EgressMode,
@@ -497,7 +622,7 @@ func mediaJobFromDomain(value media.Job) *mediaJobModel {
 		Status: string(value.Status), Progress: value.Progress, InputJSON: value.InputJSON, InputImageCount: mediaJobInputImageCount(value.InputImageCount), UpstreamURL: value.UpstreamURL,
 		ResultAssetID: value.ResultAssetID, ContentType: value.ContentType, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
 		LeaseUntil: value.LeaseUntil, ClaimToken: value.ClaimToken, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
-		CompletedAt: value.CompletedAt, UsageRecordedAt: value.UsageRecordedAt,
+		CompletedAt: value.CompletedAt, UsageRecordedAt: value.UsageRecordedAt, QuotaAccountID: value.Quota.AccountID, QuotaMode: value.Quota.Mode, QuotaSnapshotVersion: value.Quota.SnapshotVersion, QuotaRecordedAt: value.Quota.RecordedAt,
 	}
 }
 
@@ -515,7 +640,10 @@ func mediaJobToDomain(row mediaJobModel) media.Job {
 		operation = media.VideoOperationGenerate
 	}
 	return media.Job{
-		ID: row.ID, RequestID: row.RequestID, ClientKeyID: row.ClientKeyID, ClientKeyName: row.ClientKeyName, ClientIP: row.ClientIP,
+		Limits:       media.ExecutionLimits{Version: row.LimitsVersion, Deadline: row.ExecutionDeadline, PhysicalLimit: row.PhysicalLimit, Reserved: row.PhysicalReserved, Confirmed: row.PhysicalConfirmed},
+		Execution:    media.VideoExecution{Revision: row.ExecutionRevision, Phase: media.VideoExecutionPhase(row.ExecutionPhase), Route: row.NativeRoute, Endpoint: row.NativeEndpoint, NativeJobID: row.NativeJobID, UploadAssetID: row.UploadAssetID, GeneratedAt: row.GeneratedAt},
+		AccessPolicy: media.JobAccessPolicy{Version: row.AccessPolicyVersion, AccountScope: clientkey.AccountScope{Providers: clientkey.ProviderScope(row.AccountProviderScope), Tiers: clientkey.TierScope(row.AccountTierScope)}},
+		ID:           row.ID, RequestID: row.RequestID, ClientKeyID: row.ClientKeyID, ClientKeyName: row.ClientKeyName, ClientIP: row.ClientIP,
 		AccountID: accountID, AccountName: row.AccountName,
 		EgressNodeID: row.EgressNodeID, EgressNodeName: row.EgressNodeName, EgressScope: row.EgressScope, EgressMode: row.EgressMode,
 		Provider: row.Provider,
@@ -524,7 +652,7 @@ func mediaJobToDomain(row mediaJobModel) media.Job {
 		Status: media.Status(row.Status), Progress: row.Progress, InputJSON: row.InputJSON, InputImageCount: inputImageCount, UpstreamURL: row.UpstreamURL,
 		ResultAssetID: row.ResultAssetID, ContentType: row.ContentType, ErrorCode: row.ErrorCode, ErrorMessage: row.ErrorMessage,
 		LeaseUntil: row.LeaseUntil, ClaimToken: row.ClaimToken, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
-		CompletedAt: row.CompletedAt, UsageRecordedAt: row.UsageRecordedAt,
+		CompletedAt: row.CompletedAt, UsageRecordedAt: row.UsageRecordedAt, Quota: media.JobQuota{AccountID: row.QuotaAccountID, Mode: row.QuotaMode, SnapshotVersion: row.QuotaSnapshotVersion, RecordedAt: row.QuotaRecordedAt},
 	}
 }
 
@@ -535,25 +663,4 @@ func mediaJobAccountID(value uint64) *uint64 {
 		return nil
 	}
 	return &value
-}
-
-func (r *MediaJobRepository) CountActiveMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error) {
-	if len(keyIDs) == 0 {
-		return 0, nil
-	}
-	var count int64
-	err := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
-		Where("client_key_id IN ? AND status IN ?", keyIDs, []string{string(media.StatusQueued), string(media.StatusInProgress)}).
-		Count(&count).Error
-	return count, err
-}
-
-func (r *MediaJobRepository) DeleteTerminalMediaJobsByClientKeys(ctx context.Context, keyIDs []uint64) (int64, error) {
-	if len(keyIDs) == 0 {
-		return 0, nil
-	}
-	result := r.db.db.WithContext(ctx).
-		Where("client_key_id IN ? AND status IN ?", keyIDs, []string{string(media.StatusCompleted), string(media.StatusFailed)}).
-		Delete(&mediaJobModel{})
-	return result.RowsAffected, result.Error
 }

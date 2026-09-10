@@ -34,6 +34,8 @@ const (
 )
 
 type probeDeadObservation struct {
+	binding    string
+	revision   uint64
 	count      int
 	at         time.Time
 	confirming bool
@@ -58,9 +60,10 @@ func (s *Service) observeProbeResult(node domain.Node, result domain.ProbeResult
 		s.probeDead = make(map[uint64]probeDeadObservation)
 	}
 	entry, ok := s.probeDead[node.ID]
-	if !ok || now.Sub(entry.at) > probeDeadWindow {
+	if !ok || now.Sub(entry.at) > probeDeadWindow || entry.binding != node.EncryptedProxyURL || entry.revision != node.BindingRevision {
 		entry = probeDeadObservation{}
 	}
+	entry.binding, entry.revision = node.EncryptedProxyURL, node.BindingRevision
 	entry.at = now
 	entry.count++
 	scheduleConfirm := entry.count == 1 && !entry.confirming
@@ -69,6 +72,19 @@ func (s *Service) observeProbeResult(node domain.Node, result domain.ProbeResult
 	}
 	if entry.count >= 2 {
 		entry.confirming = false
+	}
+	if len(s.probeDead) >= 4096 {
+		for id, value := range s.probeDead {
+			if now.Sub(value.at) > probeDeadWindow {
+				delete(s.probeDead, id)
+			}
+		}
+		if len(s.probeDead) >= 4096 {
+			for id := range s.probeDead {
+				delete(s.probeDead, id)
+				break
+			}
+		}
 	}
 	s.probeDead[node.ID] = entry
 	fresh := entry.count == 2
@@ -79,32 +95,38 @@ func (s *Service) observeProbeResult(node domain.Node, result domain.ProbeResult
 	confirmDelay := probeDeadConfirmDelay
 	s.probeDeadMu.Unlock()
 	if scheduleConfirm {
-		go s.confirmProbeLater(node.ID, confirmDelay)
+		if !s.background().after(confirmDelay, func(ctx context.Context) { s.confirmProbe(ctx, node) }) {
+			s.probeDeadMu.Lock()
+			entry := s.probeDead[node.ID]
+			entry.confirming = false
+			s.probeDead[node.ID] = entry
+			s.probeDeadMu.Unlock()
+		}
 	}
 	if act {
-		s.markProbeDead(node.ID, fresh)
+		s.markProbeDead(node, fresh)
 	}
 }
 
 // confirmProbeLater 在确认延迟后补测一次: 抖动型失败在此窗口内自愈则计数
 // 归零(节点从未被标记), 仍然双族失败则计数到达阈值并触发标记。
-func (s *Service) confirmProbeLater(nodeID uint64, confirmDelay time.Duration) {
-	timer := time.NewTimer(confirmDelay)
-	defer timer.Stop()
-	<-timer.C
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	_, _ = s.testNode(ctx, nodeID, true)
+func (s *Service) confirmProbe(ctx context.Context, node domain.Node) {
+	latest, err := s.repository.GetEgressNode(ctx, node.ID)
+	if err != nil || latest.EncryptedProxyURL != node.EncryptedProxyURL || latest.BindingRevision != node.BindingRevision {
+		return
+	}
+	_, _ = s.testNode(ctx, node.ID, true)
 }
 
 // markProbeDead 对确认死出口的节点施加 transport 冷却并(配置了 webhook
 // 时)入轮换队列。fresh 表示新的死出口事件(计数恰好到达阈值): 重置轮换
 // 尝试计数, 让每个独立事件都拥有完整的 MaxAttemptsPerQuarantine 预算;
 // LastRotatedAt 由 SQL COALESCE 保留, MinNodeInterval 护栏不被击穿。
-func (s *Service) markProbeDead(nodeID uint64, fresh bool) {
+func (s *Service) markProbeDead(observed domain.Node, fresh bool) {
 	if s == nil || s.repository == nil {
 		return
 	}
+	nodeID := observed.ID
 	s.mu.RLock()
 	quarantiner := s.qualityQuarantiner
 	rotCfg := s.rotationCfg
@@ -113,11 +135,14 @@ func (s *Service) markProbeDead(nodeID uint64, fresh bool) {
 	if quarantiner == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 30*time.Second)
+	ctx, cancel := context.WithTimeout(s.background().ctx, 30*time.Second)
 	defer cancel()
 	node, err := s.repository.GetEgressNode(ctx, nodeID)
 	if err != nil {
 		s.rotationLog().Warn("egress_probe_dead_read_failed", "node_id", nodeID, "error", err.Error())
+		return
+	}
+	if node.EncryptedProxyURL != observed.EncryptedProxyURL || node.BindingRevision != observed.BindingRevision {
 		return
 	}
 	now := time.Now().UTC()
@@ -135,7 +160,15 @@ func (s *Service) markProbeDead(nodeID uint64, fresh bool) {
 			return
 		}
 	}
-	if err := quarantiner.CooldownNodeForProbeFailure(ctx, nodeID, now.Add(probeDeadCooldown)); err != nil {
+	cooldown := func() error {
+		if bound, ok := quarantiner.(interface {
+			CooldownBindingForProbeFailure(context.Context, domain.Node, time.Time) error
+		}); ok {
+			return bound.CooldownBindingForProbeFailure(ctx, observed, now.Add(probeDeadCooldown))
+		}
+		return quarantiner.CooldownNodeForProbeFailure(ctx, nodeID, now.Add(probeDeadCooldown))
+	}
+	if err := cooldown(); err != nil {
 		s.rotationLog().Warn("egress_probe_dead_cooldown_failed", "node_id", nodeID, "error", err.Error())
 		return
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
 // TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes is the
@@ -58,15 +59,15 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 		}
 		credentials = append(credentials, credential)
 	}
-	if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
+	if err := testsupport.Discover(ctx, modelRepo, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, credential := range credentials {
-		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+		if err := testsupport.Capabilities(ctx, modelRepo, accountRepo, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{ModelScope: clientkey.ModelScopeAll,
 		Name: "quality-failclosed-key", Prefix: "qfclosed", SecretHash: strings.Repeat("f", 64), EncryptedSecret: "encrypted",
 		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
 	})
@@ -91,7 +92,7 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: accounts,
 		OnExhausted: qualityRetryFailClosed,
@@ -128,14 +129,17 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 		seen[id] = true
 	}
 
-	// Every withheld account is cooling with the missing-thinking marker.
+	// Every withheld account has a temporary owner; manual and health fields remain independent.
 	for _, credential := range credentials {
 		account, getErr := accountRepo.Get(ctx, credential.ID)
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
-		if account.CooldownUntil == nil || account.LastError != lastErrorMissingThinking {
-			t.Fatalf("account %d must cool with missing-thinking, got until=%v last=%q", credential.ID, account.CooldownUntil, account.LastError)
+		if account.CooldownUntil != nil || account.LastError != "" || !account.Enabled {
+			t.Fatalf("quality hold changed manual/health fields: %+v", account)
+		}
+		if selector.localQualityAllowed(account.ID, time.Now()) {
+			t.Fatalf("account %d missing hold", account.ID)
 		}
 	}
 

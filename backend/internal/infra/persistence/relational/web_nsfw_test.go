@@ -25,13 +25,13 @@ func TestWebNSFWMarkerPersistsAcrossAccountUpserts(t *testing.T) {
 	}
 
 	first := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
-	if err := repo.MarkWebNSFWEnabled(ctx, credential.ID, first); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileNSFWEnabled, OccurredAt: first}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkWebTermsAccepted(ctx, credential.ID, account.CurrentWebTermsVersion, first); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileTermsAccepted, TermsVersion: account.CurrentWebTermsVersion, OccurredAt: first}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkWebBirthDateSet(ctx, credential.ID, first); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileBirthDateSet, OccurredAt: first}); err != nil {
 		t.Fatal(err)
 	}
 	marked, err := repo.Get(ctx, credential.ID)
@@ -42,13 +42,13 @@ func TestWebNSFWMarkerPersistsAcrossAccountUpserts(t *testing.T) {
 		t.Fatalf("markers nsfw=%v terms=%v version=%d birth=%v, want %s", marked.WebNSFWEnabledAt, marked.WebTermsAcceptedAt, marked.WebTermsAcceptedVersion, marked.WebBirthDateSetAt, first)
 	}
 
-	if err := repo.MarkWebNSFWEnabled(ctx, credential.ID, first.Add(time.Hour)); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileNSFWEnabled, OccurredAt: first.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkWebTermsAccepted(ctx, credential.ID, account.CurrentWebTermsVersion, first.Add(time.Hour)); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileTermsAccepted, TermsVersion: account.CurrentWebTermsVersion, OccurredAt: first.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkWebBirthDateSet(ctx, credential.ID, first.Add(time.Hour)); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileBirthDateSet, OccurredAt: first.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repo.UpsertManyByIdentity(ctx, []account.Credential{{
@@ -80,13 +80,13 @@ func TestWebNSFWMarkerRejectsNonWebAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkWebNSFWEnabled(ctx, credential.ID, time.Now()); err == nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileNSFWEnabled, OccurredAt: time.Now()}); err == nil {
 		t.Fatal("expected non-Web marker rejection")
 	}
-	if err := repo.MarkWebTermsAccepted(ctx, credential.ID, account.CurrentWebTermsVersion, time.Now()); err == nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileTermsAccepted, TermsVersion: account.CurrentWebTermsVersion, OccurredAt: time.Now()}); err == nil {
 		t.Fatal("expected non-Web terms marker rejection")
 	}
-	if err := repo.MarkWebBirthDateSet(ctx, credential.ID, time.Now()); err == nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileBirthDateSet, OccurredAt: time.Now()}); err == nil {
 		t.Fatal("expected non-Web birth marker rejection")
 	}
 }
@@ -116,7 +116,7 @@ func TestCurrentWebTermsVersionUpgradesLegacyMarker(t *testing.T) {
 		t.Fatalf("legacy terms state = at:%v version:%d", legacy.WebTermsAcceptedAt, legacy.WebTermsAcceptedVersion)
 	}
 	currentAt := legacyAt.Add(time.Hour)
-	if err := repo.MarkWebTermsAccepted(ctx, credential.ID, account.CurrentWebTermsVersion, currentAt); err != nil {
+	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileTermsAccepted, TermsVersion: account.CurrentWebTermsVersion, OccurredAt: currentAt}); err != nil {
 		t.Fatal(err)
 	}
 	current, err := repo.Get(ctx, credential.ID)

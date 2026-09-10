@@ -1,26 +1,18 @@
 package cli
 
 import (
-	"bytes"
 	_ "embed"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 )
 
 const (
-	gatewayCompactionPrefix      = "g2a_compact_v1."
-	gatewayCompactionVersion     = 1
-	maxGatewayCompactionSummary  = 8 << 20
 	minGatewayCompactionRunes    = 500
 	gatewayCompactionMaxAttempts = 3
 )
-
-// compactionTypeLiteral 是 input 项 type 字段的压缩类型字面量,预筛用。
-var compactionTypeLiteral = []byte(`"compaction"`)
 
 // Generated from xai-org/grok-build's full_replace_summary_prompt.txt using
 // build_summary_prompt(None), so the optional {user_context_section} slot is
@@ -30,128 +22,13 @@ var compactionTypeLiteral = []byte(`"compaction"`)
 //go:embed responses_compaction_prompt.txt
 var gatewayCompactionPrompt string
 
-type gatewayCompactionEnvelope struct {
-	Version int    `json:"version"`
-	Session string `json:"session"`
-	Summary string `json:"summary"`
-}
-
-type gatewayCompactionCodec struct {
-	cipher security.Cryptor
-}
-
-func newGatewayCompactionCodec(cipher security.Cryptor) *gatewayCompactionCodec {
-	if cipher == nil {
-		return nil
-	}
-	return &gatewayCompactionCodec{cipher: cipher}
-}
-
-func (c *gatewayCompactionCodec) encode(session, summary string) (string, error) {
-	if c == nil || c.cipher == nil {
-		return "", fmt.Errorf("compaction codec unavailable")
-	}
-	if summary == "" || len(summary) > maxGatewayCompactionSummary {
-		return "", fmt.Errorf("compaction summary size is invalid")
-	}
-	data, err := json.Marshal(gatewayCompactionEnvelope{Version: gatewayCompactionVersion, Session: session, Summary: summary})
-	if err != nil {
-		return "", err
-	}
-	encrypted, err := c.cipher.Encrypt(string(data))
-	if err != nil {
-		return "", err
-	}
-	return gatewayCompactionPrefix + encrypted, nil
-}
-
-func (c *gatewayCompactionCodec) decode(session, blob string) (summary string, owned bool, sessionDrifted bool, err error) {
-	if !strings.HasPrefix(blob, gatewayCompactionPrefix) {
-		return "", false, false, nil
-	}
-	if c == nil || c.cipher == nil {
-		return "", true, false, fmt.Errorf("compaction codec unavailable")
-	}
-	plain, err := c.cipher.Decrypt(strings.TrimPrefix(blob, gatewayCompactionPrefix))
-	if err != nil {
-		return "", true, false, fmt.Errorf("decode gateway compaction blob: %w", err)
-	}
-	var envelope gatewayCompactionEnvelope
-	if err := json.Unmarshal([]byte(plain), &envelope); err != nil {
-		return "", true, false, fmt.Errorf("decode gateway compaction payload: %w", err)
-	}
-	if envelope.Version != gatewayCompactionVersion || envelope.Summary == "" || len(envelope.Summary) > maxGatewayCompactionSummary {
-		return "", true, false, fmt.Errorf("gateway compaction payload is invalid")
-	}
-	// Session / PromptCacheKey is advisory. A still-decryptable summary from
-	// this gateway instance is kept when the client key drifts after a model
-	// switch, degrade, or TUI session change. Foreign provider blobs stay
-	// rejected because they never carry this prefix or this cipher.
-	return envelope.Summary, true, envelope.Session != session, nil
-}
-
-// expandGatewayCompactionHistory restores gateway-owned remote-v2 state to a
-// portable developer message. Foreign OpenAI/Claude/Gemini blobs are never
-// forwarded to Grok Build: its decoder cannot decrypt those provider states.
-func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, session string) ([]byte, int, int, error) {
-	// 字面量预筛:body 中不存在 "compaction" 时不可能有 type=="compaction"
-	// 的 input 项,直接跳过 map[string]any 全量装箱解码——该解码对每个
-	// Responses 请求都会执行,而绝大多数请求不含压缩项(128KB body 的装箱
-	// 解码是毫秒级,字面量扫描是微秒级)。JSON 转义(\u0063...)理论上可
-	// 绕过字面量检查,但本网关与主流客户端序列化器均不转义 ASCII 字母,
-	// 与质量扫描器 hot-path 预筛同口径;命中歧义时预筛只多做一次全量解码。
-	if !bytes.Contains(body, compactionTypeLiteral) {
-		return body, 0, 0, nil
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body, 0, 0, nil // normalizeResponsesRequest owns the public JSON error.
-	}
-	items, ok := payload["input"].([]any)
-	if !ok {
-		return body, 0, 0, nil
-	}
-	foreign := 0
-	drifted := 0
-	changed := false
-	for index, raw := range items {
-		item, ok := raw.(map[string]any)
-		if !ok || stringField(item, "type") != "compaction" {
-			continue
-		}
-		blob, _ := item["encrypted_content"].(string)
-		summary, owned, sessionDrifted, err := codec.decode(session, blob)
-		if err != nil {
-			foreign++
-			items[index] = compatibilityBoundaryMessage("A prior compacted context could not be decoded by this gateway instance. Continue from the retained conversation messages.")
-			changed = true
-			continue
-		}
-		if owned {
-			items[index] = gatewayCompactionSummaryMessage(summary)
-			if sessionDrifted {
-				drifted++
-			}
-		} else {
-			foreign++
-			items[index] = compatibilityBoundaryMessage("A compacted context created by another provider cannot be decoded by Grok Build. Continue from the retained conversation messages.")
-		}
-		changed = true
-	}
-	if !changed {
-		return body, 0, 0, nil
-	}
-	payload["input"] = items
-	encoded, err := json.Marshal(payload)
-	return encoded, foreign, drifted, err
-}
-
 // prepareGatewayCompactionSample mirrors Grok Build full-replace
-// sampling: normal /responses SSE, instructions=null, tools retained with
-// tool_choice=auto, concise reasoning summary, and the canonical final user prompt.
+// sampling: normal /responses SSE, instructions=null, tools and explicit choice
+// retained, concise reasoning summary, and the canonical final user prompt.
+// Only an absent choice uses the upstream default auto selection.
 func prepareGatewayCompactionSample(body []byte) ([]byte, error) {
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := jsonvalue.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
 	items, ok := payload["input"].([]any)
@@ -167,8 +44,12 @@ func prepareGatewayCompactionSample(body []byte) ([]byte, error) {
 	payload["store"] = false
 	payload["temperature"] = 1.0
 	if tools, ok := payload["tools"].([]any); ok && len(tools) > 0 {
-		// 0.2.105 起默认使用 auto；部分部署会拒绝 tools + tool_choice=none。
-		payload["tool_choice"] = "auto"
+		// The protocol default applies only when the client did not select a
+		// mode. Normalization has already validated explicit choices and narrowed
+		// hosted tools; summary sampling must keep that execution permission.
+		if payload["tool_choice"] == nil {
+			payload["tool_choice"] = "auto"
+		}
 	} else {
 		delete(payload, "tool_choice")
 	}
@@ -258,12 +139,6 @@ func gatewayCompactionContinuation(raw string) string {
 	return "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + cleanGatewayCompactionSummary(raw)
 }
 
-// Grok Build rebuilds full-replace history with a synthetic user_meta item.
-// Responses does not expose SyntheticReason, so a normal user input item is
-// the closest wire-level representation of that carrier.
-func gatewayCompactionSummaryMessage(text string) map[string]any {
-	return map[string]any{
-		"type": "message", "role": "user",
-		"content": []any{map[string]any{"type": "input_text", "text": text}},
-	}
+func compactionPreparationError(err error) error {
+	return &responsesRequestError{Message: err.Error(), Param: "input", Code: "compaction_history_unavailable"}
 }

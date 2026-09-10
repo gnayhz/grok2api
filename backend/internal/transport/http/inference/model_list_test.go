@@ -8,89 +8,14 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/gin-gonic/gin"
 )
 
-func TestNewModelListItemsDeduplicatesSharedPublicName(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	items := newModelListItems([]modeldomain.Route{
-		{PublicID: "Build/grok-shared", Provider: account.ProviderBuild, CreatedAt: now},
-		{PublicID: "Console/grok-shared", Provider: account.ProviderConsole, CreatedAt: now.Add(time.Second)},
-		{PublicID: "Web/grok-chat-fast", Provider: account.ProviderWeb, CreatedAt: now},
-		{PublicID: "Console/grok-imagine-image", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityImage, CreatedAt: now},
-		{PublicID: "Console/grok-imagine-image", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityImageEdit, CreatedAt: now.Add(time.Second)},
-	})
-	if len(items) != 3 || items[0].ID != "grok-shared" || items[1].ID != "grok-chat-fast" || items[2].ID != "grok-imagine-image" {
-		t.Fatalf("model list = %#v", items)
-	}
-}
-
-func TestFilterModelRoutesForClientKeyUsesProviderAndModelIntersection(t *testing.T) {
-	routes := []modeldomain.Route{
-		{ID: 1, Provider: account.ProviderBuild, PublicID: "Build/grok-shared"},
-		{ID: 2, Provider: account.ProviderWeb, PublicID: "Web/grok-shared"},
-		{ID: 3, Provider: account.ProviderConsole, PublicID: "Console/grok-shared"},
-	}
-	key := clientkeydomain.Key{ProviderScope: clientkeydomain.ProviderScopeWeb | clientkeydomain.ProviderScopeConsole, AllowedModels: []uint64{2, 3}}
-	filtered := filterModelRoutesForClientKey(routes, key)
-	if len(filtered) != 2 || filtered[0].ID != 2 || filtered[1].ID != 3 {
-		t.Fatalf("filtered routes = %#v", filtered)
-	}
-}
-
-func TestAppendReasoningModelAliasesUsesRealSupportedLevels(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	base := newModelListItems([]modeldomain.Route{
-		{PublicID: "Build/grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
-		{PublicID: "Build/grok-4.6", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
-		{PublicID: "Console/grok-4.3", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
-		{PublicID: "Console/grok-4.20-0309-reasoning", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
-		{PublicID: "Build/grok-build-0.1", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
-	})
-	expanded := appendReasoningModelAliases(base)
-	ids := make(map[string]bool, len(expanded))
-	for _, item := range expanded {
-		ids[item.ID] = true
-	}
-	for _, want := range []string{"grok-4.5", "grok-4.5-low", "grok-4.5-medium", "grok-4.5-high", "grok-4.6", "grok-4.6-low", "grok-4.6-medium", "grok-4.6-high", "grok-4.6-xhigh", "grok-4.3-none", "grok-4.3-low", "grok-4.3-medium", "grok-4.3-high", "grok-build-0.1"} {
-		if !ids[want] {
-			t.Fatalf("missing model %q in %#v", want, expanded)
-		}
-	}
-	for _, reject := range []string{
-		"grok-4.5-none", "grok-4.5-xhigh", "grok-4.5-max", "grok-4.3-xhigh", "grok-build-0.1-none",
-		"grok-4.20-0309-reasoning-low", "grok-4.20-0309-reasoning-medium", "grok-4.20-0309-reasoning-high",
-	} {
-		if ids[reject] {
-			t.Fatalf("unexpected unsupported alias %q", reject)
-		}
-	}
-}
-
-func TestAppendReasoningModelAliasesIncludesConsoleGrok46XHigh(t *testing.T) {
-	expanded := appendReasoningModelAliases([]modelListItem{{
-		ID: "grok-4.6", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityResponses,
-	}})
-	ids := make(map[string]bool, len(expanded))
-	for _, item := range expanded {
-		ids[item.ID] = true
-	}
-	for _, want := range []string{"grok-4.6-low", "grok-4.6-medium", "grok-4.6-high", "grok-4.6-xhigh"} {
-		if !ids[want] {
-			t.Fatalf("missing Console alias %q in %#v", want, expanded)
-		}
-	}
-	if ids["grok-4.6-max"] {
-		t.Fatalf("client compatibility value max must not be advertised as a model alias: %#v", expanded)
-	}
-}
-
 func TestNewCodexModelCatalogIncludesRequiredProtocolFields(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
-	items := newModelListItems([]modeldomain.Route{
-		{PublicID: "Build/grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
+	items := testPublicProducts([]modeldomain.Route{
+		{PublicID: "Build/grok-4.5", UpstreamModel: "grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
 	})
 	catalog := newCodexModelCatalog(items)
 	if len(catalog.Models) != 1 || catalog.Models[0].Slug != "grok-4.5" {
@@ -129,10 +54,10 @@ func TestNewCodexModelCatalogIncludesRequiredProtocolFields(t *testing.T) {
 }
 
 func TestCodexCatalogUsesGrok46MetadataForBaseAndXHighAlias(t *testing.T) {
-	items := []modelListItem{
-		{ID: "grok-4.6", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses},
-		{ID: "grok-4.6-xhigh", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses},
-	}
+	items := testPublicProducts([]modeldomain.Route{
+		{PublicID: "grok-4.6", UpstreamModel: "grok-4.6", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses},
+		{PublicID: "grok-4.6-xhigh", UpstreamModel: "grok-4.6", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses},
+	})
 	models := newCodexModelCatalog(items).Models
 	if len(models) != 2 {
 		t.Fatalf("model count = %d, want 2", len(models))
@@ -165,9 +90,9 @@ func TestCodexCatalogUsesGrok46MetadataForBaseAndXHighAlias(t *testing.T) {
 }
 
 func TestCodexCatalogMarksConsoleGrok420AsFixedReasoning(t *testing.T) {
-	entry := newCodexModelCatalog([]modelListItem{{
-		ID: "grok-4.20-0309-reasoning", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityResponses,
-	}}).Models[0]
+	entry := newCodexModelCatalog(testPublicProducts([]modeldomain.Route{{
+		PublicID: "grok-4.20-0309-reasoning", UpstreamModel: "grok-4.20-0309-reasoning", Provider: account.ProviderConsole, Capability: modeldomain.CapabilityResponses,
+	}})).Models[0]
 	if entry.DefaultReasoningLevel != "none" || len(entry.SupportedReasoningLevels) != 0 {
 		t.Fatalf("fixed reasoning efforts = default %q, levels %#v", entry.DefaultReasoningLevel, entry.SupportedReasoningLevels)
 	}
@@ -178,8 +103,8 @@ func TestCodexCatalogMarksConsoleGrok420AsFixedReasoning(t *testing.T) {
 
 func TestNewCodexModelCacheRespectsNonReasoningModel(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
-	items := newModelListItems([]modeldomain.Route{
-		{PublicID: "Build/grok-build-0.1", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
+	items := testPublicProducts([]modeldomain.Route{
+		{PublicID: "Build/grok-build-0.1", UpstreamModel: "grok-build-0.1", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
 	})
 	entry := newCodexModelCatalog(items).Models[0]
 	if entry.DefaultReasoningLevel != "none" {
@@ -196,11 +121,11 @@ func TestNewCodexModelCacheRespectsNonReasoningModel(t *testing.T) {
 func TestCodexCatalogHidesMediaModels(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	routes := []modeldomain.Route{
-		{PublicID: "Build/grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
-		{PublicID: "Web/grok-imagine-image-lite", Provider: account.ProviderWeb, Capability: modeldomain.CapabilityImage, CreatedAt: now},
-		{PublicID: "Web/grok-imagine-video", Provider: account.ProviderWeb, Capability: modeldomain.CapabilityVideo, CreatedAt: now},
+		{PublicID: "Build/grok-4.5", UpstreamModel: "grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses, CreatedAt: now},
+		{PublicID: "Web/grok-imagine-image-lite", UpstreamModel: "grok-imagine-image-lite", Provider: account.ProviderWeb, Capability: modeldomain.CapabilityImage, CreatedAt: now},
+		{PublicID: "Web/grok-imagine-video", UpstreamModel: "grok-imagine-video", Provider: account.ProviderWeb, Capability: modeldomain.CapabilityVideo, CreatedAt: now},
 	}
-	catalog := newCodexModelCatalog(newModelListItems(routes))
+	catalog := newCodexModelCatalog(testPublicProducts(routes))
 	if len(catalog.Models) != 3 {
 		t.Fatalf("model count = %d, want 3; slugs = %#v", len(catalog.Models), codexSlugs(catalog.Models))
 	}
@@ -219,9 +144,9 @@ func TestCodexCatalogHidesMediaModels(t *testing.T) {
 }
 
 func TestCodexCatalogUsesConservativeUnknownModelDefaults(t *testing.T) {
-	entry := newCodexModelCatalog([]modelListItem{{
-		ID: "custom-model", Provider: account.ProviderWeb, Capability: modeldomain.CapabilityChat,
-	}}).Models[0]
+	entry := newCodexModelCatalog(testPublicProducts([]modeldomain.Route{{
+		PublicID: "custom-model", UpstreamModel: "custom-model", Provider: account.ProviderWeb, Capability: modeldomain.CapabilityChat,
+	}})).Models[0]
 	if entry.ContextWindow != 128000 || entry.DefaultReasoningLevel != "none" {
 		t.Fatalf("unknown model metadata = %#v", entry)
 	}
@@ -232,9 +157,9 @@ func TestCodexCatalogUsesConservativeUnknownModelDefaults(t *testing.T) {
 
 func TestWriteCodexModelCatalogSetsETagAndHandlesNotModified(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	catalog := newCodexModelCatalog([]modelListItem{{
-		ID: "grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses,
-	}})
+	catalog := newCodexModelCatalog(testPublicProducts([]modeldomain.Route{{
+		PublicID: "grok-4.5", UpstreamModel: "grok-4.5", Provider: account.ProviderBuild, Capability: modeldomain.CapabilityResponses,
+	}}))
 	router := gin.New()
 	router.GET("/v1/models", func(c *gin.Context) { writeCodexModelCatalog(c, catalog) })
 
@@ -261,4 +186,25 @@ func codexSlugs(models []codexModelEntry) []string {
 		slugs = append(slugs, m.Slug)
 	}
 	return slugs
+}
+
+func testPublicProducts(routes []modeldomain.Route) []modeldomain.PublicModel {
+	products := make([]modeldomain.PublicModel, 0, len(routes))
+	for _, route := range routes {
+		name := modeldomain.ExternalPublicID(route.Provider, route.PublicID)
+		pinned := ""
+		if name == "grok-4.6-xhigh" {
+			pinned = "xhigh"
+		}
+		products = append(products, modeldomain.DescribePublicModel(name, []modeldomain.Route{route}, pinned))
+	}
+	return products
+}
+
+func TestNewModelListItemsEncodesPublishedIdentity(t *testing.T) {
+	products := []modeldomain.PublicModel{{ID: "team-coding", CreatedAt: time.Unix(100, 0)}}
+	items := newModelListItems(products)
+	if len(items) != 1 || items[0].ID != "team-coding" || items[0].Created != 100 || items[0].Object != "model" || items[0].OwnedBy != "grok2api" {
+		t.Fatalf("items = %#v", items)
+	}
 }

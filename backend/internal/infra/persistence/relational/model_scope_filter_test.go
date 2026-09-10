@@ -73,9 +73,9 @@ func assertModelListFiltersByClientKeyProviderAndTierScope(t *testing.T, databas
 	routes := []modeldomain.Route{
 		{PublicID: "Build/scope-free", Provider: account.ProviderBuild, UpstreamModel: "scope-free", Capability: modeldomain.CapabilityResponses, Enabled: true},
 		{PublicID: "Build/scope-super", Provider: account.ProviderBuild, UpstreamModel: "scope-super", Capability: modeldomain.CapabilityResponses, Enabled: true},
-		{PublicID: "scope-web-free", Provider: account.ProviderWeb, UpstreamModel: "scope-web-free", Capability: modeldomain.CapabilityChat, Enabled: true},
-		{PublicID: "scope-web-super", Provider: account.ProviderWeb, UpstreamModel: "scope-web-super", Capability: modeldomain.CapabilityChat, Enabled: true},
-		{PublicID: "scope-console", Provider: account.ProviderConsole, UpstreamModel: "scope-console", Capability: modeldomain.CapabilityResponses, Enabled: true},
+		{PublicID: "scope-web-free", Provider: account.ProviderWeb, UpstreamModel: "grok-chat-fast", Capability: modeldomain.CapabilityChat, Enabled: true},
+		{PublicID: "scope-web-super", Provider: account.ProviderWeb, UpstreamModel: "grok-chat-expert", Capability: modeldomain.CapabilityChat, Enabled: true},
+		{PublicID: "scope-console", Provider: account.ProviderConsole, UpstreamModel: "grok-4.3", Capability: modeldomain.CapabilityResponses, Enabled: true},
 	}
 	routeIDs := make([]uint64, 0, len(routes))
 	for index := range routes {
@@ -98,9 +98,9 @@ func assertModelListFiltersByClientKeyProviderAndTierScope(t *testing.T, databas
 	capabilities := []accountModelCapabilityModel{
 		{AccountID: accounts[0].ID, UpstreamModel: "scope-free"},
 		{AccountID: accounts[1].ID, UpstreamModel: "scope-super"},
-		{AccountID: accounts[2].ID, UpstreamModel: "scope-web-free"},
-		{AccountID: accounts[3].ID, UpstreamModel: "scope-web-super"},
-		{AccountID: accounts[4].ID, UpstreamModel: "scope-console"},
+		{AccountID: accounts[2].ID, UpstreamModel: "grok-chat-fast"},
+		{AccountID: accounts[3].ID, UpstreamModel: "grok-chat-expert"},
+		{AccountID: accounts[4].ID, UpstreamModel: "grok-4.3"},
 	}
 	if err := database.db.WithContext(ctx).Create(&capabilities).Error; err != nil {
 		t.Fatal(err)

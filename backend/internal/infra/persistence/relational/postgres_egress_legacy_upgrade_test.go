@@ -183,7 +183,7 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 	// 换 IP/降智列升级后的仓储窄方法往返。
 	until := time.Now().Add(time.Hour).UTC()
 	degradedAt := time.Now().UTC()
-	if err := nodes.UpdateEgressNodeQualityState(ctx, fixedNode.ID, 0.5, 2, &until, egressdomain.LastErrorExitIPQuality, 1, &degradedAt); err != nil {
+	if err := seedLegacyEgressQuality(nodes, ctx, fixedNode.ID, 0.5, 2, &until, egressdomain.LastErrorExitIPQuality, 1, &degradedAt); err != nil {
 		t.Fatal(err)
 	}
 	rotatedAt := degradedAt.Add(time.Minute)

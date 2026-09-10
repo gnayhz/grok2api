@@ -93,13 +93,16 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 	config.ClassTargets = map[egressdomain.TrafficClass]egressdomain.RoutingTarget{
 		egressdomain.TrafficClassInference: {Mode: egressdomain.RoutingTargetPool, PoolID: pool.ID},
 	}
-	saved, err := repo.SaveEgressOperationsConfig(ctx, config)
+	saved, err := repo.SaveEgressOperationsConfig(ctx, config, func(egressdomain.Node) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = saved
 
 	manager := infraegress.NewManager(repo, cipher)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	roundTrip := func(t *testing.T, traceCtx context.Context) (*audit.Record, uint64) {
 		t.Helper()
 		trace := infraegress.TraceFromContext(traceCtx)
@@ -142,7 +145,9 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 			t.Fatal(err)
 		}
 		emptyConfig := egressdomain.DefaultOperationsConfig()
-		if _, err := repo.SaveEgressOperationsConfig(ctx, emptyConfig); err != nil {
+		if _, err := repo.SaveEgressOperationsConfig(ctx, emptyConfig, func(egressdomain.Node) error {
+			return nil
+		}); err != nil {
 			t.Fatal(err)
 		}
 		nodes, listErr := repo.ListEgressNodes(ctx, repository.SortQuery{})
@@ -151,7 +156,9 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 		}
 		for _, node := range nodes {
 			node.Enabled = false
-			if _, updateErr := repo.UpdateEgressNode(ctx, node); updateErr != nil {
+			if _, updateErr := repo.UpdateEgressNodeConfiguration(ctx, node, func(egressdomain.Node) error {
+				return nil
+			}); updateErr != nil {
 				t.Fatal(updateErr)
 			}
 		}
@@ -180,11 +187,13 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 		poolConfig.ClassTargets = map[egressdomain.TrafficClass]egressdomain.RoutingTarget{
 			egressdomain.TrafficClassInference: {Mode: egressdomain.RoutingTargetPool, PoolID: pool.ID},
 		}
-		if _, err := repo.SaveEgressOperationsConfig(ctx, poolConfig); err != nil {
+		if _, err := repo.SaveEgressOperationsConfig(ctx, poolConfig, func(egressdomain.Node) error {
+			return nil
+		}); err != nil {
 			t.Fatal(err)
 		}
 		until := time.Now().UTC().Add(time.Hour)
-		if err := repo.UpdateEgressNodeHealth(context.Background(), nodeA.ID, 0.5, 2, &until, egressdomain.LastErrorExitIPQuality); err != nil {
+		if err := manager.CooldownNodeForProbeFailure(context.Background(), nodeA.ID, until); err != nil {
 			t.Fatal(err)
 		}
 		manager.InvalidateOperationsConfig()

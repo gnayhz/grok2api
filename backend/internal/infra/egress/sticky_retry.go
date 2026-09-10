@@ -1,11 +1,16 @@
 package egress
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
 // do retries only the connection phase of a proxy-pool request.
@@ -16,22 +21,32 @@ func (l *Lease) do(request *http.Request) (*http.Response, error) {
 		return nil, errors.New("出口客户端未初始化")
 	}
 	if !l.proxyPool {
-		return l.client.Do(request)
+		return l.submitPhysical(request)
 	}
 	current := request
 	for attempt := 0; ; attempt++ {
-		written := false
-		trace := &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) {
+		if err := current.Context().Err(); err != nil {
+			if current.Body != nil {
+				_ = current.Body.Close()
+			}
+			return nil, err
+		}
+		var written atomic.Bool
+		trace := &httptrace.ClientTrace{WroteHeaders: func() { written.Store(true) }, WroteRequest: func(httptrace.WroteRequestInfo) {
 			// The callback also fires when writing fails after a partial write;
 			// treat that as submitted because the upstream may have received it.
-			written = true
+			written.Store(true)
 		}}
 		traced := current.WithContext(httptrace.WithClientTrace(current.Context(), trace))
-		response, err := l.client.Do(traced)
+		if attempt > 0 {
+			path := attemptmeta.FromContext(request.Context()).Path
+			traced = traced.WithContext(attemptmeta.Begin(WithPhysicalCallStage(traced.Context(), "connection_retry"), path))
+		}
+		response, err := l.submitPhysical(traced)
 		if err == nil && !retryableResinResponse(response) {
 			return response, nil
 		}
-		if attempt >= proxyPoolRetryLimit || written || !safeProxyConnectionFailure(err, response) {
+		if attempt >= proxyPoolRetryLimit || written.Load() || !safeProxyConnectionFailure(err, response) {
 			if safeProxyConnectionFailure(err, response) {
 				l.client.CloseIdleConnections()
 			}
@@ -56,6 +71,44 @@ func (l *Lease) do(request *http.Request) (*http.Response, error) {
 	}
 }
 
+func (l *Lease) submitPhysical(request *http.Request) (*http.Response, error) {
+	finish := func() {}
+	if l.clientHandle != nil {
+		ctx, done, err := l.clientHandle.begin(request.Context())
+		if err != nil {
+			if request.Body != nil {
+				_ = request.Body.Close()
+			}
+			return nil, err
+		}
+		finish = done
+		request = request.WithContext(ctx)
+	}
+	if err := beginPhysicalCall(request.Context()); err != nil {
+		finish()
+		if request.Body != nil {
+			_ = request.Body.Close()
+		}
+		return nil, err
+	}
+	response, err := l.client.Do(request)
+	if err != nil || response == nil || response.Body == nil {
+		finish()
+	} else {
+		response.Body = &completionBody{ReadCloser: response.Body, finish: finish}
+	}
+	err = MarkPhysicalExecutionError(request.Context(), neterrorpkg.MarkTransport(err, neterrorpkg.PhaseRequest))
+	if err == nil && response != nil && response.Body != nil {
+		response.Body = &observedBody{ReadCloser: response.Body}
+	}
+	attemptmeta.Attach(response, request)
+	recordPhysicalCall(request.Context(), response, err)
+	if err != nil && response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	return response, err
+}
+
 func cloneRequestBody(request *http.Request) (*http.Request, error) {
 	if request == nil {
 		return nil, errors.New("请求为空")
@@ -76,6 +129,9 @@ func cloneRequestBody(request *http.Request) (*http.Request, error) {
 }
 
 func safeProxyConnectionFailure(err error, response *http.Response) bool {
+	if runtimeCapacityError(err) || errors.Is(err, context.Canceled) {
+		return false
+	}
 	if response != nil {
 		resinError := strings.ToUpper(strings.TrimSpace(response.Header.Get("X-Resin-Error")))
 		return response.StatusCode >= http.StatusBadGateway && (resinError == "UPSTREAM_CONNECT_FAILED" || resinError == "NO_AVAILABLE_NODES")
