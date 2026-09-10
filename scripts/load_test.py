@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""load_test.py — 并发流式负载台架（optimize 分支 round 12 建立）。
+"""load_test.py — 并发流式负载台架，仅对明确获授权的测试实例使用。
 
 用法:
   BASE=http://127.0.0.1:38000 ADMIN_PASS=... python3 scripts/load_test.py [并发数] [波次]
@@ -9,7 +9,7 @@
 教训），记录首字/总时长/字节。结束后输出通过率与分位数。需要
 ADMIN_PASS 以创建/清理临时压测 key。
 
-无破坏: 临时 key 用后即删；请求为普通短流式推理。
+会创建临时 Key 并消耗真实上游额度；运行前确认目标与模型，失败后核对清理结果。
 """
 import json, os, sys, threading, time, urllib.error, urllib.request
 

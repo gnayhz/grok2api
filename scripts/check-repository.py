@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote, urlsplit
 
 MAX_BYTES = 2 * 1024 * 1024
 PRIVATE_ROOTS = {
@@ -91,6 +93,36 @@ def content_problems(data: bytes) -> list[tuple[int, str]]:
     return sorted(set(found))
 
 
+def missing_markdown_links(name: str, data: bytes, available: set[str]) -> list[int]:
+    """Check inline local links against candidate files, never the host filesystem.
+
+    Directory links are supported; external URLs and page anchors are not fetched.
+    Fenced code examples are not interpreted as documentation links.
+    """
+    missing = []
+    fence = ""
+    for number, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker:
+            if not fence:
+                fence = marker.group(1)
+            elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = ""
+            continue
+        if fence:
+            continue
+        for match in re.finditer(r"!?\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))", line):
+            destination = match.group(1) or match.group(2)
+            url = urlsplit(destination)
+            if url.scheme or url.netloc or not url.path:
+                continue
+            path = unquote(url.path)
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(name), path)) if not path.startswith("/") else posixpath.normpath(path.lstrip("/"))
+            if target not in available:
+                missing.append(number)
+    return sorted(set(missing))
+
+
 def index_entries(root: Path) -> list[tuple[str, str, str]]:
     entries = []
     for row in git(root, "ls-files", "--stage", "-z").split(b"\0"):
@@ -119,6 +151,8 @@ def tree_entries(root: Path, ref: str) -> list[tuple[str, str, str]]:
 def inspect(root: Path, entries: list[tuple[str, str, str]], working: bool) -> tuple[int, list[str]]:
     problems = []
     checked = 0
+    available = {"."}
+    documents = []
     batch = None if working else subprocess.Popen(
         ["git", "-C", str(root), "cat-file", "--batch"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -161,6 +195,10 @@ def inspect(root: Path, entries: list[tuple[str, str, str]], working: bool) -> t
                 if batch.stdout.read(1) != b"\n":
                     raise ValueError("invalid Git object framing")
             checked += 1
+            available.add(name)
+            available.update(str(parent) for parent in PurePosixPath(name).parents)
+            if name.lower().endswith(".md"):
+                documents.append((name, data))
             reason = path_problem(name)
             if reason:
                 problems.append(f"{label}: {reason}")
@@ -173,6 +211,9 @@ def inspect(root: Path, entries: list[tuple[str, str, str]], working: bool) -> t
             batch.stdin.close()
             batch.stdout.close()
             batch.wait()
+    for name, data in documents:
+        for line in missing_markdown_links(name, data, available):
+            problems.append(f"{json.dumps(name, ensure_ascii=True)}:{line}: local Markdown link target is absent from the candidate source")
     return checked, problems
 
 

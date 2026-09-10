@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 出口重构验证矩阵一键复跑(EGRESS-REVIEW-STATUS.md 证据表的入口)。
+# 出口验证矩阵；测试隔离与范围见 DEVELOPMENT.md。
 # 覆盖: 三包 -race 全量、共享轮换与网关故障隔离、资源 soak、探活/轮换/订阅/
 # 审计/热更新等全部出口测试, 以及 Acquire 基准 + 回归护栏抽样。
 # 迁移矩阵(需容器)另见 scripts/verify-postgres-migrations.sh。

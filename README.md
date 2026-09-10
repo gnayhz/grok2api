@@ -431,41 +431,13 @@ See [audit retention compatibility](DEVELOPMENT.md#审计保留的兼容要求)
 for precedence, old client compatibility, and rollout constraints.
 
 
-### Verification matrix
+### Verification and state ownership
 
+See the [development guide](DEVELOPMENT.md#验证入口) for current check commands and integration-test isolation. `make verify` includes architecture, build, formatting, vet, staticcheck and race checks; `make verify-full` adds fuzz seeds, vulnerability checks and repeated critical packages. `make fuzz` discovers the configured fuzz targets. Missing optional tools or databases are reported as skipped, not verified.
 
-The backend ships a one-shot verification script consolidating the review
-gates established during hardening:
+Account state has separate owners: administrator intent, credential validity, quota, operational health and quality restrictions. Clearing a cooldown cannot enable an administrator-disabled account or release a restriction held by another quality case. Fixed-egress transport health also remains independent of account state. Legacy `missing_thinking` account markers are compatibility inputs, not the current quality decision policy; use [controlled quality investigation](backend/internal/quality/README.md) and the current case/qualification views.
 
-- **fast** (`make verify`): build, vet, staticcheck, race-enabled test suite.
-- **full** (`make verify-full`): + fuzz seed regressions, govulncheck,
-  and a count=3 flaky probe over the seven timing-sensitive packages
-  (gateway, risk, rsc, relational, app, inference, jsonpeek).
-- **fuzz** (`make fuzz`): 30s of the mutation engines per parse target
-  (SSE quality scanner + body peek, RSC payload parser, jsonpeek
-  extractors, egress subscription payloads — 7 targets in total).
-
-Third-party tools degrade to SKIP with install hints when absent.
-See [HARDENING.md](./HARDENING.md) for the complete hardening log: detection rules, attribution flow, cooldown taxonomy, security fixes, and production measurements.
-
-### Cooldown taxonomy
-
-Three independent cooldown families are visible in the admin UI:
-
-- **Routing guard** (`requestRetry.accountCooldown` / `idleAccountCooldown`):
-  `missing_thinking` (first strike cools; a later strike after expiry disables
-  the account), `missing_thinking_disabled`, and `quality_idle_timeout`
-  (empty/silent stream, kept separate from the failure counter and with its own
-  configurable duration). A clean RSC verdict lifts these. The admin UI shows a
-  clear action on a cooling badge as the manual operator escape hatch.
-- **Routing cooldown** (`routing.cooldownBase`/`cooldownMax`): generic upstream
-  failures with exponential backoff; never cleared by risk attribution.
-- **Egress-node cooldown**: exponential backoff and health re-probes for fixed-node
-  transport failures; independent of account state.
-
-The request-audits page filters by error code (`quality_degraded`) and account
-rows show the cooldown reason on hover, so degraded-withhold events can be
-diagnosed end to end.
+Correlate request IDs, individual attempts and completion outcomes when diagnosing withheld or interrupted responses. An HTTP success code, a clean probe or one closed case does not by itself establish complete delivery or globally unrestricted resources.
 
 Resin usernames can contain `{account}`:
 
@@ -613,9 +585,10 @@ Back up together with:
 
 - `config.yaml` — losing `secrets.credentialEncryptionKey` makes stored account credentials undecryptable; changing `secrets.jwtSecret` invalidates every issued session. Never commit or share these values.
 - `data/media/` when using the local media driver (inside Docker it lives in the same `/app/data` volume).
+- The configured `audit.journalDirectory` and stable deployment instance identity; PostgreSQL deployments still have this local pending-settlement store. Back it up consistently, retain any required encryption key history, and verify the complete restore in an isolated environment. See [data and recovery contracts](DEVELOPMENT.md#数据库升级与回滚).
 - PostgreSQL deployments: use `pg_dump`; Redis runtime stores: follow standard Redis persistence practice.
 
-Restore by stopping the instance, replacing the database and media files, keeping `config.yaml` unchanged, then starting again. Account credentials can alternatively be moved between deployments with the admin export/import API (`GET /api/admin/v1/accounts/export`, cursor-stable per provider).
+Restore by stopping the instance, restoring the matching database, media and pending journal, keeping the configuration, encryption keys and instance identity consistent, then starting again after checking version compatibility. Account credentials can alternatively be moved between deployments with the admin export/import API (`GET /api/admin/v1/accounts/export`, cursor-stable per provider); this does not replace a complete backup.
 
 ### Monitoring
 

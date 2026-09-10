@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# patrol.sh — §191 长期监控项的可执行巡检（HARDENING.md round 14 固化）。
+# patrol.sh — 既有部署巡检；固定告警项需按目标环境核对，不能作为当前业务合同。
 #
 # 用法:
 #   BASE=http://127.0.0.1:8000 ADMIN_USER=root ADMIN_PASS=... scripts/patrol.sh
 #
-# 检查项（全部来自 §191 里程碑报告的推荐监控清单）:
+# 检查项（部署专用；通用排障与验证见 DEVELOPMENT.md）:
 #   1. healthz / readyz 可用且 ready=true
 #   2. "egress routing payload is corrupt" WARN —— 应为恒零（r4 已治愈）
 #   3. audit_retention_days_purged 日志 —— 出现即 retentionDays 被重新打开
@@ -15,7 +15,7 @@
 #      （ce63696b 回归类：键序盲扫丢 terminal。历史行未老化前可用
 #        PATROL_INCOMPLETE_BASELINE 压噪，如生产当前设 6）
 #
-# 退出码: 0=全部正常  1=存在异常项。只读巡检，不产生任何数据变更。
+# 退出码: 0=全部正常  1=存在异常项。查询巡检；登录会建立管理会话，不修改业务配置。
 set -uo pipefail
 
 BASE="${BASE:-http://127.0.0.1:8000}"

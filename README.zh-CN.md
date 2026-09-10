@@ -419,33 +419,13 @@ Build 与 Console 的 SSE 消费者共享一个事件组装器。缓冲分配及
 ### 验证矩阵
 
 
-后端内置一键验证脚本，固化加固过程中建立的审查闸门：
+当前检查命令与集成测试隔离要求见 [开发指南](DEVELOPMENT.md#验证入口)。`make verify` 包括架构、构建、格式、vet、staticcheck 和 race；`make verify-full` 追加 fuzz 种子、漏洞检查及关键包重复测试；`make fuzz` 自动发现配置包中的 fuzz 目标。缺少工具或测试数据库时，SKIP 不代表已验证。
 
-- **fast**（`make verify`）：构建、vet、staticcheck、race 全量测试。
-- **full**（`make verify-full`）：追加 fuzz 种子回归、govulncheck 漏洞扫描、
-  七个时序敏感包（gateway/risk/rsc/relational/app/inference/jsonpeek）的
-  count=3 稳定性探针。
-- **fuzz**（`make fuzz`）：每个解析目标 30 秒变异引擎
-  （SSE 质量扫描器与 body 判决、RSC 载荷解析器、jsonpeek 抽取器、
-  出口订阅载荷——共 7 个目标）。
+### 状态与限制的独立归属
 
-第三方工具缺失时降级为 SKIP 并附安装提示。
-完整加固记录（检测规则、归因流程、冷却分类、安全修复与生产实测）见 [HARDENING.md](./HARDENING.md)。
+管理员启停、凭据有效性、额度、运行健康和质量限制分别维护。解除冷却不能启用管理员已停用的账号，也不能释放其他案件持有的质量限制。固定出口的传输健康与账号状态独立。历史 `missing_thinking` 账号标记用于兼容迁移，不能作为当前质量裁决规则；具体政策以 [受控质量调查](backend/internal/quality/README.md) 和当前案件/资格视图为准。
 
-### 冷却分类
-
-管理后台可见三族相互独立的冷却：
-
-- **实时路由守卫冷却**（`requestRetry.accountCooldown` / `idleAccountCooldown`）：
-  `missing_thinking`（首次打击进入冷却，冷却过期后再打击则停用）、`missing_thinking_disabled`、
-  `quality_idle_timeout`（空流/静默超时，与失败计数分离，时长独立可配）。clean RSC 结论可
-  解除这三类；管理页冷却徽标上提供一键解除作为人工逃生门。
-- **路由冷却**（`routing.cooldownBase`/`cooldownMax`）：泛型上游失败的指数退避；
-  风险归因永不清除。
-- **出口节点冷却**：固定节点传输失败的指数退避与健康复测；与账号状态无关。
-
-请求审计页支持按错误码（`quality_degraded`）过滤，账号行的冷却原因悬停可见，
-降智扣留事件可以端到端诊断。
+排查扣留或断流时，关联请求 ID、具体尝试和独立完成结果。HTTP 成功状态、一次 clean 探测或一个案件结案，都不能单独证明交付完整或资源已无任何限制。
 
 Resin 用户名支持 `{account}`：
 
@@ -547,7 +527,10 @@ docker network inspect grok2api_default \
 
 重要的可选设置：
 
-- `audit.ledgerMode`：`observe` 仅报告账本故障；`enforce` 可暂停新推理以保护计费准确性。
+- `audit.journalDirectory`：已接受但尚未完成 SQL 结算的持久待写目录。每个实例持有独立文件，重启须保持目录与实例身份稳定；SQLite WAL 使用本地持久盘，不放在网络共享盘。
+- `audit.journalMaxBytes` 与 `audit.bufferSize`：限制待写字节和记录数，包含待修复记录，不会淘汰已接受事实；变更需要重启，并为索引和 WAL 预留磁盘空间。
+- `audit.ledgerMode`：`observe` 报告可恢复积压；`enforce` 在宽限期后暂停新推理。未接受事实或保留的非法记录在两种模式下都会阻止新推理。不要通过删除 pending 文件消除告警。
+- 费用预留保留原实例 owner；只有该实例恢复自己的待写后才能回收其无活动预留。永久结算身份不随审计详情过期删除。
 - `routing.accountIsolatedConnections`：为外部 L4 或按连接哈希的负载均衡器按账号拆分出站 TCP/HTTP 连接池。默认关闭，因为会增加连接数、TLS 握手、内存和文件描述符占用。
 - `routing.segmentedSelectorEnabled`：默认对至少 3000 个可用账号的大号池启用，限制动态并发读取规模，同时保留额度/等级优先级、会话粘性、完整选号回退与原子门禁。
 - Build 响应头超时和精确匹配的 403 失效规则支持热加载。
@@ -558,7 +541,7 @@ docker network inspect grok2api_default \
 - 使用 HTTPS，并启用 `auth.secureCookies`。
 - 公网部署保持 Swagger 关闭。
 - 使用强密钥并妥善备份；不要提交凭据、Cookie、账号导出或数据库。
-- 备份 `config.yaml`、数据库和媒体目录。
+- 备份实际配置、密钥链、数据库、媒体与审计持久待写目录，并验证隔离恢复。
 - 多实例同时使用 PostgreSQL、Redis 与共享媒体。
 - 公网服务前置反向代理与访问控制。
 
@@ -582,9 +565,10 @@ docker run --rm --volumes-from grok2api -v "$PWD/backups:/backup" alpine:3.23 \
 
 - `config.yaml`——丢失 `secrets.credentialEncryptionKey` 将使已存账号凭据无法解密；更换 `secrets.jwtSecret` 会使所有已签发会话失效。切勿提交或外传这些值。
 - 使用本地媒体驱动时备份 `data/media/`（Docker 部署位于同一 `/app/data` 卷内）。
+- 实际 `audit.journalDirectory` 和稳定的部署实例身份；PostgreSQL 部署仍有本地待结算存储。使用一致性备份，保留所需历史解密密钥，并在隔离环境验证完整恢复，见 [数据与恢复合同](DEVELOPMENT.md#数据库升级与回滚)。
 - PostgreSQL 部署改用 `pg_dump`；Redis 运行态存储遵循其标准持久化实践。
 
-恢复：停止实例→替换数据库与媒体文件→保持 `config.yaml` 不变→重新启动。账号凭据也可经管理端导出/导入接口（`GET /api/admin/v1/accounts/export`，按 provider 游标稳定快照）在部署间迁移。
+恢复：停止实例→恢复同一备份集合的数据库、媒体与待写日志→保持配置、加密密钥和实例身份一致→核对版本兼容后启动。账号凭据也可经管理端导出/导入接口（`GET /api/admin/v1/accounts/export`，按 provider 游标稳定快照）在部署间迁移；账号导出不能代替完整备份。
 
 ### 监控
 

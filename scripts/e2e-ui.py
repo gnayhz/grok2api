@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""e2e-ui.py — 管理端浏览器级冒烟（HARDENING.md round 189 探针固化）。
+"""e2e-ui.py — 管理端浏览器级冒烟；范围与隔离要求见 DEVELOPMENT.md。
 
 用法:
   BASE=http://127.0.0.1:8000 ADMIN_USER=root ADMIN_PASS=... python3 scripts/e2e-ui.py
@@ -8,7 +8,7 @@
 依赖缺失时显式 SKIP（退出码 3），绝不假通过。
 
 覆盖链路: 登录表单 → dashboard 重定向 → 导航栏渲染 → 会话持久化
-（reload 不回登录页）→ 密钥管理页渲染。全部只读，无数据变更。
+（reload 不回登录页）→ 密钥管理页渲染。登录会建立会话，其余步骤读取页面，不修改业务配置。
 
 退出码: 0=PASS  1=FAIL  3=依赖缺失(SKIP)
 """

@@ -104,6 +104,27 @@ class RepositoryCheckTest(unittest.TestCase):
         self.assertIn("2 MiB", result.stdout)
         self.assertIn("symlinks", result.stdout)
 
+    def test_ignored_local_document_cannot_satisfy_source_link(self):
+        self.write(".gitignore", "local-notes.md\n")
+        self.write("local-notes.md", "private notes still exist on this machine")
+        self.write("README.md", "[Required guide](local-notes.md)\n")
+        self.git("add", ".")
+        for args in [(), ("--staged",)]:
+            result = self.check(*args)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("local Markdown link", result.stdout)
+            self.assertNotIn("private notes still exist", result.stdout + result.stderr)
+
+    def test_packaged_link_targets_and_staged_removal(self):
+        self.write("README.md", "[Guide](guide/readme.md#setup)\n[Directory](guide/)\n[External](https://example.test/)\n```md\n[Example](not-a-file.md)\n```\n")
+        self.write("guide/readme.md", "# Setup\n[Root](../README.md)\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "packaged documentation")
+        self.assertEqual(self.check("--tree", "HEAD").returncode, 0)
+        self.git("rm", "--cached", "guide/readme.md")
+        self.assertTrue((self.root / "guide/readme.md").exists())
+        self.assertEqual(self.check("--staged").returncode, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

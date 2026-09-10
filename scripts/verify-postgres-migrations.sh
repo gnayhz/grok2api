@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 真实 PostgreSQL 迁移矩阵验证(EGRESS-REVIEW-STATUS.md 的可复现命令)。
+# 真实 PostgreSQL 迁移矩阵验证；测试隔离与范围见 DEVELOPMENT.md。
 # 起临时 postgres:16 容器, 跑 persistence/relational 全套集成测试
 # (含 TestPostgresEgressLegacySchemaUpgrade 旧库升级), 结束自动清理。
 # 用法: scripts/verify-postgres-migrations.sh [镜像tag, 默认 16-alpine]

@@ -7,7 +7,7 @@ Thumbs.db
 *.swo
 *~
 
-# Private design notes under /docs/ stay local; durable guides live at the root.
+# Legacy private-note paths stay ignored; new work records belong outside the project.
 # Local environment and secrets
 .env
 .env.*

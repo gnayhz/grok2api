@@ -45,7 +45,7 @@ services:
     restart: unless-stopped
     ports:
       # 安全提醒(必做, 非可选):本端口与上方 WARP SOCKS 端口默认绑定全部接口。
-      # 部署后必须用防火墙只放行 grok2api 服务器 IP(见 EXIT-IP-GUARD.md §2.4),
+      # 部署后必须用防火墙只放行 grok2api 服务器 IP；不要将这些端口直接暴露公网,
       # 否则无认证的 WARP SOCKS 会对整个互联网开放(带宽盗用+出口 IP 被拉黑)。
       # 也可以在此直接绑定指定接口: - "192.0.2.10:9000:9000"
       - "9000:9000"
