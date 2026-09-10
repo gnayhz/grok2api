@@ -1,15 +1,11 @@
 import { ArrowUpRight, CircleAlert, CircleHelp, RefreshCw } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import * as TabsPrimitive from "@radix-ui/react-tabs";
 import { Button } from "@/components/ui/button";
 import { DialogContent } from "@/components/ui/dialog";
 import { AlertDialogContent } from "@/components/ui/alert-dialog";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
 import "./operations.css";
 
@@ -28,23 +24,49 @@ export function StatusPill({
 		</span>
 	);
 }
-export function OperationsHelp({ children }: { children: ReactNode }) {
-	const { t } = useTranslation();
+export function OperationsTooltip({
+	children,
+	content,
+	tapToOpen = false,
+}: {
+	children: ReactNode;
+	content: ReactNode;
+	tapToOpen?: boolean;
+}) {
+	const [open, setOpen] = useState(false);
+	const pointer = useRef("");
 	return (
-		<Tooltip>
-			<TooltipTrigger asChild>
-				<button
-					type="button"
-					className="ops-help"
-					aria-label={t("ops.parameterHelp")}
-				>
-					<CircleHelp className="size-3.5" />
-				</button>
-			</TooltipTrigger>
-			<TooltipContent className="max-w-80 whitespace-normal text-xs leading-5">
+		<Tooltip open={open} onOpenChange={setOpen}>
+			<TooltipTrigger
+				asChild
+				onPointerDown={(event) => {
+					pointer.current = event.pointerType;
+				}}
+				onClick={() => {
+					if (tapToOpen && pointer.current !== "mouse") setOpen(true);
+				}}
+			>
 				{children}
+			</TooltipTrigger>
+			<TooltipContent className="max-w-80 whitespace-normal break-words text-xs leading-5">
+				{content}
 			</TooltipContent>
 		</Tooltip>
+	);
+}
+
+export function OperationsHelp({ children, label }: { children: ReactNode; label?: string }) {
+	const { t } = useTranslation();
+	return (
+		<OperationsTooltip content={children} tapToOpen>
+			<button
+				type="button"
+				className="ops-help"
+				aria-label={label ? `${label} · ${t("ops.parameterHelp")}` : t("ops.parameterHelp")}
+			>
+				<CircleHelp className="size-3.5" />
+			</button>
+		</OperationsTooltip>
 	);
 }
 export function OperationsHeader({
@@ -87,9 +109,7 @@ export function OperationsTabs({
 						key={item.value}
 					>
 						{item.label}
-						{item.count !== undefined && (
-							<span className="ops-tab-count">{item.count}</span>
-						)}
+						{item.count !== undefined && <span className="ops-tab-count">{item.count}</span>}
 					</TabsPrimitive.Trigger>
 				))}
 			</TabsPrimitive.List>
@@ -119,9 +139,7 @@ export function OperationalMetric({
 				{label}
 				{onClick && <ArrowUpRight className="size-3" />}
 			</span>
-			<strong className={cn("ops-metric-value", tone && `ops-text-${tone}`)}>
-				{value}
-			</strong>
+			<strong className={cn("ops-metric-value", tone && `ops-text-${tone}`)}>{value}</strong>
 			<span className="sr-only">{detail}</span>
 		</>
 	);
@@ -129,11 +147,7 @@ export function OperationalMetric({
 		<Tooltip>
 			<TooltipTrigger asChild>
 				{onClick ? (
-					<button
-						type="button"
-						className="ops-metric ops-metric-interactive"
-						onClick={onClick}
-					>
+					<button type="button" className="ops-metric ops-metric-interactive" onClick={onClick}>
 						{content}
 					</button>
 				) : (
@@ -172,13 +186,7 @@ export function OperationsSection({
 		</section>
 	);
 }
-export function OperationsError({
-	message,
-	retry,
-}: {
-	message?: string;
-	retry?: () => void;
-}) {
+export function OperationsError({ message, retry }: { message?: string; retry?: () => void }) {
 	const { t } = useTranslation();
 	return (
 		<div role="alert" className="ops-error">
@@ -195,16 +203,28 @@ export function OperationsError({
 }
 export function OperationsDialogContent({
 	className,
+	overlayClassName,
 	...props
 }: ComponentProps<typeof DialogContent>) {
-	return <DialogContent {...props} className={cn("ops-dialog", className)} />;
+	return (
+		<DialogContent
+			{...props}
+			className={cn("ops-dialog", className)}
+			overlayClassName={cn("ops-dialog-overlay", overlayClassName)}
+		/>
+	);
 }
 export function OperationsAlertDialogContent({
 	className,
+	overlayClassName,
 	...props
 }: ComponentProps<typeof AlertDialogContent>) {
 	return (
-		<AlertDialogContent {...props} className={cn("ops-dialog", className)} />
+		<AlertDialogContent
+			{...props}
+			className={cn("ops-dialog", className)}
+			overlayClassName={cn("ops-dialog-overlay", overlayClassName)}
+		/>
 	);
 }
 export function OperationsField({
@@ -227,30 +247,31 @@ export function OperationsField({
 	const { t } = useTranslation();
 	return (
 		<div className={cn("ops-field", className)}>
-			<div className="min-w-0">
+			<div className="ops-field-heading">
 				<label htmlFor={controlId} className="ops-field-label">
 					{label}
 				</label>
-				{description && <p className="ops-field-help">{description}</p>}
-				{current !== undefined && (
-					<p className="ops-field-current">
-						{t("ops.appliedValue")} <span>{current}</span>
-					</p>
-				)}
-				{error && (
-					<p role="alert" className="mt-1 text-xs text-destructive">
-						{error}
-					</p>
-				)}
+				{description && <OperationsHelp label={label}>{description}</OperationsHelp>}
 			</div>
 			<div className="ops-field-control">{children}</div>
+			{(current !== undefined || error) && (
+				<div className="ops-field-note">
+					{current !== undefined && (
+						<p className="ops-field-current">
+							{t("ops.appliedValue")} <span>{current}</span>
+						</p>
+					)}
+					{error && (
+						<p role="alert" className="mt-1 text-xs text-destructive">
+							{error}
+						</p>
+					)}
+				</div>
+			)}
 		</div>
 	);
 }
 
-export function OperationsButton({
-	className,
-	...props
-}: ComponentProps<typeof Button>) {
+export function OperationsButton({ className, ...props }: ComponentProps<typeof Button>) {
 	return <Button {...props} className={cn("rounded-md", className)} />;
 }

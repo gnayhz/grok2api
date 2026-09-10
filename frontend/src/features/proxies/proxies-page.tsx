@@ -1,30 +1,18 @@
-import { ArrowRight, Settings2 } from "lucide-react";
-import { useState } from "react";
+import { LayoutDashboard, Layers2, RefreshCw, Route, Server } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
-import { OperationsButton as Button } from "@/features/operations/operations-ui";
+import { useQueryClient } from "@tanstack/react-query";
+import { NetworkButton as Button, NetworkNavigation } from "./network-ui";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { NodesPanel } from "./nodes-panel";
 import { EgressOperationsProvider } from "./operations-context";
 import { useEgressOperations } from "./operations-shared";
-import { resolveEffectiveTarget } from "./effective-target";
 import { PoolsPanel } from "./pools-panel";
 import { RoutingPanel } from "./routing-panel";
-import {
-	useOperationsNodes,
-	useOperationsPools,
-} from "@/features/operations/operations-queries";
-import {
-	MetricRail,
-	OperationalMetric,
-	OperationsHeader,
-	OperationsTabs,
-	StatusPill,
-	OperationsError,
-} from "@/features/operations/operations-ui";
-import { networkSummary } from "@/features/operations/operations-data";
-import { useNow } from "@/features/guard/quality-hooks";
+import { NetworkOverview } from "./network-overview";
+import { useOperationsNodes, useOperationsPools } from "@/features/operations/operations-queries";
+import { OperationsError, StatusPill } from "@/features/operations/operations-ui";
 
 export function ProxiesPage() {
 	return (
@@ -38,166 +26,99 @@ function NetworkWorkspace() {
 	const operations = useEgressOperations();
 	const location = useLocation();
 	const navigate = useNavigate();
-	const now = useNow(15000);
+	const queryClient = useQueryClient();
 	const nodes = useOperationsNodes();
 	const pools = useOperationsPools();
-	const summary = networkSummary(nodes.data?.items ?? [], now);
-	const [focus, setFocus] = useState({
-		search: "",
-		filter: "all",
-		revision: 0,
-	});
 	const requested = location.hash.slice(1);
-	const view = ["nodes", "pools", "routing"].includes(requested)
-		? requested
-		: "nodes";
-	const select = (next: string) =>
-		navigate({ pathname: "/proxies", hash: next });
-	const locate = (search: string, filter = "all") => {
-		setFocus((current) => ({ search, filter, revision: current.revision + 1 }));
-		select("nodes");
-	};
-	const value = (n: number | string | null) =>
-		nodes.isError || !nodes.data ? "—" : (n ?? "—");
-	const destination = (scope: "grok_build" | "grok_web" | "grok_console") => {
-		const target = resolveEffectiveTarget(operations.form, "inference", scope);
-		if (target.mode === "direct") return t("ops.direct");
-		if (target.mode === "auto") return t("ops.auto");
-		if (target.mode === "node")
-			return (
-				nodes.data?.items.find((n) => n.id === target.nodeId)?.name ??
-				t("ops.missingTarget")
-			);
-		return `${t("ops.poolTab")} · ${pools.data?.find((p) => p.id === target.poolId)?.name ?? t("ops.missingTarget")}`;
+	const sourcesOpen = requested === "nodes/sources" || requested === "sources";
+	const view = sourcesOpen
+		? "nodes"
+		: ["overview", "nodes", "pools", "routing"].includes(requested)
+			? requested
+			: "overview";
+	const search = new URLSearchParams(location.search);
+	const select = (next: string) => navigate({ pathname: "/proxies", hash: next });
+	const refresh = () => {
+		for (const key of [
+			"egress-nodes",
+			"egress-pools",
+			"egress-sources",
+			"egress-operations",
+			"egress-runtime",
+			"egress-routing-stats",
+		]) {
+			void queryClient.invalidateQueries({ queryKey: [key] });
+		}
 	};
 	return (
-		<div className="ops-workspace">
-			<OperationsHeader
-				title={t("ops.network")}
-				description={t("ops.networkDescription")}
-				status={
-					<StatusPill
-						tone={
-							nodes.isError || !nodes.data
-								? "neutral"
-								: summary.attention
-									? "warn"
-									: "good"
+		<div className="network-workspace">
+			<header className="network-header">
+				<h1>{t("ops.network")}</h1>
+				<Button
+					size="sm"
+					variant="outline"
+					onClick={refresh}
+					disabled={nodes.isFetching || pools.isFetching}
+				>
+					<RefreshCw
+						className={
+							nodes.isFetching || pools.isFetching
+								? "animate-spin motion-reduce:animate-none"
+								: undefined
 						}
-					>
-						{nodes.isError || !nodes.data
-							? t("ops.unknown")
-							: summary.attention
-								? `${summary.attention} · ${t("ops.attention")}`
-								: t("ops.nodeLoaded", { count: summary.total })}
-					</StatusPill>
-				}
-			/>
-
+					/>
+					{t("network.refresh")}
+				</Button>
+			</header>
 			{(nodes.isError || pools.isError || operations.isError) && (
-				<div className="mb-4">
-					<OperationsError
-						retry={() => {
-							void nodes.refetch();
-							void pools.refetch();
-							operations.retry();
-						}}
-					/>
-				</div>
+				<OperationsError retry={refresh} />
 			)}
-
-			<Tabs activationMode="manual" value={view} onValueChange={select}>
-				<OperationsTabs
-					items={[
-						{
-							value: "nodes",
-							label: t("ops.nodeTab"),
-							count: nodes.data?.total,
-						},
-						{
-							value: "pools",
-							label: t("ops.poolTab"),
-							count: pools.data?.length,
-						},
-						{ value: "routing", label: t("ops.routeTab") },
-					]}
-					end={t("ops.freshness")}
-				/>
-				<TabsContent value="nodes" className="mt-0">
-					<MetricRail>
-						<OperationalMetric
-							label={t("ops.availableNodes")}
-							value={value(summary.ready)}
-							detail={t("ops.availableHelp")}
-							tone="good"
-							onClick={() => locate("", "ready")}
-						/>
-						<OperationalMetric
-							label={t("ops.attention")}
-							value={value(summary.attention)}
-							detail={t("ops.attentionHelp")}
-							tone={summary.attention ? "warn" : undefined}
-							onClick={() => locate("", "attention")}
-						/>
-						<OperationalMetric
-							label={t("ops.unchecked")}
-							value={value(summary.unknown)}
-							detail={t("ops.uncheckedHelp")}
-							onClick={() => locate("", "unknown")}
-						/>
-						<OperationalMetric
-							label={t("ops.latency")}
-							value={
-								<>
-									{value(summary.median)}
-									{nodes.data && summary.median !== null && (
-										<span className="ml-1 text-sm font-normal text-muted-foreground">
-											ms
-										</span>
-									)}
-								</>
-							}
-							detail={t("ops.latencyHelp")}
-						/>
-					</MetricRail>
-					<div className="ops-route-strip">
-						{(["grok_build", "grok_web", "grok_console"] as const).map(
-							(scope) => (
-								<div className="ops-route-path" key={scope}>
-									<strong>{scope.replace("grok_", "").toUpperCase()}</strong>
-									<ArrowRight className="size-3 text-muted-foreground" />
-									<span className="truncate font-medium">
-										{operations.isPending || operations.isError
-											? t("ops.unknown")
-											: destination(scope)}
-									</span>
-								</div>
-							),
-						)}
-						<Button variant="ghost" size="sm" onClick={() => select("routing")}>
-							<Settings2 className="size-3.5" />
-							{t("ops.routeTab")}
-						</Button>
+			<Tabs className="network-tabs" activationMode="manual" value={view} onValueChange={select}>
+				<div className="network-tabs-bar">
+					<NetworkNavigation
+						items={[
+							{ value: "overview", icon: LayoutDashboard, label: t("network.overview") },
+							{
+								value: "nodes",
+								icon: Server,
+								label: t("network.resources"),
+								count: nodes.data?.total,
+							},
+							{ value: "pools", icon: Layers2, label: t("ops.poolTab"), count: pools.data?.length },
+							{ value: "routing", icon: Route, label: t("ops.routeTab") },
+						]}
+					/>
+					<div className="network-tabs-status">
+						<StatusPill tone={operations.isDirty ? "warn" : "good"}>
+							{t(operations.isDirty ? "networkRouting.draftPreview" : "networkRouting.saved")}
+						</StatusPill>
 					</div>
-
+				</div>
+				<TabsContent value="overview">
+					<NetworkOverview />
+				</TabsContent>
+				<TabsContent value="nodes">
 					<NodesPanel
-						key={focus.revision}
-						initialSearch={focus.search}
-						initialCondition={focus.filter}
+						sourcesOpen={sourcesOpen}
+						onManageSources={() => navigate({ pathname: "/proxies", search: location.search, hash: "nodes/sources" })}
+						onShowNodes={() => navigate({ pathname: "/proxies", search: location.search, hash: "nodes" })}
+						initialCondition={search.get("condition") ?? "all"}
+						focusKey={location.search}
 					/>
 				</TabsContent>
-				<TabsContent value="pools" className="mt-0">
-					<PoolsPanel />
+				<TabsContent value="pools">
+					<PoolsPanel
+						focusPoolId={search.get("pool") ?? undefined}
+						onViewNodes={() => navigate("/proxies?condition=ready#nodes")}
+					/>
 				</TabsContent>
-				<TabsContent value="routing" className="mt-0">
-					<RoutingPanel />
+				<TabsContent value="routing">
+					<RoutingPanel initialRule={search.get("rule") ?? undefined} />
 				</TabsContent>
 			</Tabs>
 			{operations.isDirty && (
-				<div className="ops-save-dock">
-					<span className="text-xs text-muted-foreground">
-						{t("ops.settingsDraft")}
-					</span>
+				<div className="network-savebar" role="status">
+					<span>{t("ops.settingsDraft")}</span>
 					<Button
 						size="sm"
 						variant="ghost"
@@ -206,11 +127,7 @@ function NetworkWorkspace() {
 					>
 						{t("proxies.discard")}
 					</Button>
-					<Button
-						size="sm"
-						disabled={operations.savePending}
-						onClick={operations.save}
-					>
+					<Button size="sm" disabled={operations.savePending} onClick={operations.save}>
 						{operations.savePending && <Spinner />}
 						{t("common.save")}
 					</Button>

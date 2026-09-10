@@ -1,50 +1,37 @@
+import { NetworkField as OperationsField } from "./network-ui";
 import {
-	OperationsField,
-	OperationsDialogContent as DialogContent,
-} from "@/features/operations/operations-ui";
+	NetworkDialogContent as DialogContent,
+	NetworkDialogHeader as DialogHeader,
+	NetworkDialogFooter as DialogFooter,
+	NetworkButton as Button,
+	NetworkText,
+} from "./network-ui";
+import { StatusPill } from "@/features/operations/operations-ui";
+import { AlertDialogContent } from "@/components/ui/alert-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-	Inbox,
-	MoreHorizontal,
-	Pencil,
-	Plus,
-	RefreshCw,
-	Search,
-	Trash2,
-} from "lucide-react";
-import { useState } from "react";
+import { Inbox, Rss, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-
-import { Badge } from "@/components/ui/badge";
-import { OperationsButton as Button } from "@/features/operations/operations-ui";
+import { Dialog, DialogTitle } from "@/components/ui/dialog";
 import {
-	Dialog,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
-import {
-	Table,
-	TableActionCell,
-	TableActionHead,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
 import {
 	createEgressSource,
 	deleteEgressSource,
@@ -56,26 +43,23 @@ import {
 	type EgressSourceDTO,
 	type EgressSourceInput,
 } from "@/features/settings/settings-api";
-import {
-	IntervalInput,
-	OperationSectionHeader,
-	SourceError,
-} from "@/features/proxies/operations-context";
-import { showError } from "@/features/proxies/operations-shared";
+import { IntervalInput, OperationSectionHeader } from "./operations-context";
+import { showError } from "./operations-shared";
 import {
 	validSubscriptionProxyURL,
 	validSubscriptionURL,
 } from "@/features/settings/settings-model";
 import { formatDateTime } from "@/shared/lib/format";
-import { ErrorState, TableLoadingRow } from "@/shared/components/data-state";
-import { DataTableShell } from "@/shared/components/data-table-shell";
+import { ErrorState, LoadingState } from "@/shared/components/data-state";
+import "./resources-panel.css";
 import { Pagination } from "@/shared/components/pagination";
-import { VirtualTableBody } from "@/shared/components/virtual-table-body";
 
-type SourceForm = Omit<
-	EgressSourceInput,
-	"url" | "proxyURL" | "clearProxyURL"
-> & { url: string; proxyEnabled: boolean; proxyURL: string };
+type SourceForm = Omit<EgressSourceInput, "url" | "proxyURL" | "clearProxyURL"> & {
+	url: string;
+	proxyEnabled: boolean;
+	proxyURL: string;
+};
+type SourceSession = { controller: AbortController; urlEdited: boolean; proxyEdited: boolean };
 const emptySource: SourceForm = {
 	name: "",
 	enabled: true,
@@ -85,52 +69,48 @@ const emptySource: SourceForm = {
 	refreshIntervalSeconds: 900,
 };
 
-/** Subscription sources are the upstream feed of the node inventory. */
-export function SubscriptionsPanel({
-	showHeader = true,
-}: {
-	showHeader?: boolean;
-}) {
+/** Sources are maintained inside the node inventory; changes take effect on save. */
+export function SubscriptionsPanel({ showHeader = true }: { showHeader?: boolean }) {
 	const { t, i18n } = useTranslation();
 	const queryClient = useQueryClient();
-	const [sourceEditing, setSourceEditing] = useState<
-		EgressSourceDTO | null | undefined
-	>(undefined);
+	const [sourceEditing, setSourceEditing] = useState<EgressSourceDTO | null | undefined>();
 	const [sourceForm, setSourceForm] = useState<SourceForm>(emptySource);
-	const [page, setPage] = useState(1);
-	const [pageSize, setPageSize] = useState(20);
-	const [search, setSearch] = useState("");
+	const [deleting, setDeleting] = useState<EgressSourceDTO | null>(null);
+	const [page, setPage] = useState(1),
+		[pageSize, setPageSize] = useState(12),
+		[search, setSearch] = useState("");
+	const editor = useRef<SourceSession | null>(null);
+	useEffect(() => () => { editor.current?.controller.abort(); editor.current = null; }, []);
 	const sourcesQuery = useQuery({
 		queryKey: ["egress-sources"],
 		queryFn: () => listEgressSources(),
+		staleTime: 15_000,
+		refetchInterval: 30_000,
 	});
-
 	const invalidate = () => {
 		void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
 		void queryClient.invalidateQueries({ queryKey: ["egress-sources"] });
 	};
+	function closeSource() {
+		editor.current?.controller.abort();
+		editor.current = null;
+		setSourceEditing(undefined);
+	}
 	const saveSource = useMutation({
-		mutationFn: () => {
-			const input: EgressSourceInput = {
-				name: sourceForm.name,
-				enabled: sourceForm.enabled,
-				url: sourceForm.url.trim() || undefined,
-				proxyURL: sourceForm.proxyEnabled
-					? sourceForm.proxyURL.trim() || undefined
-					: undefined,
-				clearProxyURL: Boolean(
-					sourceEditing?.proxyConfigured && !sourceForm.proxyEnabled,
-				),
-				refreshIntervalSeconds: sourceForm.refreshIntervalSeconds,
-			};
-			return sourceEditing
-				? updateEgressSource(sourceEditing.id, input)
-				: createEgressSource(input);
-		},
-		onSuccess: () => {
-			if (!sourceEditing) setPage(1);
+		mutationFn: ({
+			id,
+			input,
+		}: {
+			id?: string;
+			input: EgressSourceInput;
+			session: SourceSession;
+		}) => (id ? updateEgressSource(id, input) : createEgressSource(input)),
+		onSuccess: (_, submission) => {
 			invalidate();
-			setSourceEditing(undefined);
+			if (editor.current === submission.session) {
+				if (!submission.id) setPage(1);
+				closeSource();
+			}
 			toast.success(t("settings.egress.sourceSaved"));
 		},
 		onError: showError,
@@ -139,6 +119,7 @@ export function SubscriptionsPanel({
 		mutationFn: deleteEgressSource,
 		onSuccess: () => {
 			if (page > 1 && pagedSources.length === 1) setPage(page - 1);
+			setDeleting(null);
 			invalidate();
 			toast.success(t("settings.egress.sourceDeleted"));
 		},
@@ -152,426 +133,298 @@ export function SubscriptionsPanel({
 		},
 		onError: showError,
 	});
-
 	function openSource(value?: EgressSourceDTO) {
-		if (!value) {
-			setSourceForm(emptySource);
-			setSourceEditing(null);
-			return;
-		}
-		setSourceForm({
-			name: value.name,
-			enabled: value.enabled,
-			url: "",
-			refreshIntervalSeconds: value.refreshIntervalSeconds,
-			proxyEnabled: value.proxyConfigured,
-			proxyURL: "",
-		});
-		setSourceEditing(value);
-		if (value.urlConfigured) {
-			getEgressSourceURL(value.id)
-				.then(({ url }) =>
-					setSourceForm((current) =>
-						current.url === "" ? { ...current, url } : current,
-					),
-				)
+		editor.current?.controller.abort();
+		const session: SourceSession = {
+			controller: new AbortController(),
+			urlEdited: false,
+			proxyEdited: false,
+		};
+		editor.current = session;
+		setSourceForm(
+			value
+				? {
+						name: value.name,
+						enabled: value.enabled,
+						url: "",
+						refreshIntervalSeconds: value.refreshIntervalSeconds,
+						proxyEnabled: value.proxyConfigured,
+						proxyURL: "",
+					}
+				: emptySource,
+		);
+		setSourceEditing(value ?? null);
+		if (value?.urlConfigured)
+			void getEgressSourceURL(value.id, session.controller.signal)
+				.then(({ url }) => {
+					if (editor.current === session && !session.controller.signal.aborted && !session.urlEdited)
+						setSourceForm((current) => ({ ...current, url }));
+				})
 				.catch(() => undefined);
-		}
-		if (value.proxyConfigured) {
-			getEgressSourceProxyURL(value.id)
-				.then(({ proxyURL }) =>
-					setSourceForm((current) =>
-						current.proxyURL === "" ? { ...current, proxyURL } : current,
-					),
-				)
+		if (value?.proxyConfigured)
+			void getEgressSourceProxyURL(value.id, session.controller.signal)
+				.then(({ proxyURL }) => {
+					if (editor.current === session && !session.controller.signal.aborted && !session.proxyEdited)
+						setSourceForm((current) => ({ ...current, proxyURL }));
+				})
 				.catch(() => undefined);
-		}
 	}
-
 	const normalizedSearch = search.trim().toLocaleLowerCase();
-	const sources = sourcesQuery.data?.items ?? [];
-	const filteredSources = sources.filter((source) => {
-		if (
-			normalizedSearch &&
-			!source.name.toLocaleLowerCase().includes(normalizedSearch)
-		)
-			return false;
-		return true;
-	});
-	const pageCount = Math.max(1, Math.ceil(filteredSources.length / pageSize));
-	const currentPage = Math.min(page, pageCount);
-	const pagedSources = filteredSources.slice(
-		(currentPage - 1) * pageSize,
-		currentPage * pageSize,
+	const filteredSources = (sourcesQuery.data?.items ?? []).filter((source) =>
+		source.name.toLocaleLowerCase().includes(normalizedSearch),
 	);
-	const hasActiveFilters = Boolean(normalizedSearch);
+	const currentPage = Math.min(page, Math.max(1, Math.ceil(filteredSources.length / pageSize)));
+	const pagedSources = filteredSources.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 	const sourceProxyInvalid =
 		sourceForm.proxyEnabled &&
 		Boolean(sourceForm.proxyURL.trim()) &&
 		!validSubscriptionProxyURL(sourceForm.proxyURL);
-	const sourceURLInvalid =
-		Boolean(sourceForm.url.trim()) && !validSubscriptionURL(sourceForm.url);
-	// 后端强制 60-86400;此前清空输入会变成 0 提交, 只得到原始 400 错误。
+	const sourceURLInvalid = Boolean(sourceForm.url.trim()) && !validSubscriptionURL(sourceForm.url);
 	const sourceIntervalInvalid =
+		!Number.isInteger(sourceForm.refreshIntervalSeconds) ||
 		(sourceForm.refreshIntervalSeconds ?? 0) < 60 ||
 		(sourceForm.refreshIntervalSeconds ?? 0) > 86400;
-
+	function submitSource() {
+		const session = editor.current;
+		if (
+			!session ||
+			saveSource.isPending ||
+			!sourceForm.name.trim() ||
+			(!sourceEditing && !sourceForm.url.trim()) ||
+			(sourceForm.proxyEnabled && !sourceEditing?.proxyConfigured && !sourceForm.proxyURL.trim()) ||
+			sourceURLInvalid ||
+			sourceProxyInvalid ||
+			sourceIntervalInvalid
+		)
+			return;
+		// Capture the submitted editor. A later save response must not close another source.
+		saveSource.mutate({
+			id: sourceEditing?.id,
+			session,
+			input: {
+				name: sourceForm.name,
+				enabled: sourceForm.enabled,
+				url: sourceForm.url.trim() || undefined,
+				proxyURL: sourceForm.proxyEnabled ? sourceForm.proxyURL.trim() || undefined : undefined,
+				clearProxyURL: Boolean(sourceEditing?.proxyConfigured && !sourceForm.proxyEnabled),
+				refreshIntervalSeconds: sourceForm.refreshIntervalSeconds,
+			},
+		});
+	}
 	return (
-		<section className="space-y-3">
-			{showHeader ? (
+		<section className="nres-sources">
+			{showHeader && (
 				<OperationSectionHeader
 					title={t("settings.egress.subscriptions")}
-					help={t("settings.egress.subscriptionsHelp")}
+					help={t("ops.netSourcesHelp")}
 				/>
-			) : null}
-
-			<DataTableShell
-				toolbar={
-					<>
-						<div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
-							<div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
-								<Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-								<Input
-									className="h-8 pl-9 text-xs"
-									value={search}
-									onChange={(event) => {
-										setSearch(event.target.value);
-										setPage(1);
-									}}
-									placeholder={t("settings.egress.searchSubscriptions")}
-									aria-label={t("settings.egress.searchSubscriptions")}
-								/>
-							</div>
-						</div>
-						<Button
-							type="button"
-							size="sm"
-							variant="secondary"
-							onClick={() => openSource()}
-						>
-							<Plus />
-							{t("settings.egress.addSource")}
-						</Button>
-					</>
-				}
-				footer={
-					filteredSources.length > 0 ? (
-						<Pagination
-							page={currentPage}
-							pageSize={pageSize}
-							total={filteredSources.length}
-							onPageChange={setPage}
-							onPageSizeChange={(value) => {
-								setPageSize(value);
-								setPage(1);
-							}}
-						/>
-					) : undefined
-				}
+			)}
+			<div className="nres-source-search">
+				<Search aria-hidden="true" />
+				<Input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder={t("settings.egress.searchSubscriptions")} aria-label={t("settings.egress.searchSubscriptions")} />
+				<Button type="button" size="sm" className="nres-source-add" onClick={() => openSource()}>
+					<Plus />{t("settings.egress.addSource")}
+				</Button>
+			</div>
+			{sourcesQuery.isError && <ErrorState message={sourcesQuery.error.message} onRetry={() => void sourcesQuery.refetch()} />}
+			{sourcesQuery.isPending ? <LoadingState /> : !sourcesQuery.data ? null : pagedSources.length === 0 ? (
+				<div className="nres-empty">
+					<Inbox aria-hidden="true" />
+					<p>{t(normalizedSearch ? "settings.egress.noSubscriptionMatches" : "settings.egress.noSources")}</p>
+					{normalizedSearch && <Button type="button" variant="outline" size="sm" onClick={() => setSearch("")}>{t("networkResources.clearSearch")}</Button>}
+				</div>
+			) : (
+				<div className="nres-source-grid">
+					{pagedSources.map((source) => (
+						<article key={source.id} className="nres-source-card">
+							<header>
+								<div className="nres-source-name"><Rss aria-hidden="true" /><h3><NetworkText>{source.name}</NetworkText></h3></div>
+								<StatusPill tone={!source.enabled ? "neutral" : source.lastSyncError ? "warn" : "good"}>
+									{t(!source.enabled ? "ops.netSourcePaused" : source.lastSyncError ? "ops.netSyncFailed" : "ops.netSourceAuto")}
+								</StatusPill>
+							</header>
+							<dl className="nres-source-facts">
+								<div><dt>{t("settings.egress.lastSync")}</dt><dd>{source.lastSyncedAt ? <time dateTime={source.lastSyncedAt}>{formatDateTime(source.lastSyncedAt, i18n.language)}</time> : t("settings.egress.never")}</dd></div>
+								<div><dt>{t("networkResources.nextSync")}</dt><dd>{source.enabled && source.nextSyncAt ? <time dateTime={source.nextSyncAt}>{formatDateTime(source.nextSyncAt, i18n.language)}</time> : t("networkResources.notScheduled")}</dd></div>
+								<div><dt>{t("ops.netLastImported")}</dt><dd>{source.lastSyncedAt ? t("networkResources.nodeCount", { count: source.lastSyncImported }) : "—"}</dd></div>
+								<div><dt>{t("networkResources.refreshInterval")}</dt><dd>{source.refreshIntervalSeconds % 60 === 0 ? t("networkResources.minutes", { count: source.refreshIntervalSeconds / 60 }) : t("networkResources.seconds", { count: source.refreshIntervalSeconds })}</dd></div>
+								<div><dt>{t("settings.egress.subscriptionProxy")}</dt><dd>{t(source.proxyConfigured ? "common.enable" : "ops.netDirect")}</dd></div>
+							</dl>
+							{source.lastSyncError && <div className="nres-source-error"><strong>{t("ops.netSyncFailed")}</strong><p>{source.lastSyncError}</p></div>}
+							<footer>
+								<Button type="button" variant="outline" size="sm" disabled={syncSource.isPending} onClick={() => syncSource.mutate(source.id)}>
+									{syncSource.isPending && syncSource.variables === source.id ? <Spinner /> : <RefreshCw />}
+									{t(source.lastSyncError ? "networkResources.retrySync" : "networkResources.syncNow")}
+								</Button>
+								<Button type="button" variant="ghost" size="sm" onClick={() => openSource(source)}><Pencil />{t("common.edit")}</Button>
+								<DropdownMenu>
+									<DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={`${t("common.actions")} · ${source.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger>
+									<DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onClick={() => setDeleting(source)}><Trash2 />{t("common.delete")}</DropdownMenuItem></DropdownMenuContent>
+								</DropdownMenu>
+							</footer>
+						</article>
+					))}
+				</div>
+			)}
+			{filteredSources.length > 0 && <Pagination page={currentPage} pageSize={pageSize} pageSizeOptions={[12, 24, 48]} total={filteredSources.length} onPageChange={setPage} onPageSizeChange={(value) => { setPageSize(value); setPage(1); }} />}
+			<AlertDialog
+				open={Boolean(deleting)}
+				onOpenChange={(open) => {
+					if (!open && !removeSource.isPending) setDeleting(null);
+				}}
 			>
-				{sourcesQuery.isError ? (
-					<ErrorState
-						message={sourcesQuery.error.message}
-						onRetry={() => void sourcesQuery.refetch()}
-					/>
-				) : null}
-				{!sourcesQuery.isError ? (
-					<Table
-						viewportRows={showHeader ? 10 : 6}
-						rowHeight={48}
-						className="table-fixed"
-					>
-						<TableHeader>
-							<TableRow className="hover:bg-transparent">
-								<TableHead className="text-center">
-									{t("proxies.supply.name")}
-								</TableHead>
-								<TableHead className="w-[88px] text-center">
-									{t("proxies.supply.enabledCol")}
-								</TableHead>
-								<TableHead className="w-[104px] whitespace-nowrap text-center">
-									{t("settings.egress.refreshInterval")}
-								</TableHead>
-								<TableHead className="w-[88px] text-center">
-									{t("proxies.supply.viaProxy")}
-								</TableHead>
-								<TableHead className="w-[128px] whitespace-nowrap text-center">
-									{t("settings.egress.lastSync")}
-								</TableHead>
-								<TableActionHead />
-							</TableRow>
-						</TableHeader>
-						{sourcesQuery.isPending ? (
-							<TableBody>
-								<TableLoadingRow colSpan={6} />
-							</TableBody>
-						) : null}
-						{!sourcesQuery.isPending && pagedSources.length === 0 ? (
-							<TableBody>
-								<TableRow>
-									<TableCell colSpan={6} className="p-0">
-										<div className="flex min-h-44 flex-col items-center justify-center gap-2 py-6 text-center">
-											<Inbox className="size-7 stroke-1 text-muted-foreground" />
-											<p className="text-sm text-muted-foreground">
-												{hasActiveFilters
-													? t("settings.egress.noSubscriptionMatches")
-													: t("settings.egress.noSources")}
-											</p>
-											{!hasActiveFilters ? (
-												<Button
-													type="button"
-													size="sm"
-													variant="secondary"
-													className="mt-1"
-													onClick={() => openSource()}
-												>
-													<Plus />
-													{t("settings.egress.addSource")}
-												</Button>
-											) : null}
-										</div>
-									</TableCell>
-								</TableRow>
-							</TableBody>
-						) : null}
-						{!sourcesQuery.isPending && pagedSources.length > 0 ? (
-							<VirtualTableBody
-								items={pagedSources}
-								colSpan={6}
-								rowHeight={48}
-								renderRow={(source) => (
-									<TableRow className="group h-12" key={source.id}>
-										<TableCell className="text-center">
-											<div className="flex min-w-0 items-center justify-center gap-2">
-												<span className="truncate text-xs font-medium">
-													{source.name}
-												</span>
-												{source.lastSyncError ? (
-													<SourceError message={source.lastSyncError} />
-												) : null}
-											</div>
-										</TableCell>
-										<TableCell className="text-center">
-											<Badge
-												variant={source.enabled ? "secondary" : "outline"}
-												className={
-													source.enabled
-														? "bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-300"
-														: "text-[10px] text-muted-foreground"
-												}
-											>
-												{source.enabled
-													? t("proxies.supply.yes")
-													: t("proxies.supply.no")}
-											</Badge>
-										</TableCell>
-										<TableCell className="text-center text-xs tabular-nums text-muted-foreground">
-											{source.refreshIntervalSeconds}s
-										</TableCell>
-										<TableCell className="text-center">
-											<Badge
-												variant={
-													source.proxyConfigured ? "secondary" : "outline"
-												}
-												className={
-													source.proxyConfigured
-														? "bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-300"
-														: "text-[10px] text-muted-foreground"
-												}
-											>
-												{source.proxyConfigured
-													? t("proxies.supply.yes")
-													: t("proxies.supply.no")}
-											</Badge>
-										</TableCell>
-										<TableCell className="whitespace-nowrap text-center text-xs text-muted-foreground">
-											{source.lastSyncedAt
-												? formatDateTime(source.lastSyncedAt, i18n.language)
-												: t("settings.egress.never")}
-										</TableCell>
-										<TableActionCell>
-											<DropdownMenu>
-												<DropdownMenuTrigger asChild>
-													<Button
-														type="button"
-														size="icon"
-														variant="ghost"
-														className="size-8"
-														aria-label={t("common.actions")}
-													>
-														<MoreHorizontal />
-													</Button>
-												</DropdownMenuTrigger>
-												<DropdownMenuContent align="end">
-													<DropdownMenuItem
-														disabled={syncSource.isPending}
-														onClick={() => syncSource.mutate(source.id)}
-													>
-														<RefreshCw />
-														{t("settings.egress.sync")}
-													</DropdownMenuItem>
-													<DropdownMenuItem onClick={() => openSource(source)}>
-														<Pencil />
-														{t("common.edit")}
-													</DropdownMenuItem>
-													<DropdownMenuSeparator />
-													<DropdownMenuItem
-														className="text-destructive focus:text-destructive"
-														disabled={removeSource.isPending}
-														onClick={() => removeSource.mutate(source.id)}
-													>
-														<Trash2 />
-														{t("common.delete")}
-													</DropdownMenuItem>
-												</DropdownMenuContent>
-											</DropdownMenu>
-										</TableActionCell>
-									</TableRow>
-								)}
-							/>
-						) : null}
-					</Table>
-				) : null}
-			</DataTableShell>
-
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>
+							{t("ops.netDeleteSource", { name: deleting?.name })}
+						</AlertDialogTitle>
+						<AlertDialogDescription>{t("ops.netDeleteSourceHelp")}</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel disabled={removeSource.isPending}>
+							{t("common.cancel")}
+						</AlertDialogCancel>
+						<AlertDialogAction
+							className="bg-destructive text-destructive-foreground"
+							disabled={removeSource.isPending}
+							onClick={(event) => {
+								event.preventDefault();
+								if (deleting) removeSource.mutate(deleting.id);
+							}}
+						>
+							{removeSource.isPending && <Spinner />}
+							{t("common.delete")}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
 			<Dialog
 				open={sourceEditing !== undefined}
 				onOpenChange={(open) => {
-					if (!open) setSourceEditing(undefined);
+					if (!open) closeSource();
 				}}
 			>
-				<DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-[660px]">
+				<DialogContent layout="editor" aria-describedby={undefined}>
 					<DialogHeader className="pr-8">
 						<DialogTitle>
-							{sourceEditing
-								? t("settings.egress.editSource")
-								: t("settings.egress.addSource")}
+							<Rss aria-hidden="true" />
+							{sourceEditing ? t("settings.egress.editSource") : t("settings.egress.addSource")}
 						</DialogTitle>
-						<DialogDescription>
-							{t("settings.egress.sourceDialogDescription")}
-						</DialogDescription>
 					</DialogHeader>
 					<form
+						className="net-editor-form"
 						onSubmit={(event) => {
 							event.preventDefault();
 							event.stopPropagation();
-							saveSource.mutate();
+							submitSource();
 						}}
 					>
-						<OperationsField
-							controlId="source-enabled"
-							label={t("settings.egress.enabled")}
-						>
-							<Switch
-								id="source-enabled"
-								checked={sourceForm.enabled}
-								onCheckedChange={(enabled) =>
-									setSourceForm({ ...sourceForm, enabled })
-								}
-							/>
-						</OperationsField>
-						<OperationsField
-							controlId="source-name"
-							label={t("settings.egress.name")}
-						>
-							<Input
-								id="source-name"
-								maxLength={160}
-								value={sourceForm.name}
-								onChange={(event) =>
-									setSourceForm({ ...sourceForm, name: event.target.value })
-								}
-							/>
-						</OperationsField>
-						<OperationsField
-							controlId="source-url"
-							label={t("settings.egress.subscriptionURL")}
-							error={
-								sourceURLInvalid ? t("ops.subscriptionInvalid") : undefined
-							}
-						>
-							<Input
-								id="source-url"
-								type="text"
-								autoComplete="off"
-								aria-invalid={sourceURLInvalid}
-								placeholder="https://..."
-								value={sourceForm.url}
-								onChange={(event) =>
-									setSourceForm({ ...sourceForm, url: event.target.value })
-								}
-							/>
-						</OperationsField>
-						<OperationsField
-							controlId="egress-source-refresh-interval"
-							label={t("settings.egress.refreshInterval")}
-							error={
-								sourceIntervalInvalid
-									? t("settings.egress.invalidRefreshInterval")
-									: undefined
-							}
-						>
-							<IntervalInput
-								id="egress-source-refresh-interval"
-								value={
-									sourceForm.refreshIntervalSeconds
-										? String(sourceForm.refreshIntervalSeconds)
-										: ""
-								}
-								onChange={(value) =>
-									setSourceForm({
-										...sourceForm,
-										refreshIntervalSeconds: Number(value) || 0,
-									})
-								}
-							/>
-						</OperationsField>
-						<OperationsField
-							controlId="source-proxy"
-							label={t("settings.egress.subscriptionProxy")}
-						>
-							<Switch
-								id="source-proxy"
-								checked={sourceForm.proxyEnabled}
-								onCheckedChange={(proxyEnabled) =>
-									setSourceForm({ ...sourceForm, proxyEnabled })
-								}
-							/>
-						</OperationsField>
-						{sourceForm.proxyEnabled ? (
+						<fieldset className="net-editor-body nres-editor-fields" disabled={saveSource.isPending}>
+							<div className="net-identity">
+								<OperationsField controlId="source-name" label={t("settings.egress.name")}>
+									<Input
+										id="source-name"
+										placeholder={t("ops.netSourceExample")}
+										maxLength={160}
+										value={sourceForm.name}
+										onChange={(event) => setSourceForm({ ...sourceForm, name: event.target.value })}
+									/>
+								</OperationsField>
+								<OperationsField controlId="source-enabled" label={t("settings.egress.enabled")}>
+									<Switch
+										id="source-enabled"
+										checked={sourceForm.enabled}
+										onCheckedChange={(enabled) => setSourceForm({ ...sourceForm, enabled })}
+									/>
+								</OperationsField>
+							</div>
 							<OperationsField
-								controlId="source-proxy-url"
-								label={t("settings.egress.subscriptionProxyURL")}
-								error={
-									sourceProxyInvalid
-										? t("settings.egress.invalidSubscriptionProxy")
-										: undefined
-								}
+								controlId="source-url"
+								label={t("settings.egress.subscriptionURL")}
+								error={sourceURLInvalid ? t("ops.subscriptionInvalid") : undefined}
 							>
 								<Input
-									id="source-proxy-url"
+									id="source-url"
+									className="net-address-input"
 									type="text"
 									autoComplete="off"
-									aria-invalid={sourceProxyInvalid}
-									placeholder="http://proxy.example:8080"
-									value={sourceForm.proxyURL}
-									onChange={(event) =>
+									aria-invalid={sourceURLInvalid}
+									placeholder={
+										sourceEditing?.urlConfigured ? t("ops.netKeepStoredAddress") : "https://..."
+									}
+									value={sourceForm.url}
+									onChange={(event) => {
+										if (editor.current) editor.current.urlEdited = true;
+										setSourceForm({ ...sourceForm, url: event.target.value });
+									}}
+								/>
+							</OperationsField>
+							<OperationsField
+								controlId="egress-source-refresh-interval"
+								className="net-field-number"
+								label={t("settings.egress.refreshInterval")}
+								error={
+									sourceIntervalInvalid ? t("settings.egress.invalidRefreshInterval") : undefined
+								}
+							>
+								<IntervalInput
+									id="egress-source-refresh-interval"
+									value={
+										sourceForm.refreshIntervalSeconds
+											? String(sourceForm.refreshIntervalSeconds)
+											: ""
+									}
+									onChange={(value) =>
 										setSourceForm({
 											...sourceForm,
-											proxyURL: event.target.value,
+											refreshIntervalSeconds: Number(value) || 0,
 										})
 									}
 								/>
 							</OperationsField>
-						) : null}
-						<DialogFooter className="pt-4">
-							<Button
-								type="button"
-								size="sm"
-								variant="secondary"
-								onClick={() => setSourceEditing(undefined)}
+							<OperationsField
+								controlId="source-proxy"
+								label={t("settings.egress.subscriptionProxy")}
 							>
-								{t("common.cancel")}
+								<Switch
+									id="source-proxy"
+									checked={sourceForm.proxyEnabled}
+									onCheckedChange={(proxyEnabled) => setSourceForm({ ...sourceForm, proxyEnabled })}
+								/>
+							</OperationsField>
+							{sourceForm.proxyEnabled ? (
+								<OperationsField
+									controlId="source-proxy-url"
+									label={t("settings.egress.subscriptionProxyURL")}
+									error={
+										sourceProxyInvalid ? t("settings.egress.invalidSubscriptionProxy") : undefined
+									}
+								>
+									<Input
+										id="source-proxy-url"
+										type="text"
+										autoComplete="off"
+										aria-invalid={sourceProxyInvalid}
+										placeholder={
+											sourceEditing?.proxyConfigured
+												? t("ops.netKeepStoredAddress")
+												: "http://proxy.example:8080"
+										}
+										value={sourceForm.proxyURL}
+										onChange={(event) => {
+											if (editor.current) editor.current.proxyEdited = true;
+											setSourceForm({
+												...sourceForm,
+												proxyURL: event.target.value,
+											});
+										}}
+									/>
+								</OperationsField>
+							) : null}
+						</fieldset>
+						<DialogFooter>
+							<Button type="button" size="sm" variant="secondary" onClick={closeSource}>
+								{t(saveSource.isPending ? "common.close" : "common.cancel")}
 							</Button>
 							<Button
 								type="submit"

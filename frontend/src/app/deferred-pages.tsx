@@ -1,25 +1,23 @@
-import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from "react";
+import { lazy, Suspense, type ComponentType } from "react";
+
+import { AccountsPageModule, AppShellModule, RequestAuditsPageModule, ClientKeysPageModule, CreativeConsolePageModule, DashboardPageModule, ApiDocsPageModule, GalleryPageModule, QualityConsoleModule, QualitySettingsPageModule, VideoGalleryPageModule, ModelsPageModule, ProxiesPageModule, SettingsPageModule } from "./page-modules";
 
 import { Spinner } from "@/components/ui/spinner";
 
-const AccountsPage = lazyNamed(() => import("@/features/accounts/accounts-page"), "AccountsPage");
-const AppShell = lazyNamed(() => import("@/app/app-shell"), "AppShell");
-const RequestAuditsPage = lazyNamed(() => import("@/features/audits/request-audits-page"), "RequestAuditsPage");
-const ClientKeysPage = lazyNamed(() => import("@/features/client-keys/client-keys-page"), "ClientKeysPage");
-const CreativeConsolePage = lazyNamed(() => import("@/features/creative-console/creative-console-page"), "CreativeConsolePage");
-const DashboardPage = lazyNamed(() => import("@/features/dashboard/dashboard-page"), "DashboardPage");
-const ApiDocsPage = lazyNamed(() => import("@/features/docs/api-docs-page"), "ApiDocsPage");
-const GalleryPage = lazyNamed(() => import("@/features/media/gallery-page"), "GalleryPage");
-const QualityConsole = lazyNamed(() => import("@/features/guard/quality-console"), "QualityConsole");
-const QualitySettingsPage = lazyNamed(() => import("@/features/guard/quality-settings-page"), "QualitySettingsPage");
-const VideoGalleryPage = lazyNamed(() => import("@/features/media/video-gallery-page"), "VideoGalleryPage");
-const ModelsPage = lazyNamed(() => import("@/features/models/models-page"), "ModelsPage");
-const ProxiesPage = lazyNamed(() => import("@/features/proxies/proxies-page"), "ProxiesPage");
-const SettingsPage = lazyNamed(() => import("@/features/settings/settings-page"), "SettingsPage");
-
-function lazyNamed<T extends Record<K, ComponentType>, K extends keyof T>(loader: () => Promise<T>, exportName: K): LazyExoticComponent<T[K]> {
-  return lazy(async () => ({ default: (await loader())[exportName] }));
-}
+const AccountsPage = lazy(AccountsPageModule.load);
+const AppShell = lazy(AppShellModule.load);
+const RequestAuditsPage = lazy(RequestAuditsPageModule.load);
+const ClientKeysPage = lazy(ClientKeysPageModule.load);
+const CreativeConsolePage = lazy(CreativeConsolePageModule.load);
+const DashboardPage = lazy(DashboardPageModule.load);
+const ApiDocsPage = lazy(ApiDocsPageModule.load);
+const GalleryPage = lazy(GalleryPageModule.load);
+const QualityConsole = lazy(QualityConsoleModule.load);
+const QualitySettingsPage = lazy(QualitySettingsPageModule.load);
+const VideoGalleryPage = lazy(VideoGalleryPageModule.load);
+const ModelsPage = lazy(ModelsPageModule.load);
+const ProxiesPage = lazy(ProxiesPageModule.load);
+const SettingsPage = lazy(SettingsPageModule.load);
 
 function DeferredPage({ page: Page }: { page: ComponentType }) {
   return <Suspense fallback={<PageLoadingFallback />}><Page /></Suspense>;

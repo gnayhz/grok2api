@@ -23,12 +23,14 @@ import {
 	Waypoints,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
+
+import { preloadPage } from "@/app/page-modules";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -163,8 +165,9 @@ export function AppShell() {
 	const [documentationOpen, setDocumentationOpen] = useState<
 		Record<string, boolean>
 	>({});
-	const operationsRoute =
-		location.pathname.startsWith("/guard") || location.pathname === "/proxies";
+	const compactPageHeader =
+		location.pathname.startsWith("/guard") ||
+		location.pathname === "/request-audits";
 	const isMediaWorkspace = [
 		"/creative-console",
 		"/gallery",
@@ -193,11 +196,13 @@ export function AppShell() {
 		}
 	}
 
-	function navigationLinks(): ReactNode {
-		return navigation.map(({ href, label, icon: Icon }) => (
+	const navigationLinks = useMemo(() => navigation.map(({ href, label, icon: Icon }) => (
 			<NavLink
 				key={href}
 				to={href}
+				onPointerEnter={() => preloadPage(href)}
+				onFocus={() => preloadPage(href)}
+				onPointerDown={() => preloadPage(href)}
 				onClick={() => setMobileOpen(false)}
 				className={({ isActive }) =>
 					cn(
@@ -223,11 +228,9 @@ export function AppShell() {
 					</>
 				)}
 			</NavLink>
-		));
-	}
+		)), [t]);
 
-	function documentationLinks(): ReactNode {
-		return documentation.map(({ label, icon: Icon, items }) => {
+	const documentationLinks = useMemo(() => documentation.map(({ label, icon: Icon, items }) => {
 			const open = documentationOpen[label] ?? false;
 			return (
 				<div key={label}>
@@ -267,10 +270,12 @@ export function AppShell() {
 					>
 						<div className="overflow-hidden">
 							<div className="space-y-1 pt-1">
-								{items.map((item) => (
+								{open ? items.map((item) => (
 									<NavLink
 										key={item.href}
 										to={item.href}
+										onPointerEnter={() => preloadPage(item.href)}
+										onFocus={() => preloadPage(item.href)}
 										onClick={() => setMobileOpen(false)}
 										className={({ isActive }) =>
 											cn(
@@ -294,26 +299,25 @@ export function AppShell() {
 											{item.method}
 										</span>
 									</NavLink>
-								))}
+								)) : null}
 							</div>
 						</div>
 					</div>
 				</div>
 			);
-		});
-	}
+		}), [documentationOpen]);
 
 	const navigationContent = (
 		<nav
 			className="mt-7 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-2 pb-2"
 			aria-label={t("shell.navigation")}
 		>
-			<div className="space-y-1">{navigationLinks()}</div>
+			<div className="space-y-1">{navigationLinks}</div>
 			<div className="mt-7">
 				<div className="px-2.5 pb-2 text-xs font-normal text-foreground">
 					{t("nav.docs")}
 				</div>
-				<div className="space-y-1">{documentationLinks()}</div>
+				<div className="space-y-1">{documentationLinks}</div>
 			</div>
 		</nav>
 	);
@@ -392,6 +396,8 @@ export function AppShell() {
 			</DropdownMenu>
 			<NavLink
 				to="/settings"
+				onPointerEnter={() => preloadPage("/settings")}
+				onFocus={() => preloadPage("/settings")}
 				onClick={() => setMobileOpen(false)}
 				className={({ isActive }) =>
 					cn(
@@ -468,12 +474,12 @@ export function AppShell() {
 								className="mt-5 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pb-2"
 								aria-label={t("shell.navigation")}
 							>
-								<div className="space-y-1">{navigationLinks()}</div>
+								<div className="space-y-1">{navigationLinks}</div>
 								<div className="mt-7">
 									<div className="px-2.5 pb-2 text-xs font-normal text-foreground">
 										{t("nav.docs")}
 									</div>
-									<div className="space-y-1">{documentationLinks()}</div>
+									<div className="space-y-1">{documentationLinks}</div>
 								</div>
 							</nav>
 							<div className="relative z-10 mt-3 shrink-0 border-t border-sidebar-border/60 bg-sidebar pt-3">
@@ -505,7 +511,7 @@ export function AppShell() {
 				<main
 					className={cn(
 						"mx-auto w-full max-w-[1280px] flex-1 px-5 sm:px-8",
-						operationsRoute
+						compactPageHeader
 							? "py-8"
 							: isMediaWorkspace
 								? "pt-8 pb-0 lg:pt-20"

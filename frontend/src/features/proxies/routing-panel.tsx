@@ -1,29 +1,21 @@
-import {
-	OperationsHelp,
-	StatusPill,
-} from "@/features/operations/operations-ui";
 import { useQuery } from "@tanstack/react-query";
-import React from "react";
-import { ArrowRight, Search } from "lucide-react";
+import { ArrowRight, GitBranch, Globe2, Layers3, Search, Server } from "lucide-react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Input } from "@/components/ui/input";
-import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
-import { useEgressOperations } from "@/features/proxies/operations-shared";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useNow } from "@/features/guard/quality-hooks";
+import { nodeCondition } from "@/features/operations/operations-data";
+import { StatusPill, type StatusTone } from "@/features/operations/operations-ui";
+import { resolveEffectiveTarget } from "@/features/proxies/effective-target";
 import {
 	fixedTargetCandidates,
-	nodeCooling,
 	routingScopes,
 	routingScopeLabelKeys,
-	trafficClassLabelKeys,
 	trafficClasses,
-	type EgressOperationsDraft,
+	trafficClassLabelKeys,
+	useEgressOperations,
 } from "@/features/proxies/operations-shared";
 import {
 	getEgressRoutingStats,
@@ -31,34 +23,42 @@ import {
 	listEgressPools,
 	type EgressNodeDTO,
 	type EgressPoolDTO,
+	type EgressRoutingScope,
 	type EgressRoutingTarget,
+	type EgressTrafficClass,
 } from "@/features/settings/settings-api";
-import { resolveEffectiveTarget } from "@/features/proxies/effective-target";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
+import { NetworkButton, NetworkField, NetworkSelect, NetworkText } from "./network-ui";
+import "./routing-panel.css";
 
-/** 可搜索的资源选择:下拉顶部过滤输入按名称/IP 实时筛,搜索框吸顶不随列表滚动。 */
-function SearchableResourceSelect({
-	placeholder,
+type RoutingPanelProps = { initialRule?: string };
+type RouteRule = {
+	id: string;
+	label: string;
+	target?: EgressRoutingTarget;
+	inheritLabel?: string;
+	onChange: (target?: EgressRoutingTarget) => void;
+};
+type TargetSummary = { name: string; detail: string; status: string; tone: StatusTone };
+
+function ResourceSelect({
+	id,
+	label,
 	items,
 	value,
-	disabled,
 	onChange,
-	unavailableLabel,
 }: {
-	placeholder: string;
+	id: string;
+	label: string;
 	items: { id: string; label: string }[];
 	value?: string;
-	disabled?: boolean;
 	onChange: (id: string) => void;
-	unavailableLabel?: string;
 }) {
 	const { t } = useTranslation();
-	const [open, setOpen] = React.useState(false);
-	const [filter, setFilter] = React.useState("");
+	const [open, setOpen] = useState(false);
+	const [filter, setFilter] = useState("");
 	const needle = filter.trim().toLocaleLowerCase();
-	const visible = needle
-		? items.filter((item) => item.label.toLocaleLowerCase().includes(needle))
-		: items;
+	const visible = items.filter((item) => item.label.toLocaleLowerCase().includes(needle));
 	const selected = items.find((item) => item.id === value);
 	return (
 		<Select
@@ -68,619 +68,330 @@ function SearchableResourceSelect({
 				if (!next) setFilter("");
 			}}
 			value={value ?? ""}
-			disabled={disabled}
 			onValueChange={onChange}
 		>
-			<SelectTrigger aria-label={placeholder} className="min-w-40 flex-1">
-				<SelectValue placeholder={t("proxies.routing.targetUnavailable")} />
+			<SelectTrigger id={id} aria-label={label}>
+				<SelectValue placeholder={t("networkRouting.chooseResource")}>
+					{selected?.label ?? (value ? t("networkRouting.unavailableResource", { id: value }) : undefined)}
+				</SelectValue>
 			</SelectTrigger>
 			<SelectContent
+				className="nroute-resource-menu"
 				selectHeader={
-					<div
-						className="shrink-0 border-b px-1.5 py-1.5"
-						onKeyDown={(event) => event.stopPropagation()}
-					>
-						<div className="relative">
-							<Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-							<Input
-								autoFocus
-								className="h-8 border-0 bg-secondary/55 pl-8 text-xs shadow-none focus-visible:ring-0"
-								value={filter}
-								placeholder={placeholder}
-								onChange={(event) => setFilter(event.target.value)}
-							/>
-						</div>
+					<div className="nroute-resource-search" onKeyDown={(event) => {
+						if (event.key !== "Escape") event.stopPropagation();
+					}}>
+						<Search aria-hidden="true" />
+						<Input
+							autoFocus
+							value={filter}
+							aria-label={t("networkRouting.searchResources")}
+							placeholder={t("networkRouting.searchResources")}
+							onChange={(event) => setFilter(event.target.value)}
+						/>
 					</div>
 				}
 			>
-				{!selected && value ? (
-					<SelectItem value={value} disabled>
-						{unavailableLabel ?? "—"}
-					</SelectItem>
-				) : null}
-				{visible.length === 0 ? (
-					<p className="px-2 py-3 text-center text-xs text-muted-foreground">
-						{t("settings.egress.noMatches")}
-					</p>
-				) : null}
+				{value && !selected && (
+					<SelectItem value={value} disabled>{t("networkRouting.unavailableResource", { id: value })}</SelectItem>
+				)}
+				{visible.length === 0 && <p className="nroute-menu-note">{t("networkRouting.noResources")}</p>}
+				{visible.length > 200 && <p className="nroute-menu-note">{t("networkRouting.refineSearch")}</p>}
 				{visible.slice(0, 200).map((item) => (
-					<SelectItem
-						key={item.id}
-						value={item.id}
-						className="max-w-96 truncate"
-					>
-						{item.label}
-					</SelectItem>
+					<SelectItem key={item.id} value={item.id} className="nroute-resource-option">{item.label}</SelectItem>
 				))}
 			</SelectContent>
 		</Select>
 	);
 }
 
-/** 池目标选择:实体池列表(含已停用,标注状态),带搜索。 */
-function PoolTargetSelect({
-	pools,
-	value,
-	onChange,
-}: {
-	pools: EgressPoolDTO[];
-	value?: string;
-	onChange: (poolId: string) => void;
-}) {
+function TargetEditor({ rule, nodes, pools, now }: { rule: RouteRule; nodes: EgressNodeDTO[]; pools: EgressPoolDTO[]; now: number }) {
 	const { t } = useTranslation();
-	const [open, setOpen] = React.useState(false);
-	const [filter, setFilter] = React.useState("");
-	const items = pools.map((pool) => ({
-		id: pool.id,
-		label: pool.enabled
-			? pool.name
-			: pool.name + " · " + t("proxies.routing.poolDisabled"),
-	}));
-	const needle = filter.trim().toLocaleLowerCase();
-	const visible = needle
-		? items.filter((item) => item.label.toLocaleLowerCase().includes(needle))
-		: items;
-	const selected = items.find((item) => item.id === value);
+	const id = useId();
+	const mode = rule.target?.mode || (rule.inheritLabel ? "inherit" : "auto");
+	// Inheritance removes the rule. A stored explicit auto is a terminal route,
+	// so it keeps its own visible value until the operator chooses a replacement.
+	const explicitAuto = Boolean(rule.inheritLabel && mode === "auto");
+	const options = [
+		{ value: rule.inheritLabel ? "inherit" : "auto", label: rule.inheritLabel ?? t("networkRouting.auto") },
+		...(explicitAuto ? [{ value: "auto", label: t("networkRouting.explicitAuto"), disabled: true }] : []),
+		{ value: "pool", label: t("networkRouting.pool"), disabled: pools.length === 0 },
+		{ value: "node", label: t("networkRouting.node"), disabled: nodes.length === 0 },
+		{ value: "direct", label: t("networkRouting.direct") },
+	];
 	return (
-		<Select
-			open={open}
-			onOpenChange={(next) => {
-				setOpen(next);
-				if (!next) setFilter("");
-			}}
-			value={value ?? ""}
-			onValueChange={onChange}
-		>
-			<SelectTrigger
-				aria-label={t("proxies.routing.targetPool")}
-				className="min-w-40 flex-1"
-			>
-				<SelectValue placeholder={t("proxies.routing.targetUnavailable")} />
-			</SelectTrigger>
-			<SelectContent
-				selectHeader={
-					<div
-						className="shrink-0 border-b px-1.5 py-1.5"
-						onKeyDown={(event) => event.stopPropagation()}
-					>
-						<div className="relative">
-							<Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-							<Input
-								autoFocus
-								className="h-8 border-0 bg-secondary/55 pl-8 text-xs shadow-none focus-visible:ring-0"
-								value={filter}
-								placeholder={t("settings.egress.search")}
-								onChange={(event) => setFilter(event.target.value)}
-							/>
-						</div>
-					</div>
-				}
-			>
-				{!selected && value ? (
-					<SelectItem value={value} disabled>
-						{t("proxies.routing.targetUnavailable")}
-					</SelectItem>
-				) : null}
-				{visible.map((item) => (
-					<SelectItem
-						key={item.id}
-						value={item.id}
-						className="max-w-96 truncate"
-					>
-						{item.label}
-					</SelectItem>
-				))}
-				{visible.length === 0 ? (
-					<p className="px-2 py-3 text-center text-xs text-muted-foreground">
-						{t("settings.egress.noMatches")}
-					</p>
-				) : null}
-			</SelectContent>
-		</Select>
-	);
-}
-
-type PickerProps = {
-	value: EgressRoutingTarget;
-	onChange: (target: EgressRoutingTarget) => void;
-	nodes: EgressNodeDTO[];
-	pools: EgressPoolDTO[];
-};
-
-/**
- * 双下拉:目标类型(未配置 / 直连 / 固定节点 / 代理池)+ 对应资源。
- * 资源下拉带吸顶搜索框(节点多时按名称/IP 过滤)。
- */
-function RoutingTargetPicker({ value, onChange, nodes, pools }: PickerProps) {
-	const { t } = useTranslation();
-	const mode = value.mode;
-	const selectedNode = nodes.some((node) => node.id === value.nodeId);
-	const selectedPool = pools.some((pool) => pool.id === value.poolId);
-	function setMode(next: string) {
-		if (next === "auto") {
-			onChange({ mode: "auto" });
-			return;
-		}
-		if (next === "direct") {
-			onChange({ mode: "direct" });
-			return;
-		}
-		if (next === "node") {
-			onChange({ mode: "node", nodeId: nodes[0]?.id });
-			return;
-		}
-		onChange({ mode: "pool", poolId: pools[0]?.id });
-	}
-	return (
-		<div className="flex min-w-0 flex-wrap items-center gap-2">
-			<Select value={mode} onValueChange={setMode}>
-				<SelectTrigger
-					aria-label={t("proxies.routing.targetMode")}
-					className="w-28"
-				>
-					<SelectValue placeholder={t("proxies.routing.targetUnavailable")} />
-				</SelectTrigger>
-				<SelectContent>
-					<SelectItem value="auto">
-						{t("proxies.routing.classFollowScope")}
-					</SelectItem>
-					<SelectItem value="direct">
-						{t("proxies.routing.targetDirect")}
-					</SelectItem>
-					<SelectItem value="node" disabled={nodes.length === 0}>
-						{t("proxies.routing.targetNode")}
-					</SelectItem>
-					<SelectItem value="pool" disabled={pools.length === 0}>
-						{t("proxies.routing.targetPool")}
-					</SelectItem>
-				</SelectContent>
-			</Select>
-			{mode === "node" ? (
-				<SearchableResourceSelect
-					placeholder={t("settings.egress.search")}
-					items={nodes.map((node) => ({
-						id: node.id,
-						label:
-							node.name +
-							(node.exitIp ? " · " + node.exitIp : "") +
-							(nodeCooling(node)
-								? " · " + t("proxies.routing.nodeCooling")
-								: ""),
-					}))}
-					value={selectedNode ? value.nodeId : undefined}
-					disabled={nodes.length === 0}
-					onChange={(nodeId) => onChange({ mode: "node", nodeId })}
-					unavailableLabel={t("proxies.routing.targetUnavailable")}
-				/>
-			) : null}
-			{mode === "pool" ? (
-				<PoolTargetSelect
-					pools={pools}
-					value={selectedPool ? value.poolId : undefined}
-					onChange={(poolId) => onChange({ mode: "pool", poolId })}
-				/>
-			) : null}
-		</div>
-	);
-}
-
-/** 出口徽标:直观显示"这类流量最终从哪出去"。 */
-function EffectiveTargetBadge({
-	target,
-	nodes,
-	pools,
-	nodeCount,
-}: {
-	target: EgressRoutingTarget;
-	nodes: EgressNodeDTO[];
-	pools: EgressPoolDTO[];
-	nodeCount: number;
-}) {
-	const { t } = useTranslation();
-	const label =
-		target.mode === "direct"
-			? t("proxies.routing.targetDirectShort")
-			: target.mode === "node"
-				? (nodes.find((n) => n.id === target.nodeId)?.name ??
-					t("proxies.routing.targetUnavailable"))
-				: target.mode === "pool"
-					? (pools.find((p) => p.id === target.poolId)?.name ??
-						t("proxies.routing.targetUnavailable"))
-					: t("proxies.routing.autoScheduleCount", { count: nodeCount });
-	return (
-		<span className="inline-flex min-w-0 items-center gap-2 text-xs font-medium">
-			<ArrowRight className="size-3 shrink-0 text-muted-foreground" />
-			<span className="truncate" title={label}>
-				{label}
-			</span>
-		</span>
-	);
-}
-
-/** 命中统计小标签:该路由行实际的调度命中/回退(进程内计数)。 */
-function HitStatBadge({ hit, fallback }: { hit: number; fallback: number }) {
-	const { t } = useTranslation();
-	if (!hit && !fallback) return null;
-	return (
-		<span
-			className="mt-1 block text-[11px] text-muted-foreground"
-			title={t("proxies.routing.statsHint")}
-		>
-			{t("proxies.routing.statsMini", { hit, fallback })}
-		</span>
-	);
-}
-function SectionHeader({ label, help }: { label: string; help?: string }) {
-	return (
-		<div className="ops-route-group-title">
-			<span>{label}</span>
-			{help && <OperationsHelp>{help}</OperationsHelp>}
-		</div>
-	);
-}
-function RouteRow({
-	label,
-	configured,
-	badge,
-	stats,
-	picker,
-}: {
-	label: string;
-	configured?: boolean;
-	badge: React.ReactNode;
-	stats?: { hit: number; fallback: number };
-	picker: React.ReactNode;
-}) {
-	return (
-		<div className="ops-route-row">
-			<div className="min-w-0">
-				<p className="font-medium">
-					{label}
-					{configured && (
-						<span className="ml-2 inline-block size-1.5 rounded-full bg-current" />
-					)}
-				</p>
-				{stats && <HitStatBadge hit={stats.hit} fallback={stats.fallback} />}
+		<div className="nroute-editor">
+			<div className="nroute-fields">
+				<NetworkField controlId={`${id}-mode`} label={t("networkRouting.targetMode")}>
+					<NetworkSelect
+						id={`${id}-mode`}
+						label={t("networkRouting.targetMode")}
+						value={mode}
+						options={options}
+						onChange={(next) => {
+							if (next === "inherit") rule.onChange(undefined);
+							else if (next === "node") rule.onChange({ mode: "node", nodeId: nodes[0]?.id });
+							else if (next === "pool") rule.onChange({ mode: "pool", poolId: pools[0]?.id });
+							else if (next === "auto" || next === "direct") rule.onChange({ mode: next });
+						}}
+					/>
+				</NetworkField>
+				{(mode === "node" || mode === "pool") && (
+					<NetworkField controlId={`${id}-resource`} label={t("networkRouting.targetResource")}>
+						<ResourceSelect
+							id={`${id}-resource`}
+							label={t("networkRouting.targetResource")}
+							value={mode === "node" ? rule.target?.nodeId : rule.target?.poolId}
+							items={mode === "node" ? nodes.map((node) => ({
+								id: node.id,
+								label: [node.name, node.exitIp, t(`ops.condition.${nodeCondition(node, now)}`)].filter(Boolean).join(" · "),
+							})) : pools.map((pool) => ({
+								id: pool.id,
+								label: pool.name + (pool.enabled ? "" : ` · ${t("networkRouting.disabled")}`),
+							}))}
+							onChange={(resource) => rule.onChange(mode === "node" ? { mode: "node", nodeId: resource } : { mode: "pool", poolId: resource })}
+						/>
+					</NetworkField>
+				)}
 			</div>
-			{badge}
-			<div className="min-w-0">{picker}</div>
+			{explicitAuto && <p className="nroute-note">{t("networkRouting.explicitAutoHelp")}</p>}
 		</div>
 	);
 }
 
-/**
- * 出口路由：语义（流量类别）→ 作用域 → 总出口 → 自动调度。节点和代理池只是
- * 资源；这一页决定每类流量从哪里出去。
- */
-export function RoutingPanel() {
+function TargetIcon({ target }: { target: EgressRoutingTarget }) {
+	const Icon = target.mode === "pool" ? Layers3 : target.mode === "node" ? Server : target.mode === "direct" ? Globe2 : GitBranch;
+	return <Icon aria-hidden="true" />;
+}
+
+/** Navigation may reset the selected rule without resetting the shared draft. */
+export function RoutingPanel({ initialRule = "default" }: RoutingPanelProps) {
+	return <RoutingWorkspace key={initialRule} initialRule={initialRule} />;
+}
+
+function RoutingWorkspace({ initialRule }: { initialRule: string }) {
 	const { t } = useTranslation();
 	const operations = useEgressOperations();
-	const nodesQuery = useQuery({
-		queryKey: ["egress-nodes", "routing-options"],
-		queryFn: () => listAllEgressNodes(),
+	const now = useNow(15_000);
+	const [selected, setSelected] = useState(() => {
+		if (initialRule === "classes" || initialRule.startsWith("class:")) return "classes";
+		return routingScopes.some((scope) => initialRule === `scope:${scope}`) ? initialRule : "default";
 	});
-	const poolsQuery = useQuery({
-		queryKey: ["egress-pools", "routing-options"],
-		queryFn: () => listEgressPools(),
-	});
-	const statsQuery = useQuery({
-		queryKey: ["egress-routing-stats"],
-		queryFn: () => getEgressRoutingStats(),
-		refetchInterval: 10_000,
-	});
-	const nodes = fixedTargetCandidates(nodesQuery.data?.items ?? []);
-	// 目标下拉列出全部池:已停用的池标注状态——运行时严格失败(强绑定),
-	// 但配置值不能在界面上静默消失。
-	const pools = poolsQuery.data ?? [];
-	const allNodes = nodesQuery.data?.items ?? [];
-	const enabledCount = allNodes.filter((node) => node.enabled).length;
-	const nodesError = nodesQuery.isError || poolsQuery.isError;
+	const [selectedClass, setSelectedClass] = useState<EgressTrafficClass>(
+		trafficClasses.find((cls) => initialRule === `class:${cls}`) ?? "inference",
+	);
+	const id = useId();
+	const nodesQuery = useQuery({ queryKey: ["egress-nodes", "routing-options"], queryFn: ({ signal }) => listAllEgressNodes({}, signal) });
+	const poolsQuery = useQuery({ queryKey: ["egress-pools", "routing-options"], queryFn: () => listEgressPools() });
+	const statsQuery = useQuery({ queryKey: ["egress-routing-stats"], queryFn: () => getEgressRoutingStats(), refetchInterval: 10_000 });
 
-	if (operations.isError) {
-		return (
-			<ErrorState
-				message={operations.errorMessage ?? t("errors.generic")}
-				onRetry={operations.retry}
-			/>
-		);
-	}
+	if (operations.isError) return <ErrorState message={operations.errorMessage ?? t("errors.generic")} onRetry={operations.retry} />;
 	if (operations.isPending) return <LoadingState />;
-	if (nodesError) {
-		return (
-			<ErrorState
-				message={t("errors.generic")}
-				onRetry={() => {
-					void nodesQuery.refetch();
-					void poolsQuery.refetch();
-				}}
-			/>
-		);
+	if (nodesQuery.isError || poolsQuery.isError) {
+		return <ErrorState message={t("errors.generic")} onRetry={() => { void nodesQuery.refetch(); void poolsQuery.refetch(); }} />;
 	}
+	if (nodesQuery.isPending || poolsQuery.isPending) return <LoadingState />;
 
-	const defaultTarget = operations.form.defaultTarget;
-	const stats = statsQuery.data?.items ?? [];
-	// 行级命中统计:该 level(类别/作用域)所有模式的命中+回退合计。
-	function statsFor(
-		level: string,
-	): { hit: number; fallback: number } | undefined {
-		let hit = 0;
-		let fallback = 0;
-		let seen = false;
-		for (const stat of stats) {
-			if (stat.level !== level) continue;
-			hit += stat.hit;
-			fallback += stat.fallback;
-			seen = true;
+	const allNodes = nodesQuery.data?.items ?? [];
+	const nodes = fixedTargetCandidates(allNodes);
+	const pools = poolsQuery.data ?? [];
+	const nodesById = new Map(allNodes.map((node) => [node.id, node]));
+	const poolsById = new Map(pools.map((pool) => [pool.id, pool]));
+	const eligibleNodeIds = new Set(nodes.map((node) => node.id));
+	const candidateCount = allNodes.filter((node) => ["ready", "dynamic"].includes(nodeCondition(node, now))).length;
+	const classOverrideCount = trafficClasses.filter((cls) => operations.form.classTargets[cls]?.mode).length;
+
+	function summary(target: EgressRoutingTarget): TargetSummary {
+		if (target.mode === "direct") return {
+			name: t("networkRouting.direct"), detail: t("networkRouting.directDetail"),
+			status: t("networkRouting.directStatus"), tone: "good",
+		};
+		if (target.mode === "node") {
+			const node = nodesById.get(target.nodeId ?? "");
+			if (!node || !eligibleNodeIds.has(node.id)) return {
+				name: node?.name ?? t("networkRouting.unavailableResource", { id: target.nodeId ?? "—" }),
+				detail: t("networkRouting.nodeUnavailable"), status: t("networkRouting.unavailable"), tone: "bad",
+			};
+			const condition = nodeCondition(node, now);
+			return {
+				name: node.name, status: t(`ops.condition.${condition}`),
+				detail: t(node.rotatingEndpoint ? "networkRouting.dynamicNode" : "networkRouting.fixedNode"),
+				tone: condition === "ready" || condition === "dynamic" ? "good" : condition === "unknown" ? "neutral" : "warn",
+			};
 		}
-		return seen ? { hit, fallback } : undefined;
+		if (target.mode === "pool") {
+			const pool = poolsById.get(target.poolId ?? "");
+			if (!pool) return {
+				name: t("networkRouting.unavailableResource", { id: target.poolId ?? "—" }),
+				detail: t("networkRouting.poolUnavailable"), status: t("networkRouting.unavailable"), tone: "bad",
+			};
+			const ready = pool.memberIds.filter((memberId) => {
+				const node = nodesById.get(memberId);
+				return node && ["ready", "dynamic"].includes(nodeCondition(node, now));
+			}).length;
+			return {
+				name: pool.name,
+				detail: pool.enabled ? t("networkRouting.poolCandidates", { count: ready, total: pool.memberCount }) : t("networkRouting.poolDisabledDetail"),
+				status: t(pool.enabled ? "networkRouting.poolEnabled" : "networkRouting.disabled"),
+				tone: pool.enabled ? (ready > 0 ? "good" : "warn") : "bad",
+			};
+		}
+		return {
+			name: t("networkRouting.auto"), detail: t("networkRouting.autoCandidates", { count: candidateCount }),
+			status: t("networkRouting.snapshot"), tone: "neutral",
+		};
 	}
 
-	function classEffectiveBadge(cls: (typeof trafficClasses)[number]) {
-		return (
-			<ClassEffectiveBadgeCell
-				cls={cls}
-				nodes={nodes}
-				pools={pools}
-				nodeCount={enabledCount}
-				form={operations.form}
-				defaultTarget={defaultTarget}
-			/>
-		);
+	// 回退说明仅保留代理池场景（回退链影响实际选路）；直连/节点/自动调度不再提示。
+	function fallbackHint(target: EgressRoutingTarget): string | undefined {
+		if (target.mode !== "pool") return undefined;
+		const pool = poolsById.get(target.poolId ?? "");
+		if (!pool?.enabled) return t("networkRouting.disabledPoolFallback");
+		if (pool.fallbackMode === "direct") return t("networkRouting.directFallback");
+		if (pool.fallbackMode === "pool") {
+			const fallbackPool = poolsById.get(pool.fallbackPoolId ?? "");
+			const name = fallbackPool ? fallbackPool.name + (fallbackPool.enabled ? "" : ` · ${t("networkRouting.disabled")}`) : t("networkRouting.unavailableResource", { id: pool.fallbackPoolId ?? "—" });
+			return t("networkRouting.poolFallback", { name });
+		}
+		return undefined;
 	}
 
-	function setScopeTarget(
-		scope: (typeof routingScopes)[number],
-		target: EgressRoutingTarget,
-	) {
-		operations.update((current) => {
-			const next = { ...current.scopeTargets };
-			if (target.mode === "auto") delete next[scope];
-			else next[scope] = target;
-			return { ...current, scopeTargets: next };
-		});
+	function effective(cls?: EgressTrafficClass, scope?: EgressRoutingScope) {
+		return resolveEffectiveTarget(operations.form, cls, scope);
+	}
+	function decidingLabel(cls?: EgressTrafficClass, scope?: EgressRoutingScope) {
+		if (cls && operations.form.classTargets[cls]?.mode) return t("networkRouting.fromClass");
+		if (scope && operations.form.scopeTargets[scope]?.mode) return t("networkRouting.fromScope");
+		return t(operations.form.defaultTarget.mode ? "networkRouting.fromDefault" : "networkRouting.fromAuto");
 	}
 
-	function setClassTarget(
-		cls: (typeof trafficClasses)[number],
-		target: EgressRoutingTarget,
-	) {
-		operations.update((current) => {
+	const rules: RouteRule[] = [
+		{
+			id: "default", label: t("networkRouting.default"), target: operations.form.defaultTarget,
+			onChange: (target) => operations.update((current) => ({ ...current, defaultTarget: target ?? { mode: "auto" } })),
+		},
+		...routingScopes.map((scope): RouteRule => ({
+			id: `scope:${scope}`, label: t(routingScopeLabelKeys[scope]), target: operations.form.scopeTargets[scope],
+			inheritLabel: t("networkRouting.inheritDefault"),
+			onChange: (target) => operations.update((current) => {
+				const next = { ...current.scopeTargets };
+				if (target) next[scope] = target;
+				else delete next[scope];
+				return { ...current, scopeTargets: next };
+			}),
+		})),
+	];
+	const classRules = trafficClasses.map((cls): RouteRule & { cls: EgressTrafficClass } => ({
+		cls,
+		id: `class:${cls}`, label: t(trafficClassLabelKeys[cls]), target: operations.form.classTargets[cls],
+		inheritLabel: t("networkRouting.inheritScope"),
+		onChange: (nextTarget) => operations.update((current) => {
 			const next = { ...current.classTargets };
-			if (target.mode === "auto") delete next[cls];
-			else next[cls] = target;
+			if (nextTarget) next[cls] = nextTarget;
+			else delete next[cls];
 			return { ...current, classTargets: next };
-		});
-	}
+		}),
+	}));
+	const classesMode = selected === "classes";
+	const activeClassRule = classRules.find((rule) => rule.cls === selectedClass)!;
+	const activeRule = classesMode
+		? activeClassRule
+		: (rules.find((rule) => rule.id === selected) ?? rules[0]!);
+	const activeScope = routingScopes.find((item) => activeRule.id === `scope:${item}`);
+	const target = effective(undefined, activeScope);
+	const targetSummary = summary(target);
+	const classConfigured = Boolean(activeClassRule.target?.mode);
+	const activeFallback = fallbackHint(target);
+	const classFallback =
+		classConfigured && activeClassRule.target ? fallbackHint(activeClassRule.target) : undefined;
 
-	// 生效解析:与后端 TargetFor 同规则 —— 类别 → 作用域 → 总出口 → 自动调度。
-	// 显式 auto 是该层终态（自动调度），不是回落到下一层。
-	function resolveEffective(
-		cls?: (typeof trafficClasses)[number],
-		scope?: (typeof routingScopes)[number],
-	): EgressRoutingTarget {
-		return resolveEffectiveTarget(
-			{
-				defaultTarget,
-				scopeTargets: operations.form.scopeTargets,
-				classTargets: operations.form.classTargets,
-			},
-			cls,
-			scope,
+	function counters(rule: RouteRule) {
+		const records = statsQuery.data?.items.filter((stat) => stat.level === rule.id) ?? [];
+		const known = !statsQuery.isPending && !statsQuery.isError && Boolean(statsQuery.data);
+		const hit = records.reduce((total, stat) => total + stat.hit, 0);
+		const fallback = records.reduce((total, stat) => total + stat.fallback, 0);
+		return (
+			<section className="nroute-counters" aria-label={t("networkRouting.ruleCounters", { name: rule.label })}>
+				<div className="nroute-counter"><span>{t("networkRouting.targetSelected")}</span><strong>{known ? hit.toLocaleString() : "—"}</strong></div>
+				<div className="nroute-counter"><span>{t("networkRouting.fallbackRefusal")}</span><strong>{known ? fallback.toLocaleString() : "—"}</strong></div>
+				<div className="nroute-counter-help">
+					{rule.target?.mode === "auto" && <p>{t("networkRouting.autoCounters")}</p>}
+					{statsQuery.isError && <NetworkButton size="sm" variant="ghost" onClick={() => void statsQuery.refetch()}>{t("networkRouting.retryCounters")}</NetworkButton>}
+				</div>
+			</section>
 		);
 	}
 
 	return (
-		<div className="space-y-4">
-			<div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-				<span>{t("ops.routePriorityShort")}</span>
-				<StatusPill>
-					{t(
-						operations.isDirty ? "ops.routePreviewDraft" : "ops.settingsSaved",
-					)}
-				</StatusPill>
-			</div>
-
-			<div className="ops-setting-group">
-				<div className="ops-route-row ops-route-heading">
-					<span>{t("ops.routingRules")}</span>
-					<span>{t("ops.routeApplied")}</span>
-					<span>{t("ops.routeConfig")}</span>
-				</div>
-				{/* 总出口 */}
-				<SectionHeader
-					label={t("proxies.routing.defaultTarget")}
-					help={t("proxies.routing.defaultTargetHelp")}
-				/>
-				<RouteRow
-					label={t("proxies.routing.defaultTarget")}
-					configured={defaultTarget.mode !== "auto"}
-					badge={
-						<EffectiveTargetBadge
-							target={defaultTarget}
-							nodes={nodes}
-							pools={pools}
-							nodeCount={enabledCount}
-						/>
-					}
-					stats={statsFor("default")}
-					picker={
-						<RoutingTargetPicker
-							value={defaultTarget}
-							onChange={(target) =>
-								operations.update((current) => ({
-									...current,
-									defaultTarget: target,
-								}))
-							}
-							nodes={nodes}
-							pools={pools}
-						/>
-					}
-				/>
-
-				{/* 作用域出口 */}
-				<SectionHeader
-					label={t("proxies.routing.scopeSection")}
-					help={t("proxies.routing.scopeSectionHelp")}
-				/>
-				<div className="divide-y">
-					{routingScopes.map((scope) => {
-						const configured = operations.form.scopeTargets[scope];
-						const isSet = Boolean(configured && configured.mode !== "auto");
+		<section className="nroute-page">
+			<div className="nroute-board">
+				<nav className="nroute-scope-picker" aria-label={t("networkRouting.chooseRule")}>
+					{rules.map((rule) => {
+						const ruleScope = routingScopes.find((item) => rule.id === `scope:${item}`);
+						const routeSummary = summary(effective(undefined, ruleScope));
 						return (
-							<RouteRow
-								key={scope}
-								label={t(routingScopeLabelKeys[scope])}
-								configured={isSet}
-								badge={
-									<EffectiveTargetBadge
-										target={resolveEffective(undefined, scope)}
-										nodes={nodes}
-										pools={pools}
-										nodeCount={enabledCount}
-									/>
-								}
-								stats={statsFor("scope:" + scope)}
-								picker={
-									<RoutingTargetPicker
-										value={configured ?? { mode: "auto" }}
-										onChange={(target) => setScopeTarget(scope, target)}
-										nodes={nodes}
-										pools={pools}
-									/>
-								}
-							/>
+							<button key={rule.id} type="button" aria-pressed={selected === rule.id} aria-controls={`${id}-canvas`} onClick={() => setSelected(rule.id)}>
+								<strong>{rule.label}</strong>
+								<span>{rule.id === "default" ? t("networkRouting.defaultDescription") : !rule.target?.mode ? t("networkRouting.inheritDefault") : routeSummary.name}</span>
+							</button>
 						);
 					})}
-				</div>
-
-				<details
-					className="ops-disclosure"
-					open={Object.keys(operations.form.classTargets).length > 0}
-				>
-					<summary className="px-4 py-3">
-						{t("proxies.routing.classSection")} · {t("ops.advancedSettings")}
-					</summary>{" "}
-					{/* 语义路由:最具体,覆盖一切 */}
-					<SectionHeader
-						label={t("proxies.routing.classSection")}
-						help={t("proxies.routing.classSectionHelp")}
-					/>
-					<div className="divide-y">
-						{trafficClasses.map((cls) => {
-							const configured = operations.form.classTargets[cls];
-							const isSet = Boolean(configured && configured.mode !== "auto");
-							return (
-								<RouteRow
-									key={cls}
-									label={t(trafficClassLabelKeys[cls])}
-									configured={isSet}
-									badge={classEffectiveBadge(cls)}
-									stats={statsFor("class:" + cls)}
-									picker={
-										<RoutingTargetPicker
-											value={configured ?? { mode: "auto" }}
-											onChange={(target) => setClassTarget(cls, target)}
-											nodes={nodes}
-											pools={pools}
-										/>
-									}
-								/>
-							);
-						})}
-					</div>
-				</details>
-				{/* 兜底:自动调度 */}
-				<div className="flex items-center justify-between gap-3 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-					<span className="flex items-center gap-2">
-						<ArrowRight className="size-3.5" />
-						{t("proxies.routing.autoScheduleRoot")}
-					</span>
-					<EffectiveTargetBadge
-						target={{ mode: "auto" }}
-						nodes={nodes}
-						pools={pools}
-						nodeCount={enabledCount}
-					/>
-				</div>
+					<button type="button" aria-pressed={classesMode} aria-controls={`${id}-canvas`} onClick={() => setSelected("classes")}>
+						<strong>{t("networkRouting.semanticGroup")}</strong>
+						<span>{t("networkRouting.classOverrides", { count: classOverrideCount })}</span>
+					</button>
+				</nav>
+				<article className="nroute-canvas" id={`${id}-canvas`} aria-label={classesMode ? t("networkRouting.semanticGroup") : activeRule.label}>
+					{classesMode ? (
+						<>
+							<nav className="nroute-class-picker" aria-label={t("networkRouting.chooseClass")}>
+								{trafficClasses.map((cls) => (
+									<button
+										type="button"
+										key={cls}
+										aria-pressed={selectedClass === cls}
+										aria-controls={`${id}-class-editor`}
+										onClick={() => setSelectedClass(cls)}
+									>
+										{operations.form.classTargets[cls]?.mode && (
+											<span className="nroute-configured-dot" aria-label={t("networkRouting.configured")} />
+										)}
+										{t(trafficClassLabelKeys[cls])}
+									</button>
+								))}
+							</nav>
+							<div id={`${id}-class-editor`} className="nroute-class-editor">
+								<TargetEditor key={activeClassRule.id} rule={activeClassRule} nodes={nodes} pools={pools} now={now} />
+								<div className="nroute-class-results">
+									{routingScopes.map((provider) => {
+										const resolved = effective(selectedClass, provider);
+										const result = summary(resolved);
+										return <article key={provider} className="nroute-class-result">
+											<div className="nroute-result-source">{t(routingScopeLabelKeys[provider])}<ArrowRight aria-hidden="true" /></div>
+											<strong><NetworkText>{result.name}</NetworkText></strong>
+											<StatusPill tone={result.tone}>{result.status}</StatusPill>
+											<p>{decidingLabel(selectedClass, provider)}</p>
+										</article>;
+									})}
+								</div>
+								{classFallback && <p className="nroute-note">{classFallback}</p>}
+								{counters(activeClassRule)}
+							</div>
+						</>
+					) : (
+						<>
+							<div className="nroute-flow">
+								<div className="nroute-flow-node"><GitBranch aria-hidden="true" /><strong>{activeRule.label}</strong><span>{t(activeRule.id === "default" ? "networkRouting.defaultTraffic" : "networkRouting.providerTraffic")}</span></div>
+								<div className="nroute-flow-link" aria-hidden="true"><span /><ArrowRight /></div>
+								<div className="nroute-flow-node nroute-flow-target" data-tone={targetSummary.tone}><TargetIcon target={target} /><strong><NetworkText>{targetSummary.name}</NetworkText></strong><span>{targetSummary.detail}</span></div>
+							</div>
+							{activeFallback && <p className="nroute-fallback">{activeFallback}</p>}
+							<TargetEditor key={activeRule.id} rule={activeRule} nodes={nodes} pools={pools} now={now} />
+							{counters(activeRule)}
+						</>
+					)}
+				</article>
 			</div>
-		</div>
-	);
-}
-
-/**
- * 类别行生效徽标:同一类别可能来自多个作用域(推理/账单横跨 Build/Web/
- * Console)。类别已配置时直接展示;未配置而任一作用域有配置时,各作用域
- * 解析结果可能不同,展示"跟随作用域"而不是猜一个;作用域全空则解析到
- * 总出口/自动调度,那是唯一确定的。
- */
-function ClassEffectiveBadgeCell({
-	cls,
-	nodes,
-	pools,
-	nodeCount,
-	form,
-	defaultTarget,
-}: {
-	cls: (typeof trafficClasses)[number];
-	nodes: EgressNodeDTO[];
-	pools: EgressPoolDTO[];
-	nodeCount: number;
-	form: EgressOperationsDraft;
-	defaultTarget: EgressRoutingTarget;
-}) {
-	const { t } = useTranslation();
-	const configured = form.classTargets[cls];
-	if (configured && configured.mode !== "auto") {
-		return (
-			<EffectiveTargetBadge
-				target={configured}
-				nodes={nodes}
-				pools={pools}
-				nodeCount={nodeCount}
-			/>
-		);
-	}
-	const anyScopeSet = routingScopes.some(
-		(scope) =>
-			form.scopeTargets[scope] && form.scopeTargets[scope]!.mode !== "auto",
-	);
-	if (anyScopeSet) {
-		return (
-			<span
-				className="text-xs text-muted-foreground"
-				title={t("proxies.routing.followsScopeHelp")}
-			>
-				{t("proxies.routing.followsScope")}
-			</span>
-		);
-	}
-	return (
-		<EffectiveTargetBadge
-			target={defaultTarget.mode !== "auto" ? defaultTarget : { mode: "auto" }}
-			nodes={nodes}
-			pools={pools}
-			nodeCount={nodeCount}
-		/>
+		</section>
 	);
 }

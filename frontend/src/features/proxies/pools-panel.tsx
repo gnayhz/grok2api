@@ -1,20 +1,33 @@
+import { NetworkField as OperationsField } from "./network-ui";
+import { VirtualTableBody } from "@/shared/components/virtual-table-body";
+import { NetworkText, NetworkTooltip } from "./network-ui";
 import {
-	nodeCondition,
-	nodeNeedsAttention,
-} from "@/features/operations/operations-data";
+	NetworkDialogContent as DialogContent,
+	NetworkDialogHeader as DialogHeader,
+	NetworkDialogFooter as DialogFooter,
+	NetworkSelect,
+} from "./network-ui";
+import { nodeCondition, nodeNeedsAttention } from "@/features/operations/operations-data";
 import { useNow } from "@/features/guard/quality-hooks";
-import {
-	OperationsDialogContent as DialogContent,
-	OperationsAlertDialogContent as AlertDialogContent,
-} from "@/features/operations/operations-ui";
-import {
-	OperationsField,
-	StatusPill,
-	OperationsError,
-} from "@/features/operations/operations-ui";
+import { AlertDialogContent } from "@/components/ui/alert-dialog";
+import { StatusPill, OperationsError } from "@/features/operations/operations-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Pencil, Plus, Settings2, Star, Trash2 } from "lucide-react";
-import { useState } from "react";
+import {
+	Ban,
+	ArrowRight,
+	BarChart3,
+	MoreHorizontal,
+	Gauge,
+	Globe,
+	Layers2,
+	Plus,
+	Repeat2,
+	Shuffle,
+	Star,
+	Trash2,
+	UserRound,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -27,23 +40,16 @@ import {
 	AlertDialogHeader,
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { OperationsButton as Button } from "@/features/operations/operations-ui";
+import { NetworkButton as Button } from "./network-ui";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-	Dialog,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import {
 	DropdownMenu,
+	DropdownMenuTrigger,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuSeparator,
-	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
 	Select,
@@ -80,6 +86,7 @@ import {
 	type EgressPoolDTO,
 	type EgressPoolStrategy,
 } from "@/features/settings/settings-api";
+import "./pools-panel.css";
 
 type PoolForm = {
 	name: string;
@@ -97,15 +104,31 @@ const emptyForm: PoolForm = {
 	fallbackPoolId: "",
 };
 
-export function PoolsPanel() {
+export function PoolsPanel({
+	focusPoolId,
+	onViewNodes,
+}: {
+	focusPoolId?: string;
+	onViewNodes?: () => void;
+} = {}) {
 	const { t } = useTranslation();
 	const now = useNow(30_000);
 	const queryClient = useQueryClient();
-	const [editing, setEditing] = useState<EgressPoolDTO | null>(null);
+	const [editing, setEditingState] = useState<EgressPoolDTO | null>(null);
+	const editorRevision = useRef(0);
+	function setEditing(value: EgressPoolDTO | null) {
+		editorRevision.current++;
+		setEditingState(value);
+	}
 	const [form, setForm] = useState<PoolForm>(emptyForm);
 	// 存 id 而不是池对象:对象是打开瞬间的快照,星标/成员变化后旧快照会把
 	// 已清除的首选又带回来。渲染时从最新查询取池。
-	const [managingId, setManagingId] = useState<string | null>(null);
+	const [selectedId, setSelectedId] = useState<string | null>(focusPoolId ?? null);
+	const [previousFocusId, setPreviousFocusId] = useState(focusPoolId);
+	if (focusPoolId !== previousFocusId) {
+		setPreviousFocusId(focusPoolId);
+		if (focusPoolId) setSelectedId(focusPoolId);
+	}
 	const [statsId, setStatsId] = useState<string | null>(null);
 	// 删除是不可逆的分组级操作且可能被路由目标引用:与批量删节点一致走确认弹窗,
 	// 而不是菜单一点就删。
@@ -128,30 +151,23 @@ export function PoolsPanel() {
 		void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
 	};
 	const save = useMutation({
-		mutationFn: () => {
+		mutationFn: ({ form, id }: { form: PoolForm; id?: string; revision: number; }) => {
 			const input = {
 				name: form.name.trim(),
 				enabled: form.enabled,
 				strategy: form.strategy,
 				fallbackMode: form.fallbackMode,
-				fallbackPoolId:
-					form.fallbackMode === "pool" ? form.fallbackPoolId : undefined,
+				fallbackPoolId: form.fallbackMode === "pool" ? form.fallbackPoolId : undefined,
 			};
-			return editing?.id
-				? updateEgressPool(editing.id, input)
-				: createEgressPool(input);
+			return id ? updateEgressPool(id, input) : createEgressPool(input);
 		},
-		onSuccess: () => {
+		onSuccess: (_, submission) => {
 			invalidate();
-			setEditing(null);
+			if (editorRevision.current === submission.revision) setEditing(null);
 			toast.success(t("settings.egress.pools.saved"));
 		},
 		onError: (error) =>
-			toast.error(
-				error instanceof Error
-					? error.message
-					: t("settings.egress.operationFailed"),
-			),
+			toast.error(error instanceof Error ? error.message : t("settings.egress.operationFailed")),
 	});
 	const remove = useMutation({
 		mutationFn: (id: string) => deleteEgressPool(id),
@@ -161,11 +177,7 @@ export function PoolsPanel() {
 			toast.success(t("settings.egress.pools.deleted"));
 		},
 		onError: (error) =>
-			toast.error(
-				error instanceof Error
-					? error.message
-					: t("settings.egress.operationFailed"),
-			),
+			toast.error(error instanceof Error ? error.message : t("settings.egress.operationFailed")),
 	});
 
 	const pools = query.data ?? [];
@@ -174,36 +186,28 @@ export function PoolsPanel() {
 	const autoNodes = nodes.filter((node) => node.enabled);
 
 	const strategyLabel = (strategy: EgressPoolStrategy) =>
-		strategy === "random"
-			? t("proxies.pools.strategyRandom")
-			: strategy === "sticky"
-				? t("proxies.pools.strategySticky")
-				: strategy === "rotation"
-					? t("proxies.pools.strategyRotation")
-					: t("proxies.pools.strategyAffinity");
+		strategy === "least-used"
+			? t("proxies.pools.strategyLeastUsed")
+			: strategy === "random"
+				? t("proxies.pools.strategyRandom")
+				: strategy === "sticky"
+					? t("proxies.pools.strategySticky")
+					: strategy === "rotation"
+						? t("proxies.pools.strategyRotation")
+						: t("proxies.pools.strategyAffinity");
 
-	// 当前出口,按策略取最准确的信号:
-	// 节点轮询 = 持久化游标;首选优先 = 首选节点;其余 = 最近一次被调度选中的节点。
-	const nodeName = (id?: string) => nodes.find((node) => node.id === id)?.name;
-	const currentNodeName = (pool: EgressPoolDTO): string | undefined => {
-		const ordered = pool.memberIds ?? [];
-		const first = pool.preferredNodeId ?? ordered[0];
+	const nodeName = (id: string) => nodes.find((node) => node.id === id)?.name ?? id;
+	const poolSignal = (pool: EgressPoolDTO) => {
+		if (!pool.enabled) return undefined;
+		const first = pool.preferredNodeId ?? pool.memberIds[0];
 		if (pool.strategy === "rotation") {
-			// 有游标显示游标;还没流量时显示即将开始的第一个(首选/顺序首个)。
 			const id = pool.rotationCursorNodeId ?? first;
-			if (id)
-				return t("proxies.pools.cardCurrent", { name: nodeName(id) ?? id });
+			if (id) return { label: t(pool.rotationCursorNodeId ? "networkPools.rotationPosition" : "networkPools.startsWith"), name: nodeName(id) };
 		}
-		if (pool.strategy === "sticky" && first) {
-			return t("proxies.pools.cardPreferred", {
-				name: nodeName(first) ?? first,
-			});
-		}
-		if (pool.lastSelectedNodeId) {
-			return t("proxies.pools.cardCurrent", {
-				name: nodeName(pool.lastSelectedNodeId) ?? pool.lastSelectedNodeId,
-			});
-		}
+		if (pool.strategy === "sticky" && first)
+			return { label: t("networkPools.preferredExit"), name: nodeName(first) };
+		if (pool.lastSelectedNodeId)
+			return { label: t("networkPools.lastSelected"), name: nodeName(pool.lastSelectedNodeId) };
 		return undefined;
 	};
 	const fallbackLabel = (pool: EgressPoolDTO) =>
@@ -213,106 +217,174 @@ export function PoolsPanel() {
 				? t("settings.egress.direct")
 				: t("settings.egress.none");
 
+	const selectedPool = selectedId === "auto" ? null : pools.find((pool) => pool.id === selectedId);
+	const members = selectedPool
+		? nodes.filter((node) => (selectedPool.memberIds ?? []).includes(node.id))
+		: autoNodes;
+	const ready = members.filter((node) =>
+		["ready", "dynamic"].includes(nodeCondition(node, now)),
+	).length;
+	const editPool = (pool: EgressPoolDTO) => {
+		setForm({
+			name: pool.name,
+			enabled: pool.enabled,
+			strategy: pool.strategy,
+			fallbackMode: pool.fallbackMode,
+			fallbackPoolId: pool.fallbackPoolId ?? "",
+		});
+		setEditing(pool);
+	};
 	return (
-		<section className="space-y-3">
-			<div className="flex flex-wrap items-center justify-between gap-3">
+		<section className="npool-page">
+			<header className="npool-heading">
 				<div>
-					<h2 className="text-base font-semibold">{t("ops.poolTitle")}</h2>
+					<h2>{t("networkPools.title")}</h2>
+					<p>{t("networkPools.description")}</p>
 				</div>
-				<Button
-					type="button"
-					size="sm"
-					onClick={() => {
-						setForm(emptyForm);
-						setEditing({} as EgressPoolDTO);
-					}}
-				>
-					<Plus />
-					{t("settings.egress.pools.add")}
+				<Button size="sm" onClick={() => { setForm(emptyForm); setEditing({} as EgressPoolDTO); }}>
+					<Plus />{t("settings.egress.pools.add")}
 				</Button>
-			</div>
+			</header>
 			{query.isError || nodesQuery.isError ? (
-				<OperationsError
-					retry={() => {
-						void query.refetch();
-						void nodesQuery.refetch();
-					}}
-				/>
+				<OperationsError retry={() => { void query.refetch(); void nodesQuery.refetch(); }} />
 			) : query.isPending || nodesQuery.isPending ? (
-				<div className="flex h-16 items-center justify-center text-xs text-muted-foreground">
+				<div className="npool-loading" role="status">
 					<Spinner />
-				</div>
-			) : pools.length === 0 && nodes.length === 0 ? (
-				<div className="rounded-md border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">
-					{t("settings.egress.pools.empty")}
+					<span>{t("common.loading")}</span>
 				</div>
 			) : (
-				<div className="ops-panel">
-					{autoNodes.length > 0 ? (
-						<PoolCard
-							virtual
-							name={t("proxies.pools.defaultPool")}
-							members={autoNodes.length}
-							healthy={
-								autoNodes.filter((node) =>
-									["ready", "dynamic"].includes(nodeCondition(node, now)),
-								).length
-							}
-							meta={t("proxies.pools.defaultPoolFlow", {
-								healthy: autoNodes.filter((node) =>
-									["ready", "dynamic"].includes(nodeCondition(node, now)),
-								).length,
+				<>
+					{pools.length === 0 ? (
+						<div className="npool-empty">
+							<Layers2 aria-hidden="true" />
+							<h3>{t("networkPools.emptyTitle")}</h3>
+							<p>{t("networkPools.emptyDescription")}</p>
+							<Button size="sm" onClick={() => { setForm(emptyForm); setEditing({} as EgressPoolDTO); }}>
+								<Plus />{t("settings.egress.pools.add")}
+							</Button>
+						</div>
+					) : (
+						<div className="npool-grid">
+							{pools.map((pool) => {
+								const memberIds = new Set(pool.memberIds);
+								const available = pool.enabled ? nodes.filter((node) => memberIds.has(node.id) && ["ready", "dynamic"].includes(nodeCondition(node, now))).length : 0;
+								const total = memberIds.size;
+								const signal = poolSignal(pool);
+								return (
+									<article className="npool-card" key={pool.id} data-enabled={pool.enabled} aria-labelledby={`npool-name-${pool.id}`}>
+										<div className="npool-card-body">
+											<header className="npool-card-heading">
+												<h3 id={`npool-name-${pool.id}`}>
+													<button type="button" onClick={() => editPool(pool)}>
+														<NetworkText>{pool.name}</NetworkText>
+													</button>
+												</h3>
+												<span className={cn("npool-badge", pool.enabled && "npool-badge-enabled")}>{t(pool.enabled ? "common.enabled" : "common.disabled")}</span>
+											</header>
+											<div className="npool-capacity">
+												<strong>{available}</strong>
+												<span>/ {total} {t("networkPools.availableMembers")}</span>
+											</div>
+											<div className="npool-meter" role="meter" aria-label={t("networkPools.capacityLabel", { name: pool.name })} aria-valuemin={0} aria-valuemax={Math.max(1, total)} aria-valuenow={available} aria-valuetext={t("networkPools.capacityValue", { available, total })}>
+												<span style={{ width: `${total ? available / total * 100 : 0}%` }} />
+											</div>
+											<dl className="npool-details">
+												<div>
+													<dt>{t("proxies.pools.strategy")}</dt>
+													<dd>{strategyLabel(pool.strategy)}</dd>
+												</div>
+												<div>
+													<dt>{t("networkPools.fallbackPath")}</dt>
+													<dd>{pool.fallbackMode === "pool" && pool.fallbackPoolId ? <button className="npool-resource-link" type="button" onClick={() => setSelectedId(pool.fallbackPoolId!)}>
+														<NetworkText>{fallbackLabel(pool)}</NetworkText>
+														<ArrowRight aria-hidden="true" />
+													</button> : fallbackLabel(pool)}</dd>
+												</div>
+												<div>
+													<dt>{signal?.label ?? t("networkPools.lastSelected")}</dt>
+													<dd>
+														<NetworkText>{signal?.name ?? "—"}</NetworkText>
+													</dd>
+												</div>
+											</dl>
+										</div>
+										<footer className="npool-card-actions">
+											<Button variant="outline" size="sm" onClick={() => setSelectedId(pool.id)}>{t("networkPools.manageMembers", { count: total })}</Button>
+											<div>
+												<Button variant="ghost" size="sm" onClick={() => editPool(pool)}>{t("common.edit")}</Button>
+												<DropdownMenu>
+													<DropdownMenuTrigger asChild>
+														<Button variant="ghost" size="icon" aria-label={t("networkPools.poolActions", { name: pool.name })}>
+															<MoreHorizontal />
+														</Button>
+													</DropdownMenuTrigger>
+													<DropdownMenuContent align="end">
+														<DropdownMenuItem onClick={() => setStatsId(pool.id)}>
+															<BarChart3 />{t("proxies.pools.statsAction")}</DropdownMenuItem>
+														<DropdownMenuSeparator />
+														<DropdownMenuItem className="text-destructive" onClick={() => setDeletingId(pool.id)}>
+															<Trash2 />{t("common.delete")}</DropdownMenuItem>
+													</DropdownMenuContent>
+												</DropdownMenu>
+											</div>
+										</footer>
+									</article>
+								);
 							})}
-						/>
-					) : null}
-					{pools.map((pool) => (
-						<PoolCard
-							key={pool.id}
-							enabled={pool.enabled}
-							name={pool.name}
-							members={pool.memberCount}
-							healthy={
-								nodes.filter(
-									(node) =>
-										(pool.memberIds ?? []).includes(node.id) &&
-										["ready", "dynamic"].includes(nodeCondition(node, now)),
-								).length
-							}
-							quarantined={pool.quarantinedCount}
-							meta={
-								strategyLabel(pool.strategy) +
-								" · " +
-								t("settings.egress.pools.fallback", {
-									mode: fallbackLabel(pool),
-								})
-							}
-							current={currentNodeName(pool)}
-							onManage={() => setManagingId(pool.id)}
-							onStats={() => setStatsId(pool.id)}
-							onEdit={() => {
-								setForm({
-									name: pool.name,
-									enabled: pool.enabled,
-									strategy: pool.strategy,
-									fallbackMode: pool.fallbackMode,
-									fallbackPoolId: pool.fallbackPoolId ?? "",
-								});
-								setEditing(pool);
-							}}
-							onDelete={() => setDeletingId(pool.id)}
-						/>
-					))}
-				</div>
+						</div>
+					)}
+					<section className="npool-automatic">
+						<Globe aria-hidden="true" />
+						<div>
+							<h3>{t("proxies.pools.defaultPool")}</h3>
+							<p>{t("networkPools.automaticDescription", { count: autoNodes.length })}</p>
+						</div>
+						<Button variant="ghost" size="sm" onClick={() => onViewNodes ? onViewNodes() : setSelectedId("auto")}>{t("networkPools.viewCandidates")}<ArrowRight />
+						</Button>
+					</section>
+				</>
 			)}
 
-			<PoolMembersDialog
-				key={`members-${managingId ?? "none"}`}
-				pool={pools.find((item) => item.id === managingId) ?? null}
-				onOpenChange={(open) => {
-					if (!open) setManagingId(null);
-				}}
-				onSaved={invalidate}
-			/>
+			<Dialog open={selectedId !== null && (selectedId === "auto" || Boolean(selectedPool))} onOpenChange={(open) => { if (!open) setSelectedId(null); }}>
+				<DialogContent className="npool-members-dialog" aria-describedby="npool-members-description">
+					<DialogHeader className="npool-members-heading">
+						<DialogTitle>{selectedPool?.name ?? t("proxies.pools.defaultPool")}</DialogTitle>
+						<DialogDescription id="npool-members-description">{selectedPool ? t("networkPools.membersDescription") : t("networkPools.automaticDescription", { count: autoNodes.length })}</DialogDescription>
+					</DialogHeader>
+					{selectedPool ? (
+						<PoolMembersEditor key={selectedPool.id} pool={selectedPool} onSaved={invalidate} onClose={() => setSelectedId(null)} />
+					) : (
+						<>
+							<div className="npool-automatic-members">
+								<p className="npool-dialog-summary">{t("networkPools.capacityValue", { available: ready, total: members.length })}</p>
+								<Table className="min-w-[500px] table-fixed" viewportRows={8} rowHeight={64}>
+									<TableHeader>
+										<TableRow>
+											<TableHead>{t("ops.nodeName")}</TableHead>
+											<TableHead>{t("ops.path")}</TableHead>
+											<TableHead className="w-32">{t("ops.nodeState")}</TableHead>
+										</TableRow>
+									</TableHeader>
+									<VirtualTableBody items={autoNodes} colSpan={3} rowHeight={64} renderRow={(node) => <TableRow key={node.id} className="h-16">
+										<TableCell className="text-xs">
+											<NetworkText>{node.name}</NetworkText>
+										</TableCell>
+										<TableCell className="text-xs font-mono">{node.exitIp || "—"}</TableCell>
+										<TableCell>
+											<StatusPill tone={nodeNeedsAttention(node, now) ? "warn" : ["ready", "dynamic"].includes(nodeCondition(node, now)) ? "good" : "neutral"}>{t(`ops.condition.${nodeCondition(node, now)}`)}</StatusPill>
+										</TableCell>
+									</TableRow>} />
+								</Table>
+								{autoNodes.length === 0 && <p className="npool-dialog-summary">{t("proxies.pools.noEligibleNodes")}</p>}
+							</div>
+							<DialogFooter className="npool-members-footer">
+								<Button variant="secondary" size="sm" onClick={() => setSelectedId(null)}>{t("common.close")}</Button>
+							</DialogFooter>
+						</>
+					)}
+				</DialogContent>
+			</Dialog>
+
 			<PoolStatsDialog
 				key={`stats-${statsId ?? "none"}`}
 				pool={pools.find((item) => item.id === statsId) ?? null}
@@ -329,17 +401,13 @@ export function PoolsPanel() {
 			>
 				<AlertDialogContent>
 					<AlertDialogHeader>
-						<AlertDialogTitle>
-							{t("settings.egress.pools.deleteTitle")}
-						</AlertDialogTitle>
+						<AlertDialogTitle>{t("settings.egress.pools.deleteTitle")}</AlertDialogTitle>
 						<AlertDialogDescription>
 							{t("settings.egress.pools.deleteDescription")}
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
-						<AlertDialogCancel disabled={remove.isPending}>
-							{t("common.cancel")}
-						</AlertDialogCancel>
+						<AlertDialogCancel disabled={remove.isPending}>{t("common.cancel")}</AlertDialogCancel>
 						<AlertDialogAction
 							className="bg-destructive text-white hover:bg-destructive/90"
 							disabled={remove.isPending}
@@ -348,7 +416,7 @@ export function PoolsPanel() {
 								if (deletingId) remove.mutate(deletingId);
 							}}
 						>
-							{remove.isPending ? null : null}
+							{remove.isPending && <Spinner />}
 							{t("common.delete")}
 						</AlertDialogAction>
 					</AlertDialogFooter>
@@ -361,152 +429,137 @@ export function PoolsPanel() {
 					if (!open) setEditing(null);
 				}}
 			>
-				<DialogContent className="max-h-[92svh] overflow-y-auto sm:max-w-[680px]">
+				<DialogContent layout="editor" aria-describedby={undefined}>
 					<DialogHeader>
 						<DialogTitle>
+							<Layers2 aria-hidden="true" />
 							{editing?.id
 								? t("settings.egress.pools.editTitle")
 								: t("settings.egress.pools.addTitle")}
 						</DialogTitle>
 					</DialogHeader>
-					<div>
-						<OperationsField
-							label={t("settings.egress.name")}
-							controlId="pool-name"
-						>
-							<Input
-								id="pool-name"
-								maxLength={160}
-								value={form.name}
-								onChange={(event) =>
-									setForm({ ...form, name: event.target.value })
-								}
-							/>
-						</OperationsField>
-						<OperationsField
-							label={t("proxies.pools.strategy")}
-							controlId="pool-strategy"
-							description={t(
-								`proxies.pools.${{ affinity: "strategyAffinityHelp", random: "strategyRandomHelp", sticky: "strategyStickyHelp", rotation: "strategyRotationHelp", "least-used": "strategyLeastUsedHelp" }[form.strategy]}`,
-							)}
-						>
-							<Select
-								value={form.strategy}
-								onValueChange={(strategy) =>
-									setForm({ ...form, strategy: strategy as EgressPoolStrategy })
+					<form
+						className="net-editor-form"
+						onSubmit={(event) => {
+							event.preventDefault();
+							if (
+								!save.isPending &&
+								form.name.trim() &&
+								(form.fallbackMode !== "pool" || form.fallbackPoolId)
+							)
+								save.mutate({ form, id: editing?.id, revision: editorRevision.current });
+						}}
+					>
+						<fieldset className="net-editor-body min-w-0" disabled={save.isPending}>
+							<div className="net-identity">
+								<OperationsField label={t("settings.egress.name")} controlId="pool-name">
+									<Input
+										id="pool-name"
+										placeholder={t("ops.netPoolExample")}
+										maxLength={160}
+										value={form.name}
+										onChange={(event) => setForm({ ...form, name: event.target.value })}
+									/>
+								</OperationsField>
+								<OperationsField label={t("settings.egress.enabled")} controlId="pool-enabled">
+									<Switch
+										id="pool-enabled"
+										checked={form.enabled}
+										onCheckedChange={(enabled) => setForm({ ...form, enabled })}
+									/>
+								</OperationsField>
+							</div>
+							<OperationsField
+								label={t("proxies.pools.strategy")}
+								controlId="pool-strategy"
+								description={t(
+									`proxies.pools.${{ affinity: "strategyAffinityHelp", random: "strategyRandomHelp", sticky: "strategyStickyHelp", rotation: "strategyRotationHelp", "least-used": "strategyLeastUsedHelp" }[form.strategy]}`,
+								)}
+							>
+								<NetworkSelect
+									id="pool-strategy"
+									label={t("proxies.pools.strategy")}
+									columns={2}
+									value={form.strategy}
+									onChange={(strategy) => setForm({ ...form, strategy })}
+									options={[
+										{
+											value: "affinity",
+											label: t("proxies.pools.strategyAffinity"),
+											icon: UserRound,
+										},
+										{ value: "random", label: t("proxies.pools.strategyRandom"), icon: Shuffle },
+										{ value: "sticky", label: t("proxies.pools.strategySticky"), icon: Star },
+										{
+											value: "rotation",
+											label: t("proxies.pools.strategyRotation"),
+											icon: Repeat2,
+										},
+										{
+											value: "least-used",
+											label: t("proxies.pools.strategyLeastUsed"),
+											icon: Gauge,
+										},
+									]}
+								/>
+							</OperationsField>
+							<OperationsField
+								label={t("settings.egress.pools.fallbackLabel")}
+								controlId="pool-fallback"
+								description={t("settings.egress.pools.fallbackHelp")}
+							>
+								<div className="space-y-2">
+									<NetworkSelect
+										id="pool-fallback"
+										label={t("settings.egress.pools.fallbackLabel")}
+										value={form.fallbackMode}
+										onChange={(fallbackMode) => setForm({ ...form, fallbackMode })}
+										options={[
+											{ value: "none", label: t("ops.netNoFallback"), icon: Ban },
+											{ value: "direct", label: t("ops.netDirect"), icon: Globe },
+											{ value: "pool", label: t("ops.netOtherPool"), icon: Layers2 },
+										]}
+									/>
+									{form.fallbackMode === "pool" && (
+										<Select
+											value={form.fallbackPoolId}
+											onValueChange={(fallbackPoolId) => setForm({ ...form, fallbackPoolId })}
+										>
+											<SelectTrigger aria-label={t("settings.egress.pools.selectFallback")}>
+												<SelectValue placeholder={t("settings.egress.pools.selectFallback")} />
+											</SelectTrigger>
+											<SelectContent>
+												{pools
+													.filter((pool) => pool.id !== editing?.id)
+													.map((pool) => (
+														<SelectItem key={pool.id} value={pool.id}>
+															{pool.name}
+														</SelectItem>
+													))}
+											</SelectContent>
+										</Select>
+									)}
+								</div>
+							</OperationsField>
+						</fieldset>
+						<DialogFooter>
+							<Button type="button" variant="secondary" size="sm" onClick={() => setEditing(null)}>
+								{t(save.isPending ? "common.close" : "common.cancel")}
+							</Button>
+							<Button
+								type="submit"
+								size="sm"
+								disabled={
+									!form.name.trim() ||
+									save.isPending ||
+									(form.fallbackMode === "pool" && !form.fallbackPoolId)
 								}
 							>
-								<SelectTrigger id="pool-strategy">
-									<SelectValue />
-								</SelectTrigger>
-								<SelectContent>
-									{(
-										[
-											["affinity", "strategyAffinity"],
-											["random", "strategyRandom"],
-											["sticky", "strategySticky"],
-											["rotation", "strategyRotation"],
-											["least-used", "strategyLeastUsed"],
-										] as const
-									).map(([value, key]) => (
-										<SelectItem value={value} key={value}>
-											{t(`proxies.pools.${key}`)}
-										</SelectItem>
-									))}
-								</SelectContent>
-							</Select>
-						</OperationsField>
-						<OperationsField
-							label={t("settings.egress.pools.fallbackLabel")}
-							controlId="pool-fallback"
-							description={t("settings.egress.pools.fallbackHelp")}
-						>
-							<div className="space-y-2">
-								<Select
-									value={form.fallbackMode}
-									onValueChange={(mode) =>
-										setForm({
-											...form,
-											fallbackMode: mode as PoolForm["fallbackMode"],
-										})
-									}
-								>
-									<SelectTrigger id="pool-fallback">
-										<SelectValue />
-									</SelectTrigger>
-									<SelectContent>
-										{[
-											["none", "fallbackNone"],
-											["direct", "fallbackDirect"],
-											["pool", "fallbackPool"],
-										].map(([value, key]) => (
-											<SelectItem value={value} key={value}>
-												{t(`settings.egress.pools.${key}`)}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-								{form.fallbackMode === "pool" && (
-									<Select
-										value={form.fallbackPoolId}
-										onValueChange={(fallbackPoolId) =>
-											setForm({ ...form, fallbackPoolId })
-										}
-									>
-										<SelectTrigger
-											aria-label={t("settings.egress.pools.selectFallback")}
-										>
-											<SelectValue
-												placeholder={t("settings.egress.pools.selectFallback")}
-											/>
-										</SelectTrigger>
-										<SelectContent>
-											{pools
-												.filter((pool) => pool.id !== editing?.id)
-												.map((pool) => (
-													<SelectItem key={pool.id} value={pool.id}>
-														{pool.name}
-													</SelectItem>
-												))}
-										</SelectContent>
-									</Select>
-								)}
-							</div>
-						</OperationsField>
-						<OperationsField
-							label={t("settings.egress.enabled")}
-							controlId="pool-enabled"
-						>
-							<Switch
-								id="pool-enabled"
-								checked={form.enabled}
-								onCheckedChange={(enabled) => setForm({ ...form, enabled })}
-							/>
-						</OperationsField>
-					</div>
-					<DialogFooter>
-						<Button
-							type="button"
-							variant="secondary"
-							size="sm"
-							onClick={() => setEditing(null)}
-						>
-							{t("common.cancel")}
-						</Button>
-						<Button
-							type="button"
-							size="sm"
-							disabled={
-								!form.name.trim() ||
-								save.isPending ||
-								(form.fallbackMode === "pool" && !form.fallbackPoolId)
-							}
-							onClick={() => save.mutate()}
-						>
-							{save.isPending ? <Spinner /> : null}
-							{t("common.save")}
-						</Button>
-					</DialogFooter>
+								{save.isPending ? <Spinner /> : null}
+								{t("common.save")}
+							</Button>
+						</DialogFooter>
+					</form>
 				</DialogContent>
 			</Dialog>
 		</section>
@@ -521,6 +574,7 @@ function PoolStatsDialog({
 	onOpenChange: (open: boolean) => void;
 }) {
 	const { t, i18n } = useTranslation();
+	const now = useNow(30_000);
 	const queryClient = useQueryClient();
 	const statsQuery = useQuery({
 		queryKey: ["egress-pool-stats", pool?.id ?? ""],
@@ -535,20 +589,16 @@ function PoolStatsDialog({
 		staleTime: 10_000,
 	});
 	const reset = useMutation({
-		mutationFn: () => resetEgressPoolStats(pool!.id),
+		mutationFn: (poolId: string) => resetEgressPoolStats(poolId),
 		onSuccess: () => {
 			void queryClient.invalidateQueries({ queryKey: ["egress-pool-stats"] });
 			toast.success(t("proxies.pools.statsResetDone"));
 		},
 		onError: (error) =>
-			toast.error(
-				error instanceof Error
-					? error.message
-					: t("settings.egress.operationFailed"),
-			),
+			toast.error(error instanceof Error ? error.message : t("settings.egress.operationFailed")),
 	});
 	const testMembers = useMutation({
-		mutationFn: () => testEgressNodes(pool!.memberIds ?? []),
+		mutationFn: (ids: string[]) => testEgressNodes(ids),
 		onSuccess: (result) => {
 			void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
 			void queryClient.invalidateQueries({ queryKey: ["egress-pools"] });
@@ -560,16 +610,10 @@ function PoolStatsDialog({
 			);
 		},
 		onError: (error) =>
-			toast.error(
-				error instanceof Error
-					? error.message
-					: t("settings.egress.operationFailed"),
-			),
+			toast.error(error instanceof Error ? error.message : t("settings.egress.operationFailed")),
 	});
 	if (!pool) return null;
-	const stats = new Map(
-		(statsQuery.data?.items ?? []).map((item) => [item.nodeId, item]),
-	);
+	const stats = new Map((statsQuery.data?.items ?? []).map((item) => [item.nodeId, item]));
 	const members = (nodesQuery.data?.items ?? []).filter((node) =>
 		(pool.memberIds ?? []).includes(node.id),
 	);
@@ -577,8 +621,8 @@ function PoolStatsDialog({
 		...members.map((node) => ({
 			id: node.id,
 			name: node.name,
-			status: node.probeStatus,
-			latency: node.probeLatencyMs,
+			condition: nodeCondition(node, now),
+			latency: node.rotatingEndpoint ? 0 : node.probeLatencyMs,
 			stat: stats.get(node.id),
 		})),
 		...[...stats.entries()]
@@ -586,7 +630,7 @@ function PoolStatsDialog({
 			.map(([id, stat]) => ({
 				id,
 				name: t("proxies.pools.statsRemovedNode", { id }),
-				status: "unknown" as const,
+				condition: "unknown" as const,
 				latency: 0,
 				stat,
 			})),
@@ -599,118 +643,97 @@ function PoolStatsDialog({
 				: undefined;
 	return (
 		<Dialog open onOpenChange={onOpenChange}>
-			<DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col overflow-hidden sm:max-w-2xl">
-				<DialogHeader>
-					<DialogTitle>
-						{t("proxies.pools.statsTitle", { name: pool.name })}
-					</DialogTitle>
+			<DialogContent className="npool-stats-dialog" aria-describedby="npool-stats-description">
+				<DialogHeader className="npool-members-heading">
+					<DialogTitle>{t("proxies.pools.statsTitle", { name: pool.name })}</DialogTitle>
+					<DialogDescription id="npool-stats-description">{t("networkPools.statsDescription")}</DialogDescription>
 				</DialogHeader>
-				{statsQuery.isPending ? (
-					<div className="flex h-20 items-center justify-center">
-						<Spinner />
-					</div>
-				) : rows.length === 0 ? (
-					<p className="py-6 text-center text-xs text-muted-foreground">
-						{t("proxies.pools.statsEmpty")}
-					</p>
-				) : (
-					<Table className="table-fixed" viewportRows={10} rowHeight={40}>
-						<TableHeader>
-							<TableRow className="hover:bg-transparent">
-								<TableHead className="w-[132px] text-center">
-									{t("settings.egress.name")}
-								</TableHead>
-								<TableHead className="w-[72px] text-center">
-									{t("proxies.pools.statsStatus")}
-								</TableHead>
-								<TableHead className="w-[64px] text-center">
-									{t("proxies.pools.statsSelections")}
-								</TableHead>
-								<TableHead className="w-[64px] text-center">
-									{t("proxies.pools.statsFailures")}
-								</TableHead>
-								<TableHead className="w-[84px] whitespace-nowrap text-center">
-									{t("proxies.pools.statsLatency")}
-								</TableHead>
-								<TableHead className="w-[172px] whitespace-nowrap text-center">
-									{t("proxies.pools.statsLastSelected")}
-								</TableHead>
-							</TableRow>
-						</TableHeader>
-						<TableBody>
-							{rows.map((row) => (
-								<TableRow key={row.id} className="h-10">
-									<TableCell
-										className="truncate text-center text-xs font-medium"
-										title={row.name}
-									>
-										{row.name}
-										{row.id === currentNode ? (
-											<span className="ml-1.5 text-[10px] text-emerald-600">
-												{t("proxies.pools.statsCurrentBadge")}
-											</span>
-										) : null}
-									</TableCell>
-									<TableCell
-										className={cn(
-											"text-center text-[11px]",
-											row.status === "healthy"
-												? "text-emerald-600"
-												: row.status === "unhealthy"
-													? "text-destructive"
-													: "text-muted-foreground",
-										)}
-									>
-										{row.status === "healthy"
-											? t("settings.egress.healthy")
-											: row.status === "unhealthy"
-												? t("settings.egress.unhealthy")
-												: t("settings.egress.notTested")}
-									</TableCell>
-									<TableCell className="text-center text-xs tabular-nums">
-										{row.stat?.selections ?? 0}
-									</TableCell>
-									<TableCell
-										className={cn(
-											"text-center text-xs tabular-nums",
-											(row.stat?.failures ?? 0) > 0 && "text-destructive",
-										)}
-									>
-										{row.stat?.failures ?? 0}
-									</TableCell>
-									<TableCell className="whitespace-nowrap px-1 text-center text-[11px] tabular-nums text-muted-foreground">
-										{row.latency > 0
-											? t("proxies.pools.statsLatencyValue", {
+				<div className="npool-stats-body">
+					{statsQuery.isError || nodesQuery.isError ? (
+						<OperationsError
+							retry={() => {
+								void statsQuery.refetch();
+								void nodesQuery.refetch();
+							}}
+						/>
+					) : statsQuery.isPending || nodesQuery.isPending ? (
+						<div className="flex h-20 items-center justify-center">
+							<Spinner />
+						</div>
+					) : rows.length === 0 ? (
+						<p className="py-6 text-center text-xs text-muted-foreground">
+							{t("proxies.pools.statsEmpty")}
+						</p>
+					) : (
+						<Table className="min-w-[700px] table-fixed" viewportRows={8} rowHeight={48}>
+							<TableHeader>
+								<TableRow className="hover:bg-transparent">
+								<TableHead className="w-[170px] text-center">{t("settings.egress.name")}</TableHead>
+								<TableHead className="w-[110px] text-center">
+										{t("proxies.pools.statsStatus")}
+									</TableHead>
+									<TableHead className="w-[64px] text-center">
+										{t("proxies.pools.statsSelections")}
+									</TableHead>
+								<TableHead className="w-[110px] text-center">
+									{t("networkPools.nodeFailures")}
+									</TableHead>
+									<TableHead className="w-[84px] whitespace-nowrap text-center">
+										{t("networkPools.probeLatency")}
+									</TableHead>
+									<TableHead className="w-[172px] whitespace-nowrap text-center">
+										{t("proxies.pools.statsLastSelected")}
+									</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{rows.map((row) => (
+									<TableRow key={row.id} className="h-12">
+										<TableCell className="text-center text-xs font-medium">
+											{row.name}
+											{row.id === currentNode ? (
+												<span className="npool-current-badge">
+													{t(pool.strategy === "sticky" ? "networkPools.preferredExit" : "networkPools.rotationPosition")}
+												</span>
+											) : null}
+										</TableCell>
+										<TableCell className="text-center text-[11px]">
+											<StatusPill tone={["ready", "dynamic"].includes(row.condition) ? "good" : ["held", "banned", "cooling", "unhealthy", "unconfigured"].includes(row.condition) ? "warn" : "neutral"}>{t(`ops.condition.${row.condition}`)}</StatusPill>
+										</TableCell>
+										<TableCell className="text-center text-xs tabular-nums">
+											{row.stat?.selections ?? 0}
+										</TableCell>
+										<TableCell
+											className={cn(
+												"text-center text-xs tabular-nums",
+												(row.stat?.failures ?? 0) > 0 && "text-destructive",
+											)}
+										>
+											{row.stat?.failures ?? "—"}
+										</TableCell>
+										<TableCell className="whitespace-nowrap px-1 text-center text-[11px] tabular-nums text-muted-foreground">
+											{row.latency > 0
+												? t("proxies.pools.statsLatencyValue", {
 													ms: row.latency,
 												})
-											: "-"}
-									</TableCell>
-									<TableCell className="whitespace-nowrap text-center text-xs tabular-nums text-muted-foreground">
-										{row.stat?.lastSelectedAt
-											? formatCompactDateTime(
-													row.stat.lastSelectedAt,
-													i18n.language,
-												)
-											: t("settings.egress.never")}
-									</TableCell>
-								</TableRow>
-							))}
-						</TableBody>
-					</Table>
-				)}
-				<DialogFooter className="items-center sm:justify-between">
-					<span className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
-						{t("proxies.pools.statsTotals", {
-							selections: rows.reduce(
-								(sum, row) => sum + (row.stat?.selections ?? 0),
-								0,
-							),
-							failures: rows.reduce(
-								(sum, row) => sum + (row.stat?.failures ?? 0),
-								0,
-							),
-						})}
-					</span>
+												: "-"}
+										</TableCell>
+										<TableCell className="whitespace-nowrap text-center text-xs tabular-nums text-muted-foreground">
+											{row.stat?.lastSelectedAt
+												? formatCompactDateTime(row.stat.lastSelectedAt, i18n.language)
+												: t("settings.egress.never")}
+										</TableCell>
+									</TableRow>
+								))}
+							</TableBody>
+						</Table>
+					)}
+				</div>
+				<DialogFooter className="npool-stats-footer">
+					<div className="npool-stats-since">
+						<span>{t("networkPools.selectionTotal", { value: statsQuery.isError || nodesQuery.isError || statsQuery.isPending || nodesQuery.isPending ? "—" : rows.reduce((sum, row) => sum + (row.stat?.selections ?? 0), 0) })}</span>
+						{statsQuery.data?.since && <span>{t("networkPools.statsSince", { time: formatCompactDateTime(statsQuery.data.since, i18n.language) })}</span>}
+					</div>
 					<div className="flex items-center gap-2">
 						{(pool.memberIds ?? []).length > 0 ? (
 							<Button
@@ -718,7 +741,7 @@ function PoolStatsDialog({
 								size="sm"
 								variant="secondary"
 								disabled={testMembers.isPending}
-								onClick={() => testMembers.mutate()}
+								onClick={() => testMembers.mutate([...pool.memberIds])}
 							>
 								{testMembers.isPending ? <Spinner /> : null}
 								{t("proxies.pools.statsTest")}
@@ -729,16 +752,11 @@ function PoolStatsDialog({
 							size="sm"
 							variant="secondary"
 							disabled={reset.isPending}
-							onClick={() => reset.mutate()}
+							onClick={() => reset.mutate(pool.id)}
 						>
 							{t("proxies.pools.statsReset")}
 						</Button>
-						<Button
-							type="button"
-							size="sm"
-							variant="secondary"
-							onClick={() => onOpenChange(false)}
-						>
+						<Button type="button" size="sm" variant="secondary" onClick={() => onOpenChange(false)}>
 							{t("common.close")}
 						</Button>
 					</div>
@@ -748,26 +766,38 @@ function PoolStatsDialog({
 	);
 }
 
+class PoolMemberPreferenceError extends Error {
+	constructor(readonly ids: string[], readonly preferred: string | undefined, cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause));
+	}
+}
+
 /** Pool-side node management: checkbox list with search + selected-only
  *  filter — with dozens of nodes, finding the ones to toggle is the hard
  *  part, not the toggling. One save applies every checked/unchecked row. */
-function PoolMembersDialog({
-	pool,
-	onOpenChange,
-	onSaved,
-}: {
-	pool: EgressPoolDTO | null;
-	onOpenChange: (open: boolean) => void;
+function PoolMembersEditor({ pool, onSaved, onClose }: {
+	pool: EgressPoolDTO;
 	onSaved: () => void;
+	onClose: () => void;
 }) {
 	const { t } = useTranslation();
 	const now = useNow(30_000);
-	const [draft, setDraft] = useState<Set<string>>(new Set());
-	const [loadedFor, setLoadedFor] = useState<string>("");
+	const active = useRef(true);
+	useEffect(() => {
+		active.current = true;
+		return () => {
+			active.current = false;
+		};
+	}, []);
+	const [draft, setDraft] = useState<Set<string>>(() => new Set(pool.memberIds));
+	const [baseline, setBaseline] = useState({
+		ids: pool.memberIds,
+		preferred: pool.preferredNodeId,
+	});
 	const [search, setSearch] = useState("");
-	const [onlySelected, setOnlySelected] = useState(false);
+	const [onlySelected, setOnlySelected] = useState(true);
 	// 首选的本地镜像:点击后立即变实心,不等父级列表刷新。
-	const [preferredId, setPreferredId] = useState<string | undefined>(undefined);
+	const [preferredId, setPreferredId] = useState<string | undefined>(pool.preferredNodeId);
 	const nodesQuery = useQuery({
 		queryKey: ["egress-nodes", "pool-nodes", pool?.id ?? ""],
 		queryFn: () => listAllEgressNodes(),
@@ -775,34 +805,43 @@ function PoolMembersDialog({
 		staleTime: 10_000,
 	});
 	const all: EgressNodeDTO[] = nodesQuery.data?.items ?? [];
-	if (pool && loadedFor !== pool.id) {
-		setLoadedFor(pool.id);
-		setDraft(new Set(pool.memberIds ?? []));
-		setPreferredId(pool.preferredNodeId);
-	}
-	// 一次保存全部生效:成员与首选一起提交。星标点击只改本地草稿,不发请求。
+	// Membership and priority have separate endpoints. Capture both identities in
+	// the submission and retain committed membership if the priority write fails.
 	const apply = useMutation({
-		mutationFn: async () => {
-			await setEgressPoolMembers(pool!.id, [...draft]);
-			if (preferredId && draft.has(preferredId)) {
-				await setEgressPoolMemberPriority(pool!.id, preferredId, 1);
-			} else if (pool?.preferredNodeId) {
-				await setEgressPoolMemberPriority(pool!.id, pool.preferredNodeId, 0);
+		mutationFn: async (submission: { poolId: string; ids: string[]; preferred?: string; previousPreferred?: string; }) => {
+			await setEgressPoolMembers(submission.poolId, submission.ids);
+			let savedPreferred = submission.previousPreferred && submission.ids.includes(submission.previousPreferred)
+				? submission.previousPreferred : undefined;
+			try {
+				if (savedPreferred && savedPreferred !== submission.preferred) {
+					await setEgressPoolMemberPriority(submission.poolId, savedPreferred, 0);
+					savedPreferred = undefined;
+				}
+				if (submission.preferred && submission.ids.includes(submission.preferred)) {
+					await setEgressPoolMemberPriority(submission.poolId, submission.preferred, 1);
+					savedPreferred = submission.preferred;
+				}
+			} catch (error) {
+				throw new PoolMemberPreferenceError(submission.ids, savedPreferred, error);
 			}
 		},
-		onSuccess: () => {
+		onSuccess: (_, submission) => {
 			onSaved();
-			onOpenChange(false);
+			if (active.current) setBaseline({ ids: submission.ids, preferred: submission.preferred });
 			toast.success(t("proxies.pools.nodesSaved"));
 		},
-		onError: (error) =>
-			toast.error(
-				error instanceof Error
-					? error.message
-					: t("settings.egress.operationFailed"),
-			),
+		onError: (error) => {
+			if (error instanceof PoolMemberPreferenceError) {
+				onSaved();
+				if (active.current) setBaseline({ ids: error.ids, preferred: error.preferred });
+			}
+			toast.error(error instanceof PoolMemberPreferenceError ? t("networkPools.preferenceSaveFailed") : error.message);
+		},
 	});
-	if (!pool) return null;
+	const dirty =
+		draft.size !== baseline.ids.length ||
+		baseline.ids.some((id) => !draft.has(id)) ||
+		(preferredId && draft.has(preferredId) ? preferredId : undefined) !== baseline.preferred;
 	const toggle = (id: string, checked: boolean) =>
 		setDraft((current) => {
 			const next = new Set(current);
@@ -828,312 +867,215 @@ function PoolMembersDialog({
 			return next;
 		});
 	return (
-		<Dialog open onOpenChange={onOpenChange}>
-			<DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col overflow-hidden sm:max-w-lg">
-				<DialogHeader>
-					<DialogTitle>
-						{t("proxies.pools.nodesTitle", { name: pool.name })}
-					</DialogTitle>
-				</DialogHeader>
-				{nodesQuery.isPending ? (
-					<div className="flex h-20 items-center justify-center">
-						<Spinner />
-					</div>
-				) : (
-					<>
-						<div className="flex items-center gap-2">
-							<Input
-								className="h-8 flex-1 text-xs"
-								value={search}
-								onChange={(event) => setSearch(event.target.value)}
-								placeholder={t("settings.egress.search")}
-								aria-label={t("settings.egress.search")}
-							/>
-							<Button
-								type="button"
-								size="sm"
-								variant={onlySelected ? "default" : "secondary"}
-								onClick={() => setOnlySelected((current) => !current)}
-							>
-								{t("proxies.pools.onlySelected")}
-							</Button>
+		<fieldset className="npool-members-editor" disabled={apply.isPending}>
+			<div className="npool-members-body">
+				<div className="min-w-0 space-y-3">
+					{nodesQuery.isError ? (
+						<OperationsError retry={() => void nodesQuery.refetch()} />
+					) : nodesQuery.isPending ? (
+						<div className="flex h-20 items-center justify-center">
+							<Spinner />
 						</div>
-						<div className="flex items-center justify-between">
-							<span className="text-xs tabular-nums text-muted-foreground">
-								{t("proxies.pools.selectedCount", {
-									count: draft.size,
-									total: all.length,
-								})}
-							</span>
-							<div className="flex items-center gap-1.5">
+					) : (
+						<>
+							<div className="npool-members-toolbar">
+								<Input
+									className="h-8 flex-1 text-xs"
+									value={search}
+									onChange={(event) => setSearch(event.target.value)}
+									placeholder={t("settings.egress.search")}
+									aria-label={t("settings.egress.search")}
+								/>
 								<Button
 									type="button"
 									size="sm"
-									variant="secondary"
-									disabled={
-										onlySelected ||
-										visible.length === 0 ||
-										visible.every((node) => draft.has(node.id))
-									}
-									onClick={selectAllVisible}
+									variant="outline"
+									aria-pressed={!onlySelected}
+									onClick={() => setOnlySelected((current) => !current)}
 								>
-									{t("proxies.pools.selectAllVisible")}
-								</Button>
-								<Button
-									type="button"
-									size="sm"
-									variant="secondary"
-									disabled={draft.size === 0}
-									onClick={() => setDraft(new Set())}
-								>
-									{t("proxies.pools.clearSelection")}
+									{t(onlySelected ? "ops.netAddMembers" : "ops.netViewMembers")}
 								</Button>
 							</div>
-						</div>
-						<div className="max-h-72 min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain rounded-md border p-1.5">
-							{all.length === 0 ? (
-								<p className="p-4 text-center text-xs text-muted-foreground">
-									{t("proxies.pools.noEligibleNodes")}
-								</p>
-							) : null}
-							{all.length > 0 && visible.length === 0 ? (
-								<p className="p-4 text-center text-xs text-muted-foreground">
-									{t("settings.egress.noMatches")}
-								</p>
-							) : null}
-							{visible.map((node) => {
-								const isPreferred = preferredId === node.id;
-								return (
-									// 不用 label 包裹:label 会把点击转发给内部第一个可标记控件,
-									// checkbox/星标被二次触发,勾选时好时坏。改为显式点击区。
-									<div
-										key={node.id}
-										className="flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 hover:bg-muted/45"
-										onClick={() => toggle(node.id, !draft.has(node.id))}
+							<div className="npool-member-selection">
+								<span className="text-xs tabular-nums text-muted-foreground">
+									{t("proxies.pools.selectedCount", {
+										count: draft.size,
+										total: all.length,
+									})}
+								</span>
+								<div className="flex items-center gap-1.5">
+									<Button
+										type="button"
+										size="sm"
+										variant="secondary"
+										disabled={
+											onlySelected ||
+											visible.length === 0 ||
+											visible.every((node) => draft.has(node.id))
+										}
+										onClick={selectAllVisible}
 									>
-										<Checkbox
-											checked={draft.has(node.id)}
-											onCheckedChange={(checked) =>
-												toggle(node.id, checked === true)
-											}
-											aria-label={node.name}
-											onClick={(event) => event.stopPropagation()}
-										/>
-										{draft.has(node.id) ? (
-											<button
-												type="button"
-												className={cn(
-													"shrink-0",
-													isPreferred
-														? "text-amber-500"
-														: "text-muted-foreground/40 hover:text-foreground",
-												)}
-												aria-label={
-													isPreferred
-														? t("proxies.pools.preferClear")
-														: t("proxies.pools.preferSet")
-												}
-												onClick={(event) => {
-													event.stopPropagation();
-													setPreferredId(isPreferred ? undefined : node.id);
-												}}
-											>
-												<Star
-													className={cn(
-														"size-3.5",
-														isPreferred && "fill-current",
-													)}
-												/>
-											</button>
-										) : null}
-										<span className="min-w-0 flex-1 truncate text-xs font-medium">
-											{node.name}
-										</span>
-										<StatusPill
-											tone={
-												nodeNeedsAttention(node, now)
-													? "warn"
-													: ["ready", "dynamic"].includes(
-																nodeCondition(node, now),
-														  )
-														? "good"
-														: "neutral"
-											}
-										>
-											{t(`ops.condition.${nodeCondition(node, now)}`)}
-										</StatusPill>
-										{node.exitIp ? (
-											<span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-												{node.exitIp}
-											</span>
-										) : null}
-										{node.sourceName ? (
-											<Badge
-												variant="outline"
-												className="shrink-0 text-[10px] text-muted-foreground"
-											>
-												{node.sourceName}
-											</Badge>
-										) : null}
-									</div>
-								);
-							})}
-						</div>
-					</>
-				)}
-				<DialogFooter>
-					<Button
-						type="button"
-						variant="secondary"
-						size="sm"
-						onClick={() => onOpenChange(false)}
-					>
-						{t("common.cancel")}
-					</Button>
-					<Button
-						type="button"
-						size="sm"
-						disabled={apply.isPending || nodesQuery.isPending}
-						onClick={() => apply.mutate()}
-					>
-						{apply.isPending ? <Spinner /> : null}
-						{t("common.save")}
-					</Button>
-				</DialogFooter>
-			</DialogContent>
-		</Dialog>
-	);
-}
+										{t("proxies.pools.selectAllVisible")}
+									</Button>
+									<Button
+										type="button"
+										size="sm"
+										variant="secondary"
+										disabled={!visible.some((node) => draft.has(node.id))}
+										onClick={() => setDraft((current) => {
+											const next = new Set(current);
+											for (const node of visible) next.delete(node.id);
+											return next;
+										})}
+									>
+										{t("networkPools.removeVisible")}
+									</Button>
+								</div>
+							</div>
+							<div className="min-w-0">
+								{all.length === 0 ? (
+									<p className="p-4 text-center text-xs text-muted-foreground">
+										{t("proxies.pools.noEligibleNodes")}
+									</p>
+								) : null}
+								{all.length > 0 && visible.length === 0 ? (
+									<p className="p-4 text-center text-xs text-muted-foreground">
+										{t("settings.egress.noMatches")}
+									</p>
+								) : null}
 
-/** Comparable pool rows use the same candidate eligibility as the node inventory. */
-function PoolCard({
-	virtual,
-	enabled = true,
-	name,
-	members,
-	healthy,
-	quarantined = 0,
-	meta,
-	current,
-	onManage,
-	onStats,
-	onEdit,
-	onDelete,
-}: {
-	virtual?: boolean;
-	enabled?: boolean;
-	name: string;
-	members: number;
-	healthy: number;
-	current?: string;
-	quarantined?: number;
-	meta: string;
-	onManage?: () => void;
-	onStats?: () => void;
-	onEdit?: () => void;
-	onDelete?: () => void;
-}) {
-	const { t } = useTranslation();
-	return (
-		<div className="ops-pool-row">
-			<div className="min-w-0">
-				<div className="flex flex-wrap items-center gap-2">
-					<h3 className="truncate text-sm font-semibold" title={name}>
-						{name}
-					</h3>
-					<StatusPill
-						tone={!enabled ? "neutral" : healthy > 0 ? "good" : "warn"}
-					>
-						{!enabled
-							? t("ops.disabled")
-							: healthy > 0
-								? t("common.enable")
-								: t("ops.attention")}
-					</StatusPill>
-					{virtual && (
-						<span className="text-[11px] text-muted-foreground">
-							{t("proxies.pools.virtual")}
-						</span>
+								{
+									<Table className="min-w-[540px] table-fixed" viewportRows={7} rowHeight={64}>
+										<TableHeader>
+											<TableRow>
+												<TableHead className="w-10" />
+												<TableHead>{t("ops.nodeName")}</TableHead>
+												<TableHead className="w-32">{t("ops.nodeState")}</TableHead>
+												<TableHead className="w-16">{t("proxies.pools.preferSet")}</TableHead>
+											</TableRow>
+										</TableHeader>
+										<VirtualTableBody
+											items={visible}
+											colSpan={4}
+											rowHeight={64}
+											renderRow={(node) => {
+												const selected = draft.has(node.id),
+													isPreferred = preferredId === node.id,
+													condition = nodeCondition(node, now);
+												return (
+													<TableRow
+														key={node.id}
+														className="h-16"
+														onClick={() => {
+															if (!apply.isPending) toggle(node.id, !selected);
+														}}
+													>
+														<TableCell>
+															<Checkbox
+																checked={selected}
+																onCheckedChange={(checked) => toggle(node.id, checked === true)}
+																aria-label={node.name}
+																onClick={(event) => event.stopPropagation()}
+															/>
+														</TableCell>
+														<TableCell>
+															<div className="min-w-0">
+																<NetworkText className="text-xs font-medium">{node.name}</NetworkText>
+																<span className="mt-1 block truncate text-[10px] text-muted-foreground">
+																	{[node.exitIp, node.sourceName].filter(Boolean).join(" · ")}
+																</span>
+															</div>
+														</TableCell>
+														<TableCell>
+															<StatusPill
+																tone={
+																	nodeNeedsAttention(node, now)
+																		? "warn"
+																		: ["ready", "dynamic"].includes(condition)
+																			? "good"
+																			: "neutral"
+																}
+															>
+																{t(`ops.condition.${condition}`)}
+															</StatusPill>
+														</TableCell>
+														<TableCell>
+															{selected ? (
+																<NetworkTooltip
+																	content={t(
+																		isPreferred
+																			? "proxies.pools.preferClear"
+																			: "proxies.pools.preferSet",
+																	)}
+																>
+																	<button
+																		type="button"
+																		className={cn(
+																			"inline-flex size-7 items-center justify-center",
+																		isPreferred && "npool-preferred",
+																		)}
+																		aria-label={t(
+																			isPreferred
+																				? "proxies.pools.preferClear"
+																				: "proxies.pools.preferSet",
+																		)}
+																		onClick={(event) => {
+																			event.stopPropagation();
+																			setPreferredId(isPreferred ? undefined : node.id);
+																		}}
+																	>
+																		<Star className={cn("size-3.5", isPreferred && "fill-current")} />
+																	</button>
+																</NetworkTooltip>
+															) : (
+																<span className="inline-flex size-7 items-center justify-center" />
+															)}
+														</TableCell>
+													</TableRow>
+												);
+											}}
+										/>
+									</Table>
+								}
+							</div>
+						</>
 					)}
 				</div>
-				{current && (
-					<p className="mt-2 truncate text-xs text-muted-foreground">
-						{current}
-					</p>
-				)}
+				{apply.isError && <p className="npool-save-error" role="alert">{apply.error instanceof PoolMemberPreferenceError ? `${t("networkPools.preferenceSaveFailed")} ${apply.error.message}` : apply.error.message}</p>}
 			</div>
-			<div>
-				<p className="text-[11px] text-muted-foreground">
-					{t("ops.poolAvailability")}
-				</p>
-				<p className="mt-2 text-sm tabular-nums">
-					<strong className="font-semibold">{healthy}</strong>
-					<span className="text-muted-foreground">
-						{" "}
-						/ {members} · {t("ops.poolHealthy")}
-					</span>
-				</p>
-				{quarantined > 0 && (
-					<p className="mt-1 text-[11px] ops-text-warn">
-						{quarantined} {t("ops.poolLimited")}
-					</p>
-				)}
+			<div className="npool-members-footer">
+				<span aria-live="polite">{dirty ? t("ops.netMembersDraft") : t("ops.settingsSaved")}</span>
+				<Button type="button" variant="ghost" size="sm" onClick={onClose}>{t("common.close")}</Button>
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					disabled={!dirty || apply.isPending}
+					onClick={() => {
+						setDraft(new Set(baseline.ids));
+						setPreferredId(baseline.preferred);
+						apply.reset();
+					}}
+				>
+					{t("proxies.discard")}
+				</Button>
+				<Button
+					type="button"
+					size="sm"
+					disabled={!dirty || apply.isPending || nodesQuery.isPending || nodesQuery.isError}
+					onClick={() =>
+						apply.mutate({
+							poolId: pool.id,
+							previousPreferred: baseline.preferred,
+							ids: [...draft],
+							preferred: preferredId && draft.has(preferredId) ? preferredId : undefined,
+						})
+					}
+				>
+					{apply.isPending && <Spinner />}
+					{t("common.save")}
+				</Button>
 			</div>
-			<div>
-				<p className="text-[11px] text-muted-foreground">
-					{t("ops.poolStrategy")}
-				</p>
-				<p className="mt-2 text-xs leading-5">{meta}</p>
-			</div>
-			<div className="flex items-center gap-1">
-				{onManage && (
-					<Button variant="outline" size="sm" onClick={onManage}>
-						<Settings2 className="size-3.5" />
-						{t("ops.poolManage")}
-					</Button>
-				)}
-				{(onStats || onEdit || onDelete) && (
-					<DropdownMenu>
-						<DropdownMenuTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon"
-								className="size-8"
-								aria-label={t("common.actions")}
-							>
-								<MoreHorizontal className="size-4" />
-							</Button>
-						</DropdownMenuTrigger>
-						<DropdownMenuContent align="end">
-							{onStats && (
-								<DropdownMenuItem onClick={onStats}>
-									<BarChart3 />
-									{t("proxies.pools.statsAction")}
-								</DropdownMenuItem>
-							)}
-							{onEdit && (
-								<DropdownMenuItem onClick={onEdit}>
-									<Pencil />
-									{t("common.edit")}
-								</DropdownMenuItem>
-							)}
-							{onDelete && (
-								<>
-									<DropdownMenuSeparator />
-									<DropdownMenuItem
-										className="text-destructive focus:text-destructive"
-										onClick={onDelete}
-									>
-										<Trash2 />
-										{t("common.delete")}
-									</DropdownMenuItem>
-								</>
-							)}
-						</DropdownMenuContent>
-					</DropdownMenu>
-				)}
-			</div>
-		</div>
+		</fieldset>
 	);
 }

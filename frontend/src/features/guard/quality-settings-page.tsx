@@ -57,39 +57,18 @@ import {
 
 type FieldKind = "duration" | "number";
 
-/** 直接闭环参数分组:定罪门槛→调查取证→证据保留→执行所。 */
-const TUNABLE_GROUPS: Array<{
-	group: string;
-	fields: Array<{ key: keyof QualitySettingsInput; kind: FieldKind }>;
-}> = [
-	{
-		group: "conviction",
-		fields: [
-			{ key: "account_need_exits", kind: "number" },
-			{ key: "account_span_nodes", kind: "number" },
-			{ key: "exit_need_n", kind: "number" },
-			{ key: "exit_need_k", kind: "number" },
-		],
-	},
-	{
-		group: "investigation",
-		fields: [
-			{ key: "differential_exits", kind: "number" },
-			{ key: "jurors_per_exit", kind: "number" },
-			{ key: "probe_budget", kind: "number" },
-			{ key: "investigation_timeout", kind: "duration" },
-		],
-	},
-	{
-		group: "evidence",
-		fields: [
-			{ key: "retention", kind: "duration" },
-			{ key: "evidence_window", kind: "duration" },
-		],
-	},
+const ALL_TUNABLE_FIELDS: Array<{ key: keyof QualitySettingsInput; kind: FieldKind }> = [
+	{ key: "account_need_exits", kind: "number" },
+	{ key: "account_span_nodes", kind: "number" },
+	{ key: "exit_need_n", kind: "number" },
+	{ key: "exit_need_k", kind: "number" },
+	{ key: "differential_exits", kind: "number" },
+	{ key: "jurors_per_exit", kind: "number" },
+	{ key: "probe_budget", kind: "number" },
+	{ key: "investigation_timeout", kind: "duration" },
+	{ key: "retention", kind: "duration" },
+	{ key: "evidence_window", kind: "duration" },
 ];
-
-const ALL_TUNABLE_FIELDS = TUNABLE_GROUPS.flatMap((group) => group.fields);
 
 /** 可行性预校验(批10 后端同款约束的前置):
  * 门槛超出可派证据量会静默关闭定罪通道——保存前即拒,不走 400 往返。 */
@@ -234,7 +213,7 @@ export function QualitySettingsPage() {
                             {fileGuard ? <Button type="button" variant="outline" size="sm" onClick={syncRequestRetryToFile}>{t("settings.requestRetry.syncFileButton")}</Button> : null}
                             <Button type="submit" size="sm" disabled={!guardForm.formState.isDirty}>{guard.saving ? <Spinner /> : null}{t("common.save")}</Button>
                           </div>}>
-                          <div className="space-y-0">
+                          <div className="ops-form-grid">
                             {(["createdTimeout", "evidenceTimeout", "admissionTimeout", "toolAdmissionTimeout", "accountCooldown", "idleAccountCooldown"] as const).map((key) => (
                               <SettingsField key={key} controlId={`guard-${key}`} label={t(`settings.requestRetry.${key}`)} description={t(`settings.requestRetry.${key}Help`)} error={guardForm.formState.errors[key]?.message}>
                                 <Controller control={guardForm.control} name={key} render={({ field }) => <DurationInput allowZero id={`guard-${key}`} value={field.value} onChange={field.onChange} />} />
@@ -275,10 +254,10 @@ export function QualitySettingsPage() {
 								</Button>
 							}
 						>
-							<div className="space-y-0">
+							<div className="ops-form-grid">
 								<SettingsField
 									controlId="egress-rotation-enabled"
-									className="sm:col-span-2"
+									className="ops-field-wide"
 									label={t("settings.egressRotation.enabled")}
 									description={t("settings.egressRotation.enabledHelp")}
 								>
@@ -654,17 +633,21 @@ function QualityJurisdictionSection({ settings }: { settings: ReturnType<typeof 
 			<div className="space-y-5">
 				{/* 总开关独立区块。 */}
 				<div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-4 py-3.5">
-					<label
-						className="flex items-center gap-2.5 text-sm font-medium"
-						title={t("quality.settingsPage.masterEnabledHelp")}
-					>
-						<Switch
-							checked={masterEnabled}
-							onCheckedChange={onMasterToggle}
-							aria-label={t("quality.settingsPage.masterEnabled")}
-						/>
-						{t("quality.settingsPage.masterEnabled")}
-					</label>
+					<div className="flex items-center gap-1">
+						<label
+							className="flex items-center gap-2.5 text-sm font-medium"
+						>
+							<Switch
+								checked={masterEnabled}
+								onCheckedChange={onMasterToggle}
+								aria-label={t("quality.settingsPage.masterEnabled")}
+							/>
+							{t("quality.settingsPage.masterEnabled")}
+						</label>
+						<OperationsHelp label={t("quality.settingsPage.masterEnabled")}>
+							{t("quality.settingsPage.masterEnabledHelp")}
+						</OperationsHelp>
+					</div>
 					{selfCheck ? (
 						<StatusPill tone={selfCheckOk ? "good" : "bad"}>
 							{selfCheckOk
@@ -868,7 +851,7 @@ function QualityJurisdictionSection({ settings }: { settings: ReturnType<typeof 
 	);
 }
 
-/** 仲裁庭与证据局参数:分组呈现+逐字段说明;独立保存,整体热应用。 */
+/** 仲裁庭与证据局参数：独立保存，整体热应用。 */
 function QualityTunablesSection() {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
@@ -947,7 +930,7 @@ function QualityTunablesSection() {
 		<QualitySection
 			icon={Gavel}
 			title={t("ops.settingsInvestigation")}
-			help={t("quality.settings.help")}
+			help={`${t("quality.settings.help")} ${t("quality.settings.capacityProjection", { count: settingsQuery.data?.max_rotations_per_hour })}`}
 			action={
 				<Button
 					type="button"
@@ -996,47 +979,43 @@ function QualityTunablesSection() {
      {t("common.cancel")}
     </Button>
    ) : null}
-   <p className="text-sm text-muted-foreground">{t("quality.settings.capacityProjection", { count: settingsQuery.data?.max_rotations_per_hour })}</p>
-			{TUNABLE_GROUPS.map((group) => (
-				<fieldset key={group.group} className="ops-fieldset">
-					<legend>{t(`quality.settingsPage.groups.${group.group}`)}</legend>
-					{group.fields.map((field) => (
-						<SettingsField
-							controlId={`quality-tunable-${String(field.key)}`}
-							key={field.key}
-							label={t(`quality.settings.fields.${String(field.key)}`)}
-							description={t(`quality.settings.helps.${String(field.key)}`)}
-							current={
-								form[field.key] !== base[field.key]
-									? String(base[field.key])
+			<div className="ops-form-grid">
+				{ALL_TUNABLE_FIELDS.map((field) => (
+					<SettingsField
+						controlId={`quality-tunable-${String(field.key)}`}
+						key={field.key}
+						label={t(`quality.settings.fields.${String(field.key)}`)}
+						description={t(`quality.settings.helps.${String(field.key)}`)}
+						current={
+							form[field.key] !== base[field.key]
+								? String(base[field.key])
+								: undefined
+						}
+					>
+						<Input
+							disabled={saveMutation.isPending}
+							id={`quality-tunable-${String(field.key)}`}
+							type={field.kind === "number" ? "number" : "text"}
+							min={
+								field.kind === "number"
+									? [
+											"account_need_exits",
+											"account_span_nodes",
+											"exit_need_n",
+											"exit_need_k",
+										].includes(field.key)
+										? 2
+										: 1
 									: undefined
 							}
-						>
-							<Input
-								disabled={saveMutation.isPending}
-								id={`quality-tunable-${String(field.key)}`}
-								type={field.kind === "number" ? "number" : "text"}
-								min={
-									field.kind === "number"
-										? [
-												"account_need_exits",
-												"account_span_nodes",
-												"exit_need_n",
-												"exit_need_k",
-											].includes(field.key)
-											? 2
-											: 1
-										: undefined
-								}
-								value={String(form[field.key])}
-								onChange={(event) =>
-									setField(field.key, event.target.value, field.kind)
-								}
-							/>
-						</SettingsField>
-					))}
-				</fieldset>
-			))}
+							value={String(form[field.key])}
+							onChange={(event) =>
+								setField(field.key, event.target.value, field.kind)
+							}
+						/>
+					</SettingsField>
+				))}
+			</div>
 		</QualitySection>
 	);
 }

@@ -1,5 +1,4 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, CircleHelp } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -7,12 +6,18 @@ import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { OperationsHelp } from "@/features/operations/operations-ui";
 import {
 	getEgressOperationsConfig,
 	updateEgressOperationsConfig,
 } from "@/features/settings/settings-api";
-import { EgressOperationsContext, showError, operationsFormFrom, type EgressOperationsDraft, type EgressOperationsValue } from "@/features/proxies/operations-shared";
+import {
+	EgressOperationsContext,
+	showError,
+	operationsFormFrom,
+	type EgressOperationsDraft,
+	type EgressOperationsValue,
+} from "@/features/proxies/operations-shared";
 
 /**
  * Shared draft state for the unified routing configuration (总出口 / 作用域
@@ -29,8 +34,12 @@ export function EgressOperationsProvider({ children }: { children: ReactNode }) 
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const [draft, setDraft] = useState<EgressOperationsDraft | null>(null);
-	const query = useQuery({ queryKey: ["egress-operations"], queryFn: ({ signal }) => getEgressOperationsConfig(signal) });
-	const form = draft ?? operationsFormFrom(query.data);
+	const query = useQuery({
+		queryKey: ["egress-operations"],
+		queryFn: ({ signal }) => getEgressOperationsConfig(signal),
+	});
+	const baseline = useMemo(() => operationsFormFrom(query.data), [query.data]);
+	const form = draft ?? baseline;
 	const [saving, setSaving] = useState(false);
 	const saveOwner = useRef<AbortController | null>(null);
 	useEffect(() => {
@@ -52,7 +61,7 @@ export function EgressOperationsProvider({ children }: { children: ReactNode }) 
 			await queryClient.cancelQueries({ queryKey: ["egress-operations"], exact: true });
 			if (owner.signal.aborted) return false;
 			queryClient.setQueryData(["egress-operations"], saved);
-			setDraft((current) => current === submitted ? null : current);
+			setDraft((current) => (current === submitted ? null : current));
 			void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
 			toast.success(t("proxies.routing.saved"));
 			return true;
@@ -63,38 +72,49 @@ export function EgressOperationsProvider({ children }: { children: ReactNode }) 
 			setSaving(false);
 		}
 	}, [form, queryClient, t]);
-	const update = useCallback<EgressOperationsValue["update"]>((updater) => {
-		setDraft((current) => updater(current ?? operationsFormFrom(query.data)));
-	}, [query.data]);
+	const update = useCallback<EgressOperationsValue["update"]>(
+		(updater) => {
+			setDraft((current) => updater(current ?? operationsFormFrom(query.data)));
+		},
+		[query.data],
+	);
 	const refetch = query.refetch;
 
-	const value = useMemo<EgressOperationsValue>(() => ({
-		form,
-		isPending: query.isPending,
-		isError: query.isError,
-		errorMessage: query.error instanceof Error ? query.error.message : undefined,
-		isDirty: draft !== null,
-		update,
-		save,
-		savePending: saving,
-		discard: () => setDraft(null),
-		retry: () => void refetch(),
-	}), [form, draft, saving, query.isPending, query.isError, query.error, refetch, save, update]);
+	const value = useMemo<EgressOperationsValue>(
+		() => ({
+			form,
+			isPending: query.isPending,
+			isError: query.isError,
+			errorMessage: query.error instanceof Error ? query.error.message : undefined,
+			isDirty: draft !== null,
+			update,
+			save,
+			savePending: saving,
+			discard: () => setDraft(null),
+			retry: () => void refetch(),
+		}),
+		[form, draft, saving, query.isPending, query.isError, query.error, refetch, save, update],
+	);
 
-	return <EgressOperationsContext.Provider value={value}>{children}</EgressOperationsContext.Provider>;
+	return (
+		<EgressOperationsContext.Provider value={value}>{children}</EgressOperationsContext.Provider>
+	);
 }
 
-export function OperationSectionHeader({ title, help, children }: { title: string; help?: string; children?: ReactNode }) {
+export function OperationSectionHeader({
+	title,
+	help,
+	children,
+}: {
+	title: string;
+	help?: string;
+	children?: ReactNode;
+}) {
 	return (
 		<div className="flex min-h-8 flex-wrap items-center justify-between gap-3 px-1">
 			<div className="flex items-center gap-1.5">
 				<h3 className="text-sm font-medium tracking-tight">{title}</h3>
-				{help ? (
-					<Tooltip>
-						<TooltipTrigger asChild><button type="button" className="text-muted-foreground transition-colors hover:text-foreground" aria-label={help}><CircleHelp className="size-3.5" /></button></TooltipTrigger>
-						<TooltipContent className="max-w-80">{help}</TooltipContent>
-					</Tooltip>
-				) : null}
+				{help && <OperationsHelp label={title}>{help}</OperationsHelp>}
 			</div>
 			{children ? <div className="flex flex-wrap items-center gap-1.5">{children}</div> : null}
 		</div>
@@ -104,7 +124,15 @@ export function OperationSectionHeader({ title, help, children }: { title: strin
 /** 单位不单独占位：标签已写明（秒），单位块只会在数字和控件边缘之间留大片空白。
  * 受控值必须是 string：number 型受控值在清空输入框时会把空串强转回 0，
  * 框里永远留着删不掉的 "0"；这里保持用户敲的原文，失焦时才解析。 */
-export function IntervalInput({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+export function IntervalInput({
+	id,
+	value,
+	onChange,
+}: {
+	id: string;
+	value: string;
+	onChange: (value: string) => void;
+}) {
 	return (
 		<Input
 			id={id}
@@ -115,25 +143,37 @@ export function IntervalInput({ id, value, onChange }: { id: string; value: stri
 			max={86400}
 			value={value}
 			onFocus={(event) => event.target.select()}
-			onBlur={(event) => { const parsed = Number(event.target.value); if (Number.isFinite(parsed) && event.target.value.trim() !== "") onChange(String(parsed)); }}
+			onBlur={(event) => {
+				const parsed = Number(event.target.value);
+				if (Number.isFinite(parsed) && event.target.value.trim() !== "") onChange(String(parsed));
+			}}
 			onChange={(event) => onChange(event.target.value)}
 		/>
 	);
 }
 
-export function SourceError({ message }: { message: string }) {
+export function Control({ label, children }: { label: string; children: ReactNode }) {
 	return (
-		<Tooltip>
-			<TooltipTrigger asChild><span className="inline-flex shrink-0 cursor-help text-destructive" tabIndex={0} aria-label={message}><CircleAlert className="size-3.5" /></span></TooltipTrigger>
-			<TooltipContent className="max-w-80">{message}</TooltipContent>
-		</Tooltip>
+		<div className="space-y-2">
+			<Label className="text-xs font-medium">{label}</Label>
+			{children}
+		</div>
 	);
 }
 
-export function Control({ label, children }: { label: string; children: ReactNode }) {
-	return <div className="space-y-2"><Label className="text-xs font-medium">{label}</Label>{children}</div>;
-}
-
-export function ToggleControl({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
-	return <div className="flex min-h-10 items-center justify-between gap-4 rounded-md bg-muted/45 px-3"><Label className="text-xs font-medium">{label}</Label><Switch checked={checked} onCheckedChange={onChange} /></div>;
+export function ToggleControl({
+	label,
+	checked,
+	onChange,
+}: {
+	label: string;
+	checked: boolean;
+	onChange: (value: boolean) => void;
+}) {
+	return (
+		<div className="flex min-h-10 items-center justify-between gap-4 rounded-md bg-muted/45 px-3">
+			<Label className="text-xs font-medium">{label}</Label>
+			<Switch checked={checked} onCheckedChange={onChange} />
+		</div>
+	);
 }

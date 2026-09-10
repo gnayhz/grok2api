@@ -9,8 +9,8 @@ export function Tabs({ className, ...props }: React.ComponentProps<typeof TabsPr
 
 type IndicatorGeometry = { left: number; top: number; width: number; height: number };
 
-export const TabsList = React.forwardRef<React.ElementRef<typeof TabsPrimitive.List>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>>(
-  function TabsList({ className, children, ...props }, forwardedRef) {
+export const TabsList = React.forwardRef<React.ElementRef<typeof TabsPrimitive.List>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.List> & { showIndicator?: boolean }>(
+  function TabsList({ className, children, showIndicator = true, ...props }, forwardedRef) {
     const listRef = React.useRef<React.ElementRef<typeof TabsPrimitive.List> | null>(null);
     const [indicator, setIndicator] = React.useState<IndicatorGeometry | null>(null);
     const setListRef = React.useCallback((node: React.ElementRef<typeof TabsPrimitive.List> | null) => {
@@ -31,25 +31,32 @@ export const TabsList = React.forwardRef<React.ElementRef<typeof TabsPrimitive.L
     }, []);
 
     React.useLayoutEffect(() => {
+      if (!showIndicator) return;
       const list = listRef.current;
       if (!list) return;
       updateIndicator();
-      const mutationObserver = new MutationObserver(updateIndicator);
+      let frame: number | undefined;
+      const scheduleUpdate = () => {
+        if (frame !== undefined) return;
+        frame = requestAnimationFrame(() => { frame = undefined; updateIndicator(); });
+      };
+      const mutationObserver = new MutationObserver(scheduleUpdate);
       mutationObserver.observe(list, { attributes: true, childList: true, subtree: true, attributeFilter: ["data-state"] });
-      const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateIndicator);
+      const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleUpdate);
       resizeObserver?.observe(list);
       list.querySelectorAll<HTMLElement>('[role="tab"]').forEach((tab) => resizeObserver?.observe(tab));
-      window.addEventListener("resize", updateIndicator);
+      window.addEventListener("resize", scheduleUpdate);
       return () => {
         mutationObserver.disconnect();
         resizeObserver?.disconnect();
-        window.removeEventListener("resize", updateIndicator);
+        window.removeEventListener("resize", scheduleUpdate);
+        if (frame !== undefined) cancelAnimationFrame(frame);
       };
-    }, [updateIndicator]);
+    }, [showIndicator, updateIndicator]);
 
     return (
       <TabsPrimitive.List ref={setListRef} className={cn("relative isolate inline-flex h-8 w-fit items-center gap-1 rounded-full bg-muted p-0.5", className)} {...props}>
-        {indicator ? (
+        {showIndicator && indicator ? (
           <span
             aria-hidden="true"
             className="pointer-events-none absolute left-0 top-0 z-0 rounded-full bg-background shadow-sm transition-[transform,width,height] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"

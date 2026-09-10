@@ -110,6 +110,9 @@
 	min-width: 0;
 	text-align: left;
 }
+.ops-network-workspace .ops-metric-rail {
+	background: var(--background);
+}
 .ops-metric + .ops-metric {
 	border-left: 1px solid var(--border);
 }
@@ -398,28 +401,6 @@
 	background: var(--card);
 	margin-bottom: 16px;
 }
-.ops-route-strip {
-	display: grid;
-	grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
-	align-items: center;
-	gap: 14px;
-	padding: 12px 16px;
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	margin-bottom: 16px;
-	font-size: 12px;
-}
-.ops-route-path {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	min-width: 0;
-}
-.ops-route-path strong {
-	font-size: 10px;
-	color: var(--muted-foreground);
-	font-weight: 600;
-}
 .ops-node-table-shell {
 	gap: 0;
 }
@@ -440,20 +421,29 @@
 	padding-top: 12px;
 	padding-bottom: 12px;
 }
+/* Stacked exit addresses fit within the compact 48px virtual row height. */
+.ops-node-table-shell .ops-compact-table td {
+	padding-top: 7px;
+	padding-bottom: 7px;
+	white-space: nowrap;
+}
 .ops-node-table-shell td:first-child,
 .ops-node-table-shell th:first-child {
 	padding-left: 16px;
 }
 .ops-field {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(160px, 240px);
-	gap: 24px;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 6px;
 	align-items: start;
-	padding: 16px 0;
-	border-bottom: 1px solid var(--border);
+	min-width: 0;
+	padding: 12px 0;
 }
-.ops-field:last-child {
-	border-bottom: 0;
+.ops-field-heading {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
 }
 .ops-field-label {
 	display: inline-block;
@@ -461,21 +451,41 @@
 	font-weight: 500;
 	line-height: 1.7;
 }
-.ops-field-help {
-	font-size: 12px;
-	line-height: 1.7;
-	color: var(--muted-foreground);
-	margin-top: 4px;
-	max-width: 600px;
-}
 .ops-field-control {
 	min-width: 0;
 	display: flex;
 	align-items: center;
-	justify-content: flex-end;
+	justify-content: flex-start;
 }
 .ops-field-control > div {
 	width: 100%;
+}
+.ops-field-note {
+	min-width: 0;
+}
+.ops-field:has(.ops-field-control [role="switch"]) {
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+}
+.ops-field:has(.ops-field-control [role="switch"]) > .ops-field-note {
+	grid-column: 1 / -1;
+}
+.ops-form-grid {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	column-gap: 24px;
+	align-items: start;
+}
+.ops-form-grid > .ops-field-wide {
+	grid-column: 1 / -1;
+}
+.ops-settings-layout .ops-panel-body {
+	container-type: inline-size;
+}
+@container (min-width: 640px) {
+	.ops-form-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
 }
 .ops-field-current {
 	font-size: 11px;
@@ -486,22 +496,6 @@
 	color: var(--foreground);
 	font-variant-numeric: tabular-nums;
 }
-.ops-fieldset {
-	border: 0;
-	margin: 0;
-	padding: 0;
-}
-.ops-fieldset + .ops-fieldset {
-	margin-top: 20px;
-}
-.ops-fieldset > legend {
-	width: 100%;
-	font-size: 12px;
-	font-weight: 600;
-	padding: 9px 0;
-	border-bottom: 1px solid var(--border);
-	color: var(--muted-foreground);
-}
 .ops-dialog {
 	border: 1px solid var(--border);
 	border-radius: 12px;
@@ -510,6 +504,39 @@
 }
 .ops-dialog form {
 	min-width: 0;
+}
+/* Centering already uses translate. Keep the animated offset small and avoid
+   compositing a blurred copy of the entire workspace under the dialog. */
+.ops-dialog[data-state="open"] {
+	animation: ops-dialog-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.ops-dialog[data-state="closed"] {
+	animation: ops-dialog-out 100ms ease-in both;
+}
+.ops-dialog-overlay {
+	backdrop-filter: none;
+}
+.ops-dialog-overlay[data-state="open"] {
+	animation: ops-overlay-in 160ms ease-out both;
+}
+.ops-dialog-overlay[data-state="closed"] {
+	animation: ops-overlay-out 100ms ease-in both;
+}
+@keyframes ops-dialog-in {
+	from { opacity: 0; transform: translate3d(0, 5px, 0); }
+	to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes ops-dialog-out {
+	from { opacity: 1; transform: translate3d(0, 0, 0); }
+	to { opacity: 0; transform: translate3d(0, 3px, 0); }
+}
+@keyframes ops-overlay-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+@keyframes ops-overlay-out {
+	from { opacity: 1; }
+	to { opacity: 0; }
 }
 .ops-case-dialog {
 	padding: 0;
@@ -709,41 +736,6 @@
 	background: var(--ops-good-bg);
 	border-color: color-mix(in srgb, var(--ops-good) 30%, var(--border));
 }
-.ops-route-row {
-	display: grid;
-	grid-template-columns: minmax(120px, 1fr) minmax(0, 1fr) minmax(220px, 1.3fr);
-	gap: 20px;
-	align-items: center;
-	padding: 14px 16px;
-	font-size: 12px;
-	border-bottom: 1px solid var(--border);
-}
-.ops-route-heading {
-	background: var(--card);
-	font-size: 11px;
-	color: var(--muted-foreground);
-	padding: 10px 16px;
-}
-.ops-route-group-title {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 12px 16px;
-	font-size: 13px;
-	font-weight: 600;
-	border-bottom: 1px solid var(--border);
-}
-.ops-pool-row {
-	display: grid;
-	grid-template-columns: minmax(180px, 1.4fr) 1fr 1fr auto;
-	gap: 24px;
-	align-items: center;
-	padding: 18px 16px;
-	border-bottom: 1px solid var(--border);
-}
-.ops-pool-row:last-child {
-	border: 0;
-}
 .ops-empty {
 	display: flex;
 	align-items: center;
@@ -811,13 +803,6 @@
 		display: grid;
 		grid-template-columns: 1fr;
 	}
-	.ops-route-strip {
-		grid-template-columns: 1fr;
-		gap: 12px;
-	}
-	.ops-route-strip > button {
-		justify-self: start;
-	}
 	.ops-case-dialog {
 		width: calc(100vw - 20px);
 		height: 94svh;
@@ -839,9 +824,7 @@
 		border-top: 1px solid var(--border);
 	}
 	.ops-field {
-		grid-template-columns: 1fr;
-		gap: 10px;
-		padding: 14px 0;
+		padding: 10px 0;
 	}
 	.ops-field-control {
 		justify-content: flex-start;
@@ -861,17 +844,6 @@
 	.ops-settings-layout .ops-tab {
 		white-space: nowrap;
 	}
-	.ops-route-row {
-		grid-template-columns: 1fr;
-		gap: 10px;
-	}
-	.ops-route-heading {
-		display: none;
-	}
-	.ops-pool-row {
-		grid-template-columns: 1fr 1fr;
-		gap: 16px;
-	}
 	.ops-save-dock {
 		bottom: 10px;
 		padding: 10px;
@@ -879,16 +851,10 @@
 }
 @media (prefers-reduced-motion: reduce) {
 	.ops-workspace *,
+	.ops-dialog,
+	.ops-dialog-overlay,
 	.ops-dialog * {
 		transition: none !important;
 		animation: none !important;
 	}
-}
-.ops-editor-dialog {
-	display: flex;
-	flex-direction: column;
-	gap: 0;
-	padding: 0;
-	max-height: 92svh;
-	overflow: hidden;
 }

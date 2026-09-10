@@ -475,12 +475,12 @@ export function listEgressNodes(input: ListEgressNodesInput = {}, signal?: Abort
   return apiRequest(`/api/admin/v1/egress-nodes?${query}`, { signal }, decodeEgressNodeList);
 }
 
-export async function listAllEgressNodes(input: Omit<ListEgressNodesInput, "page" | "pageSize"> = {}): Promise<EgressNodeListDTO> {
+export async function listAllEgressNodes(input: Omit<ListEgressNodesInput, "page" | "pageSize"> = {}, signal?: AbortSignal): Promise<EgressNodeListDTO> {
   const pageSize = 2000;
-  const first = await listEgressNodes({ ...input, page: 1, pageSize });
+  const first = await listEgressNodes({ ...input, page: 1, pageSize }, signal);
   const items = [...first.items];
   for (let page = 2; items.length < first.total; page += 1) {
-    const next = await listEgressNodes({ ...input, page, pageSize });
+    const next = await listEgressNodes({ ...input, page, pageSize }, signal);
     if (next.items.length === 0) break;
     items.push(...next.items);
   }
@@ -495,12 +495,12 @@ export function updateEgressNode(id: string, input: EgressNodeInput): Promise<Eg
   return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "PUT", body: input }, decodeEgressNode);
 }
 
-export function getEgressNodeRotationURL(id: string): Promise<{ rotationURL: string }> {
-	return apiRequest(`/api/admin/v1/egress-nodes/${id}/rotation-url/reveal`, { method: "POST" }, createObjectDecoder<{ rotationURL: string }>("egress rotation URL", { rotationURL: isString }));
+export function getEgressNodeRotationURL(id: string, signal?: AbortSignal): Promise<{ rotationURL: string }> {
+	return apiRequest(`/api/admin/v1/egress-nodes/${id}/rotation-url/reveal`, { method: "POST", signal }, createObjectDecoder<{ rotationURL: string }>("egress rotation URL", { rotationURL: isString }));
 }
 
-export function getEgressNodeProxyURL(id: string): Promise<{ proxyURL: string }> {
-  return apiRequest(`/api/admin/v1/egress-nodes/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress proxy URL", { proxyURL: isString }));
+export function getEgressNodeProxyURL(id: string, signal?: AbortSignal): Promise<{ proxyURL: string }> {
+  return apiRequest(`/api/admin/v1/egress-nodes/${id}/proxy-url/reveal`, { method: "POST", signal }, createObjectDecoder<{ proxyURL: string }>("egress proxy URL", { proxyURL: isString }));
 }
 
 export function deleteEgressNode(id: string): Promise<{ deleted: boolean }> {
@@ -562,8 +562,8 @@ export type EgressPoolInput = {
 	fallbackMode: EgressPoolFallbackMode; fallbackPoolId?: string;
 };
 
-export function listEgressPools(): Promise<EgressPoolDTO[]> {
-	return apiRequest("/api/admin/v1/egress-pools", {}, decodeEgressPools).then((value) => value.items);
+export function listEgressPools(signal?: AbortSignal): Promise<EgressPoolDTO[]> {
+	return apiRequest("/api/admin/v1/egress-pools", { signal }, decodeEgressPools).then((value) => value.items);
 }
 
 /** 池内节点调度统计：验证策略分布的进程内存计数，重启/清零归零。 */
@@ -608,11 +608,11 @@ type ListEgressSourcesInput = {
   search?: string;
 };
 
-export function listEgressSources(input?: ListEgressSourcesInput): Promise<EgressSourceListDTO> {
-  if (!input) return apiRequest("/api/admin/v1/egress-sources", {}, decodeEgressSourceList);
+export function listEgressSources(input?: ListEgressSourcesInput, signal?: AbortSignal): Promise<EgressSourceListDTO> {
+  if (!input) return apiRequest("/api/admin/v1/egress-sources", { signal }, decodeEgressSourceList);
   const query = new URLSearchParams({ page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
   if (input.search) query.set("search", input.search);
-  return apiRequest(`/api/admin/v1/egress-sources?${query}`, {}, decodeEgressSourceList);
+  return apiRequest(`/api/admin/v1/egress-sources?${query}`, { signal }, decodeEgressSourceList);
 }
 
 export function createEgressSource(input: EgressSourceInput): Promise<EgressSourceDTO> {
@@ -627,12 +627,12 @@ export function deleteEgressSource(id: string): Promise<{ deleted: boolean }> {
   return apiRequest(`/api/admin/v1/egress-sources/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
 }
 
-export function getEgressSourceURL(id: string): Promise<{ url: string }> {
-  return apiRequest(`/api/admin/v1/egress-sources/${id}/url/reveal`, { method: "POST" }, createObjectDecoder<{ url: string }>("egress source URL", { url: isString }));
+export function getEgressSourceURL(id: string, signal?: AbortSignal): Promise<{ url: string }> {
+  return apiRequest(`/api/admin/v1/egress-sources/${id}/url/reveal`, { method: "POST", signal }, createObjectDecoder<{ url: string }>("egress source URL", { url: isString }));
 }
 
-export function getEgressSourceProxyURL(id: string): Promise<{ proxyURL: string }> {
-  return apiRequest(`/api/admin/v1/egress-sources/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress source proxy URL", { proxyURL: isString }));
+export function getEgressSourceProxyURL(id: string, signal?: AbortSignal): Promise<{ proxyURL: string }> {
+  return apiRequest(`/api/admin/v1/egress-sources/${id}/proxy-url/reveal`, { method: "POST", signal }, createObjectDecoder<{ proxyURL: string }>("egress source proxy URL", { proxyURL: isString }));
 }
 
 export function syncEgressSource(id: string): Promise<EgressImportResultDTO> {
