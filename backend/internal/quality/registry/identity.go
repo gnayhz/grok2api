@@ -83,6 +83,12 @@ func identityGroupID(members []uint64) uint64 {
 	return hash
 }
 
+// identityGroupInsertBatch 限定单条多行 INSERT 的宿主参数规模:每行 3 列,
+// 200 行 = 600 个绑定参数,低于 glebarez/go-sqlite 实测 749 的上限
+// (SQLite 默认构建为 999)。 Fleet 级关联(数万账号)的整表重写若不
+// 分片将超出变量预算并使启动失败。事务边界不变,分片只改语句形状。
+const identityGroupInsertBatch = 200
+
 // RefreshIdentityGroups 重算身份组并持久化到 q_identity_group
 // (整表重写:组号确定性,幂等)。账号关联变化后由调用方触发;
 // 启动时 Open 已重建。
@@ -117,7 +123,7 @@ func (r *Registry) RefreshIdentityGroups(ctx context.Context) error {
 				rows = append(rows, qIdentityGroupModel{GroupID: groupID, AccountID: member, AddedAt: now})
 			}
 		}
-		return tx.Create(&rows).Error
+		return tx.CreateInBatches(&rows, identityGroupInsertBatch).Error
 	}); err != nil {
 		return err
 	}
