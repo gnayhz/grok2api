@@ -516,6 +516,89 @@ export function maskIP(ip: string): string {
 	}
 	return ip.length > 12 ? ip.slice(0, 12) + "…" : ip;
 }
+/** 解析探针结论为人性化中文和色调 */
+export function getProbeFinding(
+	task: QualityProbeTask,
+	t: (key: string, opts?: Record<string, unknown>) => string,
+): {
+	text: string;
+	tone: "ok" | "bad" | "warn" | "neutral";
+	badge: string;
+} {
+	if (task.result === "clean") {
+		return {
+			text: t("guardProbes.findingClean"),
+			tone: "ok",
+			badge: t("guardProbes.resultClean"),
+		};
+	}
+
+	const detail = task.detail || "";
+	const failureKind = task.failure_kind || "";
+
+	if (detail.includes("created_timeout") || failureKind === "created_timeout") {
+		return {
+			text: t("guardProbes.findingCreatedTimeout"),
+			tone: "warn",
+			badge: "建连超时",
+		};
+	}
+
+	if (detail.includes("evidence_timeout") || failureKind === "evidence_timeout") {
+		return {
+			text: "上游思考证据等待超时（evidence_timeout），未获取完整思维链。",
+			tone: "warn",
+			badge: "证据超时",
+		};
+	}
+
+	if (detail.includes("transport") || failureKind === "transport") {
+		return {
+			text: t("guardProbes.findingTransportError"),
+			tone: "warn",
+			badge: "传输中断",
+		};
+	}
+
+	if (detail.includes("upstream_http")) {
+		return {
+			text: t("guardProbes.findingUpstreamHttp"),
+			tone: "warn",
+			badge: "上游异常",
+		};
+	}
+
+	if (detail.includes("exit-ip-verified") || detail.includes("degraded")) {
+		return {
+			text: t("guardProbes.findingExitDegraded"),
+			tone: "bad",
+			badge: t("guardProbes.resultDegraded"),
+		};
+	}
+
+	if (task.result === "degraded") {
+		return {
+			text: "多维度测试验证命中降智，响应内容或思维链异常。",
+			tone: "bad",
+			badge: t("guardProbes.resultDegraded"),
+		};
+	}
+
+	if (task.result === "error" || task.state === "failed") {
+		return {
+			text: detail || t("guardProbes.findingGeneric", { detail: detail || "测试失败" }),
+			tone: "warn",
+			badge: t("guardProbes.resultError"),
+		};
+	}
+
+	return {
+		text: detail || t("guardProbes.findingUnknown"),
+		tone: "neutral",
+		badge: t("guardProbes.statePending"),
+	};
+}
+
 
 /** 案件探针行 → 与裁决同口径的计数(clean/degraded 只数可采结论,
  * 与后端 summarizeSimpleProbes 的 admissibility 对齐:陪审 done 即票;

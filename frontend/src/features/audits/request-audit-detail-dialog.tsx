@@ -95,6 +95,7 @@ function RequestAuditDetailContent({ audit, open, titleRef }: {
   const activeAudit = detailQuery.data?.audit ?? audit;
   const attempts = detailQuery.data?.attempts ?? [];
   const hasDetail = Boolean(detailQuery.data);
+  const failureCount = hasDetail ? attempts.length : (activeAudit?.attemptCount ?? 0);
 
   return (
     <>
@@ -131,9 +132,11 @@ function RequestAuditDetailContent({ audit, open, titleRef }: {
               <TabsList showIndicator={false} aria-label={t("audits.detailSections")} className="h-12 w-max gap-4 rounded-none bg-transparent p-0 sm:gap-6">
                 <TabsTrigger value="overview" className={detailTabClass}><FileText className="size-3.5" />{t("audits.requestOverview")}</TabsTrigger>
                 <TabsTrigger value="attempts" className={detailTabClass} disabled={!hasDetail}><Network className="size-3.5" />{t("audits.failureDiagnostics")}
-                  <span className={cn("min-w-5 rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] tabular-nums text-red-700 dark:text-red-300", !(hasDetail ? attempts.length : activeAudit.attemptCount) && "invisible")}>
-                    {hasDetail ? attempts.length : activeAudit.attemptCount}
-                  </span>
+                  {failureCount > 0 ? (
+                    <span className="min-w-5 rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-red-700 dark:text-red-300">
+                      {failureCount}
+                    </span>
+                  ) : null}
                 </TabsTrigger>
                 <TabsTrigger value="generation" className={detailTabClass} disabled={!hasDetail}><Activity className="size-3.5" />{t("audits.generationUsage")}</TabsTrigger>
                 <TabsTrigger value="requestMetadata" className={detailTabClass} disabled={!hasDetail}><ListTree className="size-3.5" />{t("audits.requestMetadata")}</TabsTrigger>

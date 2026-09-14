@@ -1,15 +1,14 @@
-import { Settings2 } from "lucide-react";
+import { RefreshCw, Settings2, ShieldCheck } from "lucide-react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/shared/lib/cn";
 import { OperationsButton as Button } from "@/features/operations/operations-ui";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
-	MetricRail,
-	OperationalMetric,
 	OperationsError,
-	OperationsHeader,
 	OperationsTabs,
-	StatusPill,
 } from "@/features/operations/operations-ui";
 import {
 	useOperationsAccounts,
@@ -21,7 +20,6 @@ import {
 import { QualityHitStats } from "./quality-hit-stats";
 import { QualityProbeView } from "./quality-probe-view";
 import { QualityTribunalView } from "./quality-tribunal-view";
-import { QualityOverviewPanel } from "./quality-overview";
 
 export function QualityConsole() {
 	const { t } = useTranslation();
@@ -36,47 +34,104 @@ export function QualityConsole() {
 	const nodes = useOperationsNodes();
 	const enabled = guard.data?.effective?.enabled;
 	const checkBad = check.data?.self_check.outcome === "error";
-	const status =
-		guard.isError || check.isError || !check.data || enabled === undefined
-			? "unknown"
-			: checkBad
-				? "selfCheckFailed"
-				: enabled
-					? "active"
-					: "inactive";
-	const open = cases.data?.filter((c) => c.status === "investigating").length;
-	const accountCount = accounts.data?.items.filter(
+	const status = useMemo(() => {
+		if (guard.isError || check.isError || !check.data || enabled === undefined) return "unknown";
+		if (checkBad) return "selfCheckFailed";
+		return enabled ? "active" : "inactive";
+	}, [guard.isError, check.isError, check.data, enabled, checkBad]);
+
+	const open = useMemo(() => cases.data?.filter((c) => c.status === "investigating").length ?? 0, [cases.data]);
+	const accountCount = useMemo(() => accounts.data?.items.filter(
 		(a) => a.quality && a.quality.state !== "active",
-	).length;
-	const exitCount = nodes.data?.items.filter((n) => n.quality).length;
+	).length ?? 0, [accounts.data?.items]);
+	const exitCount = useMemo(() => nodes.data?.items.filter((n) => n.quality).length ?? 0, [nodes.data?.items]);
+
+	// Keep visited tabs in DOM for instant 0ms switching without remounting lag
+	const [visitedTabs, setVisitedTabs] = useState<Record<string, boolean>>(() => ({ [view]: true }));
+	if (!visitedTabs[view]) {
+		setVisitedTabs((prev) => ({ ...prev, [view]: true }));
+	}
+
 	const change = (next: string) => navigate({ pathname: "/guard", hash: next });
 	return (
 		<div className="ops-workspace">
-			<OperationsHeader
-				title={t("ops.quality")}
-				description={t("ops.qualityDescription")}
-				status={
-					<StatusPill
-						tone={
-							status === "active"
-								? "good"
-								: status === "unknown"
-									? "neutral"
-									: "bad"
-						}
-					>
-						{t(`ops.${status}`)}
-					</StatusPill>
-				}
-				action={
-					<Button variant="outline" size="sm" asChild>
+			{/* Top Bar: Brand, Status, and Action Hub (Command Deck Style) */}
+			<div className="flex flex-wrap items-center justify-between gap-4 py-1 mb-1">
+				{/* Title and Live status */}
+				<div className="flex items-center gap-3">
+					<div className="relative flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+						<ShieldCheck className="size-5 animate-pulse text-primary" />
+					</div>
+					<div>
+						<div className="flex items-center gap-2">
+							<h1 className="text-xl font-bold tracking-tight text-foreground">
+								{t("ops.quality")}
+							</h1>
+							<span
+								className={cn(
+									"inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium",
+									status === "active"
+										? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+										: status === "unknown"
+											? "bg-muted text-muted-foreground"
+											: "bg-rose-500/10 text-rose-600 dark:text-rose-400"
+								)}
+							>
+								<span
+									className={cn(
+										"size-1.5 rounded-full",
+										status === "active"
+											? "bg-emerald-500 animate-ping"
+											: status === "unknown"
+												? "bg-muted-foreground"
+												: "bg-rose-500 animate-ping"
+									)}
+								/>
+								{t(`ops.${status}`)}
+							</span>
+						</div>
+						<p className="text-xs text-muted-foreground mt-0.5">
+							{open ?? 0} {t("ops.cases")} · {accountCount ?? 0} {t("ops.heldAccounts")} · {exitCount ?? 0} {t("ops.heldExits")}
+						</p>
+					</div>
+				</div>
+
+				{/* Quick Action Center */}
+				<div className="flex flex-wrap items-center gap-2">
+					<Button variant="outline" size="sm" className="gap-1.5 font-medium shadow-xs" asChild>
 						<Link to="/guard/settings">
 							<Settings2 className="size-3.5" />
-							{t("ops.settings")}
+							<span>{t("ops.settings")}</span>
 						</Link>
 					</Button>
-				}
-			/>
+
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								variant="ghost"
+								size="icon"
+								className="size-8"
+								disabled={guard.isFetching || check.isFetching || cases.isFetching}
+								onClick={() => {
+									void guard.refetch();
+									void check.refetch();
+									void cases.refetch();
+									void accounts.refetch();
+									void nodes.refetch();
+								}}
+							>
+								<RefreshCw
+									className={cn(
+										"size-4 text-muted-foreground",
+										(guard.isFetching || check.isFetching || cases.isFetching) && "animate-spin text-primary"
+									)}
+								/>
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>{t("network.refresh")}</TooltipContent>
+					</Tooltip>
+				</div>
+			</div>
 			{(guard.isError ||
 				check.isError ||
 				cases.isError ||
@@ -107,50 +162,21 @@ export function QualityConsole() {
 					]}
 					end={t("ops.freshness")}
 				/>
-				<TabsContent value="tribunal" className="mt-0">
-					<MetricRail>
-						<OperationalMetric
-							label={t("ops.openCases")}
-							value={cases.isError ? "—" : (open ?? "—")}
-							detail={t("ops.openCasesHelp")}
-							tone={open ? "warn" : undefined}
-							onClick={() => change("tribunal")}
-						/>
-						<OperationalMetric
-							label={t("ops.heldAccounts")}
-							value={accounts.isError ? "—" : (accountCount ?? "—")}
-							detail={t("ops.heldAccountsHelp")}
-							tone={accountCount ? "warn" : undefined}
-						/>
-						<OperationalMetric
-							label={t("ops.heldExits")}
-							value={nodes.isError ? "—" : (exitCount ?? "—")}
-							detail={t("ops.heldExitsHelp")}
-							tone={exitCount ? "bad" : undefined}
-							onClick={() => navigate("/proxies#nodes")}
-						/>
-						<OperationalMetric
-							label={t("ops.rejected")}
-							value={
-								guard.isError
-									? "—"
-									: (guard.data?.retrial.exhaustedRejected ?? "—")
-							}
-							detail={t("ops.processScope")}
-							onClick={() => change("stats")}
-						/>
-					</MetricRail>
-					<div className="ops-workbench">
+				{visitedTabs.tribunal && (
+					<TabsContent forceMount value="tribunal" className="data-[state=inactive]:hidden mt-0 focus-visible:outline-none">
 						<QualityTribunalView />
-						<QualityOverviewPanel />
-					</div>
-				</TabsContent>
-				<TabsContent value="stats" className="mt-0">
-					<QualityHitStats />
-				</TabsContent>
-				<TabsContent value="bureau" className="mt-0">
-					<QualityProbeView />
-				</TabsContent>
+					</TabsContent>
+				)}
+				{visitedTabs.stats && (
+					<TabsContent forceMount value="stats" className="data-[state=inactive]:hidden mt-0">
+						<QualityHitStats />
+					</TabsContent>
+				)}
+				{visitedTabs.bureau && (
+					<TabsContent forceMount value="bureau" className="data-[state=inactive]:hidden mt-0">
+						<QualityProbeView />
+					</TabsContent>
+				)}
 			</Tabs>
 		</div>
 	);

@@ -193,7 +193,7 @@ export function CreativeConsolePage() {
   }
 
   return (
-    <div className="flex h-[calc(100dvh-5rem)] min-h-[36rem] flex-col gap-5 overflow-hidden">
+    <div className="flex h-[calc(100dvh-5rem)] lg:h-[calc(100dvh-36px)] min-h-[36rem] flex-col gap-5 overflow-hidden">
       <PageHeader title={t("creativeConsole.title")} description={t("creativeConsole.description")} />
 
       <aside className="flex shrink-0 flex-col gap-2 rounded-lg bg-secondary/45 px-4 py-2.5 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:gap-4">

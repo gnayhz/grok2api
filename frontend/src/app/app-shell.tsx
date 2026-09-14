@@ -165,9 +165,7 @@ export function AppShell() {
 	const [documentationOpen, setDocumentationOpen] = useState<
 		Record<string, boolean>
 	>({});
-	const compactPageHeader =
-		location.pathname.startsWith("/guard") ||
-		location.pathname === "/request-audits";
+	const compactPageHeader = false;
 	const isMediaWorkspace = [
 		"/creative-console",
 		"/gallery",
@@ -510,12 +508,12 @@ export function AppShell() {
 
 				<main
 					className={cn(
-						"mx-auto w-full max-w-[1280px] flex-1 px-5 sm:px-8",
+						"w-full lg:w-auto mx-auto lg:mx-[36px] max-w-[1400px] flex-1 px-5 sm:px-8 lg:px-[36px]",
 						compactPageHeader
-							? "py-8"
+							? "py-6"
 							: isMediaWorkspace
-								? "pt-8 pb-0 lg:pt-20"
-								: "py-8 lg:py-20",
+								? "pt-6 pb-0 lg:pt-[36px]"
+								: "pt-6 pb-2 lg:pt-[36px] lg:pb-3",
 					)}
 				>
 					<Outlet />

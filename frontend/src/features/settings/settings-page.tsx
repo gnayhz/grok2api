@@ -4,6 +4,7 @@ import { Controller } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -16,7 +17,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { isByteSizeUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/features/settings/settings-model";
 import { useSettings } from "@/features/settings/use-settings";
 import { DurationInput, SettingsField, SettingsPane, SettingsSection } from "@/features/settings/settings-ui";
-import { SettingsApplicationStatus } from "@/features/settings/settings-status";
 import { ErrorState } from "@/shared/components/data-state";
 
 export function SettingsPage() {
@@ -60,9 +60,14 @@ export function SettingsPage() {
 
   return (
     <form className="w-full space-y-5" onSubmit={form.handleSubmit((values) => updateMutation.mutate(values))}>
-      <header className="relative sticky top-12 z-30 -mx-2 flex min-h-12 items-center justify-between gap-3 bg-background px-2 py-2 lg:top-20 lg:z-40 lg:before:pointer-events-none lg:before:absolute lg:before:inset-x-0 lg:before:-top-[100vh] lg:before:h-[100vh] lg:before:bg-background lg:before:content-['']">
-        <div className="min-w-0">
+      <header className="flex min-h-10 items-center justify-between gap-3 pb-2">
+        <div className="flex items-center gap-2.5 min-w-0">
           <h1 className="text-xl font-medium">{t("settings.title")}</h1>
+          {snapshot?.revision && (
+            <Badge variant="outline" className="font-mono text-xs">
+              v{snapshot.revision}
+            </Badge>
+          )}
           <p className="sr-only">{t("settings.description")}</p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -85,11 +90,15 @@ export function SettingsPage() {
 
       {loading ? <div className="flex min-h-64 items-center justify-center"><Spinner /></div> : null}
       {settingsQuery.isError ? <p role="alert" className="text-sm text-destructive">{settingsQuery.error.message} <Button type="button" variant="link" onClick={() => void settingsQuery.refetch()}>{t("common.retry")}</Button></p> : null}
-      {snapshot ? <SettingsApplicationStatus snapshot={snapshot} /> : null}
+      {snapshot?.restartRequired && snapshot.restartRequired.length > 0 ? (
+        <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+          <p className="font-semibold">{t("settings.application.restart", { fields: snapshot.restartRequired.join(", ") })}</p>
+        </div>
+      ) : null}
       <fieldset disabled={saving} className="min-w-0">
       {snapshot ? (
         <Tabs defaultValue="build" className="flex min-w-0 flex-col gap-7 lg:flex-row lg:items-start">
-          <TabsList className="flex h-auto w-full max-w-full shrink-0 justify-start gap-1 overflow-x-auto overscroll-x-contain rounded-none bg-transparent p-0 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden [&>span]:rounded-md [&>span]:bg-muted/70 [&>span]:shadow-none lg:sticky lg:top-[148px] lg:w-56 lg:flex-col lg:items-stretch lg:overflow-visible">
+          <TabsList className="flex h-auto w-full max-w-full shrink-0 justify-start gap-1 overflow-x-auto overscroll-x-contain rounded-none bg-transparent p-0 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden [&>span]:rounded-md [&>span]:bg-muted/70 [&>span]:shadow-none lg:sticky lg:top-14 lg:w-56 lg:flex-col lg:items-stretch lg:overflow-visible">
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="build">{t("models.providerGrokBuild")}</TabsTrigger>
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="web">{t("settings.web.title")}</TabsTrigger>
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="console">{t("console.name")}</TabsTrigger>

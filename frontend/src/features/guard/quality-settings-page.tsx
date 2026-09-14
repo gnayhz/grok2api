@@ -122,11 +122,67 @@ export function QualitySettingsPage() {
  const submitGuard = guardForm.handleSubmit((values) => guard.saveMutation.mutate(values));
  const resetGuard = resetDefaultsConfirm === "guard";
 
+	const headerVersionTag = useMemo(() => {
+		if (settingsView === "rotation") {
+			const rev = settingsQuery.data?.revision;
+			const applied = settingsQuery.data?.appliedRevision;
+			if (!rev) return null;
+			return (
+				<Badge
+					variant="secondary"
+					className="font-mono text-xs px-2 py-0.5 gap-1 bg-muted/80 text-foreground border border-border/70 font-semibold shrink-0"
+				>
+					<span>v{rev}</span>
+					{applied && (
+						<span className="text-[10px] text-muted-foreground font-sans font-normal">
+							· {applied === rev ? "已热应用 (本实例)" : `应用中 (${applied})`}
+						</span>
+					)}
+				</Badge>
+			);
+		}
+
+		if (settingsView === "jurisdiction" || settingsView === "retry") {
+			const rev = guard.guardQuery.data?.revision;
+			if (rev === undefined) return null;
+			return (
+				<Badge
+					variant="secondary"
+					className="font-mono text-xs px-2 py-0.5 gap-1 bg-muted/80 text-foreground border border-border/70 font-semibold shrink-0"
+				>
+					<span>v{rev}</span>
+					<span className="text-[10px] text-muted-foreground font-sans font-normal">
+						· 已保存并应用 (本实例)
+					</span>
+				</Badge>
+			);
+		}
+
+		if (settingsView === "tunables") {
+			const rev = settingsQuery.data?.revision;
+			if (!rev) return null;
+			return (
+				<Badge
+					variant="secondary"
+					className="font-mono text-xs px-2 py-0.5 gap-1 bg-muted/80 text-foreground border border-border/70 font-semibold shrink-0"
+				>
+					<span>v{rev}</span>
+					<span className="text-[10px] text-muted-foreground font-sans font-normal">
+						· 归因规则
+					</span>
+				</Badge>
+			);
+		}
+
+		return null;
+	}, [settingsView, settingsQuery.data, guard.guardQuery.data]);
+
 	return (
 		<div className="ops-workspace">
 			<OperationsHeader
 				title={t("ops.settings")}
 				description={t("ops.qualitySettingsDescription")}
+				status={headerVersionTag}
 				action={
 					<Button type="button" variant="outline" size="sm" asChild>
 						<Link to="/guard">
@@ -142,14 +198,33 @@ export function QualitySettingsPage() {
 				</div>
 			) : null}
 
-            {settingsView === "rotation" && settingsQuery.isError ? <p role="alert">{settingsQuery.error.message} <Button type="button" variant="outline" onClick={() => void settingsQuery.refetch()}>{t("common.retry")}</Button></p> : null}
-            {settingsView === "rotation" && settingsQuery.data ? <SettingsApplicationStatus snapshot={settingsQuery.data} /> : null}
-            {(settingsView === "jurisdiction" || settingsView === "retry") ? <div role="status" className="space-y-2">
-              {guard.guardQuery.data ? <p>{t("quality.guardConfig.version", { revision: guard.guardQuery.data.revision })}</p> : <Spinner />}
-              {guard.guardQuery.isError ? <p role="alert">{String(guard.guardQuery.error)} <Button type="button" variant="outline" onClick={() => void guard.guardQuery.refetch()}>{t("common.retry")}</Button></p> : null}
-              {guard.saveMutation.isError || guard.resetMutation.isError ? <p role="alert">{String(guard.saveMutation.error ?? guard.resetMutation.error)}</p> : null}
-              {guardForm.formState.errors.guardedModels ? <p role="alert">{t("quality.guardConfig.emptySelection")}</p> : null}
-            </div> : null}
+			{settingsView === "rotation" && settingsQuery.isError ? (
+				<p role="alert" className="text-xs text-destructive flex items-center gap-2 mb-2">
+					<span>{settingsQuery.error.message}</span>
+					<Button type="button" variant="outline" size="sm" onClick={() => void settingsQuery.refetch()}>{t("common.retry")}</Button>
+				</p>
+			) : null}
+			{settingsView === "rotation" && settingsQuery.data && (settingsQuery.data.applyPending || (settingsQuery.data.restartRequired && settingsQuery.data.restartRequired.length > 0)) ? (
+				<div className="mb-3">
+					<SettingsApplicationStatus snapshot={settingsQuery.data} />
+				</div>
+			) : null}
+			{(settingsView === "jurisdiction" || settingsView === "retry") && (guard.guardQuery.isError || guard.saveMutation.isError || guard.resetMutation.isError || guardForm.formState.errors.guardedModels) ? (
+				<div role="status" className="space-y-2 mb-3">
+					{guard.guardQuery.isError ? (
+						<p role="alert" className="text-xs text-destructive flex items-center gap-2">
+							<span>{String(guard.guardQuery.error)}</span>
+							<Button type="button" variant="outline" size="sm" onClick={() => void guard.guardQuery.refetch()}>{t("common.retry")}</Button>
+						</p>
+					) : null}
+					{guard.saveMutation.isError || guard.resetMutation.isError ? (
+						<p role="alert" className="text-xs text-destructive">{String(guard.saveMutation.error ?? guard.resetMutation.error)}</p>
+					) : null}
+					{guardForm.formState.errors.guardedModels ? (
+						<p role="alert" className="text-xs text-destructive">{t("quality.guardConfig.emptySelection")}</p>
+					) : null}
+				</div>
+			) : null}
             <Tabs
 					className="ops-settings-layout"
 					activationMode="manual"

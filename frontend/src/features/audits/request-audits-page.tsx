@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, RefreshCw, Search, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Eye, RefreshCw, Search, X } from "lucide-react";
 import { memo, useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { listModels } from "@/entities/model/model-api";
 import { listClientKeys } from "@/features/client-keys/client-keys-api";
 import { listAccounts } from "@/features/accounts/accounts-api";
@@ -16,7 +17,7 @@ import { AuditRow, AuditMobileCard } from "./audit-row";
 import { AuditResultLegend } from "./audit-result-mark";
 import { auditProviderLabel } from "./audit-presentation";
 import { getDashboard } from "@/features/dashboard/dashboard-api";
-import { OperationsHeader } from "@/features/operations/operations-ui";
+import { cn } from "@/shared/lib/cn";
 import { getRequestAudits, getRequestAuditSummary, type AuditDTO, type AuditPeriod } from "@/features/audits/request-audits-api";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
@@ -237,12 +238,55 @@ const AuditWorkspace = memo(function AuditWorkspace({ openAudit }: { openAudit: 
 
   return (
     <div className="audit-page space-y-4">
-      <OperationsHeader title={t("audits.title")} description={t("audits.pageDescription")} action={
-        <div className="flex shrink-0 items-center gap-2">
-            <PeriodSelector value={periodDays} onChange={setPeriodDays} ariaLabel={t("audits.usageSummary")} />
-            <Button variant="secondary" size="sm" onClick={refreshAll} disabled={refreshing}><RefreshCw className={refreshing ? "animate-spin" : undefined} />{t("common.refresh")}</Button>
+      {/* Top Bar: Brand, Status, and Action Hub (Command Deck Style) */}
+      <div className="flex flex-wrap items-center justify-between gap-4 py-1">
+        {/* Title and Live status */}
+        <div className="flex items-center gap-3">
+          <div className="relative flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+            <Eye className="size-5 animate-pulse text-primary" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-bold tracking-tight text-foreground">
+                {t("audits.title")}
+              </h1>
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                <span className="size-1.5 rounded-full bg-emerald-500 animate-ping" />
+                {t("network.pulseLive")}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {summary?.usage?.requests !== undefined ? `${summary.usage.requests} ${t("audits.requestRecords")}` : t("audits.summaryRequests")}
+              {summary?.usage?.successRate !== undefined ? ` · ${summary.usage.successRate.toFixed(1)}% ${t("audits.successRate")}` : ""}
+              {summary?.usage?.averageDurationMs !== undefined ? ` · ${Math.round(summary.usage.averageDurationMs)}ms` : ""}
+            </p>
+          </div>
         </div>
-      } />
+
+        {/* Quick Action Center */}
+        <div className="flex flex-wrap items-center gap-2">
+          <PeriodSelector value={periodDays} onChange={setPeriodDays} ariaLabel={t("audits.usageSummary")} />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                disabled={refreshing}
+                onClick={refreshAll}
+              >
+                <RefreshCw
+                  className={cn(
+                    "size-4 text-muted-foreground",
+                    refreshing && "animate-spin text-primary"
+                  )}
+                />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("network.refresh")}</TooltipContent>
+          </Tooltip>
+        </div>
+      </div>
 
       {summaryQuery.isError ? <ErrorState message={summaryQuery.error.message} onRetry={() => void summaryQuery.refetch()} /> : <AuditSummary
         summary={summary}

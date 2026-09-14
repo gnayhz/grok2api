@@ -4,6 +4,7 @@ import { poolsZh, poolsEn } from "@/features/proxies/pools-translations";
 import { routingZh, routingEn } from "@/features/proxies/routing-translations";
 import { operationsZh, operationsEn } from "@/features/operations/operations-translations";
 import { experimentZh, experimentEn } from "@/features/guard/experiment-translations";
+import { probeZh, probeEn } from "@/features/guard/probe-translations";
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 
@@ -11,6 +12,7 @@ const resources = {
   "zh-CN": {
     translation: {
       experiment: experimentZh,
+      guardProbes: probeZh,
       ops: operationsZh,
       network: networkZh,
       networkResources: resourcesZh,
@@ -1970,6 +1972,7 @@ const resources = {
   en: {
     translation: {
       experiment: experimentEn,
+      guardProbes: probeEn,
       ops: operationsEn,
       network: networkEn,
       networkResources: resourcesEn,
