@@ -420,18 +420,19 @@ func IntField(data []byte, key string) (int64, bool) {
 }
 
 type TokenUsage struct {
-	Input         int64
-	Output        int64
-	Total         int64
-	Reasoning     int64
-	Cached        int64
-	CacheCreation int64
-	CostTicks     int64
-	Sources       int64
-	ServerTools   int64
-	ContextInput  int64
-	ContextOutput int64
-	Found         bool
+	Input          int64
+	Output         int64
+	Total          int64
+	Reasoning      int64
+	Cached         int64
+	CachedReported bool
+	CacheCreation  int64
+	CostTicks      int64
+	Sources        int64
+	ServerTools    int64
+	ContextInput   int64
+	ContextOutput  int64
+	Found          bool
 }
 
 // TokenUsageObject reads only counters belonging to one complete usage object.
@@ -498,9 +499,11 @@ func TokenUsageFrom(data []byte) TokenUsage {
 	}
 	if v, ok := IntField(data, "cached_tokens"); ok {
 		usage.Cached = v
+		usage.CachedReported = true
 		usage.Found = true
 	} else if v, ok := IntField(data, "cache_read_input_tokens"); ok {
 		usage.Cached = v
+		usage.CachedReported = true
 		usage.Found = true
 	}
 	if v, ok := IntField(data, "cache_creation_input_tokens"); ok {
@@ -701,12 +704,19 @@ func tokenUsageObject(data []byte) TokenUsage {
 			}
 		}
 	}
-	usage.Cached = read(data, "cache_read_input_tokens", "cached_tokens")
-	if usage.Cached == 0 {
+	for _, key := range []string{"cache_read_input_tokens", "cached_tokens"} {
+		if value, ok := RootIntFieldScan(data, key); ok {
+			usage.Cached, usage.CachedReported, usage.Found = value, true, true
+			break
+		}
+	}
+	if !usage.CachedReported {
 		for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
 			if raw := RootRawValue(data, key); len(raw) > 0 {
-				usage.Cached = read(raw, "cached_tokens")
-				break
+				if value, ok := RootIntFieldScan(raw, "cached_tokens"); ok {
+					usage.Cached, usage.CachedReported, usage.Found = value, true, true
+					break
+				}
 			}
 		}
 	}

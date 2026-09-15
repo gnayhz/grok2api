@@ -11,28 +11,29 @@ import (
 // supplies the main record. Other attempts remain attributable to their actual
 // account without changing the client billing policy.
 type GenerationUsage struct {
-	PhysicalID              string      `json:"physical_id"`
-	Ordinal                 uint64      `json:"ordinal"`
-	AccountID               uint64      `json:"account_id"`
-	AccountName             string      `json:"account_name"`
-	Model                   string      `json:"model"`
-	Selected                bool        `json:"selected"`
-	Outcome                 string      `json:"outcome"`
-	UsageSource             UsageSource `json:"usage_source"`
-	InputTokens             int64       `json:"input_tokens"`
-	CachedInputTokens       int64       `json:"cached_input_tokens"`
-	CacheCreationTokens     int64       `json:"cache_creation_tokens"`
-	OutputTokens            int64       `json:"output_tokens"`
-	ReasoningTokens         int64       `json:"reasoning_tokens"`
-	TotalTokens             int64       `json:"total_tokens"`
-	ContextInputTokens      int64       `json:"context_input_tokens"`
-	ContextOutputTokens     int64       `json:"context_output_tokens"`
-	NumSourcesUsed          int64       `json:"num_sources_used"`
-	NumServerSideToolsUsed  int64       `json:"num_server_side_tools_used"`
-	CostInUSDTicks          int64       `json:"cost_in_usd_ticks"`
-	EstimatedCostInUSDTicks int64       `json:"estimated_cost_in_usd_ticks"`
-	PricingModel            string      `json:"pricing_model"`
-	PricingVersion          string      `json:"pricing_version"`
+	PhysicalID                string      `json:"physical_id"`
+	Ordinal                   uint64      `json:"ordinal"`
+	AccountID                 uint64      `json:"account_id"`
+	AccountName               string      `json:"account_name"`
+	Model                     string      `json:"model"`
+	Selected                  bool        `json:"selected"`
+	Outcome                   string      `json:"outcome"`
+	UsageSource               UsageSource `json:"usage_source"`
+	InputTokens               int64       `json:"input_tokens"`
+	CachedInputTokens         int64       `json:"cached_input_tokens"`
+	CachedInputTokensReported *bool       `json:"cached_input_tokens_reported,omitempty"`
+	CacheCreationTokens       int64       `json:"cache_creation_tokens"`
+	OutputTokens              int64       `json:"output_tokens"`
+	ReasoningTokens           int64       `json:"reasoning_tokens"`
+	TotalTokens               int64       `json:"total_tokens"`
+	ContextInputTokens        int64       `json:"context_input_tokens"`
+	ContextOutputTokens       int64       `json:"context_output_tokens"`
+	NumSourcesUsed            int64       `json:"num_sources_used"`
+	NumServerSideToolsUsed    int64       `json:"num_server_side_tools_used"`
+	CostInUSDTicks            int64       `json:"cost_in_usd_ticks"`
+	EstimatedCostInUSDTicks   int64       `json:"estimated_cost_in_usd_ticks"`
+	PricingModel              string      `json:"pricing_model"`
+	PricingVersion            string      `json:"pricing_version"`
 }
 
 // ValidateGenerationUsages bounds the request-owned facts before persistence.

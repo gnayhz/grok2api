@@ -46,46 +46,47 @@ type auditResponse struct {
 	HistoryNormalizer    int    `json:"historyNormalizer"`
 	HistoryCommit        string `json:"historyCommit"`
 
-	ID                      uint64                    `json:"id,string"`
-	RequestID               string                    `json:"requestId"`
-	ClientKeyID             uint64                    `json:"clientKeyId,string"`
-	ClientKeyName           string                    `json:"clientKeyName,omitempty"`
-	ClientIP                string                    `json:"clientIp,omitempty"`
-	ModelRouteID            uint64                    `json:"modelRouteId,string"`
-	ModelPublicID           string                    `json:"modelPublicId,omitempty"`
-	ModelUpstreamModel      string                    `json:"modelUpstreamModel,omitempty"`
-	Provider                string                    `json:"provider"`
-	Operation               string                    `json:"operation"`
-	UsageSource             string                    `json:"usageSource"`
-	ReasoningEffort         string                    `json:"reasoningEffort,omitempty"`
-	AccountID               *uint64                   `json:"accountId,string,omitempty"`
-	AccountName             string                    `json:"accountName,omitempty"`
-	EgressNodeID            *uint64                   `json:"egressNodeId,string,omitempty"`
-	EgressNodeName          string                    `json:"egressNodeName,omitempty"`
-	EgressScope             string                    `json:"egressScope,omitempty"`
-	EgressMode              string                    `json:"egressMode,omitempty"`
-	StatusCode              int                       `json:"statusCode"`
-	Streaming               bool                      `json:"streaming"`
-	MediaInputImages        int64                     `json:"mediaInputImages"`
-	MediaOutputImages       int64                     `json:"mediaOutputImages"`
-	MediaOutputSeconds      int64                     `json:"mediaOutputSeconds"`
-	AudioDurationMS         int64                     `json:"audioDurationMs"`
-	InputTokens             int64                     `json:"inputTokens"`
-	CachedInputTokens       int64                     `json:"cachedInputTokens"`
-	OutputTokens            int64                     `json:"outputTokens"`
-	ReasoningTokens         int64                     `json:"reasoningTokens"`
-	TotalTokens             int64                     `json:"totalTokens"`
-	CostInUSDTicks          int64                     `json:"costInUsdTicks"`
-	EstimatedCostInUSDTicks int64                     `json:"estimatedCostInUsdTicks"`
-	PricingModel            string                    `json:"pricingModel,omitempty"`
-	PricingVersion          string                    `json:"pricingVersion,omitempty"`
-	Billing                 *billingBreakdownResponse `json:"billing,omitempty"`
-	NumSourcesUsed          int64                     `json:"numSourcesUsed"`
-	NumServerSideToolsUsed  int64                     `json:"numServerSideToolsUsed"`
-	ContextInputTokens      int64                     `json:"contextInputTokens"`
-	ContextOutputTokens     int64                     `json:"contextOutputTokens"`
-	FirstTokenMS            *int64                    `json:"firstTokenMs,omitempty"`
-	OutputTokensPerSecond   *float64                  `json:"outputTokensPerSecond,omitempty"`
+	ID                        uint64                    `json:"id,string"`
+	RequestID                 string                    `json:"requestId"`
+	ClientKeyID               uint64                    `json:"clientKeyId,string"`
+	ClientKeyName             string                    `json:"clientKeyName,omitempty"`
+	ClientIP                  string                    `json:"clientIp,omitempty"`
+	ModelRouteID              uint64                    `json:"modelRouteId,string"`
+	ModelPublicID             string                    `json:"modelPublicId,omitempty"`
+	ModelUpstreamModel        string                    `json:"modelUpstreamModel,omitempty"`
+	Provider                  string                    `json:"provider"`
+	Operation                 string                    `json:"operation"`
+	UsageSource               string                    `json:"usageSource"`
+	ReasoningEffort           string                    `json:"reasoningEffort,omitempty"`
+	AccountID                 *uint64                   `json:"accountId,string,omitempty"`
+	AccountName               string                    `json:"accountName,omitempty"`
+	EgressNodeID              *uint64                   `json:"egressNodeId,string,omitempty"`
+	EgressNodeName            string                    `json:"egressNodeName,omitempty"`
+	EgressScope               string                    `json:"egressScope,omitempty"`
+	EgressMode                string                    `json:"egressMode,omitempty"`
+	StatusCode                int                       `json:"statusCode"`
+	Streaming                 bool                      `json:"streaming"`
+	MediaInputImages          int64                     `json:"mediaInputImages"`
+	MediaOutputImages         int64                     `json:"mediaOutputImages"`
+	MediaOutputSeconds        int64                     `json:"mediaOutputSeconds"`
+	AudioDurationMS           int64                     `json:"audioDurationMs"`
+	InputTokens               int64                     `json:"inputTokens"`
+	CachedInputTokens         int64                     `json:"cachedInputTokens"`
+	CachedInputTokensReported *bool                     `json:"cachedInputTokensReported,omitempty"`
+	OutputTokens              int64                     `json:"outputTokens"`
+	ReasoningTokens           int64                     `json:"reasoningTokens"`
+	TotalTokens               int64                     `json:"totalTokens"`
+	CostInUSDTicks            int64                     `json:"costInUsdTicks"`
+	EstimatedCostInUSDTicks   int64                     `json:"estimatedCostInUsdTicks"`
+	PricingModel              string                    `json:"pricingModel,omitempty"`
+	PricingVersion            string                    `json:"pricingVersion,omitempty"`
+	Billing                   *billingBreakdownResponse `json:"billing,omitempty"`
+	NumSourcesUsed            int64                     `json:"numSourcesUsed"`
+	NumServerSideToolsUsed    int64                     `json:"numServerSideToolsUsed"`
+	ContextInputTokens        int64                     `json:"contextInputTokens"`
+	ContextOutputTokens       int64                     `json:"contextOutputTokens"`
+	FirstTokenMS              *int64                    `json:"firstTokenMs,omitempty"`
+	OutputTokensPerSecond     *float64                  `json:"outputTokensPerSecond,omitempty"`
 	// DegradeClass 是对 2xx 流式成功行的降智观测档位；唯一档位
 	// terminal_burst 表示"整包末尾爆发+零思考"——这类行 Token/s 是除以
 	// ~0ms 的数学假象、速度列显示为空，此前在一切降智汇总里都隐形
@@ -153,28 +154,29 @@ type auditErrorFrameResponse struct {
 }
 
 type auditGenerationUsageResponse struct {
-	PhysicalID              string `json:"physicalId"`
-	Ordinal                 uint64 `json:"ordinal"`
-	AccountID               string `json:"accountId"`
-	AccountName             string `json:"accountName"`
-	Model                   string `json:"model"`
-	Selected                bool   `json:"selected"`
-	Outcome                 string `json:"outcome"`
-	UsageSource             string `json:"usageSource"`
-	InputTokens             int64  `json:"inputTokens"`
-	CachedInputTokens       int64  `json:"cachedInputTokens"`
-	CacheCreationTokens     int64  `json:"cacheCreationTokens"`
-	OutputTokens            int64  `json:"outputTokens"`
-	ReasoningTokens         int64  `json:"reasoningTokens"`
-	TotalTokens             int64  `json:"totalTokens"`
-	ContextInputTokens      int64  `json:"contextInputTokens"`
-	ContextOutputTokens     int64  `json:"contextOutputTokens"`
-	NumSourcesUsed          int64  `json:"numSourcesUsed"`
-	NumServerSideToolsUsed  int64  `json:"numServerSideToolsUsed"`
-	CostInUSDTicks          int64  `json:"costInUsdTicks"`
-	EstimatedCostInUSDTicks int64  `json:"estimatedCostInUsdTicks"`
-	PricingModel            string `json:"pricingModel"`
-	PricingVersion          string `json:"pricingVersion"`
+	PhysicalID                string `json:"physicalId"`
+	Ordinal                   uint64 `json:"ordinal"`
+	AccountID                 string `json:"accountId"`
+	AccountName               string `json:"accountName"`
+	Model                     string `json:"model"`
+	Selected                  bool   `json:"selected"`
+	Outcome                   string `json:"outcome"`
+	UsageSource               string `json:"usageSource"`
+	InputTokens               int64  `json:"inputTokens"`
+	CachedInputTokens         int64  `json:"cachedInputTokens"`
+	CachedInputTokensReported *bool  `json:"cachedInputTokensReported,omitempty"`
+	CacheCreationTokens       int64  `json:"cacheCreationTokens"`
+	OutputTokens              int64  `json:"outputTokens"`
+	ReasoningTokens           int64  `json:"reasoningTokens"`
+	TotalTokens               int64  `json:"totalTokens"`
+	ContextInputTokens        int64  `json:"contextInputTokens"`
+	ContextOutputTokens       int64  `json:"contextOutputTokens"`
+	NumSourcesUsed            int64  `json:"numSourcesUsed"`
+	NumServerSideToolsUsed    int64  `json:"numServerSideToolsUsed"`
+	CostInUSDTicks            int64  `json:"costInUsdTicks"`
+	EstimatedCostInUSDTicks   int64  `json:"estimatedCostInUsdTicks"`
+	PricingModel              string `json:"pricingModel"`
+	PricingVersion            string `json:"pricingVersion"`
 }
 
 type auditDetailResponse struct {
@@ -278,28 +280,29 @@ func (h *Handler) get(c *gin.Context) {
 	generations := make([]auditGenerationUsageResponse, 0, len(value.GenerationUsages))
 	for _, v := range value.GenerationUsages {
 		generations = append(generations, auditGenerationUsageResponse{
-			PhysicalID:              v.PhysicalID,
-			Ordinal:                 v.Ordinal,
-			AccountID:               strconv.FormatUint(v.AccountID, 10),
-			AccountName:             v.AccountName,
-			Model:                   v.Model,
-			Selected:                v.Selected,
-			Outcome:                 v.Outcome,
-			UsageSource:             string(v.UsageSource),
-			InputTokens:             v.InputTokens,
-			CachedInputTokens:       v.CachedInputTokens,
-			CacheCreationTokens:     v.CacheCreationTokens,
-			OutputTokens:            v.OutputTokens,
-			ReasoningTokens:         v.ReasoningTokens,
-			TotalTokens:             v.TotalTokens,
-			ContextInputTokens:      v.ContextInputTokens,
-			ContextOutputTokens:     v.ContextOutputTokens,
-			NumSourcesUsed:          v.NumSourcesUsed,
-			NumServerSideToolsUsed:  v.NumServerSideToolsUsed,
-			CostInUSDTicks:          v.CostInUSDTicks,
-			EstimatedCostInUSDTicks: v.EstimatedCostInUSDTicks,
-			PricingModel:            v.PricingModel,
-			PricingVersion:          v.PricingVersion,
+			PhysicalID:                v.PhysicalID,
+			Ordinal:                   v.Ordinal,
+			AccountID:                 strconv.FormatUint(v.AccountID, 10),
+			AccountName:               v.AccountName,
+			Model:                     v.Model,
+			Selected:                  v.Selected,
+			Outcome:                   v.Outcome,
+			UsageSource:               string(v.UsageSource),
+			InputTokens:               v.InputTokens,
+			CachedInputTokens:         v.CachedInputTokens,
+			CachedInputTokensReported: v.CachedInputTokensReported,
+			CacheCreationTokens:       v.CacheCreationTokens,
+			OutputTokens:              v.OutputTokens,
+			ReasoningTokens:           v.ReasoningTokens,
+			TotalTokens:               v.TotalTokens,
+			ContextInputTokens:        v.ContextInputTokens,
+			ContextOutputTokens:       v.ContextOutputTokens,
+			NumSourcesUsed:            v.NumSourcesUsed,
+			NumServerSideToolsUsed:    v.NumServerSideToolsUsed,
+			CostInUSDTicks:            v.CostInUSDTicks,
+			EstimatedCostInUSDTicks:   v.EstimatedCostInUSDTicks,
+			PricingModel:              v.PricingModel,
+			PricingVersion:            v.PricingVersion,
 		})
 	}
 	response.Success(c, http.StatusOK, auditDetailResponse{Audit: newAuditResponse(value), Attempts: attempts, GenerationUsages: generations})
@@ -395,7 +398,8 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		StatusCode: value.StatusCode, Streaming: value.Streaming,
 		MediaInputImages: value.MediaInputImages, MediaOutputImages: value.MediaOutputImages, MediaOutputSeconds: value.MediaOutputSeconds, AudioDurationMS: value.AudioDurationMS,
 		InputTokens: value.InputTokens, CachedInputTokens: value.CachedInputTokens, OutputTokens: value.OutputTokens,
-		ReasoningTokens: value.ReasoningTokens, TotalTokens: value.TotalTokens, CostInUSDTicks: value.CostInUSDTicks,
+		CachedInputTokensReported: value.CachedInputTokensReported,
+		ReasoningTokens:           value.ReasoningTokens, TotalTokens: value.TotalTokens, CostInUSDTicks: value.CostInUSDTicks,
 		EstimatedCostInUSDTicks: value.EstimatedCostInUSDTicks, PricingModel: value.PricingModel, PricingVersion: value.PricingVersion,
 		Billing:        newBillingBreakdown(value),
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,

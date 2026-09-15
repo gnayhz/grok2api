@@ -26,6 +26,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { AuditResultBadge } from "./audit-result-badge";
+import { auditCachedUsageAvailable } from "./audit-usage";
 import { auditBilling, auditResult, completionTone } from "./audit-presentation";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -241,7 +242,7 @@ function RequestOverviewPanel({ audit, diagnosticsAvailable, onDiagnostics }: { 
         <div className="grid grid-cols-2 gap-x-6 gap-y-4 p-4 sm:grid-cols-4">
           <OverviewField label={t("audits.input")} value={value(audit.inputTokens)} />
           <OverviewField label={t("audits.output")} value={value(audit.outputTokens)} />
-          <OverviewField label={t("audits.cached")} value={value(audit.cachedInputTokens)} />
+          <OverviewField label={t("audits.cached")} value={auditCachedUsageAvailable(audit) ? value(audit.cachedInputTokens) : t(audit.cachedInputTokensReported === false ? "audits.cacheNotReported" : "audits.cacheUnknown")} />
           <OverviewField label={t("audits.reasoning")} value={value(audit.reasoningTokens)} />
           <OverviewField label={t("audits.throughputMetric")} value={audit.outputTokensPerSecond === undefined ? "—" : formatNumber(audit.outputTokensPerSecond, i18n.language, 1) + " " + t("audits.tokensPerSecondUnit")} />
           {audit.reasoningEffort ? <OverviewField label={t("audits.reasoningEffort")} value={t("audits.reasoningEfforts." + audit.reasoningEffort)} /> : null}

@@ -6,6 +6,7 @@ import { cn } from "@/shared/lib/cn";
 import { formatNumber } from "@/shared/lib/format";
 import { formatUSDTicks } from "@/shared/lib/usd";
 import type { AuditGenerationUsageDTO } from "./request-audits-api";
+import { auditCachedUsageAvailable } from "./audit-usage";
 
 export function GenerationUsagePanel({ values }: { values: AuditGenerationUsageDTO[] }) {
   const { t, i18n } = useTranslation();
@@ -39,7 +40,7 @@ export function GenerationUsagePanel({ values }: { values: AuditGenerationUsageD
             <UsageValue label={t("audits.generationReportedCost")} value={value.costInUsdTicks > 0 ? formatUSDTicks(value.costInUsdTicks, 6) : "—"} />
           </div>
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t bg-muted/10 px-4 py-3 text-xs text-muted-foreground">
-            <span>{t("audits.cached")} <span className="tabular-nums text-foreground">{number(value, value.cachedInputTokens)}</span></span>
+            <span title={auditCachedUsageAvailable(value) ? undefined : t(value.cachedInputTokensReported === false ? "audits.cacheNotReported" : "audits.cacheUnknown")}>{t("audits.cached")} <span className="tabular-nums text-foreground">{auditCachedUsageAvailable(value) ? number(value, value.cachedInputTokens) : "—"}</span></span>
             <span>{t("audits.reasoning")} <span className="tabular-nums text-foreground">{number(value, value.reasoningTokens)}</span></span>
             <span className="sm:ml-auto">{t("audits.generationSources." + value.usageSource)}</span>
           </div>

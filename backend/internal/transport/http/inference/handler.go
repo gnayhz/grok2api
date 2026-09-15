@@ -2195,7 +2195,8 @@ type responseUsageDTO struct {
 	// OpenAI Chat Completions protocol: prompt_tokens_details.cached_tokens
 	PromptTokensDetails responseInputDetailsDTO `json:"prompt_tokens_details"`
 	// Anthropic Messages protocol: top-level cache_read_input_tokens
-	CacheReadInputTokens     int64                    `json:"cache_read_input_tokens"`
+	CacheReadInputTokens     *int64                   `json:"cache_read_input_tokens"`
+	CachedTokens             *int64                   `json:"cached_tokens"`
 	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens"`
 	OutputTokensDetails      responseOutputDetailsDTO `json:"output_tokens_details"`
 	// OpenAI Chat Completions protocol: completion_tokens_details.reasoning_tokens
@@ -2206,7 +2207,7 @@ type responseUsageDTO struct {
 }
 
 type responseInputDetailsDTO struct {
-	CachedTokens int64 `json:"cached_tokens"`
+	CachedTokens *int64 `json:"cached_tokens"`
 }
 
 type responseOutputDetailsDTO struct {
@@ -2242,12 +2243,13 @@ func (value responseUsageDTO) toGatewayUsage(responseModel string) gateway.Usage
 		total = input + output
 	}
 	// Unified cache hits: Responses / Chat Completions / Anthropic Messages
-	cached := value.InputTokensDetails.CachedTokens
-	if cached == 0 {
-		cached = value.PromptTokensDetails.CachedTokens
-	}
-	if cached == 0 {
-		cached = value.CacheReadInputTokens
+	var cached int64
+	cacheReported := false
+	for _, count := range []*int64{value.InputTokensDetails.CachedTokens, value.PromptTokensDetails.CachedTokens, value.CacheReadInputTokens, value.CachedTokens} {
+		if count != nil {
+			cached, cacheReported = *count, true
+			break
+		}
 	}
 	reasoning := value.OutputTokensDetails.ReasoningTokens
 	if reasoning == 0 {
@@ -2257,8 +2259,9 @@ func (value responseUsageDTO) toGatewayUsage(responseModel string) gateway.Usage
 		reasoning = value.OutputTokensDetails.ThinkingTokens
 	}
 	return gateway.Usage{
-		Reported:    true,
-		InputTokens: input, CachedInputTokens: cached,
+		Reported:                  true,
+		CachedInputTokensReported: cacheReported,
+		InputTokens:               input, CachedInputTokens: cached,
 		OutputTokens: output, ReasoningTokens: reasoning,
 		TotalTokens: total, CostInUSDTicks: value.CostInUSDTicks,
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,

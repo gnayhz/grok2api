@@ -93,45 +93,48 @@ type Record struct {
 	HistoryNormalizer    int
 	HistoryCommit        string
 
-	ID                      uint64
-	EventID                 string
-	RequestID               string
-	ClientKeyID             uint64
-	ClientKeyName           string
-	ClientIP                string
-	ModelRouteID            uint64
-	ModelPublicID           string
-	ModelUpstreamModel      string
-	Provider                string
-	Operation               Operation
-	UsageSource             UsageSource
-	ReasoningEffort         string
-	AccountID               *uint64
-	AccountName             string
-	EgressNodeID            *uint64
-	EgressNodeName          string
-	EgressScope             string
-	EgressMode              EgressMode
-	StatusCode              int
-	Streaming               bool
-	MediaInputImages        int64
-	MediaOutputImages       int64
-	MediaOutputSeconds      int64
-	AudioDurationMS         int64
-	InputTokens             int64
-	CachedInputTokens       int64
-	OutputTokens            int64
-	ReasoningTokens         int64
-	TotalTokens             int64
-	CostInUSDTicks          int64
-	EstimatedCostInUSDTicks int64
-	PricingModel            string
-	PricingVersion          string
-	NumSourcesUsed          int64
-	NumServerSideToolsUsed  int64
-	ContextInputTokens      int64
-	ContextOutputTokens     int64
-	FirstTokenMS            *int64
+	ID                 uint64
+	EventID            string
+	RequestID          string
+	ClientKeyID        uint64
+	ClientKeyName      string
+	ClientIP           string
+	ModelRouteID       uint64
+	ModelPublicID      string
+	ModelUpstreamModel string
+	Provider           string
+	Operation          Operation
+	UsageSource        UsageSource
+	ReasoningEffort    string
+	AccountID          *uint64
+	AccountName        string
+	EgressNodeID       *uint64
+	EgressNodeName     string
+	EgressScope        string
+	EgressMode         EgressMode
+	StatusCode         int
+	Streaming          bool
+	MediaInputImages   int64
+	MediaOutputImages  int64
+	MediaOutputSeconds int64
+	AudioDurationMS    int64
+	InputTokens        int64
+	CachedInputTokens  int64
+	// Nil is historical/unknown; false means an observed usage object omitted
+	// the cache counter; true includes an explicitly reported zero.
+	CachedInputTokensReported *bool
+	OutputTokens              int64
+	ReasoningTokens           int64
+	TotalTokens               int64
+	CostInUSDTicks            int64
+	EstimatedCostInUSDTicks   int64
+	PricingModel              string
+	PricingVersion            string
+	NumSourcesUsed            int64
+	NumServerSideToolsUsed    int64
+	ContextInputTokens        int64
+	ContextOutputTokens       int64
+	FirstTokenMS              *int64
 	// DeliveredEvents/DeliveredBytes：流式=转发到客户端的 SSE data 事件数与
 	// 累计字节；非流式=响应体字节数。回答「200 且带错误码时实际交付了多少」。
 	DeliveredEvents int64

@@ -145,6 +145,6 @@ func (s *Selector) localQualityAllowed(accountID uint64, now time.Time) bool {
 }
 
 func physicalUsage(usage Usage) jsonpeek.TokenUsage {
-	return jsonpeek.TokenUsage{Found: usage.Reported, Input: usage.InputTokens, Output: usage.OutputTokens, Total: usage.TotalTokens, Reasoning: usage.ReasoningTokens, Cached: usage.CachedInputTokens,
+	return jsonpeek.TokenUsage{Found: usage.Reported, Input: usage.InputTokens, Output: usage.OutputTokens, Total: usage.TotalTokens, Reasoning: usage.ReasoningTokens, Cached: usage.CachedInputTokens, CachedReported: usage.CachedInputTokensReported,
 		CostTicks: usage.CostInUSDTicks, Sources: usage.NumSourcesUsed, ServerTools: usage.NumServerSideToolsUsed, ContextInput: usage.ContextInputTokens, ContextOutput: usage.ContextOutputTokens}
 }

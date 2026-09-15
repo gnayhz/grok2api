@@ -63,6 +63,7 @@ export type AuditDTO = {
   audioDurationMs?: number;
   inputTokens: number;
   cachedInputTokens: number;
+  cachedInputTokensReported?: boolean;
   outputTokens: number;
   reasoningTokens: number;
   totalTokens: number;
@@ -131,6 +132,7 @@ export type AuditGenerationUsageDTO = {
   usageSource: "upstream" | "estimated" | "none";
   inputTokens: number;
   cachedInputTokens: number;
+  cachedInputTokensReported?: boolean;
   cacheCreationTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -205,7 +207,7 @@ const auditValidator = hasShape({
   statusCode: isNumber, streaming: isBoolean,
   mediaInputImages: isNumber, mediaOutputImages: isNumber, mediaOutputSeconds: isNumber, inputTokens: isNumber,
   audioDurationMs: isOptional(isNumber),
-  cachedInputTokens: isNumber, outputTokens: isNumber, reasoningTokens: isNumber, totalTokens: isNumber,
+  cachedInputTokens: isNumber, cachedInputTokensReported: isOptional(isBoolean), outputTokens: isNumber, reasoningTokens: isNumber, totalTokens: isNumber,
   costInUsdTicks: isNumber, estimatedCostInUsdTicks: isNumber, pricingModel: isOptional(isString), pricingVersion: isOptional(isString), billing: isOptional(auditBillingValidator),
   numSourcesUsed: isNumber, numServerSideToolsUsed: isNumber, contextInputTokens: isNumber, contextOutputTokens: isNumber,
   firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber), degradeClass: isOptional(isString), qualityFailOpen: isOptional(isBoolean), qualityExempt: isOptional(isString), qualityRule: isOptional(isString),
@@ -256,6 +258,7 @@ const auditGenerationValidator = hasShape({
   usageSource: isOneOf("upstream", "estimated", "none"),
   inputTokens: isNumber,
   cachedInputTokens: isNumber,
+  cachedInputTokensReported: isOptional(isBoolean),
   cacheCreationTokens: isNumber,
   outputTokens: isNumber,
   reasoningTokens: isNumber,

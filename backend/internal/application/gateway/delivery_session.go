@@ -188,6 +188,7 @@ func (d *deliverySession) finalize(usage Usage, responseID, errorCode string) {
 		record.QualityFailOpen = false
 		record.InputTokens = usage.InputTokens
 		record.CachedInputTokens = usage.CachedInputTokens
+		record.CachedInputTokensReported = cacheUsagePresence(usage.Reported, usage.CachedInputTokensReported, usage.CachedInputTokens)
 		record.OutputTokens = usage.OutputTokens
 		record.ReasoningTokens = usage.ReasoningTokens
 		record.TotalTokens = usage.TotalTokens

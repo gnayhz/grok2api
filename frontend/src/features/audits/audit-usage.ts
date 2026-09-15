@@ -48,6 +48,7 @@ export type AuditUsageInput = {
   mediaOutputSeconds: number;
   inputTokens: number;
   cachedInputTokens: number;
+  cachedInputTokensReported?: boolean;
   outputTokens: number;
   reasoningTokens: number;
   totalTokens: number;
@@ -56,6 +57,11 @@ export type AuditUsageInput = {
 
 export function auditTokenUsageAvailable(audit: Pick<AuditUsageInput, "usageSource">): boolean {
   return audit.usageSource !== "none";
+}
+
+export function auditCachedUsageAvailable(audit: Pick<AuditUsageInput, "usageSource" | "cachedInputTokens" | "cachedInputTokensReported">): boolean {
+  return auditTokenUsageAvailable(audit) && (audit.cachedInputTokensReported === true ||
+    (audit.cachedInputTokensReported === undefined && audit.cachedInputTokens > 0));
 }
 
 export function formatAuditTokenValue(value: number, available: boolean, formatNumber: (value: number) => string): string {
@@ -86,7 +92,7 @@ function tokenItems(audit: AuditUsageInput, formatNumber: (value: number) => str
   return [
     { key: "input", label: labels.input, value: formatAuditTokenValue(audit.inputTokens, available, formatNumber) },
     { key: "output", label: labels.output, value: formatAuditTokenValue(audit.outputTokens, available, formatNumber) },
-    { key: "cached", label: labels.cached, value: formatAuditTokenValue(audit.cachedInputTokens, available, formatNumber) },
+    { key: "cached", label: labels.cached, value: formatAuditTokenValue(audit.cachedInputTokens, auditCachedUsageAvailable(audit), formatNumber) },
     { key: "reasoning", label: labels.reasoning, value: formatAuditTokenValue(audit.reasoningTokens, available, formatNumber) },
   ];
 }

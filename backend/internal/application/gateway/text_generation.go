@@ -189,7 +189,8 @@ func (g *textGeneration) finish(response *provider.Response, usage Usage, genera
 
 func usageFromPhysical(v jsonpeek.TokenUsage, prior Usage) Usage {
 	return Usage{Reported: v.Found, OutputObserved: prior.OutputObserved, ResponseModel: prior.ResponseModel,
-		InputTokens: v.Input, CachedInputTokens: v.Cached, OutputTokens: v.Output, ReasoningTokens: v.Reasoning, TotalTokens: v.Total,
+		CachedInputTokensReported: v.CachedReported,
+		InputTokens:               v.Input, CachedInputTokens: v.Cached, OutputTokens: v.Output, ReasoningTokens: v.Reasoning, TotalTokens: v.Total,
 		CostInUSDTicks: v.CostTicks, NumSourcesUsed: v.Sources, NumServerSideToolsUsed: v.ServerTools, ContextInputTokens: v.ContextInput, ContextOutputTokens: v.ContextOutput}
 }
 
@@ -207,7 +208,8 @@ func (g *textGeneration) details() []audit.GenerationUsage {
 		}
 		v := entry.usage
 		value := audit.GenerationUsage{PhysicalID: entry.identity.ID, Ordinal: entry.identity.Ordinal, AccountID: entry.identity.AccountID,
-			AccountName: g.accounts[entry.identity.AccountID].name, Model: entry.identity.Model, Selected: entry.identity.ID == g.selected,
+			CachedInputTokensReported: cacheUsagePresence(v.Found, v.CachedReported, v.Cached),
+			AccountName:               g.accounts[entry.identity.AccountID].name, Model: entry.identity.Model, Selected: entry.identity.ID == g.selected,
 			Outcome: entry.outcome, UsageSource: audit.UsageSourceNone, InputTokens: v.Input, CachedInputTokens: v.Cached, CacheCreationTokens: v.CacheCreation,
 			OutputTokens: v.Output, ReasoningTokens: v.Reasoning, TotalTokens: v.Total, ContextInputTokens: v.ContextInput, ContextOutputTokens: v.ContextOutput,
 			NumSourcesUsed: v.Sources, NumServerSideToolsUsed: v.ServerTools, CostInUSDTicks: v.CostTicks}
@@ -224,6 +226,7 @@ func (g *textGeneration) details() []audit.GenerationUsage {
 }
 
 func applyTextUsage(record *audit.Record, usage Usage, source audit.UsageSource, pricingModel string) {
+	record.CachedInputTokensReported = cacheUsagePresence(usage.Reported, usage.CachedInputTokensReported, usage.CachedInputTokens)
 	if usage.Reported {
 		record.UsageSource = source
 	}
@@ -236,6 +239,16 @@ func applyTextUsage(record *audit.Record, usage Usage, source audit.UsageSource,
 			record.EstimatedCostInUSDTicks, record.PricingModel, record.PricingVersion = price.CostInUSDTicks, price.Model, audit.OfficialPricingAsOf
 		}
 	}
+}
+
+func cacheUsagePresence(usageReported, cacheReported bool, cached int64) *bool {
+	if !usageReported {
+		return nil
+	}
+	// Positive counters from legacy adapters remain useful even when they do
+	// not yet supply field presence. Zero alone never establishes presence.
+	known := cacheReported || cached > 0
+	return &known
 }
 
 // finishUnhandedText retains known generation on failure without claiming

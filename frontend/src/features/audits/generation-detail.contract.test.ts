@@ -32,6 +32,22 @@ test("older server responses may omit generation details without guessing", () =
   assert.deepEqual(decodeAuditDetail(value).generationUsages, []);
 });
 
+test("cache presence preserves false, zero and missing fields from old servers", () => {
+  for (const reported of [true, false, undefined]) {
+    const value = fixture();
+    value.audit.cachedInputTokens = 0;
+    value.audit.cachedInputTokensReported = reported;
+    value.generationUsages[0].cachedInputTokens = 0;
+    value.generationUsages[0].cachedInputTokensReported = reported;
+    const decoded = decodeAuditDetail(value);
+    assert.equal(decoded.audit.cachedInputTokensReported, reported);
+    assert.equal(decoded.generationUsages?.[0].cachedInputTokensReported, reported);
+  }
+  const invalid = fixture();
+  invalid.audit.cachedInputTokensReported = "false";
+  assert.throws(() => decodeAuditDetail(invalid));
+});
+
 test("present generation details require numeric counters and explicit outcome/source", () => {
   for (const [key, invalid] of [["inputTokens", "20"], ["outcome", "success"], ["usageSource", "calculated"], ["accountId", 123]]) {
     const value = fixture();

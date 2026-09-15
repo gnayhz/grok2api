@@ -18,6 +18,31 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestAuditCachePresenceJSONContract(t *testing.T) {
+	marked, missing := true, false
+	for _, reported := range []*bool{nil, &missing, &marked} {
+		body, err := json.Marshal(newAuditResponse(auditdomain.Record{CachedInputTokensReported: reported}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value map[string]any
+		if err := json.Unmarshal(body, &value); err != nil {
+			t.Fatal(err)
+		}
+		actual, exists := value["cachedInputTokensReported"]
+		if reported == nil {
+			if exists {
+				t.Fatalf("legacy presence must be omitted: %v", actual)
+			}
+		} else if !exists || actual != *reported {
+			t.Fatalf("lost explicit cache presence: %v want %v", actual, *reported)
+		}
+		if value["cachedInputTokens"] != float64(0) {
+			t.Fatal("legacy numeric counter changed")
+		}
+	}
+}
+
 func TestAuditGenerationDetailContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()

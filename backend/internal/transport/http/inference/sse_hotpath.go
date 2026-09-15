@@ -184,8 +184,9 @@ func applyPeekedUsage(meta *responseMetadata, usage jsonpeek.TokenUsage) {
 	if usage.Reasoning > 0 {
 		meta.Usage.ReasoningTokens = usage.Reasoning
 	}
-	if usage.Cached > 0 {
+	if usage.CachedReported || usage.Cached > 0 {
 		meta.Usage.CachedInputTokens = usage.Cached
+		meta.Usage.CachedInputTokensReported = usage.CachedReported
 	}
 	if usage.CacheCreation > 0 {
 		meta.cacheCreationInputTokens = usage.CacheCreation

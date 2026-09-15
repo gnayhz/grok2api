@@ -45,6 +45,16 @@ function values(items: Array<{ key: string; value: string }> | undefined, key: s
 }
 
 describe("buildAuditUsageView", () => {
+  it("distinguishes explicit zero cache usage from missing and historical counters", () => {
+    for (const [reported, cached, expected] of [
+      [true, 0, "0"], [false, 0, "—"], [undefined, 0, "—"],
+      [true, 128, "128"], [undefined, 128, "128"],
+    ] as const) {
+      const view = buildAuditUsageView(audit({ inputTokens: 1000, cachedInputTokens: cached, cachedInputTokensReported: reported }), formatNumber, labels);
+      assert.equal(values(view.tokenItems, "cached"), expected);
+      assert.equal(values(view.tokenItems, "input"), "1,000");
+    }
+  });
   it("keeps the token grid when a chat request has media input", () => {
     const view = buildAuditUsageView(audit({
       mediaInputImages: 10,

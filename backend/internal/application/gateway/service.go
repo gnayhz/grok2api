@@ -145,18 +145,19 @@ type Usage struct {
 	Reported bool
 	// OutputObserved records that the transport actually forwarded generated
 	// content even when an interrupted upstream never emitted final usage.
-	OutputObserved         bool
-	InputTokens            int64
-	CachedInputTokens      int64
-	OutputTokens           int64
-	ReasoningTokens        int64
-	TotalTokens            int64
-	CostInUSDTicks         int64
-	NumSourcesUsed         int64
-	NumServerSideToolsUsed int64
-	ContextInputTokens     int64
-	ContextOutputTokens    int64
-	ResponseModel          string
+	OutputObserved            bool
+	InputTokens               int64
+	CachedInputTokens         int64
+	CachedInputTokensReported bool
+	OutputTokens              int64
+	ReasoningTokens           int64
+	TotalTokens               int64
+	CostInUSDTicks            int64
+	NumSourcesUsed            int64
+	NumServerSideToolsUsed    int64
+	ContextInputTokens        int64
+	ContextOutputTokens       int64
+	ResponseModel             string
 }
 
 type Result struct {
