@@ -17,9 +17,9 @@ type memIPSource struct {
 	revision uint64
 }
 
-func (s memIPSource) CurrentExitIP(_ context.Context, nodeID uint64) (string, uint64, bool, error) {
+func (s memIPSource) CurrentExitIdentity(_ context.Context, nodeID uint64) (model.ExitIdentity, uint64, bool, error) {
 	ip, ok := s.current[nodeID]
-	return ip, max(1, s.revision), ok && ip != "", nil
+	return model.ExitIdentityFromAggregate(ip), max(1, s.revision), ok && ip != "", nil
 }
 
 type memRotator struct {
@@ -115,7 +115,7 @@ func TestPollEpochsEstablishesArchiveAndFlipsOnChange(t *testing.T) {
 func TestPollEpochsReconcilesPersistedArchiveAfterRestart(t *testing.T) {
 	qualityRegistry, _ := newBench(t)
 	ctx := context.Background()
-	if err := qualityRegistry.RecordExitIP(ctx, 5, "192.0.2.1"); err != nil {
+	if err := qualityRegistry.RecordExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.1")); err != nil {
 		t.Fatal(err)
 	}
 	for _, state := range []model.ExitState{model.ExitRemanded, model.ExitBanned} {
@@ -219,7 +219,7 @@ func TestRotateNodesBatch(t *testing.T) {
 func TestRecordDegradeEventLedger(t *testing.T) {
 	qualityRegistry, service := newBench(t)
 	ctx := context.Background()
-	if _, _, err := qualityRegistry.AdvanceEpoch(ctx, 7, "198.51.100.3"); err != nil {
+	if _, _, err := qualityRegistry.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.3")); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.RecordDegradeEvent(ctx, 7, 1, time.Now().UTC()); err != nil {

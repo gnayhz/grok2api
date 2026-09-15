@@ -16,18 +16,18 @@ type controlledIPObservation struct {
 	read, resume chan struct{}
 }
 
-func (s controlledIPObservation) CurrentExitIP(context.Context, uint64) (string, uint64, bool, error) {
+func (s controlledIPObservation) CurrentExitIdentity(context.Context, uint64) (model.ExitIdentity, uint64, bool, error) {
 	if s.read != nil {
 		close(s.read)
 		<-s.resume
 	}
-	return s.ip, s.revision, true, nil
+	return model.ExitIdentityFromAggregate(s.ip), s.revision, true, nil
 }
 
 func TestPollEpochsRejectsDelayedObservation(t *testing.T) {
 	r, _ := newBench(t)
 	ctx := context.Background()
-	if _, _, _, err := r.ObserveExitIP(ctx, 5, "192.0.2.1", 1); err != nil {
+	if _, _, _, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.1"), 1); err != nil {
 		t.Fatal(err)
 	}
 	nodes := memNodes{profiles: []proxy.NodeProfile{{ID: 5, Enabled: true}}}
@@ -68,9 +68,9 @@ func TestPollEpochsRejectsDelayedObservation(t *testing.T) {
 	})
 }
 
-type failingIPObservation func(context.Context, uint64) (string, uint64, bool, error)
+type failingIPObservation func(context.Context, uint64) (model.ExitIdentity, uint64, bool, error)
 
-func (f failingIPObservation) CurrentExitIP(ctx context.Context, id uint64) (string, uint64, bool, error) {
+func (f failingIPObservation) CurrentExitIdentity(ctx context.Context, id uint64) (model.ExitIdentity, uint64, bool, error) {
 	return f(ctx, id)
 }
 
@@ -78,18 +78,18 @@ func TestPollEpochsKeepsCommittedPrefixOnSourceFailure(t *testing.T) {
 	r, s := newBench(t)
 	ctx := context.Background()
 	for _, id := range []uint64{5, 6} {
-		if _, _, _, err := r.ObserveExitIP(ctx, id, "192.0.2.1", 1); err != nil {
+		if _, _, _, err := r.ObserveExitIdentity(ctx, id, model.ExitIdentityFromAggregate("192.0.2.1"), 1); err != nil {
 			t.Fatal(err)
 		}
 	}
 	fault := errors.New("node facts read unavailable")
 	fail := true
 	s.nodes = memNodes{profiles: []proxy.NodeProfile{{ID: 5, Enabled: true}, {ID: 6, Enabled: true}}}
-	s.ipSource = failingIPObservation(func(_ context.Context, id uint64) (string, uint64, bool, error) {
+	s.ipSource = failingIPObservation(func(_ context.Context, id uint64) (model.ExitIdentity, uint64, bool, error) {
 		if id == 6 && fail {
-			return "", 0, false, fault
+			return model.ExitIdentity{}, 0, false, fault
 		}
-		return "192.0.2.2", 2, true, nil
+		return model.ExitIdentity{IPv4: "192.0.2.2"}, 2, true, nil
 	})
 	changes, err := s.PollEpochs(ctx)
 	if !errors.Is(err, fault) || len(changes) != 1 || changes[0].NodeID != 5 {

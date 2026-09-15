@@ -91,20 +91,20 @@ func TestCurrentStateCostDoesNotFollowEpochHistory(t *testing.T) {
 func TestEpochPointerAndArchiveRollbackTogether(t *testing.T) {
 	r := newReconcileRegistry(t)
 	ctx := context.Background()
-	if err := r.RecordExitIP(ctx, 1, "192.0.2.1"); err != nil {
+	if err := r.RecordExitIdentity(ctx, 1, model.ExitIdentityFromAggregate("192.0.2.1")); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.DB().Exec("CREATE TRIGGER fail_epoch_pointer BEFORE INSERT ON q_node_epoch BEGIN SELECT RAISE(ABORT, 'injected pointer failure'); END").Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.AdvanceEpoch(ctx, 1, "192.0.2.2"); err == nil {
+	if _, _, err := r.AdvanceEpoch(ctx, 1, model.ExitIdentityFromAggregate("192.0.2.2")); err == nil {
 		t.Fatal("failure ignored")
 	}
 	archive, err := r.ExitIPArchive(ctx, 1)
 	if err != nil || len(archive) != 1 || r.CurrentEpoch(1) != 0 {
 		t.Fatalf("partial epoch: %+v %v", archive, err)
 	}
-	if err := r.RecordExitIP(ctx, 2, "192.0.2.3"); err == nil {
+	if err := r.RecordExitIdentity(ctx, 2, model.ExitIdentityFromAggregate("192.0.2.3")); err == nil {
 		t.Fatal("initial pointer failure ignored")
 	}
 	archive, err = r.ExitIPArchive(ctx, 2)

@@ -83,16 +83,16 @@ func TestCrossReplicaStateTransitionsAndAuthority(t *testing.T) {
 			if first.AccountState(701).State != model.AccountSentenced {
 				t.Fatal("independent release erased conviction")
 			}
-			if err := first.RecordExitIP(ctx, 903, "192.0.2.1"); err != nil {
+			if err := first.RecordExitIdentity(ctx, 903, model.ExitIdentityFromAggregate("192.0.2.1")); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := first.AdvanceEpoch(ctx, 903, "192.0.2.2"); err != nil {
+			if _, _, err := first.AdvanceEpoch(ctx, 903, model.ExitIdentityFromAggregate("192.0.2.2")); err != nil {
 				t.Fatal(err)
 			}
-			if epoch, _, err := second.AdvanceEpoch(ctx, 903, "192.0.2.3"); err != nil || epoch != 2 {
+			if epoch, _, err := second.AdvanceEpoch(ctx, 903, model.ExitIdentityFromAggregate("192.0.2.3")); err != nil || epoch != 2 {
 				t.Fatalf("stale epoch allocation: %d %v", epoch, err)
 			}
-			if epoch, released, err := first.AdvanceEpoch(ctx, 903, "192.0.2.3"); err != nil || epoch != 2 || len(released) != 0 {
+			if epoch, released, err := first.AdvanceEpoch(ctx, 903, model.ExitIdentityFromAggregate("192.0.2.3")); err != nil || epoch != 2 || len(released) != 0 {
 				t.Fatalf("peer IP observation advanced twice: %d %+v %v", epoch, released, err)
 			}
 		})

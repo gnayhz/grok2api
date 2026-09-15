@@ -100,7 +100,7 @@ func TestApplicationQualityReceiptAndIncidentConsumer(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if _, _, err := a.quality.AdvanceEpoch(ctx, node.ID, "198.51.100.1"); err != nil {
+					if _, _, err := a.quality.AdvanceEpoch(ctx, node.ID, model.ExitIdentityFromAggregate("198.51.100.1")); err != nil {
 						t.Fatal(err)
 					}
 					key, err := a.clientKeys.Create(ctx, clientkeyapp.CreateInput{Name: "receipt", Enabled: true, BillingLimitUSDTicks: 100000000000})

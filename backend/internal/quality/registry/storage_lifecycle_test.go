@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 func TestRegistrySharesExactSQLitePathWithMainStore(t *testing.T) {
@@ -60,7 +61,7 @@ func TestRegistrySharesExactSQLitePathWithMainStore(t *testing.T) {
 			if !found {
 				t.Fatal("main database identity missing")
 			}
-			if err := reg.RecordExitIP(ctx, 17, "198.51.100.17"); err != nil {
+			if err := reg.RecordExitIdentity(ctx, 17, model.ExitIdentityFromAggregate("198.51.100.17")); err != nil {
 				t.Fatal(err)
 			}
 			second, err := Open(ctx, Options{SQLitePath: path})

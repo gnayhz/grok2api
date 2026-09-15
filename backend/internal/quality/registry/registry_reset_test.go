@@ -43,7 +43,7 @@ func TestResetQualityStateAnchorsD7(t *testing.T) {
 	if err := registry.AppendDegrade(ctx, 7, 0, "203.0.113.7", now); err != nil {
 		t.Fatalf("台账: %v", err)
 	}
-	if err := registry.RecordExitIP(ctx, 7, "203.0.113.7"); err != nil {
+	if err := registry.RecordExitIdentity(ctx, 7, model.ExitIdentityFromAggregate("203.0.113.7")); err != nil {
 		t.Fatalf("IP 档案: %v", err)
 	}
 

@@ -153,7 +153,7 @@ func TestQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 			if _, err := a.qualityCourt.Evaluate(ctx, time.Now()); err == nil {
 				t.Fatal("replacement treated read failure as exhaustion")
 			}
-			if _, _, _, err := (baseExitIPSource{egress: a.egressOps}).CurrentExitIP(ctx, baseline.ID); err == nil {
+			if _, _, _, err := (baseExitIPSource{egress: a.egressOps}).CurrentExitIdentity(ctx, baseline.ID); err == nil {
 				t.Fatal("unreadable IP observation became absence")
 			}
 			if _, err := a.qualityEnforcement.PollEpochs(ctx); err == nil {
@@ -226,7 +226,7 @@ func TestQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 				t.Fatalf("cancelled profile=%v", err)
 			}
 			ipSource := baseExitIPSource{egress: a.egressOps}
-			if _, _, _, err := ipSource.CurrentExitIP(cancelled, baseline.ID); !errors.Is(err, context.Canceled) {
+			if _, _, _, err := ipSource.CurrentExitIdentity(cancelled, baseline.ID); !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancelled IP=%v", err)
 			}
 			// A known transport observation changes the epoch once and releases

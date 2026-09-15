@@ -84,7 +84,7 @@ func TestQualityManagementQueriesRefreshAcrossConnections(t *testing.T) {
 			if err := db.db.Create(&egressNodeModel{ID: 7, Name: "quality-node", Enabled: true, RotationEnabled: true}).Error; err != nil {
 				t.Fatal(err)
 			}
-			first, _, err := a.AdvanceEpoch(ctx, 7, "198.51.100.1")
+			first, _, err := a.AdvanceEpoch(ctx, 7, qualitymodel.ExitIdentityFromAggregate("198.51.100.1"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -115,7 +115,7 @@ func TestQualityManagementQueriesRefreshAcrossConnections(t *testing.T) {
 			if b.AccountEligible(42) || b.ExitEligible(7) {
 				t.Fatal("management mutation changed eligibility")
 			}
-			second, _, err := a.AdvanceEpoch(ctx, 7, "198.51.100.2")
+			second, _, err := a.AdvanceEpoch(ctx, 7, qualitymodel.ExitIdentityFromAggregate("198.51.100.2"))
 			if err != nil {
 				t.Fatal(err)
 			}

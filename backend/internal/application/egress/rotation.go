@@ -140,6 +140,34 @@ func (s *Service) SetRotationLogger(value *slog.Logger) {
 	s.mu.Unlock()
 }
 
+// SetRotationSuccessObserver 安装轮换成功后的单节点出口身份观测回调。
+// 组合根把质量执行所的 ObserveNodeExit 接进来:webhook 已验证出口身份
+// 变化,新身份落库与旧限制释放不必等下一个 5 分钟检测节拍(闭环尾延
+// 从≤5m 降到秒级)。回调失败只由回调方记录,不影响轮换结果。
+func (s *Service) SetRotationSuccessObserver(fn func(context.Context, uint64)) {
+	if s == nil || fn == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rotationObserver = fn
+	s.mu.Unlock()
+}
+
+// notifyRotationSuccess 在成功记账后驱动观测回调。使用脱离轮换预算的
+// 短超时上下文,回调不得拖住 worker 消费下一个节点;回调 panic 由外层
+// batch.Do 隔离,不会击穿进程。
+func (s *Service) notifyRotationSuccess(ctx context.Context, nodeID uint64) {
+	s.mu.RLock()
+	fn := s.rotationObserver
+	s.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	observeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	fn(observeCtx, nodeID)
+}
+
 // RotateNode enqueues one node for immediate rotation (manual trigger).
 // 手动轮换重开一个完整周期:尝试账本清零(attempts=0、错误清空),使耗尽
 // (attempts>=max)或间隔未到的节点也能立即重新轮换——EXIT-IP-GUARD 承诺
@@ -533,14 +561,16 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 		s.recordRotationState(ctx, nodeID, 0, "", true, node)
 		logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP, "reason", "probe_dead_recovered")
 		perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "succeeded"})
+		s.notifyRotationSuccess(ctx, nodeID)
 		return
 	}
 	// 金丝雀验证已废除(G16:其失败无法区分 IP/账号问题):webhook 已调用、
 	// 探活健康且出口 IP 确已变化即轮换成功。新 IP 若仍脏,降智自然开新案
-	// 走新羁押;IP-epoch 变化的解禁由质量层执行所的轮询承担。
+	// 走新羁押;身份变化的解禁由观测回调立即驱动(下一轮检测节拍兜底)。
 	s.recordRotationState(ctx, nodeID, 0, "", true, node)
 	logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP)
 	perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "succeeded"})
+	s.notifyRotationSuccess(ctx, nodeID)
 }
 
 // failRotation records one failed rotation attempt and re-enqueues when the

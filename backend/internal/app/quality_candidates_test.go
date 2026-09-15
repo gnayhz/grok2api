@@ -152,7 +152,7 @@ func TestApplicationPersistsOnlyEligibleProbeCandidates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		epoch, _, err := a.quality.AdvanceEpoch(ctx, node.ID, fmt.Sprintf("198.51.100.%d", i+1))
+		epoch, _, err := a.quality.AdvanceEpoch(ctx, node.ID, model.ExitIdentityFromAggregate(fmt.Sprintf("198.51.100.%d", i+1)))
 		if err != nil {
 			t.Fatal(err)
 		}

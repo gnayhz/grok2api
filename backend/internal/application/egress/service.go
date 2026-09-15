@@ -89,6 +89,9 @@ type Service struct {
 	rotationCfg    RotationConfig
 	rotation       *rotationScheduler
 	rotationLogger *slog.Logger
+	// rotationObserver 轮换成功记账后的单节点出口身份观测回调,由组合根
+	// 注入(执行所的 ObserveNodeExit);nil=未接线(单测/独立运行)。
+	rotationObserver func(context.Context, uint64)
 }
 
 type HTTPTransportOwner interface {

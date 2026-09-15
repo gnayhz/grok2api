@@ -36,14 +36,14 @@ func TestQualityManagementProjectionKeepsEpochAndReadFailure(t *testing.T) {
 			router.GET("/quality/evidence/matrix", h.getEvidenceMatrix)
 			path := "/quality/overview"
 			if scenario == "matrix_epoch" {
-				first, _, err := reg.AdvanceEpoch(ctx, 7, "198.51.100.1")
+				first, _, err := reg.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.1"))
 				if err != nil {
 					t.Fatal(err)
 				}
 				if err := observations.Record(ctx, model.Observation{AccountID: 42, Exit: model.EpochKey{NodeID: 7, Epoch: first}, At: time.Now().UTC(), Source: model.SourceTraffic, Outcome: model.OutcomeDegraded}); err != nil {
 					t.Fatal(err)
 				}
-				second, _, err := reg.AdvanceEpoch(ctx, 7, "198.51.100.2")
+				second, _, err := reg.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.2"))
 				if err != nil {
 					t.Fatal(err)
 				}

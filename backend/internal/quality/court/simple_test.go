@@ -813,7 +813,7 @@ func TestSimpleCourtMarksPoolPartyWithdrawnAfterEpochChange(t *testing.T) {
 	if _, err := service.Evaluate(context.Background(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := bench.registry.AdvanceEpoch(context.Background(), 3, "198.51.100.8"); err != nil {
+	if _, _, err := bench.registry.AdvanceEpoch(context.Background(), 3, model.ExitIdentityFromAggregate("198.51.100.8")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Evaluate(context.Background(), time.Now().UTC()); err != nil {
@@ -839,7 +839,7 @@ func TestSimpleCourtPreservesWithdrawnExitHistoryWhenRoundSettles(t *testing.T) 
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	caseID := openSimpleTestCase(t, service, bench.registry)
 
-	if _, _, err := bench.registry.AdvanceEpoch(context.Background(), 3, "changed"); err != nil {
+	if _, _, err := bench.registry.AdvanceEpoch(context.Background(), 3, model.ExitIdentityFromAggregate("changed")); err != nil {
 		t.Fatal(err)
 	}
 	settleSimpleTestTasks(t, bench.registry, caseID, func(registry.ProbeTaskView) model.ProbeTaskResult {

@@ -26,10 +26,10 @@ func TestExitObservationFencesOlderReplicaAndRestart(t *testing.T) {
 				return r
 			}
 			a, b := open(), open()
-			if _, _, _, err := a.ObserveExitIP(ctx, 5, "192.0.2.1", 1); err != nil {
+			if _, _, _, err := a.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.1"), 1); err != nil {
 				t.Fatal(err)
 			}
-			if _, epoch, _, err := b.ObserveExitIP(ctx, 5, "192.0.2.2", 2); err != nil || epoch != 1 {
+			if _, epoch, _, err := b.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.2"), 2); err != nil || epoch != 1 {
 				t.Fatalf("new IP: %d %v", epoch, err)
 			}
 			id, err := b.OpenInvestigation(ctx, 9, model.EpochKey{NodeID: 5, Epoch: 1}, time.Now(), `{}`)
@@ -41,7 +41,7 @@ func TestExitObservationFencesOlderReplicaAndRestart(t *testing.T) {
 			}
 			for _, r := range []*Registry{a, open()} {
 				for _, version := range []uint64{1, 2} {
-					old, current, released, err := r.ObserveExitIP(ctx, 5, "192.0.2.1", version)
+					old, current, released, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.1"), version)
 					if err != nil || old != 1 || current != 1 || len(released) != 0 {
 						t.Fatalf("old observation changed state: %d %d %v %v", old, current, released, err)
 					}
@@ -51,13 +51,13 @@ func TestExitObservationFencesOlderReplicaAndRestart(t *testing.T) {
 				}
 			}
 			// Same IP observations must still advance the version fence.
-			if _, _, _, err := a.ObserveExitIP(ctx, 5, "192.0.2.2", 4); err != nil {
+			if _, _, _, err := a.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.2"), 4); err != nil {
 				t.Fatal(err)
 			}
-			if _, epoch, _, err := b.ObserveExitIP(ctx, 5, "192.0.2.3", 3); err != nil || epoch != 1 {
+			if _, epoch, _, err := b.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.3"), 3); err != nil || epoch != 1 {
 				t.Fatalf("same-IP fence lost: %d %v", epoch, err)
 			}
-			if _, epoch, released, err := b.ObserveExitIP(ctx, 5, "192.0.2.3", 5); err != nil || epoch != 2 || len(released) != 1 {
+			if _, epoch, released, err := b.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.3"), 5); err != nil || epoch != 2 || len(released) != 1 {
 				t.Fatalf("real new IP failed: %d %v %v", epoch, released, err)
 			}
 			if allowed, err := a.ExitAllowed(ctx, 5); err != nil || !allowed {
@@ -79,7 +79,7 @@ func TestExitObservationFencesOlderReplicaAndRestart(t *testing.T) {
 func TestExitObservationFailureRollsBackFenceAndDisposition(t *testing.T) {
 	r := openTestRegistry(t)
 	ctx := context.Background()
-	if _, _, _, err := r.ObserveExitIP(ctx, 5, "192.0.2.1", 1); err != nil {
+	if _, _, _, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.1"), 1); err != nil {
 		t.Fatal(err)
 	}
 	id, err := r.OpenInvestigation(ctx, 9, model.EpochKey{NodeID: 5}, time.Now(), `{}`)
@@ -92,7 +92,7 @@ func TestExitObservationFailureRollsBackFenceAndDisposition(t *testing.T) {
 	if err := r.DB().Exec(`CREATE TRIGGER reject_observation BEFORE UPDATE OF observation_revision ON q_node_epoch BEGIN SELECT RAISE(ABORT,'injected observation failure'); END`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := r.ObserveExitIP(ctx, 5, "192.0.2.2", 2); err == nil {
+	if _, _, _, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.2"), 2); err == nil {
 		t.Fatal("write failure hidden")
 	}
 	if r.CurrentEpoch(5) != 0 || r.ExitEligible(5) {
@@ -110,7 +110,7 @@ func TestExitObservationFailureRollsBackFenceAndDisposition(t *testing.T) {
 	if err := r.DB().Exec("DROP TRIGGER reject_observation").Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, epoch, _, err := r.ObserveExitIP(ctx, 5, "192.0.2.2", 2); err != nil || epoch != 1 {
+	if _, epoch, _, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.2"), 2); err != nil || epoch != 1 {
 		t.Fatalf("same version not retryable: %d %v", epoch, err)
 	}
 }
@@ -125,7 +125,7 @@ func TestReconcileOldSentencesPreservesCurrentHoldsAndVerdicts(t *testing.T) {
 	if err := r.SettleInvestigation(ctx, oldID, model.VerdictExitGuilty, `{"retained":true}`, time.Now(), true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.AdvanceEpoch(ctx, 5, "192.0.2.2"); err != nil {
+	if _, _, err := r.AdvanceEpoch(ctx, 5, model.ExitIdentityFromAggregate("192.0.2.2")); err != nil {
 		t.Fatal(err)
 	}
 	// Emulate the legacy omission after a completed epoch change.

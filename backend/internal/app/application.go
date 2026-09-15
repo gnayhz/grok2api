@@ -414,6 +414,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	qualityEnforcementService := bootstrapEnforcementLayer(qualityRegistry, egressService)
 	owned.qualityEnforcement = qualityEnforcementService
 	qualityCourtService.SetLedgerSink(qualityEnforcementService)
+	// 轮换成功 → 立即驱动单节点出口身份观测:webhook 已验证身份变化,
+	// 解禁不必等下一个检测节拍(尾延≤5m → 秒级)。观测回调只消费已
+	// 落库的探活事实,失败仅记日志,不影响轮换结果。
+	egressService.SetRotationSuccessObserver(func(ctx context.Context, nodeID uint64) {
+		if _, _, err := qualityEnforcementService.ObserveNodeExit(ctx, nodeID); err != nil {
+			logger.Warn("quality_rotation_observe_failed", "node", nodeID, "error", err.Error())
+		}
+	})
 	// 调查局真实探针执行器:网关质量探针 + 出口 IP 取证面。
 	gatewayService.SetNodeExitIPResolver(managerExitIPResolver{Manager: egressManager})
 	qualityProbeExecutorService := qualityinvestigator.NewProbeExecutor(qualityRegistry, gatewayService, logger)

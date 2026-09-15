@@ -106,7 +106,7 @@ func executorRegistries(t *testing.T, driver string) (*registry.Registry, *regis
 	}
 	t.Cleanup(func() { first.Close() })
 	for _, node := range []uint64{8, 10} {
-		if _, _, err := first.AdvanceEpoch(ctx, node, fmt.Sprintf("198.51.100.%d", node)); err != nil {
+		if _, _, err := first.AdvanceEpoch(ctx, node, model.ExitIdentityFromAggregate(fmt.Sprintf("198.51.100.%d", node))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -145,7 +145,7 @@ func TestProbeExecutorReadsPeerEpochBeforeAndAfterMeasurements(t *testing.T) {
 					a, b := executorRegistries(t, driver)
 					task := executorTask(test.direction)
 					advance := func() {
-						if _, _, err := a.AdvanceEpoch(context.Background(), test.node, "198.51.100.111"); err != nil {
+						if _, _, err := a.AdvanceEpoch(context.Background(), test.node, model.ExitIdentityFromAggregate("198.51.100.111")); err != nil {
 							t.Fatal(err)
 						}
 					}

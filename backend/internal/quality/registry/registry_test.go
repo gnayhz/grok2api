@@ -78,13 +78,13 @@ func TestExitTransitionRejectsInvisibleEpoch(t *testing.T) {
 func TestNodeQualityArchivesUseLatestEpochWithoutGrouping(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
-	if err := registry.RecordExitIP(ctx, 7, "198.51.100.1"); err != nil {
+	if err := registry.RecordExitIdentity(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := registry.AdvanceEpoch(ctx, 7, "198.51.100.2"); err != nil {
+	if _, _, err := registry.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := registry.AdvanceEpoch(ctx, 7, "198.51.100.3"); err != nil {
+	if _, _, err := registry.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.3")); err != nil {
 		t.Fatal(err)
 	}
 	views, err := registry.ListNodeIPArchives(ctx, 10)
@@ -107,10 +107,10 @@ func TestDirectPlaceholderNeverEntersExitState(t *testing.T) {
 	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 0, To: model.ExitRemanded, CaseID: 100}); !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("直连占位节点不得羁押, got %v", err)
 	}
-	if _, _, err := registry.AdvanceEpoch(ctx, 0, "198.51.100.1"); !errors.Is(err, ErrInvalidNode) {
+	if _, _, err := registry.AdvanceEpoch(ctx, 0, model.ExitIdentityFromAggregate("198.51.100.1")); !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("直连占位节点不得翻 epoch, got %v", err)
 	}
-	if err := registry.RecordExitIP(ctx, 0, "198.51.100.1"); !errors.Is(err, ErrInvalidNode) {
+	if err := registry.RecordExitIdentity(ctx, 0, model.ExitIdentityFromAggregate("198.51.100.1")); !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("直连占位节点不得建 IP 档案, got %v", err)
 	}
 	if err := registry.AppendDegrade(ctx, 0, 0, "", time.Now().UTC()); !errors.Is(err, ErrInvalidNode) {
@@ -216,7 +216,7 @@ func TestExitRemandBanAndEpochFlip(t *testing.T) {
 		t.Fatal("BANNED 出口不可调度")
 	}
 	// IP 变化:epoch 1 → 解禁。
-	newEpoch, released, err := registry.AdvanceEpoch(ctx, 4, "203.0.113.9")
+	newEpoch, released, err := registry.AdvanceEpoch(ctx, 4, model.ExitIdentityFromAggregate("203.0.113.9"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,18 +247,18 @@ func TestStickyRemandAutoReleaseOnEpoch(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
 	// 建立 epoch 历史:首见(0)→两次翻篇(1,2)。
-	if err := registry.RecordExitIP(ctx, 9, "198.51.100.1"); err != nil {
+	if err := registry.RecordExitIdentity(ctx, 9, model.ExitIdentityFromAggregate("198.51.100.1")); err != nil {
 		t.Fatal(err)
 	}
 	for _, ip := range []string{"198.51.100.2", "198.51.100.3"} {
-		if _, _, err := registry.AdvanceEpoch(ctx, 9, ip); err != nil {
+		if _, _, err := registry.AdvanceEpoch(ctx, 9, model.ExitIdentityFromAggregate(ip)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 9, Epoch: 2, To: model.ExitRemanded, CaseID: 60}); err != nil {
 		t.Fatal(err)
 	}
-	if _, released, err := registry.AdvanceEpoch(ctx, 9, "198.51.100.7"); err != nil {
+	if _, released, err := registry.AdvanceEpoch(ctx, 9, model.ExitIdentityFromAggregate("198.51.100.7")); err != nil {
 		t.Fatal(err)
 	} else if len(released) != 1 || released[0].Epoch != 2 {
 		t.Fatalf("翻篇应释放 epoch 2 羁押, got %v", released)
@@ -317,7 +317,7 @@ func TestCurrentExitStatesProjection(t *testing.T) {
 	if len(states) != 2 || states[5].State != model.ExitRemanded || states[6].State != model.ExitBanned {
 		t.Fatalf("投影 = %+v", states)
 	}
-	if _, _, err := registry.AdvanceEpoch(ctx, 5, "198.51.100.1"); err != nil {
+	if _, _, err := registry.AdvanceEpoch(ctx, 5, model.ExitIdentityFromAggregate("198.51.100.1")); err != nil {
 		t.Fatal(err)
 	}
 	states = registry.CurrentExitStates()
@@ -347,7 +347,7 @@ func TestRegistryRestartRebuildsCache(t *testing.T) {
 	if err := first.TransitionExit(ctx, ExitTransitionRequest{NodeID: 88, To: model.ExitBanned, CaseID: 900}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := first.AdvanceEpoch(ctx, 12, "192.0.2.4"); err != nil {
+	if _, _, err := first.AdvanceEpoch(ctx, 12, model.ExitIdentityFromAggregate("192.0.2.4")); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {

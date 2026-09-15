@@ -8,14 +8,14 @@ import (
 	"gorm.io/gorm"
 )
 
-const nodeFactColumns = "id, name, enabled, proxy_pool, rotation_enabled, encrypted_proxy_url, cooldown_until, exit_ip, probe_revision"
+const nodeFactColumns = "id, name, enabled, proxy_pool, rotation_enabled, encrypted_proxy_url, cooldown_until, exit_ip, ipv4_exit_ip, ipv6_exit_ip, probe_revision"
 
 func nodeFactsFromRow(row egressNodeModel) egress.NodeFacts {
 	node := toEgressDomain(row)
 	return egress.NodeFacts{ID: node.ID, Name: node.Name, Enabled: node.Enabled,
 		ProxyPool: node.ProxyPool, RotationEnabled: node.RotationEnabled,
 		CanServeFixedTarget: egress.CanNodeServeFixedTarget(node), CooldownUntil: node.CooldownUntil,
-		ExitIP: node.ExitIP, ProbeRevision: row.ProbeRevision}
+		ExitIP: node.ExitIP, ExitIPv4: node.IPv4Probe.ExitIP, ExitIPv6: node.IPv6Probe.ExitIP, ProbeRevision: row.ProbeRevision}
 }
 
 func (r *EgressRepository) ListNodeFacts(ctx context.Context) ([]egress.NodeFacts, error) {

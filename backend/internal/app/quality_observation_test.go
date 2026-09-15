@@ -49,10 +49,10 @@ func TestProbeObservationVersionReachesQualityRegistry(t *testing.T) {
 	}
 	defer r.Close()
 	source := baseExitIPSource{egress: egressapp.NewService(repo, nil)}
-	if _, _, ok, err := source.CurrentExitIP(ctx, node.ID); ok || err != nil {
+	if _, _, ok, err := source.CurrentExitIdentity(ctx, node.ID); ok || err != nil {
 		t.Fatal("legacy IP without version became release evidence")
 	}
-	if err := r.RecordExitIP(ctx, node.ID, "192.0.2.1"); err != nil {
+	if err := r.RecordExitIdentity(ctx, node.ID, model.ExitIdentityFromAggregate("192.0.2.1")); err != nil {
 		t.Fatal(err)
 	}
 	a, b := egressapp.NewService(repo, nil), egressapp.NewService(repo, nil)
@@ -67,11 +67,11 @@ func TestProbeObservationVersionReachesQualityRegistry(t *testing.T) {
 		if err := <-done; !errors.Is(err, egressapp.ErrProbeStale) {
 			t.Errorf("late result=%v", err)
 		}
-		ip, version, ok, err := source.CurrentExitIP(ctx, node.ID)
-		if err != nil || !ok || ip != "192.0.2.2" || version != 2 {
+		ip, version, ok, err := source.CurrentExitIdentity(ctx, node.ID)
+		if err != nil || !ok || ip.IPv4 != "192.0.2.2" || version != 2 {
 			t.Errorf("source regressed: %s %d %v", ip, version, ok)
 		}
-		if _, _, _, err := r.ObserveExitIP(ctx, node.ID, ip, version); err != nil {
+		if _, _, _, err := r.ObserveExitIdentity(ctx, node.ID, ip, version); err != nil {
 			t.Error(err)
 		}
 		if allowed, err := r.ExitAllowed(ctx, node.ID); err != nil || allowed {
@@ -82,11 +82,11 @@ func TestProbeObservationVersionReachesQualityRegistry(t *testing.T) {
 	if err != nil || result.Revision != 2 {
 		t.Fatalf("version not allocated before probe: %+v %v", result, err)
 	}
-	ip, version, ok, err := source.CurrentExitIP(ctx, node.ID)
+	ip, version, ok, err := source.CurrentExitIdentity(ctx, node.ID)
 	if err != nil || !ok || version != 2 {
 		t.Fatalf("source missing version: %d %v", version, ok)
 	}
-	if _, epoch, _, err := r.ObserveExitIP(ctx, node.ID, ip, version); err != nil || epoch != 1 {
+	if _, epoch, _, err := r.ObserveExitIdentity(ctx, node.ID, ip, version); err != nil || epoch != 1 {
 		t.Fatalf("fresh IP not consumed: %d %v", epoch, err)
 	}
 	id, err := r.OpenInvestigation(ctx, 9, model.EpochKey{NodeID: node.ID, Epoch: 1}, time.Now(), `{}`)

@@ -111,9 +111,13 @@ func (qDegradeLedgerModel) TableName() string { return "q_degrade_ledger" }
 // qIPEpochModel 出口 IP 档案(B3):每节点按 epoch 追加行,
 // IP 变化即翻篇(I15)——统一 ban 律的执行数据。
 type qIPEpochModel struct {
-	NodeID      uint64    `gorm:"primaryKey"`
-	Epoch       uint64    `gorm:"primaryKey;default:0"`
+	NodeID uint64 `gorm:"primaryKey"`
+	Epoch  uint64 `gorm:"primaryKey;default:0"`
+	// CurrentIP 保持聚合展示口径(IPv4 优先);CurrentIPv6 是双族身份的
+	// IPv6 侧。升级前旧行 current_ipv6=''(AutoMigrate 加列,默认空串),
+	// 首次观测到 IPv6 时按采纳规则补写基线,不翻 epoch。
 	CurrentIP   string    `gorm:"column:current_ip;size:64;not null;default:'';check:chk_q_ip_epoch_ip,length(current_ip) <= 64"`
+	CurrentIPv6 string    `gorm:"column:current_ipv6;size:64;not null;default:'';check:chk_q_ip_epoch_ipv6,length(current_ipv6) <= 64"`
 	FirstSeenAt time.Time `gorm:"not null"`
 	ChangedAt   time.Time `gorm:"not null"`
 }

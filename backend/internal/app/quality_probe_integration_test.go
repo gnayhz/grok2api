@@ -153,7 +153,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 				nodes = append(nodes, node.ID)
 				address := fmt.Sprintf("198.51.100.%d", i+1)
 				addresses[node.ID] = egressdomain.ExitAddresses{IPv4: address}
-				if _, _, err := a.quality.AdvanceEpoch(context.Background(), node.ID, address); err != nil {
+				if _, _, err := a.quality.AdvanceEpoch(context.Background(), node.ID, model.ExitIdentity{IPv4: address}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -197,7 +197,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 				t.Fatal(err)
 			}
 			advance := func() {
-				if _, _, err := peer.AdvanceEpoch(context.Background(), nodes[1], "198.51.100.33"); err != nil {
+				if _, _, err := peer.AdvanceEpoch(context.Background(), nodes[1], model.ExitIdentity{IPv4: "198.51.100.33"}); err != nil {
 					t.Error(err)
 				}
 			}

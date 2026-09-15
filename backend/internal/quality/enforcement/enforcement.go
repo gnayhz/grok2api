@@ -19,12 +19,12 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
-// ExitIPSource 提供节点当前已知出口 IP(被动漂移检测的探测面,
+// ExitIPSource 提供节点当前已知出口身份(被动漂移检测的探测面,
 // D6 移植:组合根适配底座探活结果,不重复发起 HTTP 探测)。
 type ExitIPSource interface {
-	// CurrentExitIP returns the IP and database revision issued before measurement.
-	// ok=false 表示尚无观测。
-	CurrentExitIP(ctx context.Context, nodeID uint64) (ip string, revision uint64, ok bool, err error)
+	// CurrentExitIdentity returns the per-family exit identity and the
+	// database revision issued before measurement. ok=false 表示尚无观测。
+	CurrentExitIdentity(ctx context.Context, nodeID uint64) (identity model.ExitIdentity, revision uint64, ok bool, err error)
 }
 
 // Rotator submits a command to the network owner, which executes the webhook
@@ -150,7 +150,7 @@ type EpochChange struct {
 }
 
 // PollEpochs consumes versioned source observations. The registry atomically
-// rejects old versions and releases old restrictions only for a new IP.
+// rejects old versions and releases old restrictions only for a new identity.
 func (s *Service) PollEpochs(ctx context.Context) ([]EpochChange, error) {
 	profiles, err := s.nodes.ListProfiles(ctx)
 	if err != nil {
@@ -164,31 +164,57 @@ func (s *Service) PollEpochs(ctx context.Context) ([]EpochChange, error) {
 		if !profile.Enabled {
 			continue
 		}
-		ip, revision, ok, err := s.ipSource.CurrentExitIP(ctx, profile.ID)
+		change, changed, err := s.observeNodeExit(ctx, profile)
 		if err != nil {
 			return changes, err
 		}
-		if !ok || ip == "" || revision == 0 {
-			continue
+		if changed {
+			changes = append(changes, change)
 		}
-		oldEpoch, newEpoch, released, err := s.registry.ObserveExitIP(ctx, profile.ID, ip, revision)
-		if err != nil {
-			return changes, err
-		}
-		if oldEpoch == newEpoch {
-			continue
-		}
-		changes = append(changes, EpochChange{
-			NodeID: profile.ID, OldEpoch: oldEpoch, NewEpoch: newEpoch, Released: len(released) > 0,
-		})
-		s.logger.Info("enforcement_epoch_advanced", "node", profile.ID,
-			"old_epoch", oldEpoch, "new_epoch", newEpoch, "released", len(released))
 	}
 	return changes, nil
 }
 
+// ObserveNodeExit 对单节点立即执行一次出口身份观测(轮换成功后由组合根
+// 驱动,不等下一个检测节拍;停用/缺失节点与 PollEpochs 同口径跳过)。
+// 观测仍经版本水位校验,迟到或重复调用不会翻篇两次。
+func (s *Service) ObserveNodeExit(ctx context.Context, nodeID uint64) (EpochChange, bool, error) {
+	if s.registry == nil || s.nodes == nil || s.ipSource == nil {
+		return EpochChange{}, false, nil
+	}
+	profile, ok, err := s.nodes.Profile(ctx, nodeID)
+	if err != nil || !ok || !profile.Enabled {
+		return EpochChange{}, false, err
+	}
+	return s.observeNodeExit(ctx, profile)
+}
+
+func (s *Service) observeNodeExit(ctx context.Context, profile proxy.NodeProfile) (EpochChange, bool, error) {
+	identity, revision, ok, err := s.ipSource.CurrentExitIdentity(ctx, profile.ID)
+	if err != nil {
+		return EpochChange{}, false, err
+	}
+	if !ok || !identity.Present() || revision == 0 {
+		return EpochChange{}, false, nil
+	}
+	oldEpoch, newEpoch, released, err := s.registry.ObserveExitIdentity(ctx, profile.ID, identity, revision)
+	if err != nil {
+		return EpochChange{}, false, err
+	}
+	if oldEpoch == newEpoch {
+		return EpochChange{}, false, nil
+	}
+	change := EpochChange{
+		NodeID: profile.ID, OldEpoch: oldEpoch, NewEpoch: newEpoch, Released: len(released) > 0,
+	}
+	s.logger.Info("enforcement_epoch_advanced", "node", profile.ID,
+		"old_epoch", oldEpoch, "new_epoch", newEpoch, "released", len(released))
+	return change, true, nil
+}
+
 // rotateBannedWebhooks 自愈扫掠(统一 ban 律的闭环半边):BANNED 的
-// webhook 节点自动触发主动轮换——轮换致 IP 变化后由下轮检测翻篇解禁
+// webhook 节点自动触发主动轮换——轮换成功后由组合根的观测回调立即
+// 翻篇解禁(本包的 ObserveNodeExit),检测节拍兜底被动漂移
 // (ban 不再死等人工);固定/池节点不适用(无主动轮换语义)。限速
 // 耗尽时安静截止,留待下轮扫掠(节拍天然重试)。
 func (s *Service) rotateBannedWebhooks(ctx context.Context) int {

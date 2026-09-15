@@ -9,6 +9,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/quality/enforcement"
+	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 )
 
@@ -40,8 +41,8 @@ func (s shutdownNodeSource) ListProfiles(ctx context.Context) ([]proxy.NodeProfi
 func (shutdownNodeSource) Profile(context.Context, uint64) (proxy.NodeProfile, bool, error) {
 	return proxy.NodeProfile{}, false, nil
 }
-func (shutdownNodeSource) CurrentExitIP(context.Context, uint64) (string, uint64, bool, error) {
-	return "", 0, false, nil
+func (shutdownNodeSource) CurrentExitIdentity(context.Context, uint64) (model.ExitIdentity, uint64, bool, error) {
+	return model.ExitIdentity{}, 0, false, nil
 }
 
 func TestApplicationCloseStopsQualityBeforeRuntimeAndSQL(t *testing.T) {

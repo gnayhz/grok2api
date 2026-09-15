@@ -141,7 +141,7 @@ func TestCourtNodeFailurePreservesIndependentRelease(t *testing.T) {
 				s.SetNodes(nil)
 			default:
 				if scenario == "epoch_changed" {
-					if _, _, err := b.registry.AdvanceEpoch(ctx, 3, "192.0.2.9"); err != nil {
+					if _, _, err := b.registry.AdvanceEpoch(ctx, 3, model.ExitIdentityFromAggregate("192.0.2.9")); err != nil {
 						t.Fatal(err)
 					}
 				}

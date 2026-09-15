@@ -22,7 +22,7 @@ func TestNodeArchivesUseDurableStateOfSelectedEpoch(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer b.Close()
-			epoch, _, err := a.AdvanceEpoch(ctx, 7, "198.51.100.1")
+			epoch, _, err := a.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.1"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -34,7 +34,7 @@ func TestNodeArchivesUseDurableStateOfSelectedEpoch(t *testing.T) {
 				if err := b.RefreshState(ctx); err != nil {
 					t.Fatal(err)
 				}
-				epoch, _, err = a.AdvanceEpoch(ctx, 7, "198.51.100.2")
+				epoch, _, err = a.AdvanceEpoch(ctx, 7, model.ExitIdentityFromAggregate("198.51.100.2"))
 				if err != nil {
 					t.Fatal(err)
 				}

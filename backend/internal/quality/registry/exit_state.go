@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
@@ -229,16 +230,50 @@ func (r *Registry) ReleaseExitIfUnheld(ctx context.Context, nodeID, epoch uint64
 	return nil
 }
 
-// AdvanceEpoch 记录节点出口 IP 变化:追加 q_ip_epoch 新行(epoch+1),
+// exitIdentityDecision 是双族身份比较的纯判断(修改行为先固定测试样本):
+// 任一非空族不同 → 翻 epoch;空族不参与比较。旧档案(current_ipv6 为空)
+// 首次观测到 IPv6 且未翻篇 → 采纳:补写基线而不翻 epoch,升级本身不得
+// 释放仍有效的限制。聚合 current_ip 的历史形态按含":"归入 IPv6 族。
+type exitIdentityDecision struct {
+	Advance bool
+	AdoptV6 bool
+}
+
+func exitIdentityDecisionFor(stored qIPEpochModel, observed model.ExitIdentity) exitIdentityDecision {
+	storedV4 := stored.CurrentIP
+	storedV6 := stored.CurrentIPv6
+	if strings.Contains(stored.CurrentIP, ":") {
+		// 旧聚合口径把仅 IPv6 可达的观测写进 current_ip。
+		storedV4 = ""
+		if storedV6 == "" {
+			storedV6 = stored.CurrentIP
+		}
+	}
+	decision := exitIdentityDecision{}
+	if storedV4 != "" && observed.IPv4 != "" && storedV4 != observed.IPv4 {
+		decision.Advance = true
+	}
+	if storedV6 != "" && observed.IPv6 != "" && storedV6 != observed.IPv6 {
+		decision.Advance = true
+	}
+	if !decision.Advance && storedV6 == "" && observed.IPv6 != "" {
+		decision.AdoptV6 = true
+	}
+	return decision
+}
+
+// AdvanceEpoch 记录节点出口身份变化:追加 q_ip_epoch 新行(epoch+1),
 // 并按统一 ban 律自动解除旧 epoch 的一切质量羁押与 ban，同时撤下旧
-// 当事方处置。观测消费者必须通过 ObserveExitIP 校验持久版本后调用。
-func (r *Registry) AdvanceEpoch(ctx context.Context, nodeID uint64, newIP string) (uint64, []model.EpochKey, error) {
+// 当事方处置。观测消费者必须通过 ObserveExitIdentity 校验持久版本后
+// 调用。同一身份是幂等 no-op;旧档案首次观测到 IPv6 时只采纳补写
+// current_ipv6,不翻 epoch。
+func (r *Registry) AdvanceEpoch(ctx context.Context, nodeID uint64, identity model.ExitIdentity) (uint64, []model.EpochKey, error) {
 	if !r.inTransition {
 		var epoch uint64
 		var released []model.EpochKey
 		err := r.withTransition(ctx, func(w *Registry) error {
 			var err error
-			epoch, released, err = w.AdvanceEpoch(ctx, nodeID, newIP)
+			epoch, released, err = w.AdvanceEpoch(ctx, nodeID, identity)
 			return err
 		})
 		return epoch, released, err
@@ -246,6 +281,9 @@ func (r *Registry) AdvanceEpoch(ctx context.Context, nodeID uint64, newIP string
 
 	if nodeID == 0 {
 		return 0, nil, ErrInvalidNode
+	}
+	if !identity.Present() {
+		return 0, nil, fmt.Errorf("%w: 出口身份至少需要一个地址族", ErrInvalidNode)
 	}
 	r.transitionMu <- struct{}{}
 	defer func() { <-r.transitionMu }()
@@ -256,9 +294,22 @@ func (r *Registry) AdvanceEpoch(ctx context.Context, nodeID uint64, newIP string
 	if err := r.db.WithContext(ctx).Where("node_id = ?", nodeID).Order("epoch DESC").Limit(1).Find(&latest).Error; err != nil {
 		return 0, nil, err
 	}
-	if len(latest) > 0 && latest[0].CurrentIP == newIP {
-		return oldEpoch, nil, nil
+	if len(latest) > 0 {
+		decision := exitIdentityDecisionFor(latest[0], identity)
+		if !decision.Advance {
+			if decision.AdoptV6 {
+				// 采纳只补写旧档案缺失的 IPv6 基线;另一实例若已翻篇,
+				// 本次至多改写一行历史档案,不影响任何当前状态。
+				if err := r.db.WithContext(ctx).Model(&qIPEpochModel{}).
+					Where("node_id = ? AND epoch = ?", nodeID, latest[0].Epoch).
+					Update("current_ipv6", identity.IPv6).Error; err != nil {
+					return 0, nil, err
+				}
+			}
+			return oldEpoch, nil, nil
+		}
 	}
+	newIP := identity.Aggregate()
 	newEpoch := oldEpoch + 1
 	now := time.Now().UTC()
 	var released []model.EpochKey
@@ -271,12 +322,12 @@ func (r *Registry) AdvanceEpoch(ctx context.Context, nodeID uint64, newIP string
 		err := tx.Where("node_id = ? AND epoch = ?", nodeID, newEpoch).Take(&existing).Error
 		switch {
 		case err == nil:
-			if existing.CurrentIP != newIP {
+			if existing.CurrentIP != newIP || existing.CurrentIPv6 != identity.IPv6 {
 				return fmt.Errorf("quality: 节点 %d epoch=%d 已绑定不同出口", nodeID, newEpoch)
 			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			if err := tx.Create(&qIPEpochModel{
-				NodeID: nodeID, Epoch: newEpoch, CurrentIP: newIP,
+				NodeID: nodeID, Epoch: newEpoch, CurrentIP: newIP, CurrentIPv6: identity.IPv6,
 				FirstSeenAt: now, ChangedAt: now,
 			}).Error; err != nil {
 				return err
@@ -307,14 +358,17 @@ func (r *Registry) AdvanceEpoch(ctx context.Context, nodeID uint64, newIP string
 	return newEpoch, released, nil
 }
 
-// RecordExitIP 为节点建立首个 IP 档案(epoch 0,首见)。已有档案时
-// 是幂等 no-op——首见建档只在无任何行时写入。
-func (r *Registry) RecordExitIP(ctx context.Context, nodeID uint64, ip string) error {
+// RecordExitIdentity 为节点建立首个出口身份档案(epoch 0,首见)。已有
+// 档案时是幂等 no-op——首见建档只在无任何行时写入。
+func (r *Registry) RecordExitIdentity(ctx context.Context, nodeID uint64, identity model.ExitIdentity) error {
 	if !r.inTransition {
-		return r.withTransition(ctx, func(w *Registry) error { return w.RecordExitIP(ctx, nodeID, ip) })
+		return r.withTransition(ctx, func(w *Registry) error { return w.RecordExitIdentity(ctx, nodeID, identity) })
 	}
 	if nodeID == 0 {
 		return ErrInvalidNode
+	}
+	if !identity.Present() {
+		return fmt.Errorf("%w: 出口身份至少需要一个地址族", ErrInvalidNode)
 	}
 	r.transitionMu <- struct{}{}
 	defer func() { <-r.transitionMu }()
@@ -324,7 +378,7 @@ func (r *Registry) RecordExitIP(ctx context.Context, nodeID uint64, ip string) e
 		return nil
 	}
 	now := time.Now().UTC()
-	row := qIPEpochModel{NodeID: nodeID, Epoch: 0, CurrentIP: ip, FirstSeenAt: now, ChangedAt: now}
+	row := qIPEpochModel{NodeID: nodeID, Epoch: 0, CurrentIP: identity.Aggregate(), CurrentIPv6: identity.IPv6, FirstSeenAt: now, ChangedAt: now}
 	if err := r.db.WithContext(ctx).Create(&row).Error; err != nil {
 		return err
 	}
@@ -359,7 +413,7 @@ func exitIPRecordResult(row qIPEpochModel, err error) (ExitIPRecord, bool, error
 	if err != nil {
 		return ExitIPRecord{}, false, err
 	}
-	return ExitIPRecord{Epoch: row.Epoch, IP: row.CurrentIP, FirstSeenAt: row.FirstSeenAt, ChangedAt: row.ChangedAt}, true, nil
+	return ExitIPRecord{Epoch: row.Epoch, IP: row.CurrentIP, IPv6: row.CurrentIPv6, FirstSeenAt: row.FirstSeenAt, ChangedAt: row.ChangedAt}, true, nil
 }
 
 func (r *Registry) ExitIPArchive(ctx context.Context, nodeID uint64) ([]ExitIPRecord, error) {
@@ -372,6 +426,7 @@ func (r *Registry) ExitIPArchive(ctx context.Context, nodeID uint64) ([]ExitIPRe
 		records = append(records, ExitIPRecord{
 			Epoch:       row.Epoch,
 			IP:          row.CurrentIP,
+			IPv6:        row.CurrentIPv6,
 			FirstSeenAt: row.FirstSeenAt,
 			ChangedAt:   row.ChangedAt,
 		})
@@ -379,10 +434,12 @@ func (r *Registry) ExitIPArchive(ctx context.Context, nodeID uint64) ([]ExitIPRe
 	return records, nil
 }
 
-// ExitIPRecord 是 IP 档案的一行。
+// ExitIPRecord 是 IP 档案的一行。IP 保持聚合展示口径(IPv4 优先),
+// IPv6 是双族身份的 IPv6 侧(旧档案可能为空)。
 type ExitIPRecord struct {
 	Epoch       uint64
 	IP          string
+	IPv6        string
 	FirstSeenAt time.Time
 	ChangedAt   time.Time
 }

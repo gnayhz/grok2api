@@ -134,7 +134,7 @@ func TestEventConsumptionRecoveryAcrossReplicas(t *testing.T) {
 				t.Run(stage, func(t *testing.T) {
 					ctx := context.Background()
 					a, b := eventRegistries(t, driver)
-					if _, _, err := a.AdvanceEpoch(ctx, 11, "198.51.100.11"); err != nil {
+					if _, _, err := a.AdvanceEpoch(ctx, 11, model.ExitIdentityFromAggregate("198.51.100.11")); err != nil {
 						t.Fatal(err)
 					}
 					first, store, ev, judge := eventServices(t, a)
@@ -224,7 +224,7 @@ func TestOldEpochEventArchivesWithoutRestrictingNewEpoch(t *testing.T) {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
 			a, b := eventRegistries(t, driver)
-			if _, _, err := a.AdvanceEpoch(ctx, 11, "198.51.100.11"); err != nil {
+			if _, _, err := a.AdvanceEpoch(ctx, 11, model.ExitIdentityFromAggregate("198.51.100.11")); err != nil {
 				t.Fatal(err)
 			}
 			svc, store, ev, _ := eventServices(t, a)
@@ -232,7 +232,7 @@ func TestOldEpochEventArchivesWithoutRestrictingNewEpoch(t *testing.T) {
 			if err := svc.RecordQualityEvent(ctx, receipt, time.Minute); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := b.AdvanceEpoch(ctx, 11, "198.51.100.12"); err != nil {
+			if _, _, err := b.AdvanceEpoch(ctx, 11, model.ExitIdentityFromAggregate("198.51.100.12")); err != nil {
 				t.Fatal(err)
 			}
 			if worked, err := store.ProcessOne(ctx, "late", svc.handle); err != nil || !worked {

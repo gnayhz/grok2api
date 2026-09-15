@@ -7,6 +7,7 @@ import (
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	qualityenforcement "github.com/chenyme/grok2api/backend/internal/quality/enforcement"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
@@ -42,15 +43,25 @@ func profileFromFact(fact egressdomain.NodeFacts) proxy.NodeProfile {
 // can advance an epoch. A source failure is neither absence nor a new identity.
 type baseExitIPSource struct{ egress *egressapp.Service }
 
-func (s baseExitIPSource) CurrentExitIP(ctx context.Context, nodeID uint64) (string, uint64, bool, error) {
+func (s baseExitIPSource) CurrentExitIdentity(ctx context.Context, nodeID uint64) (qualitymodel.ExitIdentity, uint64, bool, error) {
 	fact, found, err := s.egress.NodeFacts(ctx, nodeID)
 	if err != nil {
-		return "", 0, false, err
+		return qualitymodel.ExitIdentity{}, 0, false, err
 	}
-	if !found || !fact.Enabled || fact.ExitIP == "" || fact.ProbeRevision == 0 {
-		return "", 0, false, nil
+	if !found || !fact.Enabled || fact.ProbeRevision == 0 {
+		return qualitymodel.ExitIdentity{}, 0, false, nil
 	}
-	return fact.ExitIP, fact.ProbeRevision, true, nil
+	identity := qualitymodel.ExitIdentity{IPv4: fact.ExitIPv4, IPv6: fact.ExitIPv6}
+	if !identity.Present() && fact.ExitIP != "" {
+		// 分族探活列缺失时(旧数据/旧写入方),按地址形态从聚合列归族,
+		// 保持旧观测口径可继续推进身份;首次观测到缺失的另一族时由
+		// 登记处采纳补写基线。
+		identity = qualitymodel.ExitIdentityFromAggregate(fact.ExitIP)
+	}
+	if !identity.Present() {
+		return qualitymodel.ExitIdentity{}, 0, false, nil
+	}
+	return identity, fact.ProbeRevision, true, nil
 }
 
 // baseRotator adapts quality commands to the network execution owner; queue,

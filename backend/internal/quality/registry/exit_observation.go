@@ -7,19 +7,23 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
-// ObserveExitIP consumes the version allocated before the source measurement.
-// Its high-water mark and any epoch/restriction changes commit together. Even
-// an unchanged IP advances the mark, fencing older observations after restart.
-func (r *Registry) ObserveExitIP(ctx context.Context, nodeID uint64, ip string, revision uint64) (oldEpoch, newEpoch uint64, released []model.EpochKey, err error) {
+// ObserveExitIdentity consumes the version allocated before the source
+// measurement. Its high-water mark and any epoch/restriction changes commit
+// together. Even an unchanged identity advances the mark, fencing older
+// observations after restart.
+//
+// 身份是双地址族的:任一非空族变化即翻 epoch(与 egress 轮换验证同一把
+// 尺子)。旧档案缺失的一族首次观测到时只采纳补写基线,不翻 epoch。
+func (r *Registry) ObserveExitIdentity(ctx context.Context, nodeID uint64, identity model.ExitIdentity, revision uint64) (oldEpoch, newEpoch uint64, released []model.EpochKey, err error) {
 	if nodeID == 0 {
 		return 0, 0, nil, ErrInvalidNode
 	}
-	if revision == 0 || ip == "" {
-		return 0, 0, nil, fmt.Errorf("quality: exit observation requires an IP and revision")
+	if revision == 0 || !identity.Present() {
+		return 0, 0, nil, fmt.Errorf("quality: exit observation requires an identity and revision")
 	}
 	if !r.inTransition {
 		err = r.withTransition(ctx, func(w *Registry) error {
-			oldEpoch, newEpoch, released, err = w.ObserveExitIP(ctx, nodeID, ip, revision)
+			oldEpoch, newEpoch, released, err = w.ObserveExitIdentity(ctx, nodeID, identity, revision)
 			return err
 		})
 		return
@@ -34,9 +38,9 @@ func (r *Registry) ObserveExitIP(ctx context.Context, nodeID uint64, ip string, 
 		return
 	}
 	if current.NodeID == 0 {
-		err = r.RecordExitIP(ctx, nodeID, ip)
+		err = r.RecordExitIdentity(ctx, nodeID, identity)
 	} else {
-		newEpoch, released, err = r.AdvanceEpoch(ctx, nodeID, ip)
+		newEpoch, released, err = r.AdvanceEpoch(ctx, nodeID, identity)
 	}
 	if err != nil {
 		return
