@@ -139,7 +139,18 @@ func TestAttemptOwnsBodyReturnedAlongsideError(t *testing.T) {
 func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 	base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 	s, accounts := newGuardLoopService(t, base, "unclaimed-result")
-	s.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, AdmissionTimeout: 80 * time.Millisecond})
+	// The admission budget spans the whole governed pipeline: selection, the
+	// physical send and the quality peek must all finish before delivery, and
+	// the same absolute deadline later expires the unclaimed result. An 80ms
+	// budget lost the pre-delivery race on a shared CI runner (observed while
+	// go test kept the long-running inference package busy): the peek never
+	// read the first SSE chunk before the deadline canceled it, so
+	// CreateChatCompletion surfaced quality_admission_timeout. Stay in the
+	// seconds-scale regime the other hold tests use and derive every
+	// post-delivery wait from the budget: expiry fires at start+budget, which
+	// is at most one budget after CreateChatCompletion returns.
+	const admissionBudget = 5 * time.Second
+	s.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, AdmissionTimeout: admissionBudget})
 	completed := make(chan QualityObservation, 1)
 	s.SetQualityEventRecorder(eventRecorderFunc(func(_ context.Context, obs QualityObservation, _ time.Duration) error {
 		if obs.Outcome != QualityObservedAdmitted {
@@ -160,7 +171,7 @@ func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 	defer result.Body.Close()
 	select {
 	case <-physical.Done():
-	case <-time.After(time.Second):
+	case <-time.After(2 * admissionBudget):
 		t.Fatal("unused result retained physical request")
 	}
 	if err := result.CommitDelivery(); err == nil {
@@ -169,7 +180,7 @@ func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 	if _, err := result.Body.Read(make([]byte, 10)); err == nil {
 		t.Fatal("expired result leaked held bytes")
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(2 * admissionBudget)
 	for {
 		n, _ := s.selector.concurrency.Current(context.Background(), accountConcurrencyKey(accounts[0].ID))
 		if n == 0 && body.closed.Load() == 1 {
@@ -178,14 +189,14 @@ func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("unused result: lease=%d closes=%d", n, body.closed.Load())
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	select {
 	case obs := <-completed:
 		if obs.Outcome != QualityObservedInterrupted || obs.ErrorCode != "quality_admission_timeout" {
 			t.Fatalf("unused result lost completion reason: %+v", obs)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(2 * admissionBudget):
 		t.Fatal("unused result did not record completion")
 	}
 }
