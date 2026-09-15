@@ -146,7 +146,7 @@ func (s *qualityScanState) fingerprint(verdict QualityVerdict, err error) qualit
 		Completed: s.completed, Failed: s.failed,
 		Protocol:        s.protocol,
 		Verdict:         string(verdict),
-		Rule:            qualityHoldRule(sig, err),
+		Rule:            qualityHoldRule(sig, s.semanticOutput, err),
 		HasThinking:     s.hasThinking,
 		ReasoningEnded:  s.reasoningEndedWithoutThinking,
 		SemanticOutput:  s.semanticOutput,

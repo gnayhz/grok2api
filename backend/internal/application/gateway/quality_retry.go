@@ -141,7 +141,11 @@ type qualityHoldFingerprint struct {
 	Error        string `json:"error,omitempty"`
 }
 
-func qualityHoldRule(sig QualityStreamSignals, err error) string {
+// qualityHoldRule 把判决归因到稳定标签。semanticOnly 标记终态纯语义输出
+// 形态（裸工具调用，零思考零正文）：该判决来自 emptyStreamVerdict 而非
+// 准入内核，标签直接命名该路径——借道 Judge 会落成 terminal，误读成
+// "终态兜底触发"。
+func qualityHoldRule(sig QualityStreamSignals, semanticOnly bool, err error) string {
 	switch {
 	case errors.Is(err, responsebuffer.ErrExhausted):
 		return "resource_exhausted"
@@ -157,6 +161,9 @@ func qualityHoldRule(sig QualityStreamSignals, err error) string {
 		return "evidence_timeout"
 	case errors.Is(err, errQualityEmptyStream):
 		return "empty"
+	}
+	if semanticOnly && !sig.HasThinking && !sig.ReasoningEndedWithoutThinking && sig.VisibleTokens == 0 && sig.OutputTokens == 0 {
+		return "semantic"
 	}
 	// Ordinary evidence explanations come from the same admission rule that
 	// decides the verdict. Transport/resource failures above keep their source.

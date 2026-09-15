@@ -45,7 +45,7 @@ func FuzzGuardDecisionPartitions(f *testing.F) {
 			if err != nil {
 				message = err.Error()
 			}
-			return outcome{verdict, qualityHoldRule(state.signals(), err), message}
+			return outcome{verdict, qualityHoldRule(state.signals(), state.semanticOutput, err), message}
 		}
 		whole := run(max(1, len(data)))
 		fragmented := run(int(split%1024) + 1)

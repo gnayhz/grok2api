@@ -1695,7 +1695,7 @@ attemptLoop:
 					}
 					lease.Release()
 					lastErr = peekErr
-					errorCode := qualityHoldRule(QualityStreamSignals{}, peekErr)
+					errorCode := qualityHoldRule(QualityStreamSignals{}, false, peekErr)
 					if isClientRequestCancel(ctx, peekErr) {
 						errorCode = "request_canceled"
 					}
@@ -1801,11 +1801,6 @@ attemptLoop:
 					s.logger.Info("quality_degraded_rejected", "request_id", input.RequestID, "account_id", credential.ID)
 					break attemptLoop
 				case QualityActionDeliver:
-				}
-				if !commit.KeepBody {
-					_ = response.Body.Close()
-					lease.Release()
-					break attemptLoop
 				}
 			}
 			if err := prepareResponseDelivery(response, input.Streaming, textFacts); err != nil {

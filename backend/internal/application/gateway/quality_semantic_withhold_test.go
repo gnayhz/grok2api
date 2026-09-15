@@ -167,6 +167,47 @@ func TestReasoningHeaderPlusWebSearchIsNotThinkingEvidence(t *testing.T) {
 	}
 }
 
+// 指纹规则标签：纯语义输出的扣留/放行判决来自 emptyStreamVerdict，标签
+// 必须直接命名该路径（semantic），不得借道 Judge 落成 terminal 兜底；
+// 真空流保持 empty，规则 1 保持 thinking。
+func TestSemanticOnlyFingerprintRuleLabel(t *testing.T) {
+	t.Parallel()
+	toolBody := "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+	cfg := QualityRetryRuntime{Enabled: true, ReasoningExpected: true, EvidenceTimeout: 2 * time.Second, CreatedTimeout: 2 * time.Second}
+	replay, verdict, _, fp, err := peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(toolBody)), qualityProtocolResponses, cfg)
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if err != nil || verdict != QualityWithhold || fp.Rule != "semantic" {
+		t.Fatalf("verdict=%s rule=%s err=%v, want withhold/semantic", verdict, fp.Rule, err)
+	}
+	open := QualityRetryRuntime{Enabled: true, EvidenceTimeout: 2 * time.Second, CreatedTimeout: 2 * time.Second}
+	replay, verdict, _, fp, err = peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(toolBody)), qualityProtocolResponses, open)
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if err != nil || verdict != QualityDeliver || fp.Rule != "semantic" {
+		t.Fatalf("verdict=%s rule=%s err=%v, want deliver/semantic", verdict, fp.Rule, err)
+	}
+	emptyBody := "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+	replay, verdict, _, fp, err = peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(emptyBody)), qualityProtocolResponses, cfg)
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if verdict != QualityWait || fp.Rule != "empty" {
+		t.Fatalf("verdict=%s rule=%s err=%v, want wait/empty", verdict, fp.Rule, err)
+	}
+	thinkingBody := "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"思考\"}\n\n"
+	replay, verdict, _, fp, err = peekQualityStreamReport(context.Background(), io.NopCloser(strings.NewReader(thinkingBody)), qualityProtocolResponses, cfg)
+	if replay != nil {
+		_ = replay.Close()
+	}
+	if err != nil || verdict != QualityDeliver || fp.Rule != "thinking" {
+		t.Fatalf("verdict=%s rule=%s err=%v, want deliver/thinking", verdict, fp.Rule, err)
+	}
+}
+
 // 思考期望解析：none 之外一律期望（含空档）。
 func TestReasoningExpectedForEffort(t *testing.T) {
 	t.Parallel()

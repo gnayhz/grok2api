@@ -54,6 +54,10 @@ func (h *Handler) getGuard(c *gin.Context) {
 	response.Success(c, http.StatusOK, h.guardResponse(cfg, false))
 }
 
+// guardConfigDTO 是可写字段面。reasoning_expected 不在其中：请求路径在
+// service 内按 resolved effort 覆写该期望（探针沿用持久化值），编辑它不会
+// 改变任何判决——GET 仍回报该字段以保持读契约，旧客户端继续发送该键
+// 会被 JSON 解码直接忽略。
 type guardConfigDTO struct {
 	Revision             json.RawMessage `json:"revision"`
 	EvidenceTimeout      string          `json:"evidence_timeout"`
@@ -65,7 +69,6 @@ type guardConfigDTO struct {
 	Enabled              *bool           `json:"enabled"`
 	GuardedModels        *[]string       `json:"guarded_models"`
 	MaxAttempts          *int            `json:"max_attempts"`
-	ReasoningExpected    *bool           `json:"reasoning_expected"`
 }
 
 // Legacy numeric revisions remain accepted only where JavaScript can represent
@@ -124,9 +127,6 @@ func (h *Handler) putGuard(c *gin.Context) {
 	}
 	if dto.MaxAttempts != nil {
 		cfg.MaxAttempts = *dto.MaxAttempts
-	}
-	if dto.ReasoningExpected != nil {
-		cfg.ReasoningExpected = *dto.ReasoningExpected
 	}
 	saved, err := h.deps.Guard.Update(c.Request.Context(), cfg)
 	if err != nil {

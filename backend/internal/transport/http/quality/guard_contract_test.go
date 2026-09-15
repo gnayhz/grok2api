@@ -35,6 +35,34 @@ func (s *guardHTTPStore) SaveGuard(_ context.Context, cfg guard.Config) error {
 	s.cfg, s.found = cfg, true
 	return nil
 }
+
+// reasoning_expected 不是可写字段：请求路径按 resolved effort 覆写该期望，
+// 写入必须被忽略（GET 读契约保持回报持久化值）。
+func TestGuardHTTPReasoningExpectedNotEditable(t *testing.T) {
+	base := guard.DefaultConfig()
+	store := &guardHTTPStore{}
+	service := guard.New(base, store)
+	handler := &Handler{deps: Deps{Guard: service}}
+	router := gin.New()
+	router.PUT("/guard", handler.putGuard)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/guard", strings.NewReader(`{"revision":0,"enabled":true,"reasoning_expected":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put=%d %s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			ReasoningExpected bool `json:"reasoning_expected"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !envelope.Data.ReasoningExpected || !service.Config().ReasoningExpected {
+		t.Fatal("reasoning_expected must stay derived from resolved effort; edits are ignored")
+	}
+}
+
 func TestGuardHTTPRevisionDefaultsAndFailureContract(t *testing.T) {
 	base := guard.DefaultConfig()
 	base.AccountCooldown = 9 * time.Minute

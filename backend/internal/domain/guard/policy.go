@@ -39,7 +39,8 @@ type Config struct {
 	// MaxAttempts 每请求降智换号预算。
 	MaxAttempts int
 	// ReasoningExpected is retained for persisted settings compatibility.
-	// Business requests derive their thinking expectation from resolved effort.
+	// Business requests derive their thinking expectation from resolved effort,
+	// and the guard API does not accept edits to it.
 	ReasoningExpected bool
 }
 
