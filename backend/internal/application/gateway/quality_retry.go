@@ -484,19 +484,28 @@ const qualitySearchSilenceBudget = 24 * time.Hour
 // Heavy reasoning allows more upstream queueing time in each liveness phase.
 const qualityHeavyReasoningCreatedBudget = 30 * time.Second
 
-// qualityLivenessSchedule adjusts sequential first-data/evidence budgets using
-// the normalized request profile. Tool requests use the tool admission budget;
-// high/xhigh use 30s per phase; other requests retain the configured values.
-// Neither phase extends total admission or changes the evidence classifier.
+// qualityLivenessSchedule derives first-data/evidence budgets from the client
+// body as a pre-normalization fallback. Tool requests use the tool admission
+// budget; high/xhigh use 30s per phase; other requests retain the configured
+// values. Neither phase extends total admission or changes the evidence
+// classifier.
 func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRuntime) QualityRetryRuntime {
 	profile := inferencedomain.ReplayPolicyFromRequest(body)
-	search, effort := profile.Tools, profile.ReasoningEffort
-	heavy := effort == "high" || effort == "xhigh"
-	if search {
+	return qualityLivenessScheduleForProfile(profile.Tools, profile.ReasoningEffort, cfg)
+}
+
+// qualityLivenessScheduleForProfile applies the same budgets from an explicit
+// tool/effort profile. The normalized adapter profile is authoritative and
+// replaces the client-body fallback before network I/O: Chat
+// web_search_options, Messages thinking/output_config and effort aliases such
+// as max only become tools or high/xhigh after provider normalization.
+func qualityLivenessScheduleForProfile(tools bool, effort string, cfg QualityRetryRuntime) QualityRetryRuntime {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if tools {
 		cfg.AdmissionTimeout = cfg.ToolAdmissionTimeout
 		cfg.EvidenceTimeout = qualitySearchSilenceBudget
 		cfg.CreatedTimeout = qualitySearchSilenceBudget
-	} else if heavy {
+	} else if effort == "high" || effort == "xhigh" {
 		cfg.EvidenceTimeout = qualityHeavyReasoningCreatedBudget
 		cfg.CreatedTimeout = qualityHeavyReasoningCreatedBudget
 	}

@@ -755,11 +755,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	holdCfg, snapshotScope := s.requestGuardSnapshot()
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
-	budget := time.Duration(0)
-	if holdCfg.Enabled {
-		budget = qualityLivenessSchedule(input.Body, string(input.Operation), holdCfg).AdmissionTimeout
-	}
-	admission := newAdmission(ctx, startedAt, budget)
+	// The admission deadline stays unarmed until jurisdiction and exemptions
+	// are settled below: arming here would let model and candidate lookups
+	// consume the budget of a request the guard later exempts. Arming later
+	// still measures from request start, and client cancellation keeps
+	// propagating through the parent context.
+	admission := newAdmission(ctx, startedAt, 0)
 	ctx = responsebuffer.WithContext(admission.ctx, responsebuffer.FromContext(ctx))
 	defer func() {
 		if err := admission.failure(); err != nil {
@@ -1030,22 +1031,23 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return nil, &UpstreamFailure{HTTPStatus: http.StatusBadRequest, Code: "unsupported_choices", PublicMessage: "当前响应守卫仅支持 n=1", Cause: errQualityChoices}
 		}
 	}
-	if !qualityHoldEnabled {
-		admission.disable()
-	}
-	// 活跃度预算制度表只依赖请求体/操作类型/守卫配置(三者跨 attempt 不变:
-	// 别名模型重写发生在进入循环之前,循环内不再改动 input.Body),提出
-	// 循环只算一次——128KB body 的 tools/effort 探测实测 1.16ms/次全量解析,
-	// 原实现在循环内每次质量尝试重复支付。循环内仅保留依赖 adapter 归一化
-	// 结果的 ReasoningExpected 位(首次尝试前归一化结果为空,语义不变)。
+	// 活跃度预算制度表先用客户端请求体预计算一次(128KB body 的 tools/effort
+	// 全量探测实测 1.16ms/次,原实现在循环内每次质量尝试重复支付)。adapter
+	// 归一化回调会在上游调用前用规范化轮廓覆盖它:web_search_options、
+	// Messages thinking 和 max 等别名只在归一化后才成为工具或 high/xhigh。
 	peekSchedule := holdCfg
 	// Real-time guard observability. Gate lines are emitted only when the hold
 	// is engaged: a per-request INFO line while the feature is off would be pure
 	// log amplification proportional to traffic.
 	if qualityHoldEnabled {
 		peekSchedule = qualityLivenessSchedule(input.Body, string(operation), holdCfg)
+		// Arm the deadline only after jurisdiction and exemptions are settled.
+		// The budget measures from request start, so governed requests keep the
+		// same absolute deadline; exempt requests never carry one.
+		admission.setBudget(peekSchedule.AdmissionTimeout)
 		s.logger.Info("quality_hold_gate", "request_id", input.RequestID, "provider", route.Provider, "public_model", input.PublicModel, "upstream_model", route.UpstreamModel, "operation", operation)
 	} else {
+		admission.disable()
 		// 豁免留痕：每条路径放行多少请求进 guard-stats（exempts 计数），
 		// 不再重演"连续多发裸奔却无任何痕迹可查"。
 		// 豁免 token 同步落审计主行（QualityExempt）：守卫不在场的交付，
@@ -1127,11 +1129,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 					}
 				}
 				if qualityHoldEnabled && metadata.ReplayPolicy != nil {
-					budget := holdCfg.AdmissionTimeout
-					if metadata.ReplayPolicy.Tools {
-						budget = holdCfg.ToolAdmissionTimeout
-					}
-					admission.setBudget(budget)
+					// The normalized profile is the actual upstream shape: reschedule
+					// total admission and both liveness phases from it.
+					peekSchedule = qualityLivenessScheduleForProfile(metadata.ReplayPolicy.Tools, metadata.ReasoningEffort, holdCfg)
+					admission.setBudget(peekSchedule.AdmissionTimeout)
 				}
 				return admission.failure()
 			},
@@ -1519,6 +1520,9 @@ attemptLoop:
 			// Grok Build treats only HTTP 401 as an OAuth authentication failure.
 			// A 403 is already authenticated and must not trigger token rotation or
 			// replay the same request with freshly issued credentials.
+			// No built-in provider currently reaches this branch (only Build
+			// declares credential refresh and is excluded above); it is kept for
+			// future refreshable non-Build providers.
 			if credential.Provider != accountdomain.ProviderBuild && s.providers.SupportsCredentialRefresh(credential.Provider) && !authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && !lastFailure.AccountBlocked && !buildForbiddenReauth && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
 				authRecoveryAttempted[credential.ID] = true
 				refreshed, refreshErr := ensureCredential(credential, true)
@@ -1571,9 +1575,10 @@ attemptLoop:
 					s.logger.Error("account_quota_recovery_write_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "error", err)
 				}
 			}
-			if lastFailure.AccountBlocked {
-				failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s account is blocked", credential.Provider))
-			} else if buildForbiddenReauth {
+			// Definitive account-block signals only arise from 401/403, and both
+			// statuses are fully handled (with continue) before this generic retry
+			// path, so no blocked response can reach here.
+			if buildForbiddenReauth {
 				failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s upstream error code %s matched the invalidation policy", credential.Provider, lastFailure.UpstreamCode))
 			} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
 				if credential.Provider == accountdomain.ProviderBuild {

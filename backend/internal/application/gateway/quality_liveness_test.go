@@ -123,3 +123,34 @@ func TestQualityLivenessPhases(t *testing.T) {
 		}
 	}
 }
+
+// The client-body parse is only a pre-normalization fallback: shapes that
+// become tools or heavy effort only after adapter normalization (Chat
+// web_search_options, Messages thinking, effort=max) keep the configured
+// phases until the normalized profile replaces them.
+func TestLivenessSchedulePrefersNormalizedProfile(t *testing.T) {
+	t.Parallel()
+	base := QualityRetryRuntime{Enabled: true, AdmissionTimeout: 30 * time.Second,
+		CreatedTimeout: 5 * time.Second, EvidenceTimeout: 3500 * time.Millisecond, ToolAdmissionTimeout: 3 * time.Minute}
+	for _, body := range []string{
+		`{"web_search_options":{}}`,
+		`{"thinking":{"type":"enabled","budget_tokens":1500}}`,
+		`{"reasoning":{"effort":"max"}}`,
+	} {
+		if got := qualityLivenessSchedule([]byte(body), "", base); got.CreatedTimeout != base.CreatedTimeout || got.EvidenceTimeout != base.EvidenceTimeout || got.AdmissionTimeout != base.AdmissionTimeout {
+			t.Fatalf("pre-normalization body %s changed the schedule: %+v", body, got)
+		}
+	}
+	tools := qualityLivenessScheduleForProfile(true, "", base)
+	if tools.AdmissionTimeout != base.ToolAdmissionTimeout || tools.CreatedTimeout != qualitySearchSilenceBudget || tools.EvidenceTimeout != qualitySearchSilenceBudget {
+		t.Fatalf("normalized tool profile: %+v", tools)
+	}
+	// The adapter publishes resolved efforts: aliases like max arrive here as
+	// high/xhigh, so the heavy phases apply from the normalized profile.
+	for _, effort := range []string{"high", "xhigh", " XHigh "} {
+		heavy := qualityLivenessScheduleForProfile(false, effort, base)
+		if heavy.CreatedTimeout != qualityHeavyReasoningCreatedBudget || heavy.EvidenceTimeout != qualityHeavyReasoningCreatedBudget || heavy.AdmissionTimeout != base.AdmissionTimeout {
+			t.Fatalf("normalized heavy effort %q: %+v", effort, heavy)
+		}
+	}
+}

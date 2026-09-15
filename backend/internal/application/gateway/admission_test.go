@@ -244,3 +244,27 @@ func TestOutputAcceptanceRequiresSuccessfulDelivery(t *testing.T) {
 		}
 	}
 }
+
+// The request entry creates admission unarmed: model and candidate lookups
+// run before jurisdiction and exemptions are settled, so an exempt request
+// must not be cancelled mid-lookup. Arming afterwards still measures from the
+// original request start.
+func TestAdmissionArmsAfterExemptionDecision(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := time.Now()
+	unarmed := newAdmission(parent, started, 0)
+	time.Sleep(2 * time.Millisecond)
+	if err := unarmed.failure(); err != nil {
+		t.Fatalf("unarmed admission failed during pre-work: %v", err)
+	}
+	unarmed.disable()
+	if err := unarmed.failure(); err != nil {
+		t.Fatalf("disabled admission failed: %v", err)
+	}
+	expired := newAdmission(parent, started.Add(-time.Minute), 0)
+	expired.setBudget(30 * time.Second)
+	if err := expired.failure(); err == nil {
+		t.Fatal("armed budget must still measure from request start")
+	}
+}
