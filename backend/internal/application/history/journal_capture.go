@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
@@ -114,13 +113,23 @@ func (c *journalCapture) Read(p []byte) (int, error) {
 }
 func (c *journalCapture) commit() error {
 	c.once.Do(func() {
+		defer func() { c.prepared.observeCommitFailure(c.commitErr) }()
 		complete := false
 		if c.stream != nil {
 			complete = c.stream.ReadOutcome() == io.EOF
 		}
 		c.mu.Lock()
-		if c.discarded || c.captureErr != nil {
-			c.commitErr = fmt.Errorf("%w: capture unavailable", historydomain.ErrHistoryCommit)
+		if c.discarded {
+			c.commitErr = journalCommitFailure("capture", "discarded", nil)
+			c.mu.Unlock()
+			return
+		}
+		if c.captureErr != nil {
+			reason := journalFailureReason(c.captureErr)
+			if reason == "store_error" {
+				reason = "read_error"
+			}
+			c.commitErr = journalCommitFailure("capture", reason, c.captureErr)
 			c.mu.Unlock()
 			return
 		}
@@ -128,7 +137,7 @@ func (c *journalCapture) commit() error {
 			complete = c.eof
 		}
 		if !complete {
-			c.commitErr = fmt.Errorf("%w: incomplete capture", historydomain.ErrHistoryCommit)
+			c.commitErr = journalCommitFailure("capture", "incomplete_capture", nil)
 			c.mu.Unlock()
 			return
 		}
@@ -137,14 +146,14 @@ func (c *journalCapture) commit() error {
 		c.mu.Unlock()
 		defer body.Close()
 		data, release, ok := body.BorrowBytes()
-		defer release()
 		if !ok {
-			c.commitErr = fmt.Errorf("%w: capture unavailable", historydomain.ErrHistoryCommit)
+			c.commitErr = journalCommitFailure("capture", "buffer_unavailable", nil)
 			return
 		}
+		defer release()
 		workspace, err := responsebuffer.JSONWorkspace(c.ResponseBudget(), data)
 		if err != nil {
-			c.commitErr = fmt.Errorf("%w: %w", historydomain.ErrHistoryCommit, err)
+			c.commitErr = journalCommitFailure("decode", journalFailureReason(err), err)
 			return
 		}
 		defer workspace.Release()
@@ -152,7 +161,7 @@ func (c *journalCapture) commit() error {
 			var extractionErr error
 			data, extractionErr = extractJournalPayloadFromSSE(data)
 			if extractionErr != nil {
-				c.commitErr = fmt.Errorf("%w: missing terminal output", historydomain.ErrHistoryCommit)
+				c.commitErr = extractionErr
 				return
 			}
 		}

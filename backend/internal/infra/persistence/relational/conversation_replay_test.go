@@ -94,3 +94,87 @@ func TestConversationReplayCaptureDoesNotCommitOnCloseOrAfterReset(t *testing.T)
 		t.Fatalf("old completion accepted: %v", err)
 	}
 }
+
+func TestConversationReplayPreservesProviderOpaqueEncoding(t *testing.T) {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	existing := make([]byte, 256)
+	for i := range existing {
+		existing[i] = byte(i)
+	}
+	for _, dialect := range []string{"sqlite", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			db, journal := identityJournalFixture(t, dialect)
+			for _, tc := range []struct{ name, opaque string }{
+				{"short", base64.RawStdEncoding.EncodeToString(raw)},
+				{"padded", base64.StdEncoding.EncodeToString(raw)},
+				{"url_encoding", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{251, 255}, 32))},
+				{"provider_defined", "synthetic:opaque:v2:example"},
+				{"low_entropy", base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{0}, 128))},
+				{"existing_encoding", base64.RawStdEncoding.EncodeToString(existing)},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx := t.Context()
+					key := fmt.Sprintf("synthetic/%s/%d", t.Name(), time.Now().UnixNano())
+					replay := newJournalReplay(journal)
+					_, prepared, err := replay.Prepare(ctx, "synthetic-model", key, []byte(`{"input":[{"role":"user","content":"synthetic question"}]}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					opaque := map[string]any{"type": "reasoning", "id": "synthetic-reasoning", "status": "completed", "encrypted_content": tc.opaque, "summary": []any{}}
+					commitIdentityTurn(t, prepared, "synthetic-response", "synthetic answer", opaque)
+					// A new service and journal have no cached output. Restoration must
+					// read the encrypted SQL row with exactly the provider's bytes.
+					cold := newJournalReplay(NewConversationJournal(db, journal.cipher, 64<<20))
+					input := []any{map[string]any{"role": "user", "content": "synthetic question"}, map[string]any{"role": "assistant", "content": "synthetic answer"}, map[string]any{"role": "user", "content": "synthetic next"}}
+					body, _ := json.Marshal(map[string]any{"input": input})
+					restored, next, err := cold.Prepare(ctx, "synthetic-model", key, body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if next.Outcome() != "append_ok" || next.RestoredItems() != 1 {
+						t.Fatalf("lost durable reasoning: %s/%d", next.Outcome(), next.RestoredItems())
+					}
+					next.Discard()
+					var decoded struct{ Input []map[string]json.RawMessage }
+					if err := json.Unmarshal(restored, &decoded); err != nil || len(decoded.Input) != 4 {
+						t.Fatal("invalid restored input")
+					}
+					var actual string
+					if err := json.Unmarshal(decoded.Input[1]["encrypted_content"], &actual); err != nil || actual != tc.opaque {
+						t.Fatal("opaque encoding changed during persistence or restoration")
+					}
+					if _, exists := decoded.Input[1]["status"]; exists {
+						t.Fatal("output-only status was replayed")
+					}
+					// Clients may carry the same opaque item on the next request.
+					// It must match the stored boundary without duplication.
+					_, carried, err := cold.Prepare(ctx, "synthetic-model", key, restored)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if carried.RestoredItems() != 0 || carried.Outcome() != "append_ok" {
+						t.Fatal("client-carried opaque no longer matches its durable boundary")
+					}
+					carried.Discard()
+					decoded.Input[1]["encrypted_content"] = json.RawMessage(`"synthetic-conflicting-opaque"`)
+					conflict, _ := json.Marshal(map[string]any{"input": decoded.Input})
+					if _, rejected, err := cold.Prepare(ctx, "synthetic-model", key, conflict); !errors.Is(err, historydomain.ErrHistoryAmbiguous) {
+						historydomain.Discard(rejected)
+						t.Fatalf("conflicting client opaque accepted: %v", err)
+					}
+					_, isolated, err := cold.Prepare(ctx, "synthetic-model", key+"/other", body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if isolated.RestoredItems() != 0 {
+						t.Fatal("opaque history crossed scopes")
+					}
+					isolated.Discard()
+				})
+			}
+		})
+	}
+}

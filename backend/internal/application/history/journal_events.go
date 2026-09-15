@@ -3,7 +3,6 @@ package history
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 )
 
 // Indexed output_item.done is the authoritative ordering when a terminal
@@ -26,7 +25,7 @@ func extractJournalPayloadFromSSE(data []byte) ([]byte, error) {
 			Index    *int            `json:"output_index"`
 		}
 		if json.Unmarshal(payload, &event) != nil {
-			return nil, fmt.Errorf("invalid captured event")
+			return nil, journalCommitFailure("extract", "invalid_event", nil)
 		}
 		switch event.Type {
 		case "response.output_item.done":
@@ -36,10 +35,10 @@ func extractJournalPayloadFromSSE(data []byte) ([]byte, error) {
 			}
 			index := *event.Index
 			if index < 0 || index >= 4096 {
-				return nil, fmt.Errorf("invalid output index")
+				return nil, journalCommitFailure("extract", "invalid_output_index", nil)
 			}
 			if prior, ok := indexed[index]; ok && journalOutputSignature(prior) != journalOutputSignature(event.Item) {
-				return nil, fmt.Errorf("conflicting output index")
+				return nil, journalCommitFailure("extract", "conflicting_output_index", nil)
 			}
 			indexed[index] = event.Item
 		case "response.completed", "response.done":
@@ -48,21 +47,21 @@ func extractJournalPayloadFromSSE(data []byte) ([]byte, error) {
 				next = payload
 			}
 			if len(response) > 0 && !bytes.Equal(response, next) {
-				return nil, fmt.Errorf("conflicting terminal responses")
+				return nil, journalCommitFailure("extract", "conflicting_terminal_responses", nil)
 			}
 			response = next
 		}
 	}
 	if len(response) == 0 {
-		return nil, fmt.Errorf("missing terminal response")
+		return nil, journalCommitFailure("extract", "missing_terminal_response", nil)
 	}
 	var root map[string]json.RawMessage
 	if json.Unmarshal(response, &root) != nil {
-		return nil, fmt.Errorf("invalid terminal response")
+		return nil, journalCommitFailure("extract", "invalid_terminal_response", nil)
 	}
 	var complete []json.RawMessage
 	if raw := root["output"]; len(raw) > 0 && json.Unmarshal(raw, &complete) != nil {
-		return nil, fmt.Errorf("invalid terminal output")
+		return nil, journalCommitFailure("extract", "invalid_terminal_output", nil)
 	}
 	// Without indices, only an already complete terminal list can establish order.
 	for _, item := range unindexed {
@@ -74,7 +73,7 @@ func extractJournalPayloadFromSSE(data []byte) ([]byte, error) {
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("unindexed output missing from terminal")
+			return nil, journalCommitFailure("extract", "unindexed_output_missing", nil)
 		}
 	}
 	if len(indexed) > 0 {
@@ -101,20 +100,20 @@ func extractJournalPayloadFromSSE(data []byte) ([]byte, error) {
 			} else {
 				for i, item := range indexed {
 					if i >= len(complete) || journalOutputSignature(item) != journalOutputSignature(complete[i]) {
-						return nil, fmt.Errorf("terminal output conflicts with indexed output")
+						return nil, journalCommitFailure("extract", "conflicting_terminal_output", nil)
 					}
 				}
 			}
 		} else {
 			for i, item := range indexed {
 				if i >= len(complete) || journalOutputSignature(item) != journalOutputSignature(complete[i]) {
-					return nil, fmt.Errorf("incomplete indexed output")
+					return nil, journalCommitFailure("extract", "incomplete_indexed_output", nil)
 				}
 			}
 		}
 	}
 	if len(complete) == 0 {
-		return nil, fmt.Errorf("missing terminal output")
+		return nil, journalCommitFailure("extract", "missing_terminal_output", nil)
 	}
 	root["output"], _ = json.Marshal(complete)
 	return json.Marshal(root)
@@ -125,7 +124,11 @@ func journalOutputSignature(raw []byte) string {
 		return "invalid:" + string(raw)
 	}
 	if reasoning {
-		canonical, _ = normalizeJournalReasoning(raw)
+		var ok bool
+		canonical, ok = normalizeJournalReasoning(raw)
+		if !ok {
+			return "invalid:" + string(raw)
+		}
 	}
 	return string(canonical)
 }

@@ -115,7 +115,7 @@ func TestHTTPCompletionProviderMatrix(t *testing.T) {
 			for _, streaming := range []bool{false, true} {
 				stages := []string{"success", "receipt"}
 				if kind == account.ProviderBuild {
-					stages = append(stages, "history")
+					stages = append(stages, "history", "short_reasoning")
 				}
 				if operation == "responses" && kind != account.ProviderConsole {
 					stages = append(stages, "ownership")
@@ -153,7 +153,15 @@ func TestHTTPCompletionProviderMatrix(t *testing.T) {
 							defer upstream.Close()
 							adapter = webprovider.NewAdapter(webprovider.Config{BaseURL: upstream.URL, StatsigMode: "manual", ChatTimeout: 5 * time.Second}, network, cipher, historyapp.NewResponseResources(states), nil)
 						} else {
-							upstream := completionHTTPUpstream(t, model, &generated)
+							upstream := completionHTTPUpstreamWithResponse(t, model, &generated, func(_ int32, answer map[string]any) {
+								if stage == "short_reasoning" {
+									raw := make([]byte, 32)
+									for i := range raw {
+										raw[i] = byte(i)
+									}
+									answer["output"].([]any)[0].(map[string]any)["encrypted_content"] = base64.RawStdEncoding.EncodeToString(raw)
+								}
+							})
 							defer upstream.Close()
 							if kind == account.ProviderBuild {
 								build := cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher)

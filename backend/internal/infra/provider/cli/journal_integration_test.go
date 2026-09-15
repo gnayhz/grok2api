@@ -45,7 +45,7 @@ func TestPersistentHistorySurvivesClientConversion(t *testing.T) {
 				replay.UseJournal(journal, 24*time.Hour, time.Hour)
 				adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
 				adapter.SetReasoningReplay(replay)
-				raw := make([]byte, 256)
+				raw := make([]byte, 32)
 				for i := range raw {
 					raw[i] = byte(i)
 				}

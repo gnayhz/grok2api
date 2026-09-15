@@ -321,22 +321,22 @@ func (p *PreparedHistory) store(ctx context.Context, payload []byte) error {
 	}
 	var root map[string]json.RawMessage
 	if json.Unmarshal(payload, &root) != nil {
-		return fmt.Errorf("%w: malformed payload", historydomain.ErrHistoryCommit)
+		return journalCommitFailure("validate", "malformed_payload", nil)
 	}
 	if nested, ok := root["response"]; ok {
 		if json.Unmarshal(nested, &root) != nil {
-			return fmt.Errorf("%w: malformed response", historydomain.ErrHistoryCommit)
+			return journalCommitFailure("validate", "malformed_response", nil)
 		}
 	}
 	var status, responseID string
 	_ = json.Unmarshal(root["status"], &status)
 	_ = json.Unmarshal(root["id"], &responseID)
 	if status != "" && status != "completed" {
-		return fmt.Errorf("%w: incomplete response", historydomain.ErrHistoryCommit)
+		return journalCommitFailure("validate", "incomplete_response", nil)
 	}
 	var items []json.RawMessage
 	if json.Unmarshal(root["output"], &items) != nil {
-		return fmt.Errorf("%w: missing output", historydomain.ErrHistoryCommit)
+		return journalCommitFailure("validate", "missing_output", nil)
 	}
 	output := make([][]byte, 0, len(items))
 	hash := p.reservation.Ticket.InputHash
@@ -344,11 +344,11 @@ func (p *PreparedHistory) store(ctx context.Context, payload []byte) error {
 	for _, raw := range items {
 		canonical, reasoning, e := canonicalJournalItem(raw)
 		if e != nil {
-			return fmt.Errorf("%w: invalid output", historydomain.ErrHistoryCommit)
+			return journalCommitFailure("validate", "invalid_output", nil)
 		}
 		if reasoning {
 			if _, ok := normalizeJournalReasoning(raw); !ok {
-				return fmt.Errorf("%w: invalid opaque reasoning", historydomain.ErrHistoryCommit)
+				return journalCommitFailure("validate", "invalid_opaque_reasoning", nil)
 			}
 		}
 		if !reasoning {
@@ -364,7 +364,7 @@ func (p *PreparedHistory) store(ctx context.Context, payload []byte) error {
 	}
 	p.replay.journalObserve(p.reservation.Ticket.Scope.Model, p.reservation.Ticket.Scope.Key, "commit", outcome, p.Generation(), len(output))
 	if err != nil {
-		return fmt.Errorf("%w: %w", historydomain.ErrHistoryCommit, err)
+		return journalCommitFailure("store", journalFailureReason(err), err)
 	}
 	return nil
 }
@@ -398,7 +398,9 @@ func (p *PreparedHistory) Reset() error {
 func (p *PreparedHistory) reset(ctx context.Context) error {
 	ticket := p.reservation.Ticket
 	if e := p.replay.journal.Reset(ctx, ticket.Scope, p.replay.now().UTC(), ticket.Generation); e != nil {
-		return fmt.Errorf("%w: %w", historydomain.ErrHistoryCommit, e)
+		err := journalCommitFailure("reset", journalFailureReason(e), e)
+		p.observeCommitFailure(err)
+		return err
 	}
 	p.replay.clearLegacy(ctx, ticket.Scope.Model, ticket.Scope.Key)
 	return nil
@@ -429,13 +431,27 @@ func (p *PreparedHistory) ScopeHash() string {
 
 func normalizeJournalReasoning(item []byte) ([]byte, bool) {
 	var raw map[string]json.RawMessage
-	if json.Unmarshal(item, &raw) != nil {
+	if json.Unmarshal(item, &raw) != nil || raw == nil {
 		return nil, false
 	}
-	if encrypted, ok := raw["encrypted_content"]; ok && string(encrypted) != "null" && string(encrypted) != `""` {
-		return normalizeReplayItem(item)
+	var kind string
+	if json.Unmarshal(raw["type"], &kind) != nil || kind != "reasoning" {
+		return nil, false
 	}
+	// Durable history already has an authorized scope and exact lineage. The
+	// provider owns its opaque encoding; byte entropy and a guessed minimum
+	// ciphertext length cannot establish validity. Apply the same normalization
+	// to native output, restored rows and client-carried copies of those rows.
 	next := map[string]json.RawMessage{"type": json.RawMessage(`"reasoning"`), "summary": json.RawMessage(`[]`)}
+	if encrypted := raw["encrypted_content"]; len(encrypted) > 0 && strings.TrimSpace(string(encrypted)) != "null" {
+		var opaque string
+		if json.Unmarshal(encrypted, &opaque) != nil || len(opaque) > maxReplayEncryptedLen {
+			return nil, false
+		}
+		if opaque != "" {
+			next["encrypted_content"] = encrypted
+		}
+	}
 	for _, field := range []string{"id", "summary", "content"} {
 		if value := raw[field]; len(value) > 0 && string(value) != "null" {
 			next[field] = value
