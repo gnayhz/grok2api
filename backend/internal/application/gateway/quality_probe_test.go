@@ -79,8 +79,14 @@ func TestQualityProbeDoesNotPromoteTransportSilenceToDegraded(t *testing.T) {
 			reasonPart: errQualityCreatedTimeout.Error(),
 		},
 		{
-			name:       "evidence timeout",
-			body:       func() io.ReadCloser { return newIdleQualityProbeBody() },
+			name: "evidence timeout",
+			body: func() io.ReadCloser {
+				idle := newIdleQualityProbeBody()
+				return struct {
+					io.Reader
+					io.Closer
+				}{io.MultiReader(strings.NewReader("data: {\"type\":\"response.created\"}\n\n"), idle), idle}
+			},
 			hold:       QualityRetryRuntime{CreatedTimeout: time.Second, EvidenceTimeout: 20 * time.Millisecond},
 			reasonPart: errQualityEvidenceTimeout.Error(),
 		},

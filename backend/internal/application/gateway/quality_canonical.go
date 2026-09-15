@@ -18,7 +18,9 @@ import (
 func peekCanonicalQualityStream(ctx context.Context, body io.ReadCloser, stream *responseflow.Stream, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
 	cfg = normalizeQualityRetry(cfg)
 	state := qualityScanState{kernel: cfg.kernel, protocol: protocol, startedAt: time.Now()}
-	var sawData, useful atomic.Bool
+	var useful atomic.Bool
+	liveness := newQualityLivenessTimer(cfg)
+	defer liveness.timer.Stop()
 	verdict := QualityWait
 	var verdictErr error
 	finished := make(chan error, 1)
@@ -32,8 +34,12 @@ func peekCanonicalQualityStream(ctx context.Context, body io.ReadCloser, stream 
 			if !event.HasData {
 				return false, nil
 			}
-			state.sawDataEvent = true
-			sawData.Store(true)
+			if !state.sawDataEvent {
+				if err := liveness.observeData(); err != nil {
+					return true, err
+				}
+				state.sawDataEvent = true
+			}
 			if bytes.Equal(bytes.TrimSpace(event.Data), []byte("[DONE]")) {
 				state.terminal = true
 			} else {
@@ -44,10 +50,6 @@ func peekCanonicalQualityStream(ctx context.Context, body io.ReadCloser, stream 
 			return verdict != QualityWait || verdictErr != nil, verdictErr
 		})
 	}()
-	evidenceTimer := time.NewTimer(cfg.EvidenceTimeout)
-	createdTimer := time.NewTimer(cfg.CreatedTimeout)
-	defer evidenceTimer.Stop()
-	defer createdTimer.Stop()
 	var err error
 wait:
 	for {
@@ -59,16 +61,9 @@ wait:
 			_ = body.Close()
 			<-finished
 			break wait
-		case <-createdTimer.C:
-			if !sawData.Load() {
-				err = errQualityCreatedTimeout
-				_ = body.Close()
-				<-finished
-				break wait
-			}
-		case <-evidenceTimer.C:
-			if !useful.Load() {
-				err = errQualityEvidenceTimeout
+		case <-liveness.timer.C:
+			if timeout := liveness.timeout(); timeout != nil && !useful.Load() {
+				err = timeout
 				_ = body.Close()
 				<-finished
 				break wait

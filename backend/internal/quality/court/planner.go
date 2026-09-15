@@ -15,6 +15,37 @@ type planningProgress struct {
 	DiffTasks, DiffClean, DiffDegraded, DiffFailed, DiffTransportFailed, DiffSpanNodes int
 }
 
+// A replacement round reuses one read of ordinary eligibility for both
+// directions and their matched controls. This snapshot is only a plan;
+// execution still checks current account, identity and path eligibility.
+type replacementCandidates struct {
+	accountIDs    []uint64
+	accountLoaded bool
+	nodeIDs       map[uint64]bool
+}
+
+func (c *replacementCandidates) accounts(ctx context.Context, s *Service, experiment model.ProbeExperiment) ([]uint64, error) {
+	if !c.accountLoaded {
+		ids, err := s.eligibleProbeAccounts(ctx, experiment)
+		if err != nil {
+			return nil, err
+		}
+		c.accountIDs, c.accountLoaded = ids, true
+	}
+	return c.accountIDs, nil
+}
+
+func (c *replacementCandidates) nodes(ctx context.Context, s *Service) (map[uint64]bool, error) {
+	if c.nodeIDs == nil {
+		nodes, err := s.comparisonNodes(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.nodeIDs = nodes
+	}
+	return c.nodeIDs, nil
+}
+
 func summarizePlanningProgress(tasks []registry.ProbeTaskView) planningProgress {
 	r := assessExperiment(tasks, policyFor(DefaultConfig(), time.Time{}))
 	return planningProgressFor(r)
@@ -44,7 +75,7 @@ func maxJuryAttempts(target int) int {
 // node that already produced valid degraded evidence. The baseline is also
 // excluded. This preserves the task history while ensuring a transport error
 // does not consume the evidence slot forever.
-func (s *Service) replaceAccountComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config) (int, error) {
+func (s *Service) replaceAccountComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config, available *replacementCandidates) (int, error) {
 	if s.dispatcher == nil || summary.DiffTasks >= maxDifferentialAttempts(cfg.AccountNeedExits) {
 		return 0, nil
 	}
@@ -73,7 +104,7 @@ func (s *Service) replaceAccountComparisons(ctx context.Context, record registry
 	if needed <= 0 {
 		return 0, nil
 	}
-	nodes, err := s.comparisonNodes(ctx)
+	nodes, err := available.nodes(ctx, s)
 	if err != nil {
 		return 0, err
 	}
@@ -97,7 +128,7 @@ func (s *Service) replaceAccountComparisons(ctx context.Context, record registry
 	spec, err := s.withControls(ctx, DispatchSpec{
 		CaseID: record.ID, Defendant: caseDefendant(parties), BaselineExit: baseline,
 		HealthyExits: replacementSpec.HealthyExits,
-	}, baseline, casePolicy(record, cfg))
+	}, baseline, casePolicy(record, cfg), available)
 	if err != nil {
 		return 0, err
 	}
@@ -118,7 +149,7 @@ func (s *Service) replaceAccountComparisons(ctx context.Context, record registry
 // differential exits. This is not needed for a clean four-account jury, but it
 // replaces incomplete controls without discarding the original measurements. Identity-group and quality eligibility rules are
 // applied again, so a replacement is an independent Build witness.
-func (s *Service) replaceExitComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config) (int, error) {
+func (s *Service) replaceExitComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config, available *replacementCandidates) (int, error) {
 	if s.dispatcher == nil || summary.JuryTasks >= maxJuryAttempts(cfg.ExitNeedN) || summary.JuryTotal >= cfg.ExitNeedN {
 		return 0, nil
 	}
@@ -146,7 +177,7 @@ func (s *Service) replaceExitComparisons(ctx context.Context, record registry.Ca
 		groupID, _ := s.registry.IdentityGroupOf(task.Juror)
 		seenGroups[groupID] = struct{}{}
 	}
-	accounts, err := s.eligibleProbeAccounts(ctx, casePolicy(record, cfg).Experiment)
+	accounts, err := available.accounts(ctx, s, casePolicy(record, cfg).Experiment)
 	if err != nil {
 		return 0, err
 	}
@@ -173,7 +204,7 @@ func (s *Service) replaceExitComparisons(ctx context.Context, record registry.Ca
 	}
 	spec, err := s.withControls(ctx, DispatchSpec{
 		CaseID: record.ID, Defendant: defendant, CoRemandedExits: []model.EpochKey{baseline}, Jurors: jurors,
-	}, baseline, casePolicy(record, cfg))
+	}, baseline, casePolicy(record, cfg), available)
 	if err != nil {
 		return 0, err
 	}
@@ -191,11 +222,12 @@ func (s *Service) replaceExitComparisons(ctx context.Context, record registry.Ca
 }
 
 func (s *Service) replaceMissingComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config) (int, error) {
-	differential, err := s.replaceAccountComparisons(ctx, record, parties, tasks, summary, cfg)
+	available := &replacementCandidates{}
+	differential, err := s.replaceAccountComparisons(ctx, record, parties, tasks, summary, cfg, available)
 	if err != nil {
 		return differential, err
 	}
-	jury, err := s.replaceExitComparisons(ctx, record, parties, tasks, summary, cfg)
+	jury, err := s.replaceExitComparisons(ctx, record, parties, tasks, summary, cfg, available)
 	return differential + jury, err
 }
 

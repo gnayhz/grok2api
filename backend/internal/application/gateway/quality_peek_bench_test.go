@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 )
 
 // This measures the live request path: healthy evidence arrives in the first
@@ -25,5 +27,18 @@ func BenchmarkGuardHealthyPeek(b *testing.B) {
 				replay.Close()
 			}
 		})
+	}
+}
+
+func BenchmarkGuardCanonicalHealthyPeek(b *testing.B) {
+	payload := benchResponsesStream(250)
+	b.ReportAllocs()
+	for b.Loop() {
+		body := responseflow.New(io.NopCloser(strings.NewReader(payload)), nil)
+		replay, verdict, _, err := peekQualityStream(context.Background(), body, qualityProtocolResponses, QualityRetryRuntime{})
+		if err != nil || verdict != QualityDeliver {
+			b.Fatalf("verdict=%s err=%v", verdict, err)
+		}
+		_ = replay.Close()
 	}
 }

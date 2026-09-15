@@ -47,6 +47,8 @@ export const experimentZh = {
 	thresholds:
 		"本案规则：账号质量异常至少跨 {{account}} 个独立路径复现；重复响应异常至少跨 {{transport}} 个路径且同路径正常账号通过。涉案出口需 {{jury}} 个独立账号参与对照，至少 {{degraded}} 个在该出口异常、在比较出口恢复；案件账号也需在比较出口恢复。有效反证不能被票数抵消。",
 	closure: {
+		experiment_unsupported: "实验规格不受支持，未完成归因",
+		investigation_unavailable: "调查对象不可用",
 		evidence_complete: "对照证据满足规则",
 		deadline_reached: "调查时限已到",
 		candidates_exhausted: "可用对照或测试预算已用尽",
@@ -94,7 +96,7 @@ export const experimentZh = {
 		"unknown/completion/error": "响应完成状态未确认",
 		"local/completion/deadline": "测试超过完成时限",
 
-		clean: "正常放行",
+		clean: "已观察到思考特征",
 		degraded: "质量降智",
 		error: "未取得可判定响应",
 		pending: "排队中",
@@ -126,7 +128,7 @@ export const experimentZh = {
 		account_missing: "案件账号已不存在",
 		unsupported_protocol: "此案件使用旧实验规则，现已停止自动归因",
 		experiment_baseline_missing: "原始异常缺少完整实验条件，无法开展可比取证",
-		experiment_profile_unsupported: "当前探针无法复现原请求的工具或协议配置",
+		experiment_profile_unsupported: "旧版实验不支持原请求的工具或协议配置",
 		unsupported_experiment_version: "此案件的测试样本版本已不再支持",
 		experiment_sample_unknown: "此案件的测试样本不可用",
 	},
@@ -153,7 +155,7 @@ export const experimentZh = {
 		physical_identity_unverified: "部分测试缺少可核实的实际调用身份，已排除。",
 		mixed_guard_policies: "测试使用了不同的守卫策略，无法合并归因。",
 		experiment_baseline_missing: "原始异常缺少完整实验条件。",
-		experiment_profile_unsupported: "当前探针无法复现原始工具或协议配置。",
+		experiment_profile_unsupported: "旧版实验不支持原始工具或协议配置。新立案件使用思考流特征探针。",
 		incident_path_unverified:
 			"部分涉案出口测试的实际路径未核实，不能作为同出口对照。",
 		incident_exit_changed:
@@ -227,6 +229,8 @@ export const experimentEn = {
 	thresholds:
 		"Account: {{account}} independent paths with reproduced degradation, or {{transport}} repeated response failures with clean matched controls. Exit: {{jury}} independent accounts with {{degraded}} degrading only on the incident exit, plus defendant recovery elsewhere. Valid counterevidence cannot be outweighed by counts.",
 	closure: {
+		experiment_unsupported: "Unsupported experiment; attribution unavailable",
+		investigation_unavailable: "Investigation subject unavailable",
 		evidence_complete: "Evidence meets protocol",
 		deadline_reached: "Investigation deadline reached",
 		candidates_exhausted: "Eligible controls or attempt budget exhausted",
@@ -276,7 +280,7 @@ export const experimentEn = {
 		"unknown/completion/error": "Response completion unconfirmed",
 		"local/completion/deadline": "Measurement completion deadline reached",
 
-		clean: "Clean response",
+		clean: "Thinking evidence observed",
 		degraded: "Quality degraded",
 		error: "No classifiable response",
 		pending: "Queued",
@@ -312,7 +316,7 @@ export const experimentEn = {
 		account_missing: "Incident account no longer exists",
 		unsupported_protocol: "Automatic attribution stopped for this older experiment protocol",
 		experiment_baseline_missing: "The original anomaly lacks a complete experiment specification",
-		experiment_profile_unsupported: "The probe cannot reproduce the original tool or protocol configuration",
+		experiment_profile_unsupported: "The legacy experiment does not support the original tool or protocol configuration",
 		unsupported_experiment_version: "The saved sample version is no longer supported",
 		experiment_sample_unknown: "The saved test sample is unavailable",
 	},
@@ -339,7 +343,7 @@ export const experimentEn = {
 		physical_identity_unverified: "Tests without verifiable physical identities were excluded.",
 		mixed_guard_policies: "Different guard policies cannot be combined for attribution.",
 		experiment_baseline_missing: "The original anomaly lacks a complete experiment specification.",
-		experiment_profile_unsupported: "The original tool or protocol configuration cannot be reproduced.",
+		experiment_profile_unsupported: "The legacy experiment does not support this tool or protocol configuration. New cases use thinking-stream probes.",
 		incident_path_unverified:
 			"Some incident-exit measurements lack a verified path.",
 		incident_exit_changed:

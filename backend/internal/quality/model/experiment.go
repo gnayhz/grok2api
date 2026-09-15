@@ -2,16 +2,17 @@ package model
 
 import (
 	"context"
-	"hash/fnv"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 )
 
-const ProbeExperimentVersion = "reasoning-capability-v1"
+const ProbeExperimentVersion = "thinking-presence-v2"
+const LegacyProbeExperimentVersion = "reasoning-capability-v1"
 
-// ProbeExperiment freezes the trigger and normalized configuration. It measures
-// reasoning-channel capability under a synthetic sample, not answer correctness
-// or replay equivalence to private user content.
+// ProbeExperiment retains the trigger as provenance. New experiments measure
+// account/path thinking-stream presence with a standard profile, independently of
+// the trigger's tools, effort or client protocol. Legacy experiments retain
+// their original matching rules.
 type ProbeExperiment struct {
 	Version        string               `json:"version"`
 	TriggerEventID string               `json:"trigger_event_id"`
@@ -20,21 +21,21 @@ type ProbeExperiment struct {
 }
 
 func NewProbeExperiment(obs Observation) ProbeExperiment {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(obs.Attempt.ID))
-	samples := [...]string{"inventory", "ordering", "distances"}
-	return ProbeExperiment{Version: ProbeExperimentVersion, TriggerEventID: obs.EventID, Baseline: obs.Attempt, Sample: samples[h.Sum32()%uint32(len(samples))]}
+	return ProbeExperiment{Version: ProbeExperimentVersion, TriggerEventID: obs.EventID, Baseline: obs.Attempt, Sample: "brief-confirmation"}
 }
 
 func (s ProbeExperiment) UnsupportedReason() string {
-	if s.Version != ProbeExperimentVersion {
+	if s.Version != ProbeExperimentVersion && s.Version != LegacyProbeExperimentVersion {
 		return "unsupported_experiment_version"
 	}
 	p := s.Baseline.Profile
-	if s.TriggerEventID == "" || s.Baseline.ID == "" || s.Baseline.Provider != "grok_build" || s.Baseline.Model == "" || s.Baseline.RuleVersion == "" || !p.Known {
+	if s.TriggerEventID == "" || s.Baseline.ID == "" || s.Baseline.Provider != "grok_build" || s.Baseline.Model == "" || s.Baseline.RuleVersion == "" {
 		return "experiment_baseline_missing"
 	}
-	if p.Protocol != "responses" || p.Tools {
+	if s.Version == LegacyProbeExperimentVersion && !p.Known {
+		return "experiment_baseline_missing"
+	}
+	if s.Version == LegacyProbeExperimentVersion && (p.Protocol != "responses" || p.Tools) {
 		return "experiment_profile_unsupported"
 	}
 	if s.Prompt() == "" {
@@ -43,7 +44,24 @@ func (s ProbeExperiment) UnsupportedReason() string {
 	return ""
 }
 
+// Profile is the complete measurement contract shared by main and control
+// probes. Baseline.Profile remains the unmodified production observation.
+func (s ProbeExperiment) Profile() attemptmeta.Profile {
+	p := attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "low"}
+	if s.Version == LegacyProbeExperimentVersion {
+		p = s.Baseline.Profile
+	}
+	p.Experiment, p.Sample = s.Version, s.Sample
+	return p
+}
+
 func (s ProbeExperiment) Prompt() string {
+	if s.Version == ProbeExperimentVersion {
+		if s.Sample == "brief-confirmation" {
+			return "Please reply with a brief greeting."
+		}
+		return ""
+	}
 	switch s.Sample {
 	case "inventory":
 		return "Reason through this inventory problem step by step: a box starts with 17 red and 23 blue counters. Remove 5 red counters, add twice as many blue counters as the red counters remaining, then remove 9 blue counters. How many counters remain in total? Give the final count."
@@ -57,9 +75,9 @@ func (s ProbeExperiment) Prompt() string {
 }
 
 func (s ProbeExperiment) Matches(actual attemptmeta.Identity) bool {
-	b, p := s.Baseline, actual.Profile
+	b, p, expected := s.Baseline, actual.Profile, s.Profile()
 	return s.UnsupportedReason() == "" && actual.Provider == b.Provider && actual.Model == b.Model && actual.Revision == b.Revision && actual.RuleVersion == b.RuleVersion &&
-		p.Known && p.Protocol == b.Profile.Protocol && p.ReasoningEffort == b.Profile.ReasoningEffort && p.Tools == b.Profile.Tools && p.Experiment == s.Version && p.Sample == s.Sample
+		p == expected
 }
 
 type probeExperimentKey struct{}

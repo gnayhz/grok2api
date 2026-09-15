@@ -105,7 +105,11 @@ func (s *Service) advanceInvestigations(ctx context.Context, source EvidenceSour
 			if ctx.Err() != nil {
 				return stats, errors.Join(append(errs, ctx.Err())...)
 			}
-			caseCtx, cancel := context.WithTimeout(ctx, evaluationCaseBudget(ctx, len(records)-i))
+			budget := evaluationCaseBudget(ctx, len(records)-i)
+			if group == 1 {
+				budget = activeCaseBudget(ctx, len(records)-i)
+			}
+			caseCtx, cancel := context.WithTimeout(ctx, budget)
 			err := s.registry.AdvanceEvaluationCursor(caseCtx, record.ID, group == 0)
 			var verdict model.Verdict
 			var retried int
@@ -154,7 +158,16 @@ func (s *Service) advanceInvestigations(ctx context.Context, source EvidenceSour
 // second spent on any case. Persistent rotation handles more work than a pass
 // can finish; shrinking the caller budget does not disable fault isolation.
 func evaluationCaseBudget(ctx context.Context, remaining int) time.Duration {
-	budget := time.Second
+	return boundedCaseBudget(ctx, remaining, time.Second)
+}
+
+// Candidate reads for active investigations may cover a large fleet. They
+// have a separate finite budget after expired cases have had their turn.
+func activeCaseBudget(ctx context.Context, remaining int) time.Duration {
+	return boundedCaseBudget(ctx, remaining, 5*time.Second)
+}
+
+func boundedCaseBudget(ctx context.Context, remaining int, budget time.Duration) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
 		share := time.Until(deadline) / time.Duration(min(remaining, 4)+1)
 		if share < budget {
@@ -208,13 +221,16 @@ func (s *Service) advanceExperiment(ctx context.Context, record registry.CaseRec
 	closure := "evidence_complete"
 	defendant := caseDefendant(parties)
 	if defendant == 0 || (s.accountExists != nil && !s.accountExists(ctx, defendant)) {
+		closure = "investigation_unavailable"
 		report.Verdict = model.VerdictInsufficient
 		report.Reason = "account_missing"
 	} else if policy.Experiment.Version != "" && policy.Experiment.UnsupportedReason() != "" {
+		closure = "experiment_unsupported"
 		report.Verdict = model.VerdictInsufficient
 		report.Reason = policy.Experiment.UnsupportedReason()
 		report.Limitations = appendUnique(report.Limitations, report.Reason)
 	} else if policy.Version != ProtocolVersion {
+		closure = "experiment_unsupported"
 		report.Verdict = model.VerdictInsufficient
 		report.Reason = "unsupported_protocol"
 	} else {
@@ -337,14 +353,22 @@ func (s *Service) advanceExperiment(ctx context.Context, record registry.CaseRec
 	return report.Verdict, 0, factErr
 }
 
-func (s *Service) withControls(ctx context.Context, spec DispatchSpec, baseline model.EpochKey, policy ExperimentPolicy) (DispatchSpec, error) {
+func (s *Service) withControls(ctx context.Context, spec DispatchSpec, baseline model.EpochKey, policy ExperimentPolicy, candidates *replacementCandidates) (DispatchSpec, error) {
+	if !s.isCurrentExitEpoch(baseline) {
+		return spec, nil
+	}
 	snapshot := s.evidence.SnapshotWindow(time.Now().UTC())
-	candidates, err := s.dispatchSpecFor(ctx, spec.CaseID, spec.Defendant, baseline, s.evidence.CrossValidate(snapshot), policy)
+	accounts, err := candidates.accounts(ctx, s, policy.Experiment)
 	if err != nil {
 		return spec, err
 	}
-	spec.ControlAccounts = candidates.Jurors
-	spec.ControlExits = candidates.HealthyExits
+	nodes, err := candidates.nodes(ctx, s)
+	if err != nil {
+		return spec, err
+	}
+	controls := s.dispatchSpecFromCandidates(spec.CaseID, spec.Defendant, baseline, s.evidence.CrossValidate(snapshot), policy, accounts, nodes)
+	spec.ControlAccounts = controls.Jurors
+	spec.ControlExits = controls.HealthyExits
 	return spec, nil
 }
 

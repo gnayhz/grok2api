@@ -339,12 +339,13 @@ func TestPeekQualityBodyClassifiesRealShapes(t *testing.T) {
 	}
 }
 
-// 零证据截止锁定（实测：降智静默期 75-121s，干净证据 2.1s）。
+// 首事件之后持续没有证据时，由独立的证据预算结束尝试。
 func TestPeekEvidenceTimeoutBoundsSilentDegradedStream(t *testing.T) {
 	t.Parallel()
 	cfg := QualityRetryRuntime{Enabled: true, EvidenceTimeout: 150 * time.Millisecond}
 	reader, writer := io.Pipe()
 	go func() {
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.created\"}\n\n"))
 		time.Sleep(600 * time.Millisecond) // 静默期远超截止
 		_, _ = writer.Write([]byte(`data: {"type":"response.output_text.delta","delta":"word word word word"}` + "\n\n"))
 		_ = writer.Close()

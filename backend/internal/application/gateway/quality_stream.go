@@ -161,14 +161,8 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 	state := qualityScanState{kernel: cfg.kernel, protocol: protocol, startedAt: time.Now()}
 	held := responsebuffer.New(responsebuffer.FromContext(ctx), qualityHoldMaxBufferBytes)
 	frameOffset := 0
-	// Independent liveness deadlines bound silent upstream reads. They never
-	// establish degradation; decisive protocol evidence returns immediately.
-	evidenceTimer := time.NewTimer(cfg.EvidenceTimeout)
-	defer evidenceTimer.Stop()
-	// 首事件截止：零 data 事件（keepalive 不算）。仅当本截止短于证据截止
-	// 时更早触发；默认 5s>3.5s 时空流由证据截止先赢。
-	createdTimer := time.NewTimer(cfg.CreatedTimeout)
-	defer createdTimer.Stop()
+	liveness := newQualityLivenessTimer(cfg)
+	defer liveness.timer.Stop()
 	emit := func(replay io.ReadCloser, verdict QualityVerdict, usage Usage, err error) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
 		if ctx.Err() != nil {
 			verdict, err = QualityWait, qualityPeekAbortError(ctx, ctx.Err())
@@ -190,21 +184,12 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 		case <-ctx.Done():
 			_ = pump.Close()
 			return emit(held.Body(), QualityWait, state.usage, qualityPeekAbortError(ctx, ctx.Err()))
-		case <-evidenceTimer.C:
-			// 截止触发时仍零思考证据、零可见/聚合输出、非语义输出流：该次
-			// 尝试按零证据超时中止（服务端走空闲冷却+RSC 归因+重试）。已有
-			// 任何输出或证据的流不受影响（证据提前放行/输出达到阈值扣留）。
-			if !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.semanticOutput {
+		case <-liveness.timer.C:
+			// Timeouts are inconclusive. Useful output retains its existing
+			// evidence rules and the request-wide admission deadline.
+			if timeout := liveness.timeout(); timeout != nil && !state.hasThinking && state.visibleRunes == 0 && state.aggregateRunes == 0 && !state.semanticOutput {
 				_ = pump.Close()
-				return emit(held.Body(), QualityWait, state.usage, errQualityEvidenceTimeout)
-			}
-		case <-createdTimer.C:
-			// 首事件截止：连一个 data 事件都没到（keepalive 注释不算）。降智
-			// 排队期间的真实形态（直连复测 68-125s 零 data 事件）。中止该次
-			// 尝试走空闲路径；任何 data 事件已到达则本截止失效（由证据截止接管）。
-			if !state.sawDataEvent {
-				_ = pump.Close()
-				return emit(held.Body(), QualityWait, state.usage, errQualityCreatedTimeout)
+				return emit(held.Body(), QualityWait, state.usage, timeout)
 			}
 		case result, ok := <-pump.results:
 			if !ok {
@@ -224,9 +209,15 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 					}
 					return emit(newPrefixReplay(held, pump), QualityWait, state.usage, err)
 				}
+				sawData := state.sawDataEvent
 				consumed, verdict, scanErr := scanQualityLines(&state, held.Bytes()[frameOffset:], searched, &cfg)
 				frameOffset += consumed
 				state.pending = held.Bytes()[frameOffset:] // Borrow only; EOF may complete this final line.
+				if !sawData && state.sawDataEvent {
+					if err := liveness.observeData(); err != nil {
+						return emit(newPrefixReplay(held, pump), QualityWait, state.usage, err)
+					}
+				}
 				if verdict != QualityWait || scanErr != nil {
 					// Preserve the unobserved suffix for a healthy response's exact replay.
 					if verdict == QualityDeliver {

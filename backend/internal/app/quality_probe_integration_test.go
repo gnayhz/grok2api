@@ -63,7 +63,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				if body.Input != spec.Prompt() || body.Model != "grok-4.6" || body.Reasoning.Effort != "high" {
+				if body.Input != spec.Prompt() || body.Model != "grok-4.6" || body.Reasoning.Effort != spec.Profile().ReasoningEffort {
 					t.Errorf("probe experiment changed: %+v", body)
 				}
 				if onRequest != nil {
@@ -273,7 +273,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 			wantResult := model.ProbeResultError
 			wantVerified := false
 			switch scenario {
-			case "clean", "legacy_baseline", "identity_changed":
+			case "clean", "legacy_baseline", "identity_changed", "incomplete":
 				wantCalls = 1
 				wantState = model.ProbeDone
 				wantResult = model.ProbeResultClean
@@ -285,7 +285,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 				wantVerified = true
 			case "stale_before", "policy_changed", "epoch_read_failed_before":
 				wantCalls = 0
-			case "incomplete", "stale_inflight", "epoch_read_failed_after_primary":
+			case "stale_inflight", "epoch_read_failed_after_primary":
 				wantCalls = 1
 			case "cancel_primary":
 				wantCalls = 1
@@ -332,7 +332,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 			if scenario == "server_error_with_control" {
 				wantTransport = 1
 			}
-			if scenario == "clean" || scenario == "legacy_baseline" || scenario == "identity_changed" {
+			if scenario == "clean" || scenario == "legacy_baseline" || scenario == "identity_changed" || scenario == "incomplete" {
 				wantClean = 1
 			}
 			group := assessment.Account

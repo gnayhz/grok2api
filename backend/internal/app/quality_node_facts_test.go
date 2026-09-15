@@ -179,7 +179,7 @@ func TestQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 					value.ID = fmt.Sprintf("%s-%d", label, task.ID)
 					value.AccountID = accountID
 					value.Path = attemptmeta.Path{NodeID: nodeID, Epoch: epoch, Status: attemptmeta.PathRegistered}
-					value.Profile.Experiment, value.Profile.Sample = task.Experiment.Version, task.Experiment.Sample
+					value.Profile = task.Experiment.Profile()
 					return value
 				}
 				accountID := task.DefendantAccountID

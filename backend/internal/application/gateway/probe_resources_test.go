@@ -84,9 +84,9 @@ func TestProbeBudgetAndIdentityAreSharedAcrossSelectors(t *testing.T) {
 	}
 }
 
-func TestFrozenProbeSelectsOriginalModelAndNormalizedEffort(t *testing.T) {
+func TestFrozenProbeSelectsOriginalModelAndStandardProfile(t *testing.T) {
 	baseline := attemptmeta.Identity{ID: "trigger/1", Provider: "grok_build", Model: "grok-4.6", RuleVersion: "rules", Revision: 3,
-		Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "high"}}
+		Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "xhigh", Tools: true}}
 	spec := qualitymodel.NewProbeExperiment(qualitymodel.Observation{EventID: "trigger/1/admission", Attempt: baseline})
 	ctx := qualitymodel.WithProbeExperiment(context.Background(), spec)
 	resolver := &pagedQualityProbeRouteResolver{routes: []modeldomain.Route{
@@ -103,7 +103,9 @@ func TestFrozenProbeSelectsOriginalModelAndNormalizedEffort(t *testing.T) {
 		t.Fatal(err)
 	}
 	var body struct {
-		Input     string `json:"input"`
+		Input     string            `json:"input"`
+		Tools     []json.RawMessage `json:"tools"`
+		MaxOutput int               `json:"max_output_tokens"`
 		Reasoning struct {
 			Effort string `json:"effort"`
 		} `json:"reasoning"`
@@ -111,7 +113,7 @@ func TestFrozenProbeSelectsOriginalModelAndNormalizedEffort(t *testing.T) {
 	if err := json.Unmarshal(request.Body, &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Input != spec.Prompt() || body.Reasoning.Effort != "high" {
+	if body.Input != spec.Prompt() || body.Reasoning.Effort != "low" || len(body.Tools) != 0 || body.MaxOutput != 128 {
 		t.Fatalf("experiment changed: %+v", body)
 	}
 	resolver.routes = resolver.routes[:1]

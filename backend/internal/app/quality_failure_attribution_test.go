@@ -59,7 +59,7 @@ func TestInternalAndLegacyProbeErrorsCannotSentenceAccount(t *testing.T) {
 			identity := func(label string, accountID, nodeID uint64) attemptmeta.Identity {
 				v := baseline
 				v.ID, v.AccountID, v.Path.NodeID = label, accountID, nodeID
-				v.Profile.Experiment, v.Profile.Sample = spec.Version, spec.Sample
+				v.Profile = spec.Profile()
 				return v
 			}
 			for i := uint64(1); i <= 7; i++ {

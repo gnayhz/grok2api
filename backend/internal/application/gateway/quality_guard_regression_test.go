@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 )
 
 func TestGuardDecisionIndependentOfReadBoundaries(t *testing.T) {
@@ -214,11 +216,19 @@ func TestGuardUnknownVerdictCannotCommit(t *testing.T) {
 func TestGuardCancelledContextDoesNotReadOrDeliver(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	raw := &guardCancelledBody{}
-	replay, verdict, _, err := peekQualityStream(ctx, raw, qualityProtocolResponses, QualityRetryRuntime{})
-	replay.Close()
-	if verdict != QualityWait || !errors.Is(err, context.Canceled) || !raw.closed || raw.read {
-		t.Fatalf("verdict=%s err=%v read=%v closed=%v", verdict, err, raw.read, raw.closed)
+	for _, mode := range []string{"bytes", "canonical"} {
+		t.Run(mode, func(t *testing.T) {
+			raw := &guardCancelledBody{}
+			var body io.ReadCloser = raw
+			if mode == "canonical" {
+				body = responseflow.New(raw, nil)
+			}
+			replay, verdict, _, err := peekQualityStream(ctx, body, qualityProtocolResponses, QualityRetryRuntime{})
+			replay.Close()
+			if verdict != QualityWait || !errors.Is(err, context.Canceled) || !raw.closed || raw.read {
+				t.Fatalf("verdict=%s err=%v read=%v closed=%v", verdict, err, raw.read, raw.closed)
+			}
+		})
 	}
 }
 
@@ -275,53 +285,59 @@ func TestGuardReleasesBlockedHTTPUpstream(t *testing.T) {
 		{"evidence timeout", `data: {"type":"response.created"}`, QualityWait, errQualityEvidenceTimeout},
 		{"canceled", `data: {"type":"response.created"}`, QualityWait, context.Canceled},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			disconnected, shutdown := make(chan struct{}), make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, tc.prefix+"\n\n")
-				w.(http.Flusher).Flush()
-				select {
-				case <-r.Context().Done():
-					close(disconnected)
-				case <-shutdown:
+		for _, mode := range []string{"bytes", "canonical"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				disconnected, shutdown := make(chan struct{}), make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, tc.prefix+"\n\n")
+					w.(http.Flusher).Flush()
+					select {
+					case <-r.Context().Done():
+						close(disconnected)
+					case <-shutdown:
+					}
+				}))
+				defer server.Close()
+				defer close(shutdown)
+				client := server.Client()
+				client.Timeout = 3 * time.Second
+				response, err := client.Get(server.URL)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}))
-			defer server.Close()
-			defer close(shutdown)
-			client := server.Client()
-			client.Timeout = 3 * time.Second
-			response, err := client.Get(server.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer response.Body.Close()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			cfg := QualityRetryRuntime{CreatedTimeout: 2 * time.Second, EvidenceTimeout: 2 * time.Second}
-			switch tc.wantErr {
-			case errQualityCreatedTimeout:
-				cfg.CreatedTimeout = 25 * time.Millisecond
-			case errQualityEvidenceTimeout:
-				cfg.EvidenceTimeout = 25 * time.Millisecond
-			case context.Canceled:
-				cancel()
-			}
-			replay, verdict, _, err := peekQualityStream(ctx, response.Body, qualityProtocolResponses, cfg)
-			if replay != nil {
-				defer replay.Close()
-			}
-			if verdict != tc.verdict || !errors.Is(err, tc.wantErr) {
-				t.Fatalf("verdict=%s err=%v; want %s %v", verdict, err, tc.verdict, tc.wantErr)
-			}
-			if verdict == QualityDeliver {
-				_ = replay.Close() // A client may abandon an accepted stream immediately.
-			}
-			select {
-			case <-disconnected:
-			case <-time.After(time.Second):
-				t.Fatal("blocked HTTP upstream remained connected after the attempt ended")
-			}
-		})
+				defer response.Body.Close()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				cfg := QualityRetryRuntime{CreatedTimeout: 2 * time.Second, EvidenceTimeout: 2 * time.Second}
+				switch tc.wantErr {
+				case errQualityCreatedTimeout:
+					cfg.CreatedTimeout = 25 * time.Millisecond
+				case errQualityEvidenceTimeout:
+					cfg.EvidenceTimeout = 25 * time.Millisecond
+				case context.Canceled:
+					cancel()
+				}
+				var body io.ReadCloser = response.Body
+				if mode == "canonical" {
+					body = responseflow.New(body, nil)
+				}
+				replay, verdict, _, err := peekQualityStream(ctx, body, qualityProtocolResponses, cfg)
+				if replay != nil {
+					defer replay.Close()
+				}
+				if verdict != tc.verdict || !errors.Is(err, tc.wantErr) {
+					t.Fatalf("verdict=%s err=%v; want %s %v", verdict, err, tc.verdict, tc.wantErr)
+				}
+				if verdict == QualityDeliver {
+					_ = replay.Close() // A client may abandon an accepted stream immediately.
+				}
+				select {
+				case <-disconnected:
+				case <-time.After(time.Second):
+					t.Fatal("blocked HTTP upstream remained connected after the attempt ended")
+				}
+			})
+		}
 	}
 }

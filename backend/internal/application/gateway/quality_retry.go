@@ -41,14 +41,12 @@ var (
 	errQualityHoldLimit = errors.New("上游响应超出质量守卫缓冲上限")
 	errQualityBodyShape = errors.New("上游响应不是可识别的推理响应")
 	errQualityChoices   = errors.New("质量守卫仅支持单个响应选项")
-	// errQualityEvidenceTimeout 标记流式零证据截止：静默期超过预算仍无
+	// errQualityEvidenceTimeout 标记首个 data 事件之后超过预算仍无
 	// 思考证据且无可见输出。按空闲路径处理（短冷却+重试），
 	// 不计入 missing-thinking 惩罚，也不作为指纹熔断。
 	errQualityEvidenceTimeout = errors.New("上游流式响应零证据超时")
-	// errQualityCreatedTimeout 标记首事件截止：静默期内连一个 SSE data
-	// 事件都未到达（直连复测：降智排队期间上游只发 keepalive 注释或不发
-	// 任何字节，response.created 要等 68-125s；clean 恒定 0.8-2.2s）。按
-	// 空闲路径处理（短冷却+重试）。
+	// errQualityCreatedTimeout 标记首事件截止：预算内没有 SSE data
+	// 事件到达，keepalive 注释不算。按空闲路径处理，不作为降智证据。
 	errQualityCreatedTimeout = errors.New("上游流式响应首事件超时")
 )
 
@@ -72,14 +70,11 @@ type QualityRetryRuntime struct {
 	// 的 AccountCooldown（二者诱因与置信度不同：空流常与出口 IP 相关）。
 	// 0 = 默认 15m。
 	IdleAccountCooldown time.Duration
-	// EvidenceTimeout 是流式请求的零证据截止（0=默认 3.5s）：静默期超过
-	// 该时长仍无思考证据且无任何可见输出时中止该次尝试。降智流已被
-	// item.done 零延迟拦截截胡，该截止仅是网络假死/静默丢包的防死锁兜底。
+	// EvidenceTimeout 从首个 SSE data 事件起计时（0=默认 3.5s），
+	// 超时仍无思考证据、可见或语义输出时中止尝试；后续元数据不续期。
 	EvidenceTimeout time.Duration
-	// CreatedTimeout 是流式请求的首事件截止（0=默认 5s）：任何 SSE data
-	// 事件到达前中止该次尝试。直连复测（Python+curl+h2+socks 绕过网关）
-	// 证实该延迟在上游时钟内：clean 0.8-2.2s（与复杂度无关），降智
-	// 68-125s（排队期间仅有 keepalive 注释或零字节）。
+	// CreatedTimeout 从流式准入开始等待首个 SSE data 事件（0=默认 5s）。
+	// 首事件到达后由 EvidenceTimeout 接管；两个阶段都受总准入期限限制。
 	CreatedTimeout time.Duration
 	// ReasoningExpected 是从请求侧解析出的思考期望（resolved effort !=
 	// none；空档视为期望——语料：未指定强度的推理模型对每个回答都会
@@ -482,28 +477,17 @@ func qualityModelGuarded(cfg QualityRetryRuntime, publicModel, upstreamModel str
 	return false
 }
 
-// qualitySearchSilenceBudget 是携带服务端搜索工具的请求在守卫侧的静默
-// 预算：取 24h（事实上的“不截止”），死连接由传输层流空闲超时（Build
-// 默认 2m）兜底。见 service.go 扣留点注释（生产回归）。
+// Enabled tools may produce long legitimate silence. The request-wide tool
+// admission deadline and the Provider stream-idle policy still bound the wait.
 const qualitySearchSilenceBudget = 24 * time.Hour
 
-// qualityHeavyReasoningCreatedBudget：重推理（high/xhigh）请求的首事件预算。
-// 轨迹摸底：high 档出现 P0 排队静默（首事件 >5s），
-// 5s 首事件截止误杀后换号又撞出口冷却 → 502。排队是上游负载行为而非
-// 账号降智（同池同刻 low 档首事件 0-6ms、created 后增量仍即时）。取 30s，
-// 仍远低于传输层流空闲 2m。
+// Heavy reasoning allows more upstream queueing time in each liveness phase.
 const qualityHeavyReasoningCreatedBudget = 30 * time.Second
 
-// qualityLivenessSchedule：请求类感知的活跃度预算制度表（轨迹摸底的
-// 架构产物）。守卫的两条轴正交：证据规则（规则 1/2/3，零延迟，
-// 请求类无关——33+ 捕获含 Console 通道全部同签名）与活跃度截止（排队界，
-// 非降智证据，前提随请求类变化）。表按请求侧信号给预算：
-//
-//	任意启用工具          | 无界    | 无界     | 搜索/函数执行期静默合法，传输层 2m 兜底；证据规则照常
-//	重推理（high/xhigh）  | 30s     | 30s      | P0 排队实测 >5s；created 后干净增量 0-6ms；D-b 由规则 2 定罪
-//	其余                  | 默认 5s | 默认 3.5s| 原始 SSE 首增量 0-6ms（守卫在转换器之前判决）
-//
-// deadline 触发只代表排队界，不构成降智证据；降智判定永远由证据规则承担。
+// qualityLivenessSchedule adjusts sequential first-data/evidence budgets using
+// the normalized request profile. Tool requests use the tool admission budget;
+// high/xhigh use 30s per phase; other requests retain the configured values.
+// Neither phase extends total admission or changes the evidence classifier.
 func qualityLivenessSchedule(body []byte, operation string, cfg QualityRetryRuntime) QualityRetryRuntime {
 	profile := inferencedomain.ReplayPolicyFromRequest(body)
 	search, effort := profile.Tools, profile.ReasoningEffort

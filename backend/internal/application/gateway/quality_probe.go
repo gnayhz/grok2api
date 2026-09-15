@@ -31,11 +31,9 @@ import (
 //     有罪方向,同时洗冤被告账号)。
 // 探针只走 Build 面(I23:Web 与 Build 是不同风控面,探针不得跨面)。
 
-// qualityProbePrompt 探针提示词:必须诱发可见思考——守卫规则 1 的
-// clean 判据是"出现思考增量",而"回答数字 1"这类零思考问题在健康
-// 模型上也会直接出正文(规则 3 误判降智),探针将永远测不出 clean
-// (批8 事故:差分/陪审全 degraded、零 clean、裁决永远无法落地)。
-const qualityProbePrompt = "Think step by step about 13+29, then reply with just the answer number."
+// The probe requests a minimal normal stream; answers are never evaluated.
+const qualityProbePrompt = "Please reply with a brief greeting."
+const qualityProbeMaxOutputTokens = 128
 
 // NodeExitIPResolver 出口取证面(差分路径比对):按地址族
 // 返回活体解析的出口地址。WARP 类出口 IPv4 是共享 CGNAT、每出口身份
@@ -261,8 +259,9 @@ func comparedFamilies(a, b domainegress.ExitAddresses) string {
 	return strings.Join(families, "+")
 }
 
-// A probe reports clean only after admission and successful protocol completion.
-// Degradation can be established early; transport and budget failures abstain.
+// New probes stop as soon as the stream establishes thinking presence. This
+// measurement is independent of generation completion; legacy v1 probes retain
+// their frozen completion requirement.
 func (s *Service) qualityProbeAttempt(ctx context.Context, request provider.ResponseResourceRequest, hold QualityRetryRuntime) (qualitymodel.MeasurementOutcome, string) {
 	result := s.qualityProbeMeasurement(ctx, request, hold)
 	return result.Outcome, result.Reason
@@ -298,9 +297,7 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 	ctx = attemptmeta.WithRequest(ctx, newAuditEventID(), hold.Revision, hold.RuleVersion, hold.pathResolver)
 	ctx = attemptmeta.WithAccount(ctx, request.Credential.ID, string(request.Credential.Provider), request.Model)
 	if frozen {
-		profile := spec.Baseline.Profile
-		profile.Experiment, profile.Sample = spec.Version, spec.Sample
-		ctx = attemptmeta.WithProfile(ctx, profile)
+		ctx = attemptmeta.WithProfile(ctx, spec.Profile())
 	}
 	ctx = infraegress.WithPhysicalCallTrace(ctx, string(request.Credential.Provider), "responses")
 	requestBudget := inferencedomain.NewAttemptBudget(1)
@@ -350,7 +347,7 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 	if responseflow.FromReader(response.Body) == nil {
 		response.Body = resources.own(responseflow.New(response.Body, responsebuffer.FromContext(ctx)))
 	}
-	replay, verdict, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolResponses, hold)
+	replay, verdict, _, fingerprint, peekErr := peekQualityStreamReport(ctx, response.Body, qualityProtocolResponses, hold)
 	replay = resources.own(replay)
 	switch {
 	case peekErr != nil:
@@ -365,8 +362,18 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 		result.Outcome, result.Reason = qualitymodel.MeasurementDegraded, "withheld: no thinking evidence"
 		return result
 	case verdict == QualityDeliver:
-		if err := finishQualityProbe(ctx, replay, resources); err != nil {
-			return fail(probeOperationFailure(ctx, err, qualitymodel.ProbeFailureCompletion), "completion: "+err.Error())
+		if frozen && spec.Version == qualitymodel.LegacyProbeExperimentVersion {
+			if err := finishQualityProbe(ctx, replay, resources); err != nil {
+				return fail(probeOperationFailure(ctx, err, qualitymodel.ProbeFailureCompletion), "completion: "+err.Error())
+			}
+		} else {
+			if !fingerprint.HasThinking {
+				return fail(qualitymodel.ProbeFailureAdmission, "no thinking evidence in delivered probe")
+			}
+			// Close and join the physical reader before persisting its facts.
+			// Do not synthesize response.completed or read the remaining answer.
+			resources.close()
+			result.Reason = "thinking evidence observed"
 		}
 		result.Outcome = qualitymodel.MeasurementClean
 		return result
@@ -415,12 +422,8 @@ func (s *Service) qualityProbeRequest(route modeldomain.Route, credential accoun
 		"model":             route.PublicID,
 		"input":             qualityProbePrompt,
 		"stream":            true,
-		"max_output_tokens": 512,
-		// 校准(批8):健康流量的形状=请求推理后先出思考增量。不带
-		// reasoning 参数的微型请求,健康模型对简单问题直接出正文 →
-		// 守卫规则 3(无思考出正文)误判降智 → 探针永远测不出 clean。
-		// effort 取 low:足以产生思考增量,成本最低;模型不支持时
-		// 由底座 normalizer 按既有语义处理。
+		"max_output_tokens": qualityProbeMaxOutputTokens,
+		// low is the smallest supported level that keeps thinking enabled.
 		"reasoning": map[string]any{"effort": string(modeldomain.ReasoningEffortLow)},
 	})
 	if err != nil {
@@ -476,8 +479,8 @@ func (s *Service) qualityProbeRoute(ctx context.Context) (route modeldomain.Rout
 	return modeldomain.Route{}, errors.New("no enabled reasoning build model")
 }
 
-// qualityProbeRequestForContext keeps a versioned synthetic sample and the
-// original normalized effort. Unsupported profiles cannot silently downgrade.
+// qualityProbeRequestForContext uses the saved synthetic measurement contract,
+// without replaying the trigger's content or enabling its tools.
 func (s *Service) qualityProbeRequestForContext(ctx context.Context, route modeldomain.Route, credential account.Credential, billing *account.Billing) (provider.ResponseResourceRequest, error) {
 	spec, ok := qualitymodel.ProbeExperimentFromContext(ctx)
 	if !ok {
@@ -486,8 +489,12 @@ func (s *Service) qualityProbeRequestForContext(ctx context.Context, route model
 	if reason := spec.UnsupportedReason(); reason != "" {
 		return provider.ResponseResourceRequest{}, errors.New(reason)
 	}
-	body := map[string]any{"model": route.PublicID, "input": spec.Prompt(), "stream": true, "max_output_tokens": 1024}
-	if effort := spec.Baseline.Profile.ReasoningEffort; effort != "" {
+	maxOutput := qualityProbeMaxOutputTokens
+	if spec.Version == qualitymodel.LegacyProbeExperimentVersion {
+		maxOutput = 1024
+	}
+	body := map[string]any{"model": route.PublicID, "input": spec.Prompt(), "stream": true, "max_output_tokens": maxOutput}
+	if effort := spec.Profile().ReasoningEffort; effort != "" {
 		body["reasoning"] = map[string]any{"effort": effort}
 	}
 	raw, err := json.Marshal(body)

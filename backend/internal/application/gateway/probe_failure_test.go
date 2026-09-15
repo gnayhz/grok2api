@@ -43,7 +43,7 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 		{name: "adapter unknown HTTP text", forward: errors.New("HTTP evidence timed out"), want: model.ProbeFailureForward},
 		{name: "admission capacity", read: responsebuffer.ErrExhausted, want: model.ProbeFailureResource},
 		{name: "admission unknown evidence text", read: errors.New("evidence_timeout"), want: model.ProbeFailureAdmission},
-		{name: "completion limit", tail: strings.Repeat(" ", qualityProbeCompletionBytes) + completed, want: model.ProbeFailureResource},
+		{name: "unread answer exceeds old completion limit", tail: strings.Repeat(" ", qualityProbeCompletionBytes) + completed},
 		{name: "persistence after success", tail: completed, persistFailure: true, want: model.ProbeFailurePersistence},
 		{name: "upstream server", status: 503, want: model.ProbeFailureHTTPServer},
 		{name: "upstream credential", status: 401, want: model.ProbeFailureHTTPRejected},
@@ -78,9 +78,22 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 			if test.persistFailure {
 				s.SetQualityEventRecorder(&failingPhysicalRecorder{})
 			}
+			recorder := &physicalEventRecorder{}
+			if test.want == "" {
+				s.SetQualityEventRecorder(recorder)
+			}
 			got := s.qualityProbeMeasurement(context.Background(), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
-			if got.Outcome != model.MeasurementError || got.Failure != test.want {
+			wantOutcome := model.MeasurementError
+			if test.want == "" {
+				wantOutcome = model.MeasurementClean
+			}
+			if got.Outcome != wantOutcome || got.Failure != test.want {
 				t.Fatalf("got %+v, want %s", got, test.want)
+			}
+			if test.want == "" {
+				if len(recorder.facts) != 1 || recorder.facts[0].Status != 200 || recorder.facts[0].BodyBytes == 0 || recorder.facts[0].GenerationOutcome == "completed" {
+					t.Fatalf("early signal lost the exchange or fabricated completion: %+v", recorder.facts)
+				}
 			}
 		})
 	}

@@ -16,7 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
-func TestProbeCleanRequiresCompletedResponse(t *testing.T) {
+func TestLegacyProbeCleanRequiresCompletedResponse(t *testing.T) {
 	thinking := "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n"
 	completed := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"probe\",\"status\":\"completed\"}}\n\n"
 	for _, test := range []struct {
@@ -39,8 +39,14 @@ func TestProbeCleanRequiresCompletedResponse(t *testing.T) {
 			if test.readErr {
 				body.Reader = io.MultiReader(body.Reader, guardReadFailure{})
 			}
-			s := &Service{providers: provider.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }})}
-			outcome, reason := s.qualityProbeAttempt(context.Background(), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
+			identity := attemptmeta.Identity{ID: "fictional-probe", Provider: "grok_build", Model: "grok-4.6", RuleVersion: "fictional-rule", Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "low"}}
+			spec := qualitymodel.ProbeExperiment{Version: qualitymodel.LegacyProbeExperimentVersion, TriggerEventID: "fictional-event", Baseline: identity, Sample: "inventory"}
+			identity.Profile = spec.Profile()
+			source := &changingGuardSource{}
+			source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{RuleVersion: identity.RuleVersion}), Kernel: builtinQualityKernel{}})
+			s := &Service{providers: provider.NewRegistry(identifiedProbeAdapter{qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }}, identity})}
+			s.SetGuardSnapshotSource(source)
+			outcome, reason := s.qualityProbeAttempt(qualitymodel.WithProbeExperiment(context.Background(), spec), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
 			if outcome != test.want || body.closed.Load() != 1 {
 				t.Fatalf("outcome=%s reason=%s closes=%d", outcome, reason, body.closed.Load())
 			}
@@ -48,14 +54,14 @@ func TestProbeCleanRequiresCompletedResponse(t *testing.T) {
 	}
 }
 
-func TestProbeCompletionCancellationClosesPendingRead(t *testing.T) {
+func TestProbeThinkingEvidenceStopsAndClosesUnreadTail(t *testing.T) {
 	idle := newIdleQualityProbeBody()
 	body := &replayReadCloser{Reader: io.MultiReader(strings.NewReader("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n"), idle), source: idle}
 	s := &Service{providers: provider.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }})}
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	outcome, reason := s.qualityProbeAttempt(ctx, provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
-	if outcome != qualitymodel.MeasurementError || !strings.Contains(reason, "completion") {
+	if outcome != qualitymodel.MeasurementClean || ctx.Err() != nil {
 		t.Fatalf("outcome=%s reason=%s", outcome, reason)
 	}
 	select {
@@ -77,7 +83,7 @@ func (a probeIdentityAdapter) ForwardResponse(ctx context.Context, request provi
 	identity := attemptmeta.FromContext(ctx)
 	a.epoch.Store(8)
 	a.source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{Enabled: true, Revision: 42, RuleVersion: "new", GuardedModels: []string{"grok-4.6"}}), Kernel: rejectAllKernel{}})
-	// Multi-line data must be interpreted once by admission and completion.
+	// Admission must stop before assembling the later completion event.
 	raw := "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\ndata: {\"type\":\n" +
 		"data: \"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
 	stream := responseflow.New(io.NopCloser(strings.NewReader(raw)), responsebuffer.FromContext(ctx))
@@ -89,7 +95,7 @@ type probeEpochResolver struct{ epoch *atomic.Uint64 }
 
 func (r probeEpochResolver) PathVersion(uint64) (uint64, bool) { return r.epoch.Load(), true }
 
-func TestProbeFreezesPhysicalPolicyAndSharesCanonicalCompletion(t *testing.T) {
+func TestProbeFreezesPhysicalPolicyAndStopsCanonicalStreamAtEvidence(t *testing.T) {
 	epoch, observed := &atomic.Uint64{}, &atomic.Int64{}
 	epoch.Store(7)
 	source := &changingGuardSource{}
@@ -98,12 +104,53 @@ func TestProbeFreezesPhysicalPolicyAndSharesCanonicalCompletion(t *testing.T) {
 	s.SetGuardSnapshotSource(source)
 	pool := responsebuffer.NewPool(2 << 20)
 	ctx := responsebuffer.WithContext(context.Background(), pool.Request(2<<20))
+	ctx = qualitymodel.WithProbeExperiment(ctx, qualitymodel.NewProbeExperiment(qualitymodel.Observation{EventID: "fictional-event", Attempt: attemptmeta.Identity{
+		ID: "fictional-trigger", Provider: "grok_build", Model: "grok-4.6", Revision: 41, RuleVersion: "original",
+		Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "xhigh", Tools: true},
+	}}))
 	measurement := s.qualityProbeMeasurement(ctx, provider.ResponseResourceRequest{Credential: account.Credential{ID: 11, Provider: account.ProviderBuild}, Model: "grok-4.6"}, QualityRetryRuntime{})
 	outcome, detail, identity := measurement.Outcome, measurement.Reason, measurement.Attempt
 	if outcome != qualitymodel.MeasurementClean || identity.ID == "" || identity.AccountID != 11 || identity.Revision != 41 || identity.RuleVersion != "original" || identity.Path.Epoch != 7 || identity.Path.NodeID != 19 {
 		t.Fatalf("outcome=%s detail=%s identity=%+v", outcome, detail, identity)
 	}
-	if observed.Load() != 2 || pool.Snapshot().Used != 0 {
+	if observed.Load() != 1 || pool.Snapshot().Used != 0 {
 		t.Fatalf("events=%d budget=%+v", observed.Load(), pool.Snapshot())
+	}
+}
+
+// A normalized probe identity is supplied by the real adapter after it submits.
+type identifiedProbeAdapter struct {
+	qualityProbeAttemptAdapter
+	identity attemptmeta.Identity
+}
+
+func (a identifiedProbeAdapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	response, err := a.qualityProbeAttemptAdapter.ForwardResponse(ctx, request)
+	response.Attempt = a.identity
+	return response, err
+}
+
+func TestProbeSignalClassificationDoesNotWaitForAnswer(t *testing.T) {
+	thinking := "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n"
+	for _, tc := range []struct {
+		name, raw string
+		want      qualitymodel.MeasurementOutcome
+	}{
+		{"thinking_only", thinking, qualitymodel.MeasurementClean},
+		{"answer_not_checked", thinking + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fictional wrong answer\"}\n\n", qualitymodel.MeasurementClean},
+		{"later_failure_not_consumed", thinking + "data: {\"type\":\"response.failed\"}\n\n", qualitymodel.MeasurementClean},
+		{"blank_thinking_is_not_evidence", "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\" \"}\n\n", qualitymodel.MeasurementError},
+		{"usage_is_not_evidence", "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":128,\"output_tokens_details\":{\"reasoning_tokens\":128}}}}\n\n", qualitymodel.MeasurementError},
+		{"failure_before_evidence", "data: {\"type\":\"response.failed\"}\n\n", qualitymodel.MeasurementError},
+		{"text_without_thinking", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n", qualitymodel.MeasurementDegraded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &countedBody{Reader: strings.NewReader(tc.raw)}
+			s := &Service{providers: provider.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }})}
+			outcome, reason := s.qualityProbeAttempt(context.Background(), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
+			if outcome != tc.want || body.closed.Load() != 1 {
+				t.Fatalf("outcome=%s reason=%s closes=%d", outcome, reason, body.closed.Load())
+			}
+		})
 	}
 }

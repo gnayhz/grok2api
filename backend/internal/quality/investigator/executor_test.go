@@ -51,7 +51,7 @@ func (r *recordedMeasurements) measure(ctx context.Context, account, baseline, n
 	actual := spec.Baseline
 	actual.ID, actual.AccountID = fmt.Sprintf("physical/%d", len(r.calls)), account
 	actual.Path = attemptmeta.Path{NodeID: node, Epoch: 1, Status: attemptmeta.PathRegistered}
-	actual.Profile.Experiment, actual.Profile.Sample = spec.Version, spec.Sample
+	actual.Profile = spec.Profile()
 	sample := model.ProbeMeasurement{Attempt: actual, Outcome: model.MeasurementDegraded, VerifiedIPChange: baseline != 0, PathKey: fmt.Sprintf("path-%d", node)}
 	if len(r.calls) > 1 {
 		sample.Outcome = model.MeasurementClean
@@ -63,7 +63,7 @@ func (r *recordedMeasurements) measure(ctx context.Context, account, baseline, n
 }
 
 func executorTask(direction model.ProbeDirection) model.ProbeTask {
-	base := attemptmeta.Identity{ID: "opening", AccountID: 7, Provider: "grok_build", Model: "grok-4.6", Revision: 3, RuleVersion: "rules-v1", Path: attemptmeta.Path{NodeID: 8, Epoch: 1, Status: attemptmeta.PathRegistered}, Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "high"}}
+	base := attemptmeta.Identity{ID: "opening", AccountID: 7, Provider: "grok_build", Model: "grok-4.6", Revision: 3, RuleVersion: "rules-v1", Path: attemptmeta.Path{NodeID: 8, Epoch: 1, Status: attemptmeta.PathRegistered}, Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "xhigh", Tools: true}}
 	task := model.ProbeTask{ID: 1, Direction: direction, DefendantAccountID: 7, JurorAccountID: 9, DefendantNodeID: 10, DefendantEpoch: 1, BaselineNodeID: 8, BaselineEpoch: 1, ControlAccountID: 9, ControlNodeID: 10, ControlEpoch: 1, Experiment: model.NewProbeExperiment(model.Observation{EventID: "opening/admission", Attempt: base})}
 	if direction == model.ProbeExitJury {
 		task.DefendantNodeID, task.ControlNodeID = 8, 10
@@ -331,7 +331,10 @@ func TestProbeExecutorRejectsUnsupportedTaskWithoutMeasurement(t *testing.T) {
 	}{
 		{"version", func(v *model.ProbeTask) { v.Experiment.Version = "future" }},
 		{"sample", func(v *model.ProbeTask) { v.Experiment.Sample = "missing" }},
-		{"profile", func(v *model.ProbeTask) { v.Experiment.Baseline.Profile.Tools = true }},
+		{"legacy_profile", func(v *model.ProbeTask) {
+			v.Experiment.Version = model.LegacyProbeExperimentVersion
+			v.Experiment.Baseline.Profile.Tools = true
+		}},
 		{"direction", func(v *model.ProbeTask) { v.Direction = "unknown" }},
 		{"baseline_missing", func(v *model.ProbeTask) { v.BaselineNodeID = 0 }},
 		{"node_missing", func(v *model.ProbeTask) { v.DefendantNodeID = 0 }},

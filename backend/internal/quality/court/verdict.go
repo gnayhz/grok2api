@@ -46,16 +46,22 @@ func marshalEvidence(payload map[string]any) (string, error) {
 // same low IDs are not repeatedly used as witnesses. Replacement rounds use
 // the same dispatch boundary with an explicit, already-filtered candidate set.
 func (s *Service) dispatchSpecFor(ctx context.Context, caseID, defendant uint64, baseline model.EpochKey, estimate evidence.Estimate, policy ExperimentPolicy) (DispatchSpec, error) {
-	spec := DispatchSpec{CaseID: caseID, Defendant: defendant}
 	if !s.isCurrentExitEpoch(baseline) {
-		return spec, nil
+		return DispatchSpec{CaseID: caseID, Defendant: defendant}, nil
 	}
-	spec.BaselineExit = baseline
-
 	nodes, err := s.comparisonNodes(ctx)
 	if err != nil {
-		return spec, err
+		return DispatchSpec{}, err
 	}
+	accounts, err := s.eligibleProbeAccounts(ctx, policy.Experiment)
+	if err != nil {
+		return DispatchSpec{}, err
+	}
+	return s.dispatchSpecFromCandidates(caseID, defendant, baseline, estimate, policy, accounts, nodes), nil
+}
+
+func (s *Service) dispatchSpecFromCandidates(caseID, defendant uint64, baseline model.EpochKey, estimate evidence.Estimate, policy ExperimentPolicy, accounts []uint64, nodes map[uint64]bool) DispatchSpec {
+	spec := DispatchSpec{CaseID: caseID, Defendant: defendant, BaselineExit: baseline}
 	seenNodes := map[uint64]struct{}{baseline.NodeID: {}}
 	seenKeys := map[model.EpochKey]struct{}{baseline: {}}
 	for key, subject := range estimate.Exits {
@@ -84,10 +90,6 @@ func (s *Service) dispatchSpecFor(ctx context.Context, caseID, defendant uint64,
 			accountIDs = append(accountIDs, accountID)
 		}
 	}
-	accounts, err := s.eligibleProbeAccounts(ctx, policy.Experiment)
-	if err != nil {
-		return spec, err
-	}
 	spec.Jurors = s.filterBuildJurors(accountIDs, accounts)
 	spec.Jurors = s.filterIdentityGroupJurors(defendant, spec.Jurors)
 	s.topUpJurorsFromFleet(&spec, accounts, policy.JurySize)
@@ -102,7 +104,7 @@ func (s *Service) dispatchSpecFor(ctx context.Context, caseID, defendant uint64,
 	if len(spec.Jurors) > policy.JurySize {
 		spec.Jurors = spec.Jurors[:policy.JurySize]
 	}
-	return spec, nil
+	return spec
 }
 
 func randomizeDirectDispatch(spec *DispatchSpec) {
