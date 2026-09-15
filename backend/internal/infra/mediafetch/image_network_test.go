@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,6 +114,14 @@ func TestImageSourceOwnsRealNetworkFailureAndRedirectResources(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			picture := imageNetworkBytes(t)
 			entered := make(chan struct{}, 1)
+			// cancel_body 竞态屏障:handler 不得在 FetchImage 返回前退出——
+			// net/http 在 handler 返回时补写 chunked 终止符,若抢在客户端
+			// 感知取消前送达,ReadAll 会以完整空 body 干净返回(CI 实测
+			// cancellation=<nil>)。阻塞在测试持有的 release 上,客户端
+			// 读取的唯一出口就是取消错误。
+			release := make(chan struct{})
+			releaseOnce := sync.OnceFunc(func() { close(release) })
+			defer releaseOnce()
 			fx := newImageNetworkFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				switch scenario {
 				case "relative_redirect":
@@ -146,7 +155,7 @@ func TestImageSourceOwnsRealNetworkFailureAndRedirectResources(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 					w.(http.Flusher).Flush()
 					entered <- struct{}{}
-					<-r.Context().Done()
+					<-release
 					return
 				}
 				w.Header().Set("Content-Type", "image/png")
@@ -192,6 +201,7 @@ func TestImageSourceOwnsRealNetworkFailureAndRedirectResources(t *testing.T) {
 				}
 			}
 			got := <-done
+			releaseOnce()
 			switch scenario {
 			case "success", "relative_redirect":
 				if got.err != nil || !bytes.Equal(got.data, picture) {
