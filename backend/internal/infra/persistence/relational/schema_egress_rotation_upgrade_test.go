@@ -72,7 +72,7 @@ func TestSchemaUpgradesEgressNodeRotationColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	rotatedAt := degradedAt.Add(time.Minute)
-	if err := egressRepo.UpdateEgressNodeRotationState(ctx, 1, &rotatedAt, 1, "canary degraded"); err != nil {
+	if err := seedLegacyEgressRotation(egressRepo, ctx, 1, &rotatedAt, 1, "canary degraded"); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := egressRepo.GetEgressNode(ctx, 1)
@@ -90,7 +90,7 @@ func TestSchemaUpgradesEgressNodeRotationColumns(t *testing.T) {
 	}
 
 	// 未知节点必须返回 NotFound 而非静默成功。
-	if err := egressRepo.UpdateEgressNodeRotationState(ctx, 999, nil, 0, ""); err == nil || err != repository.ErrNotFound {
+	if err := seedLegacyEgressRotation(egressRepo, ctx, 999, nil, 0, ""); err == nil || err != repository.ErrNotFound {
 		t.Fatalf("missing node error = %v", err)
 	}
 }

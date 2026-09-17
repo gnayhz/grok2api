@@ -217,6 +217,54 @@ func TestBackgroundAccountSyncRejectsAfterClose(t *testing.T) {
 	callers.Wait()
 }
 
+func TestBackgroundAccountSyncBoundsWaitingAccountsAndRecoversCapacity(t *testing.T) {
+	s := NewService(nil, nil, nil, nil)
+	s.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.SetBulkPool(batch.NewPool(1))
+	poolHeld := make(chan struct{})
+	releasePool := make(chan struct{})
+	poolDone := make(chan struct{})
+	go func() {
+		defer close(poolDone)
+		_ = s.bulkPool.Do(context.Background(), func(context.Context) error {
+			close(poolHeld)
+			<-releasePool
+			return nil
+		})
+	}()
+	<-poolHeld
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.Close(ctx); err != nil {
+			t.Error(err)
+		}
+		close(releasePool)
+		<-poolDone
+	})
+	// An occupied shared pool must not allow account hints to create an
+	// unbounded collection of waiting goroutines, contexts and timers.
+	for id := uint64(1); id <= 128; id++ {
+		if !s.QueueAccountSync(id) {
+			t.Fatalf("bounded hint %d rejected", id)
+		}
+	}
+	if s.QueueAccountSync(129) {
+		t.Fatal("full refresh queue accepted another account")
+	}
+	if !s.QueueAccountSync(1) {
+		t.Fatal("full queue failed to coalesce an already accepted account")
+	}
+	s.syncRunMu.RLock()
+	first := s.accountSyncRuns[1]
+	s.syncRunMu.RUnlock()
+	first.cancel()
+	<-first.done
+	if !s.QueueAccountSync(129) {
+		t.Fatal("completed hint did not restore capacity")
+	}
+}
+
 func TestBackgroundAccountSyncUsesSharedCapacityAndCancelsWaitingInstance(t *testing.T) {
 	for _, runtime := range []string{"memory", "redis"} {
 		t.Run(runtime, func(t *testing.T) {

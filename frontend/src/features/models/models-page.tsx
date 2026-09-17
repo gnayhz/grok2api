@@ -1,29 +1,21 @@
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { AudioLines, Clapperboard, Image as ImageIcon, MessagesSquare, MessageSquareText, Mic, MoreHorizontal, Paintbrush, Pencil, Plus, Radio, RefreshCw, Search, SquareTerminal, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { z } from "zod";
 
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/shared/ui/alert-dialog";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/shared/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
-import { Label } from "@/shared/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
-import { Switch } from "@/shared/ui/switch";
 import { Spinner } from "@/shared/ui/spinner";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/shared/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { createModel, deleteModel, deleteModels, fetchModelSyncRun, listModelGroups, syncModels, updateModel, updateModelsEnabled } from "@/entities/model/model-api";
+import { deleteModel, deleteModels, fetchModelSyncRun, listModelGroups, syncModels, updateModelsEnabled } from "@/entities/model/model-api";
 import type { ModelEndpointCapability, ModelRouteDTO, ModelRouteGroupDTO } from "@/entities/model/types";
-import { ModelAccountPicker } from "./model-account-picker";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -31,6 +23,8 @@ import { Pagination } from "@/shared/components/pagination";
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
 import { VirtualTableBody } from "@/shared/components/virtual-table-body";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
+import { ModelEditor } from "./model-editor";
+import { useLifetimeMutation } from "@/shared/hooks/use-lifetime-mutation";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime } from "@/shared/lib/format";
 import { showErrorToast } from "@/shared/lib/show-error";
@@ -52,72 +46,34 @@ export function ModelsPage() {
   const [deleting, setDeleting] = useState<ModelRouteGroup | null>(null);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const debouncedSearch = useDebouncedValue(search);
-  const schema = z.object({
-    publicId: z.string().min(1, t("errors.required")),
-    provider: z.enum(["grok_build", "grok_web", "grok_console"]),
-    upstreamModel: z.string().min(1, t("errors.required")),
-    capability: z.enum(["responses", "chat", "image", "image_edit", "video", "tts", "stt", "realtime"]),
-    enabled: z.boolean(),
-    bindingMode: z.boolean(),
-    accountIds: z.array(z.string()),
-  }).refine((value) => !value.bindingMode || value.accountIds.length > 0, { path: ["accountIds"], message: t("models.selectAccountRequired") });
-  type ModelForm = z.infer<typeof schema>;
-  const form = useForm<ModelForm>({
-    resolver: zodResolver(schema),
-    defaultValues: { publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [] },
-  });
-  const modelEnabled = useWatch({ control: form.control, name: "enabled" });
-  const selectedProvider = useWatch({ control: form.control, name: "provider" });
-  const selectedCapability = useWatch({ control: form.control, name: "capability" });
-  const bindingMode = useWatch({ control: form.control, name: "bindingMode" });
-  const selectedAccountIDs = useWatch({ control: form.control, name: "accountIds" });
 
   const modelsQuery = useQuery({
     queryKey: ["models", "grouped", page, pageSize, debouncedSearch, statusFilter, providerFilter, sort.field, sort.order],
-    queryFn: () => listModelGroups({ page, pageSize, search: debouncedSearch, status: statusFilter, provider: providerFilter, sortBy: sort.field || undefined, sortOrder: sort.field ? sort.order : undefined }),
+    queryFn: ({ signal }) => listModelGroups({ page, pageSize, search: debouncedSearch, status: statusFilter, provider: providerFilter, sortBy: sort.field || undefined, sortOrder: sort.field ? sort.order : undefined }, signal),
+    refetchOnMount: "always",
   });
 
-  const updateMutation = useMutation({
-    mutationFn: (values: ModelForm) => {
-      if (!editing) throw new Error(t("errors.generic"));
-      const input = { ...values, accountIds: values.bindingMode ? values.accountIds : [] };
-      if (editing === "new") return createModel(input);
-      const patch: Parameters<typeof updateModel>[1] = {};
-      if (input.publicId !== editing.publicId) patch.publicId = input.publicId;
-      if (input.enabled !== editing.enabled) patch.enabled = input.enabled;
-      const oldIDs = new Set(editing.accountIds);
-      if (oldIDs.size !== input.accountIds.length || input.accountIds.some((id) => !oldIDs.has(id))) patch.accountIds = input.accountIds;
-      return updateModel(editing.id, patch);
+  const deleteMutation = useLifetimeMutation({
+    mutationFn: async (routes: ModelRouteDTO[], signal) => {
+      if (routes.length === 1) await deleteModel(routes[0].id, signal);
+      else await deleteModels(routes.map((route) => route.id), signal);
     },
-    onSuccess: () => {
-      setSelected(new Set());
+    onSuccess: (_, routes) => {
+      const ids = new Set(routes.map((route) => route.id));
+      setSelected((current) => new Set([...current].filter((id) => !ids.has(id))));
       void queryClient.invalidateQueries({ queryKey: ["models"] });
-      setEditing(null);
-      toast.success(t(editing === "new" ? "models.created" : "models.updated"));
-    },
-    onError: showError,
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: async (routes: ModelRouteDTO[]) => {
-      if (routes.length === 1) await deleteModel(routes[0].id);
-      else await deleteModels(routes.map((route) => route.id));
-    },
-    onSuccess: () => {
-      setSelected(new Set());
-      void queryClient.invalidateQueries({ queryKey: ["models"] });
-      setDeleting(null);
+      setDeleting((current) => current?.routes.every((route) => ids.has(route.id)) ? null : current);
       setPage(1);
       toast.success(t("models.deleted"));
     },
     onError: showError,
   });
 
-  const batchDeleteMutation = useMutation({
-    mutationFn: () => deleteModels([...selected]),
-    onSuccess: (result) => {
-      setSelected(new Set());
-      setBatchDeleteOpen(false);
+  const batchDeleteMutation = useLifetimeMutation({
+    mutationFn: (ids: string[], signal) => deleteModels(ids, signal),
+    onSuccess: (result, ids) => {
+      const completed = new Set(ids);
+      setSelected((current) => new Set([...current].filter((id) => !completed.has(id))));
       setPage(1);
       void queryClient.invalidateQueries({ queryKey: ["models"] });
       toast.success(t("models.batchDeleted", { count: result.deleted }));
@@ -125,10 +81,11 @@ export function ModelsPage() {
     onError: showError,
   });
 
-  const batchUpdateMutation = useMutation({
-    mutationFn: (enabled: boolean) => updateModelsEnabled([...selected], enabled),
-    onSuccess: () => {
-      setSelected(new Set());
+  const batchUpdateMutation = useLifetimeMutation({
+    mutationFn: ({ ids, enabled }: { ids: string[]; enabled: boolean }, signal) => updateModelsEnabled(ids, enabled, signal),
+    onSuccess: (_, { ids }) => {
+      const completed = new Set(ids);
+      setSelected((current) => new Set([...current].filter((id) => !completed.has(id))));
       setPage(1);
       void queryClient.invalidateQueries({ queryKey: ["models"] });
       toast.success(t("models.batchUpdated"));
@@ -136,12 +93,12 @@ export function ModelsPage() {
     onError: showError,
   });
 
-  const syncMutation = useMutation({
-    mutationFn: () => syncModels((progress) => {
-      toast.loading(t("models.syncingProgress", progress), { id: modelSyncToastID });
-    }),
-    onMutate: () => {
+  const syncMutation = useLifetimeMutation({
+    mutationFn: (_: void, signal) => {
       toast.loading(t("models.syncing"), { id: modelSyncToastID });
+      return syncModels((progress) => {
+        if (!signal.aborted) toast.loading(t("models.syncingProgress", progress), { id: modelSyncToastID });
+      }, signal);
     },
     onSuccess: (result) => {
       setSelected(new Set());
@@ -161,7 +118,8 @@ export function ModelsPage() {
   // displaying progress for an in-flight run the previous tab started.
   const syncRunQuery = useQuery({
     queryKey: ["models", "sync-run"],
-    queryFn: () => fetchModelSyncRun(),
+    queryFn: ({ signal }) => fetchModelSyncRun(signal),
+    refetchOnMount: "always",
     refetchInterval: (query) => (query.state.data?.active ? 2_000 : false),
     refetchOnWindowFocus: true,
     staleTime: 10_000,
@@ -192,34 +150,11 @@ export function ModelsPage() {
   useEffect(() => () => {
     // Leaving the page mid-resume: drop the progress toast (the detached run
     // keeps going and any later visit resumes the display).
-    if (hasResumedRun.current) toast.dismiss(modelSyncToastID);
+    toast.dismiss(modelSyncToastID);
   }, []);
 
   function showError(error: unknown): void {
     showErrorToast(error, t);
-  }
-
-  function beginEdit(model: ModelRouteDTO): void {
-    setEditing(model);
-    form.reset({
-      publicId: model.publicId,
-      provider: model.provider,
-      upstreamModel: model.upstreamModel,
-      capability: model.capability,
-      enabled: model.enabled,
-      bindingMode: model.bindingMode,
-      accountIds: model.accountIds,
-    });
-  }
-
-  function beginCreate(): void {
-    setEditing("new");
-    form.reset({ publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [] });
-  }
-
-  function toggleBoundAccount(id: string, checked: boolean): void {
-    const current = form.getValues("accountIds");
-    form.setValue("accountIds", checked ? [...new Set([...current, id])] : current.filter((value) => value !== id), { shouldValidate: true });
   }
 
   const result = useMemo(() => modelsQuery.data ? { ...modelsQuery.data, items: modelsQuery.data.items.map((group) => newModelRouteGroup(group, t)) } : undefined, [modelsQuery.data, t]);
@@ -287,8 +222,8 @@ export function ModelsPage() {
               {selected.size > 0 ? (
                 <>
                   <span className="mr-1 text-xs text-muted-foreground">{t("common.selectedCount", { count: selectedGroupCount })}</span>
-                  <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
-                  <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
+                  <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate({ ids: [...selected], enabled: true })}>{t("common.enable")}</Button>
+                  <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate({ ids: [...selected], enabled: false })}>{t("common.disable")}</Button>
                   <Button variant="secondary" size="sm" className="text-destructive hover:text-destructive" onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
                 </>
               ) : null}
@@ -296,7 +231,7 @@ export function ModelsPage() {
                 {syncMutation.isPending ? <Spinner /> : <RefreshCw />}
                 {t("models.sync")}
               </Button>
-              <Button size="sm" onClick={beginCreate}><Plus />{t("models.create")}</Button>
+              <Button size="sm" onClick={() => setEditing("new")}><Plus />{t("models.create")}</Button>
             </div>
           </>
         )}
@@ -358,7 +293,7 @@ export function ModelsPage() {
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("common.actions")}><MoreHorizontal /></Button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        {model.routes.map((route) => <DropdownMenuItem key={route.id} onClick={() => beginEdit(route)}><Pencil />{model.routes.length === 1 ? t("common.edit") : t("models.editCapability", { capability: capabilityLabel(route.capability, t) })}</DropdownMenuItem>)}
+                        {model.routes.map((route) => <DropdownMenuItem key={route.id} onClick={() => setEditing(route)}><Pencil />{model.routes.length === 1 ? t("common.edit") : t("models.editCapability", { capability: capabilityLabel(route.capability, t) })}</DropdownMenuItem>)}
                         <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setDeleting(model)}><Trash2 />{t("common.delete")}</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -371,64 +306,7 @@ export function ModelsPage() {
         ) : null}
       </DataTableShell>
 
-      <Dialog open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent className="flex max-h-[calc(100svh-2rem)] min-h-0 flex-col gap-0 overflow-hidden p-0 text-xs sm:max-w-[600px]">
-          <DialogHeader className="shrink-0 px-5 py-4 pr-12">
-            <DialogTitle>{t(editing === "new" ? "models.createTitle" : "models.editTitle")}</DialogTitle>
-            <DialogDescription className="truncate">{editing === "new" ? t("models.createDescription") : editing?.upstreamModel}</DialogDescription>
-          </DialogHeader>
-          <form className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" onSubmit={form.handleSubmit((values) => updateMutation.mutate(values))}>
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-4 pt-2">
-              <div className="space-y-2"><Label htmlFor="model-public-id">{t("models.publicId")}</Label><Input id="model-public-id" {...form.register("publicId")} />{form.formState.errors.publicId ? <p className="text-xs text-destructive">{form.formState.errors.publicId.message}</p> : null}</div>
-              {editing === "new" ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>{t("models.provider")}</Label>
-                    <Select value={selectedProvider} disabled>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="grok_build">{t("models.providerGrokBuild")}</SelectItem></SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("models.capability")}</Label>
-                    <Select value={selectedCapability} disabled>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="responses">Responses</SelectItem></SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2 sm:col-span-2"><Label htmlFor="model-upstream-id">{t("models.upstream")}</Label><Input id="model-upstream-id" {...form.register("upstreamModel")} />{form.formState.errors.upstreamModel ? <p className="text-xs text-destructive">{form.formState.errors.upstreamModel.message}</p> : null}</div>
-                </div>
-              ) : null}
-              <section className="rounded-lg bg-muted/25 p-3">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <Label htmlFor="model-binding-mode">{t("models.bindAccounts")}</Label>
-                      {bindingMode ? <Badge variant="secondary" className="text-[10px] font-normal tabular-nums" aria-live="polite">{t("models.selectedAccounts", { count: selectedAccountIDs.length })}</Badge> : null}
-                    </div>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("models.bindAccountsDescription")}</p>
-                  </div>
-                  <Switch className="mt-0.5 shrink-0" id="model-binding-mode" checked={bindingMode} onCheckedChange={(checked) => { form.setValue("bindingMode", checked); if (!checked) form.clearErrors("accountIds"); }} />
-                </div>
-                {bindingMode ? (
-                  <div className="mt-3">
-                    <ModelAccountPicker provider={selectedProvider} selectedIDs={selectedAccountIDs} onToggle={toggleBoundAccount} />
-                    {form.formState.errors.accountIds ? <p className="mt-2 text-xs text-destructive">{form.formState.errors.accountIds.message}</p> : null}
-                  </div>
-                ) : null}
-              </section>
-              <section className="flex items-center justify-between gap-4 rounded-lg bg-muted/35 px-3 py-2.5">
-                <div className="min-w-0">
-                  <Label htmlFor="model-enabled">{modelEnabled ? t("common.enabled") : t("common.disabled")}</Label>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("models.enabledDescription")}</p>
-                </div>
-                <Switch id="model-enabled" checked={modelEnabled} onCheckedChange={(checked) => form.setValue("enabled", checked)} />
-              </section>
-            </div>
-            <DialogFooter className="shrink-0 gap-2 bg-muted/20 px-5 py-3.5 sm:gap-0"><Button type="button" variant="secondary" size="sm" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button type="submit" size="sm" disabled={updateMutation.isPending}>{updateMutation.isPending ? <Spinner /> : null}{editing === "new" ? t("common.create") : t("common.save")}</Button></DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      {editing !== null && <ModelEditor key={editing === "new" ? "new" : editing.id} editing={editing} onClose={() => setEditing(null)} onSaved={() => setSelected(new Set())} />}
 
       <AlertDialog open={Boolean(deleting)} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>
@@ -440,7 +318,7 @@ export function ModelsPage() {
       <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("models.batchDeleteTitle", { count: selectedGroupCount })}</AlertDialogTitle><AlertDialogDescription>{t("models.batchDeleteDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" disabled={batchDeleteMutation.isPending} onClick={() => batchDeleteMutation.mutate()}>{batchDeleteMutation.isPending ? <Spinner /> : null}{t("common.delete")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" disabled={batchDeleteMutation.isPending} onClick={() => batchDeleteMutation.mutate([...selected])}>{batchDeleteMutation.isPending ? <Spinner /> : null}{t("common.delete")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </div>

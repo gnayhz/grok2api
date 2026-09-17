@@ -630,8 +630,18 @@ func parseProtoTimestamp(message []byte) (time.Time, error) {
 				return time.Time{}, fmt.Errorf("protobuf timestamp 值无效")
 			}
 			if number == 1 {
+				// Quota periods require positive Timestamp values representable
+				// by protobuf/RFC3339, whose final second is in year 9999.
+				if value > 253402300799 {
+					return time.Time{}, fmt.Errorf("protobuf timestamp 范围无效")
+				}
 				seconds = int64(value)
 			} else {
+				// Check the wire value before narrowing: e.g. 2^32+1 must
+				// not wrap into a valid one-nanosecond fraction.
+				if value >= uint64(time.Second) {
+					return time.Time{}, fmt.Errorf("protobuf timestamp 范围无效")
+				}
 				nanos = int32(value)
 			}
 			message = message[consumed:]
@@ -643,7 +653,7 @@ func parseProtoTimestamp(message []byte) (time.Time, error) {
 		}
 		message = message[consumed:]
 	}
-	if seconds <= 0 || nanos < 0 || nanos >= int32(time.Second) {
+	if seconds == 0 {
 		return time.Time{}, fmt.Errorf("protobuf timestamp 范围无效")
 	}
 	return time.Unix(seconds, int64(nanos)).UTC(), nil
@@ -661,7 +671,7 @@ func parseQuotaBreakdown(message []byte) (account.QuotaBreakdown, bool) {
 		switch {
 		case number == 1 && fieldType == protowire.VarintType:
 			value, consumed := protowire.ConsumeVarint(message)
-			if consumed < 0 {
+			if consumed < 0 || value > uint64(math.MaxInt) {
 				return account.QuotaBreakdown{}, false
 			}
 			result.ProductCode = int(value)

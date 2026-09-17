@@ -39,7 +39,7 @@ func (r *rotationStubRepo) BeginEgressNodeProbe(context.Context, uint64, string)
 	return 1, nil
 }
 
-func (r *rotationStubRepo) UpdateEgressNodeRotationState(_ context.Context, _ uint64, lastRotatedAt *time.Time, attempts int, lastError string) error {
+func (r *rotationStubRepo) UpdateEgressNodeRotationStateForBinding(_ context.Context, _ domain.Node, lastRotatedAt *time.Time, attempts int, lastError string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rotationCalls++

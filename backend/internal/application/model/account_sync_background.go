@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const accountCatalogRefreshTimeout = 30 * time.Second
+const (
+	accountCatalogRefreshTimeout  = 30 * time.Second
+	accountCatalogRefreshCapacity = 128
+)
 
 type accountSyncRun struct {
 	cancel context.CancelFunc
@@ -16,6 +19,9 @@ type accountSyncRun struct {
 // QueueAccountSync accepts a catalog-change hint without delaying inference.
 // The account's in-flight refresh is shared. M05 owns it through final writes;
 // Close cancels and joins it before M01 releases network and storage.
+// Capacity covers active and waiting accounts, before creating a goroutine or
+// timer. Rejected hints do not advance the Provider's catalog baseline, so a
+// later response can request the refresh again.
 func (s *Service) QueueAccountSync(accountID uint64) bool {
 	if accountID == 0 {
 		return false
@@ -28,6 +34,10 @@ func (s *Service) QueueAccountSync(accountID uint64) bool {
 	if _, active := s.accountSyncRuns[accountID]; active {
 		s.syncRunMu.Unlock()
 		return true
+	}
+	if len(s.accountSyncRuns) >= accountCatalogRefreshCapacity {
+		s.syncRunMu.Unlock()
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), accountCatalogRefreshTimeout)
 	run := accountSyncRun{cancel: cancel, done: make(chan struct{})}

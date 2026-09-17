@@ -190,7 +190,7 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	rotatedAt := degradedAt.Add(time.Minute)
-	if err := nodes.UpdateEgressNodeRotationState(ctx, fixedNode.ID, &rotatedAt, 1, "canary degraded"); err != nil {
+	if err := seedLegacyEgressRotation(nodes, ctx, fixedNode.ID, &rotatedAt, 1, "canary degraded"); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := nodes.GetEgressNode(ctx, fixedNode.ID)
@@ -200,7 +200,7 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 	if updated.LastError != egressdomain.LastErrorExitIPQuality || updated.DegradeCount != 1 || updated.RotationAttempts != 1 || updated.LastRotationError != "canary degraded" || updated.LastRotatedAt == nil || updated.LastDegradedAt == nil {
 		t.Fatalf("postgres rotation round-trip mismatch: %#v", updated)
 	}
-	if err := nodes.UpdateEgressNodeRotationState(ctx, 99999, nil, 0, ""); err == nil || !errors.Is(err, repository.ErrNotFound) {
+	if err := seedLegacyEgressRotation(nodes, ctx, 99999, nil, 0, ""); err == nil || !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("missing node error = %v, want ErrNotFound", err)
 	}
 

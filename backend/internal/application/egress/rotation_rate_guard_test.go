@@ -125,9 +125,10 @@ func (r *multiNodeRotationRepo) GetEgressNode(_ context.Context, id uint64) (dom
 	return node, nil
 }
 
-func (r *multiNodeRotationRepo) UpdateEgressNodeRotationState(_ context.Context, id uint64, lastRotatedAt *time.Time, attempts int, lastError string) error {
+func (r *multiNodeRotationRepo) UpdateEgressNodeRotationStateForBinding(_ context.Context, binding domain.Node, lastRotatedAt *time.Time, attempts int, lastError string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	id := binding.ID
 	node := r.nodes[id]
 	node.RotationAttempts = attempts
 	if lastRotatedAt != nil {

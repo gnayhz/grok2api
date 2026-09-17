@@ -34,7 +34,7 @@ func TestUpdateEgressNodePreservesConcurrentRuntimeWrites(t *testing.T) {
 
 	// 模拟后台:rotation 记账(成功轮换 + 2 次尝试)与质量隔离冷却。
 	rotatedAt := time.Now().UTC().Add(time.Minute)
-	if err := repo.UpdateEgressNodeRotationState(ctx, created.ID, &rotatedAt, 2, "canary degraded"); err != nil {
+	if err := seedLegacyEgressRotation(repo, ctx, created.ID, &rotatedAt, 2, "canary degraded"); err != nil {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(2 * time.Hour).UTC()

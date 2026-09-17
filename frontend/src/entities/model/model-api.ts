@@ -1,6 +1,6 @@
 import type { ModelRouteDTO, ModelRouteGroupDTO } from "@/entities/model/types";
 import { ApiError, apiEventStream, apiRequest, type PaginatedDTO } from "@/shared/api/client";
-import { createObjectDecoder, createPaginatedDecoder, decodeBooleanResult, decodeCountResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isString } from "@/shared/api/decoder";
+import { createObjectDecoder, createValidatedDecoder, createPaginatedDecoder, decodeBooleanResult, decodeCountResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isString } from "@/shared/api/decoder";
 import { i18n } from "@/shared/i18n";
 import type { SortOrder } from "@/shared/lib/table-sort";
 
@@ -35,12 +35,7 @@ const modelRouteValidator = hasShape({
   available: isBoolean,
   lastSyncedAt: isOptional(isString),
 });
-const decodeModelRoute = createObjectDecoder<ModelRouteDTO>("model route", {
-  id: isString, publicId: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), upstreamModel: isString,
-  capability: isOneOf("responses", "chat", "image", "image_edit", "video", "tts", "stt", "realtime"), origin: isOneOf("catalog", "discovered", "manual"),
-  enabled: isBoolean, accountIds: isArrayOf(isString), bindingMode: isBoolean, supportedAccounts: isNumber,
-  syncedAccounts: isNumber, totalAccounts: isNumber, capabilityKnown: isBoolean, capabilitySupported: isOptional(isBoolean), available: isBoolean, lastSyncedAt: isOptional(isString),
-});
+const decodeModelRoute = createValidatedDecoder<ModelRouteDTO>("model route", modelRouteValidator);
 const decodeModelPage = createPaginatedDecoder<ModelRouteDTO>(modelRouteValidator);
 const modelRouteGroupValidator = hasShape({
   key: isString,
@@ -66,7 +61,7 @@ export function listModels(input: ListModelsInput, signal?: AbortSignal): Promis
   return apiRequest(`/api/admin/v1/models?${query}`, { signal }, decodeModelPage);
 }
 
-export function listModelGroups(input: ListModelsInput): Promise<PaginatedDTO<ModelRouteGroupDTO>> {
+export function listModelGroups(input: ListModelsInput, signal?: AbortSignal): Promise<PaginatedDTO<ModelRouteGroupDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
   if (input.search) query.set("search", input.search);
   if (input.status) query.set("status", input.status);
@@ -75,7 +70,7 @@ export function listModelGroups(input: ListModelsInput): Promise<PaginatedDTO<Mo
     query.set("sortBy", input.sortBy);
     query.set("sortOrder", input.sortOrder);
   }
-  return apiRequest(`/api/admin/v1/models/groups?${query}`, {}, decodeModelGroupPage);
+  return apiRequest(`/api/admin/v1/models/groups?${query}`, { signal }, decodeModelGroupPage);
 }
 
 type ModelSyncEventDTO = {
@@ -101,8 +96,8 @@ export type ModelSyncRunDTO = { active: boolean; completed: number; total: numbe
 // fetchModelSyncRun reports the shared full-sync snapshot. The sync runs
 // detached from the SSE connection, so a reloaded page can discover an
 // in-flight run and resume displaying progress without restarting it.
-export async function fetchModelSyncRun(): Promise<ModelSyncRunDTO> {
-  const payload = await apiRequest<unknown>("/api/admin/v1/models/sync/progress", { method: "GET" }, (raw) => raw);
+export async function fetchModelSyncRun(signal?: AbortSignal): Promise<ModelSyncRunDTO> {
+  const payload = await apiRequest<unknown>("/api/admin/v1/models/sync/progress", { signal, method: "GET" }, (raw) => raw);
   const record = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null;
   if (!record || typeof record.active !== "boolean" || typeof record.completed !== "number" || typeof record.total !== "number" || typeof record.failed !== "boolean") {
     throw new ApiError(502, "invalidResponse", i18n.t("apiErrors.invalidResponse"));
@@ -110,9 +105,10 @@ export async function fetchModelSyncRun(): Promise<ModelSyncRunDTO> {
   return { active: record.active, completed: record.completed, total: record.total, failed: record.failed };
 }
 
-export async function syncModels(onProgress?: (progress: ModelSyncProgressDTO) => void): Promise<{ synced: number }> {
+export async function syncModels(onProgress?: (progress: ModelSyncProgressDTO) => void, signal?: AbortSignal): Promise<{ synced: number }> {
   let result: { synced: number } | undefined;
   await apiEventStream("/api/admin/v1/models/sync", {
+    signal,
     method: "POST",
     headers: { Accept: "text/event-stream" },
   }, decodeModelSyncEvent, ({ event, data }) => {
@@ -153,22 +149,22 @@ export function listModelAccountOptions(input: { provider: ModelRouteDTO["provid
   return apiRequest(`/api/admin/v1/models/accounts?${query}`, { signal }, decodeModelAccounts);
 }
 
-export function createModel(input: CreateModelInput): Promise<ModelRouteDTO> {
-  return apiRequest("/api/admin/v1/models", { method: "POST", body: input }, decodeModelRoute);
+export function createModel(input: CreateModelInput, signal?: AbortSignal): Promise<ModelRouteDTO> {
+  return apiRequest("/api/admin/v1/models", { signal, method: "POST", body: input }, decodeModelRoute);
 }
 
-export function updateModel(id: string, input: { publicId?: string; enabled?: boolean; accountIds?: string[] }): Promise<ModelRouteDTO> {
-  return apiRequest(`/api/admin/v1/models/${id}`, { method: "PATCH", body: input }, decodeModelRoute);
+export function updateModel(id: string, input: { publicId?: string; enabled?: boolean; accountIds?: string[] }, signal?: AbortSignal): Promise<ModelRouteDTO> {
+  return apiRequest(`/api/admin/v1/models/${id}`, { signal, method: "PATCH", body: input }, decodeModelRoute);
 }
 
-export function deleteModel(id: string): Promise<{ deleted: boolean }> {
-  return apiRequest(`/api/admin/v1/models/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+export function deleteModel(id: string, signal?: AbortSignal): Promise<{ deleted: boolean }> {
+  return apiRequest(`/api/admin/v1/models/${id}`, { signal, method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
 }
 
-export function deleteModels(ids: string[]): Promise<{ deleted: number }> {
-  return apiRequest("/api/admin/v1/models", { method: "DELETE", body: { ids } }, decodeCountResult<{ deleted: number }>("deleted"));
+export function deleteModels(ids: string[], signal?: AbortSignal): Promise<{ deleted: number }> {
+  return apiRequest("/api/admin/v1/models", { signal, method: "DELETE", body: { ids } }, decodeCountResult<{ deleted: number }>("deleted"));
 }
 
-export function updateModelsEnabled(ids: string[], enabled: boolean): Promise<{ updated: number }> {
-  return apiRequest("/api/admin/v1/models/batch", { method: "PATCH", body: { ids, enabled } }, decodeCountResult<{ updated: number }>("updated"));
+export function updateModelsEnabled(ids: string[], enabled: boolean, signal?: AbortSignal): Promise<{ updated: number }> {
+  return apiRequest("/api/admin/v1/models/batch", { signal, method: "PATCH", body: { ids, enabled } }, decodeCountResult<{ updated: number }>("updated"));
 }

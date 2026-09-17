@@ -181,7 +181,7 @@ func (r *EgressRepository) UpdateEgressNodeConfiguration(ctx context.Context, va
 	// 内后台 rotation worker / 探测 / 质量隔离的窄列写(last_rotated_at/
 	// rotation_attempts/cooldown_until/last_error 等)会被陈旧快照整体回滚——
 	// 典型后果是已耗尽的节点重新获得换 IP 预算、已隔离节点提前回池。运行态
-	// 列由各自的窄方法(UpdateEgressNodeRotationState/Probe/QualityState)独占
+	// 列由各自的窄方法(UpdateEgressNodeRotationStateForBinding/Probe/QualityState)独占
 	// 写入; 配置变化时的健康重置(applyInput configurationChanged)在下方以
 	// 运行态全零的特征整组写入, 与旧行为一致。
 	updates := map[string]any{
@@ -446,20 +446,6 @@ func (r *EgressRepository) SetEgressPoolMemberPriority(ctx context.Context, pool
 		return nil
 	})
 	return mapError(err)
-}
-
-func (r *EgressRepository) UpdateEgressNodeRotationState(ctx context.Context, id uint64, lastRotatedAt *time.Time, attempts int, lastError string) error {
-	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
-		"last_rotated_at":   gorm.Expr("COALESCE(?, last_rotated_at)", lastRotatedAt),
-		"rotation_attempts": attempts, "last_rotation_error": lastError, "updated_at": time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
 }
 
 // UpdateEgressNodeRotationStateForBinding rejects a rotation completion or

@@ -44,6 +44,8 @@ Node configuration edits advance binding generations. A request whose selection 
 
 Rotation attempt reservations and completion writes also compare the original binding revision, proxy and webhook. Editing a node during a webhook prevents its older bookkeeping result from updating the new configuration. A webhook already submitted before the edit cannot be recalled.
 
+The application publishes rotation success and invokes its observation callback only after the completion write succeeds. A rejected completion keeps the reserved attempt and reports a state-write failure. Manual and dead-exit budget resets also carry the binding they inspected; a failed reset cannot enqueue a new rotation. Rotation bookkeeping requires the conditional repository operation and has no unversioned fallback. Historical unversioned writes exist only in migration test fixtures. Queue rejection is reported and is not counted as successful recovery.
+
 The legacy `Feedback`/`FeedbackForScope` methods remain for embedders, but cannot carry an original lease binding. New integrations must use lease observations. Classified lease rejections invalidate Clearance synchronously by its captured key/generation; health persistence never repeats that invalidation. Cookie, User-Agent and generation travel together through cache hits, stale fallback and shared solves, so a concurrent client construction cannot attach a newer generation to an older cookie. Repeated invalidation of the same generation is idempotent.
 
 ## Resource policy and operations

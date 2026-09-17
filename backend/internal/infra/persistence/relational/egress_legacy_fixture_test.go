@@ -22,8 +22,17 @@ func seedLegacyEgressQuality(r *EgressRepository, ctx context.Context, id uint64
 	return nil
 }
 
-// UpdateEgressNodeRotationState persists rotation bookkeeping without
-// touching health or probe columns. lastRotatedAt==nil 表示"本次没有真正换 IP"
-// (无 webhook/禁用/解密失败/尝试耗尽等跳过路径), 此时保留既有值而非写 NULL——
-// 否则失败路径会抹掉上一次成功轮换的时间, 击穿 MinNodeInterval 护栏, 下一次
-// 隔离事件可立即再次触发 webhook。显式传入时间才推进。
+// seedLegacyEgressRotation installs historical bookkeeping for migration tests.
+func seedLegacyEgressRotation(r *EgressRepository, ctx context.Context, id uint64, lastRotatedAt *time.Time, attempts int, lastError string) error {
+	result := r.db.db.WithContext(ctx).Model(&egressNodeModel{}).Where("id = ?", id).Updates(map[string]any{
+		"last_rotated_at":   gorm.Expr("COALESCE(?, last_rotated_at)", lastRotatedAt),
+		"rotation_attempts": attempts, "last_rotation_error": lastError, "updated_at": time.Now().UTC(),
+	})
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}

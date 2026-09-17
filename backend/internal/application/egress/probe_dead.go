@@ -211,11 +211,16 @@ func (s *Service) markProbeDead(observed domain.Node, fresh bool) {
 	}
 	budget := node.RotationAttempts
 	if fresh {
-		s.recordRotationState(ctx, nodeID, 0, "", false)
+		if err := s.recordRotationState(ctx, node, 0, "", false); err != nil {
+			return
+		}
 		budget = 0
 	}
 	if budget < rotCfg.MaxAttemptsPerQuarantine {
-		s.enqueueRotation(nodeID)
+		if err := s.enqueueRotation(nodeID); err != nil {
+			s.rotationLog().Warn("egress_probe_dead_rotation_enqueue_failed", "node_id", nodeID, "error", err)
+			return
+		}
 		s.rotationLog().Info("egress_probe_dead_rotation_enqueued", "node_id", nodeID, "node", node.Name, "fresh", fresh)
 	}
 }

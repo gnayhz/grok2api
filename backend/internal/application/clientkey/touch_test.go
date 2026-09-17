@@ -194,3 +194,36 @@ func TestConcurrentTouchAdmissionAndClose(t *testing.T) {
 		t.Fatal("authentication admitted Touch after close completed")
 	}
 }
+
+func TestTouchCapacityDoesNotBlockAuthenticationOrThrottleRejectedWrites(t *testing.T) {
+	entered := make(chan context.Context, 1)
+	service, created := newTouchService(t, func(ctx context.Context, _ uint64) error {
+		entered <- ctx
+		return nil
+	})
+	finishes := make([]func(), 0, 64)
+	t.Cleanup(func() {
+		for _, finish := range finishes {
+			finish()
+		}
+	})
+	for id := uint64(1000); id < 1064; id++ {
+		_, finish := service.touches.start(context.Background(), id, time.Now())
+		if finish == nil {
+			t.Fatalf("bounded display write %d rejected", id)
+		}
+		finishes = append(finishes, finish)
+	}
+	authenticateTouch(t, context.Background(), service, created.Secret)
+	service.touches.mu.Lock()
+	active := len(service.touches.active)
+	_, throttled := service.touches.lastTouched[created.Key.ID]
+	service.touches.mu.Unlock()
+	if active > 64 || throttled {
+		t.Fatalf("overloaded display writes must be skipped without throttling: active=%d throttled=%v", active, throttled)
+	}
+	finishes[0]()
+	finishes = finishes[1:]
+	authenticateTouch(t, context.Background(), service, created.Secret)
+	receiveTouch(t, entered)
+}

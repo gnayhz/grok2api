@@ -46,10 +46,17 @@ test("key editor preserves restricted-empty access and patches only changed fiel
     rpmLimit: 120, maxConcurrent: 8, billingLimitUsdTicks: 0, billedUsageUsdTicks: 0,
     allowModelAliases: false, modelScope: "restricted", allowedModelIds: [], providerScope: ["all"], tierScope: ["all"] };
   const writes: unknown[] = [];
+  let holdSave = false;
+  let pendingSave: { signal: AbortSignal; finish: () => void } | undefined;
   globalThis.fetch = async (url, options) => {
     if (options?.method === "PATCH") {
       const body = JSON.parse(options.body as string);
       writes.push(body);
+      if (holdSave) {
+        return new Promise<Response>((resolve) => {
+          pendingSave = { signal: options.signal!, finish: () => resolve(Response.json({ data: { ...key, ...body } })) };
+        });
+      }
       Object.assign(key, body);
       return Response.json({ data: key });
     }
@@ -58,7 +65,13 @@ test("key editor preserves restricted-empty access and patches only changed fiel
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false, gcTime: 0 } } });
   const root = createRoot(dom.window.document.getElementById("root")!);
-  unmount = async () => { await react.act(async () => root.unmount()); client.clear(); };
+  unmount = async () => {
+    await react.act(async () => root.unmount());
+    // Radix restores focus in a zero-delay timer after unmount. Finish that
+    // cleanup while its document and Event constructors still share a realm.
+    await react.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    client.clear();
+  };
   async function until(check: () => boolean) {
     const deadline = Date.now() + 3000;
     while (!check() && Date.now() < deadline) await react.act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
@@ -109,4 +122,26 @@ test("key editor preserves restricted-empty access and patches only changed fiel
   assert.equal(key.modelScope, "restricted");
   assert.deepEqual(key.allowedModelIds, []);
 
+  // Closing and reopening the same object creates a new form lifetime too.
+  const oldDialog = await openEditor();
+  const setName = async (dialog: Element, value: string) => {
+    const field = dialog.querySelector<HTMLInputElement>('input[name="name"]')!;
+    await react.act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(field, value);
+      field.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+  };
+  await setName(oldDialog, "pending old edit");
+  holdSave = true;
+  await react.act(async () => oldDialog.querySelector("form")!.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
+  await until(() => pendingSave !== undefined);
+  const cancel = Array.from(oldDialog.querySelectorAll("button")).find(button => button.textContent === "Cancel")!;
+  await react.act(async () => cancel.click());
+  const nextDialog = await openEditor();
+  assert.equal(pendingSave!.signal.aborted, true);
+  await setName(nextDialog, "new unsaved draft");
+  await react.act(async () => { pendingSave!.finish(); await new Promise(resolve => setTimeout(resolve, 20)); });
+  assert.equal(dom.window.document.querySelector('[role="dialog"]'), nextDialog);
+  assert.equal(nextDialog.querySelector<HTMLInputElement>('input[name="name"]')!.value, "new unsaved draft");
+  assert.equal(writes.length, 3, "aborting a submitted write must not retry it");
 });

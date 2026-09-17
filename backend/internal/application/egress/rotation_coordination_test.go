@@ -170,10 +170,6 @@ func TestAutomaticRotationBudgetSurvivesServiceRestart(t *testing.T) {
 
 type failingRotationReservation struct{ *relational.EgressRepository }
 
-func (r failingRotationReservation) UpdateEgressNodeRotationState(context.Context, uint64, *time.Time, int, string) error {
-	return errors.New("injected rotation write outage")
-}
-
 func (r failingRotationReservation) UpdateEgressNodeRotationStateForBinding(context.Context, domain.Node, *time.Time, int, string) error {
 	return errors.New("injected rotation write outage")
 }
@@ -195,7 +191,11 @@ func TestRotationReservationFailurePreventsWebhookAndManualSuccess(t *testing.T)
 	if calls.Load() != 0 {
 		t.Fatal("webhook ran after reservation failed")
 	}
-	if err := repo.UpdateEgressNodeRotationState(ctx, node.ID, nil, 3, "exhausted"); err != nil {
+	binding, err := repo.GetEgressNode(ctx, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateEgressNodeRotationStateForBinding(ctx, binding, nil, 3, "exhausted"); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.RotateNode(ctx, node.ID); err == nil {

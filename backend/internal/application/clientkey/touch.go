@@ -10,6 +10,7 @@ const (
 	keyTouchInterval       = time.Minute
 	keyTouchTimeout        = 3 * time.Second
 	touchTrackerMaxEntries = 10000
+	touchTrackerMaxActive  = 64
 )
 
 // touchTracker owns both throttling and the lifetime of last-used display writes.
@@ -49,6 +50,11 @@ func (c *touchTracker) start(ctx context.Context, id uint64, now time.Time) (con
 		return nil, nil
 	}
 	if last := c.lastTouched[id]; !last.IsZero() && now.Sub(last) < keyTouchInterval {
+		return nil, nil
+	}
+	// Last-used display writes must not accumulate behind slow storage or
+	// delay authentication. A skipped write remains eligible on the next use.
+	if len(c.active) >= touchTrackerMaxActive {
 		return nil, nil
 	}
 	c.lastTouched[id] = now

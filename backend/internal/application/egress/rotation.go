@@ -219,7 +219,7 @@ func (s *Service) queueRotation(ctx context.Context, nodeID uint64, manual bool)
 	// 真实换 IP 时间计算,自动轮换的防重启风暴护栏对手动触发同样生效;
 	// 真正的立即执行由 worker 的 requeueAfter 到点驱动,全局限速兜底。
 	if manual && (node.RotationAttempts > 0 || node.LastRotationError != "") {
-		if err := s.recordRotationState(ctx, nodeID, 0, "", false); err != nil {
+		if err := s.recordRotationState(ctx, node, 0, "", false); err != nil {
 			return err
 		}
 	}
@@ -461,20 +461,20 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 		return
 	}
 	if !node.RotationEnabled {
-		s.recordRotationState(ctx, nodeID, node.RotationAttempts, "rotation disabled for this node", false, node)
+		s.recordRotationState(ctx, node, node.RotationAttempts, "rotation disabled for this node", false)
 		logger.Info("egress_rotation_skipped", "node_id", nodeID, "node", node.Name, "reason", "rotation disabled")
 		return
 	}
 	rotationURL, err := cipher.Decrypt(node.EncryptedRotationURL)
 	if err != nil {
-		s.recordRotationState(ctx, nodeID, node.RotationAttempts, "decrypt rotation url: "+err.Error(), false, node)
+		s.recordRotationState(ctx, node, node.RotationAttempts, "decrypt rotation url: "+err.Error(), false)
 		logger.Warn("egress_rotation_decrypt_failed", "node_id", nodeID, "error", err.Error())
 		return
 	}
 	if node.RotationAttempts >= cfg.MaxAttemptsPerQuarantine {
 		logger.Warn("egress_rotation_exhausted", "node_id", nodeID, "node", node.Name, "attempts", node.RotationAttempts, "max", cfg.MaxAttemptsPerQuarantine)
 		perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "exhausted"})
-		s.recordRotationState(ctx, nodeID, node.RotationAttempts, "rotation attempts exhausted", false, node)
+		s.recordRotationState(ctx, node, node.RotationAttempts, "rotation attempts exhausted", false)
 		return
 	}
 	// 未到 MinNodeInterval:重排队尾让 worker 立即处理下一个到期节点, 而不是
@@ -482,7 +482,7 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 	// 轮换全部停滞)。
 	if node.LastRotatedAt != nil {
 		if wait := cfg.MinNodeInterval - time.Since(*node.LastRotatedAt); wait > 0 {
-			s.recordRotationState(ctx, nodeID, node.RotationAttempts, "min interval not elapsed", false, node)
+			s.recordRotationState(ctx, node, node.RotationAttempts, "min interval not elapsed", false)
 			if rotation != nil {
 				rotation.requeueAfter(nodeID, wait)
 			}
@@ -504,7 +504,7 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 	// Reserve an attempt durably before external effects. A timeout, crash or
 	// ambiguous webhook response consumes the same bounded automatic budget.
 	node.RotationAttempts++
-	if err := s.recordRotationState(ctx, nodeID, node.RotationAttempts, "rotation in progress", true, node); err != nil {
+	if err := s.recordRotationState(ctx, node, node.RotationAttempts, "rotation in progress", true); err != nil {
 		return
 	}
 	if err := s.callRotationWebhook(ctx, rotationURL, cfg); err != nil {
@@ -535,22 +535,16 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 		s.failRotation(ctx, nodeID, &node, cfg, "exit ip unchanged after rotation", logger)
 		return
 	}
-	// 死出口轮换(LastError=transport 的探活确认触发): 隧道已重启且探活
-	// 健康, 目的即达成——健康探活已按 last_error=transport 自动清除冷却
-	// (repository CASE 分支), 节点已回池。不走 canary(质量判决与"隧道
-	// 复活"正交), 也无需解除质量隔离(本就没有质量隔离)。
-	if node.LastError == domain.LastErrorTransport {
-		s.recordRotationState(ctx, nodeID, 0, "", true, node)
-		logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP, "reason", "probe_dead_recovered")
-		perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "succeeded"})
-		s.notifyRotationSuccess(ctx, nodeID)
+	// The observed probe and final bookkeeping are separate facts. Only a
+	// completion accepted for this binding may publish rotation success.
+	if err := s.recordRotationState(ctx, node, 0, "", true); err != nil {
 		return
 	}
-	// 金丝雀验证已废除(G16:其失败无法区分 IP/账号问题):webhook 已调用、
-	// 探活健康且出口 IP 确已变化即轮换成功。新 IP 若仍脏,降智自然开新案
-	// 走新羁押;身份变化的解禁由观测回调立即驱动(下一轮检测节拍兜底)。
-	s.recordRotationState(ctx, nodeID, 0, "", true, node)
-	logger.Info("egress_rotation_succeeded", "node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP)
+	fields := []any{"node_id", nodeID, "node", node.Name, "exit_ip", probe.ExitIP, "exit_ip_v6", probe.IPv6.ExitIP}
+	if node.LastError == domain.LastErrorTransport {
+		fields = append(fields, "reason", "probe_dead_recovered")
+	}
+	logger.Info("egress_rotation_succeeded", fields...)
 	perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "succeeded"})
 	s.notifyRotationSuccess(ctx, nodeID)
 }
@@ -560,45 +554,38 @@ func (s *Service) processRotation(ctx context.Context, nodeID uint64) {
 func (s *Service) failRotation(ctx context.Context, nodeID uint64, node *domain.Node, cfg RotationConfig, reason string, logger *slog.Logger) {
 	perfmetrics.Default.Inc("egress_rotation_total", perfmetrics.Labels{Subsystem: "egress", Operation: "rotation", Outcome: "failed"})
 	attempts := node.RotationAttempts
-	s.recordRotationState(ctx, nodeID, attempts, reason, false, *node)
+	s.recordRotationState(ctx, *node, attempts, reason, false)
 	logger.Warn("egress_rotation_failed", "node_id", nodeID, "attempt", attempts, "max", cfg.MaxAttemptsPerQuarantine, "reason", reason)
 	if attempts < cfg.MaxAttemptsPerQuarantine {
-		s.enqueueRotation(nodeID)
+		if err := s.enqueueRotation(nodeID); err != nil {
+			logger.Warn("egress_rotation_requeue_failed", "node_id", nodeID, "error", err)
+		}
 	}
 }
 
 // recordRotationState records reservation or outcome. An attempted webhook
 // advances LastRotatedAt before dispatch, even if its response is ambiguous.
-func (s *Service) recordRotationState(ctx context.Context, nodeID uint64, attempts int, lastError string, rotated bool, binding ...domain.Node) error {
-	if len(binding) > 0 {
-		if store, ok := s.repository.(interface {
-			UpdateEgressNodeRotationStateForBinding(context.Context, domain.Node, *time.Time, int, string) error
-		}); ok {
-			var rotatedAt *time.Time
-			if rotated {
-				now := time.Now().UTC()
-				rotatedAt = &now
-			}
-			return store.UpdateEgressNodeRotationStateForBinding(ctx, binding[0], rotatedAt, attempts, truncString(lastError, 512))
-		}
-	}
-	if stateRepo, ok := s.repository.(rotationStateRepository); ok {
+func (s *Service) recordRotationState(ctx context.Context, binding domain.Node, attempts int, lastError string, rotated bool) error {
+	var rotatedAt *time.Time
+	if rotated {
 		now := time.Now().UTC()
-		var rotatedAt *time.Time
-		if rotated {
-			rotatedAt = &now
-		}
-		if err := stateRepo.UpdateEgressNodeRotationState(ctx, nodeID, rotatedAt, attempts, truncString(lastError, 512)); err != nil {
-			s.rotationLog().Warn("egress_rotation_state_failed", "node_id", nodeID, "error", err.Error())
-			return err
-		}
-		return nil
+		rotatedAt = &now
 	}
-	return errors.New("rotation state repository unavailable")
+	lastError = truncString(lastError, 512)
+	var err error
+	if store, ok := s.repository.(rotationStateRepository); ok {
+		err = store.UpdateEgressNodeRotationStateForBinding(ctx, binding, rotatedAt, attempts, lastError)
+	} else {
+		err = errors.New("rotation state repository unavailable")
+	}
+	if err != nil {
+		s.rotationLog().Warn("egress_rotation_state_failed", "node_id", binding.ID, "error", err)
+	}
+	return err
 }
 
 type rotationStateRepository interface {
-	UpdateEgressNodeRotationState(ctx context.Context, id uint64, lastRotatedAt *time.Time, attempts int, lastError string) error
+	UpdateEgressNodeRotationStateForBinding(ctx context.Context, binding domain.Node, lastRotatedAt *time.Time, attempts int, lastError string) error
 }
 
 // WebhookExecutor 是轮换 webhook 投递的消费方端口；传输实现位于 infra。
@@ -725,7 +712,10 @@ func (s *Service) recoverPendingRotations(ctx context.Context) {
 		if node.LastError != domain.LastErrorExitIPQuality || node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
 			continue
 		}
-		s.enqueueRotation(node.ID)
+		if err := s.enqueueRotation(node.ID); err != nil {
+			s.rotationLog().Warn("egress_rotation_recover_enqueue_failed", "node_id", node.ID, "error", err)
+			break
+		}
 		recovered++
 	}
 	if recovered > 0 {
