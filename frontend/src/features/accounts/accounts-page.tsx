@@ -1,3 +1,4 @@
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, TimerOff, Trash2, TriangleAlert, Webhook } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -139,6 +140,8 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
   const [statusFilter, setStatusFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState("");
   const [riskFilter, setRiskFilter] = useState("");
+  const [params, setParams] = useSearchParams();
+  const qualityFilter = params.get("quality") ?? "";
   const [agreementFilter, setAgreementFilter] = useState("");
   const [associationFilter, setAssociationFilter] = useState("");
   const [selection, setSelection] = useState<AccountSelection>(() => ({ provider, ids: new Set() }));
@@ -203,11 +206,12 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
   const accountsQuery = useQuery({
     // A previous workspace may have cancelled after the server accepted work.
     refetchOnMount: "always",
-    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, riskFilter, agreementFilter, associationFilter, sort.field, sort.order],
+    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, riskFilter, qualityFilter, agreementFilter, associationFilter, sort.field, sort.order],
     queryFn: ({ signal }) => listAccounts({
       provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter,
       renewal: provider === "grok_build" ? renewalFilter : undefined,
       risk: riskFilter || undefined,
+      quality: qualityFilter || undefined,
       agreement: provider === "grok_web" ? agreementFilter : undefined,
       association: associationFilter || undefined,
       sortBy: sort.field, sortOrder: sort.order,
@@ -1091,6 +1095,16 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
                   { value: "refreshable", label: t("accountCredential.autoRefresh") },
                   { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
                 ] }] : []),
+                { id: "quality", label: t("accounts.qualityFilter"), value: qualityFilter, onChange: (value: string) => {
+                  const next = new URLSearchParams(params);
+                  if (value) next.set("quality", value); else next.delete("quality");
+                  setParams(next, { replace: true }); setPage(1);
+                }, options: [
+                  { value: "restricted", label: t("accounts.qualityRestricted") },
+                  { value: "remanded", label: t("accounts.qualityRemanded") },
+                  { value: "sentenced", label: t("accounts.qualitySentenced") },
+                  { value: "clear", label: t("accounts.qualityClear") },
+                ] },
                 { id: "risk", label: t("accounts.riskFilter"), value: riskFilter, onChange: (value: string) => { setRiskFilter(value); setPage(1); }, options: [
                   { value: "flagged", label: t("accounts.botRisk") },
                   { value: "normal", label: t("accounts.riskNormal") },

@@ -164,6 +164,7 @@ type QuotaView struct {
 }
 
 type View struct {
+	Quality            *QualityState
 	Credential         accountdomain.Credential
 	Billing            *accountdomain.Billing
 	Quota              QuotaView
@@ -202,6 +203,7 @@ type CredentialRejectionClassifier interface {
 }
 
 type Service struct {
+	qualityStates func(context.Context) (map[uint64]QualityState, error)
 	// rateLimiter 拥有 Team 限流观察状态:互斥/活跃/过期/窗口表/身份映射。
 	rateLimiter         *teamRateLimitTracker
 	accounts            repository.AccountRepository
@@ -476,6 +478,11 @@ func (s *Service) Get(ctx context.Context, id uint64) (View, error) {
 	} else {
 		return View{}, err
 	}
+	states, err := s.readQualityStates(ctx)
+	if err != nil {
+		return View{}, err
+	}
+	view.Quality = qualityState(states, id)
 	return view, nil
 }
 

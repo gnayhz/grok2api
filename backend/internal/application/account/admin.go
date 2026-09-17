@@ -36,6 +36,7 @@ const (
 )
 
 type ListFilter struct {
+	Quality   string
 	Provider  string
 	QuotaType string
 	Status    string
@@ -147,6 +148,7 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 		!slices.Contains([]string{"", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing", "risk"}, filter.Status) ||
 		!slices.Contains([]string{"", "refreshable", "unrefreshable"}, filter.Renewal) ||
 		!slices.Contains([]string{"", "flagged", "normal"}, filter.Risk) ||
+		!slices.Contains([]string{"", "restricted", "remanded", "sentenced", "clear"}, filter.Quality) ||
 		!slices.Contains([]string{"", "nsfwEnabled", "nsfwDisabled", "termsAccepted", "termsNotAccepted", "allAccepted", "allNotAccepted"}, filter.Agreement) ||
 		(filter.Agreement != "" && filter.Provider != string(accountdomain.ProviderWeb)) ||
 		!validAssociationFilter(filter.Provider, filter.Association) ||
@@ -178,6 +180,11 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 			}
 		}
 	}
+	states, err := s.readQualityStates(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	applyQualityFilter(&repositoryFilter, filter.Quality, states)
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: search, Sort: filter.Sort},
 		Filter: repositoryFilter,
@@ -208,7 +215,7 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 	views := make([]View, 0, len(values))
 	for _, value := range values {
 		metadata := s.buildBotFlagMetadata(value)
-		view := View{Credential: value, BuildBotFlagged: metadata.BuildBotFlagged, BuildBotFlagSource: metadata.BuildBotFlagSource}
+		view := View{Quality: qualityState(states, value.ID), Credential: value, BuildBotFlagged: metadata.BuildBotFlagged, BuildBotFlagSource: metadata.BuildBotFlagSource}
 		if billing, ok := billings[value.ID]; ok {
 			view.Billing = &billing
 		}

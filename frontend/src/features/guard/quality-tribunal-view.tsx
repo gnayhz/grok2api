@@ -47,10 +47,10 @@ import {
 	type ExperimentReport,
 	type QualityCase,
 } from "@/entities/guard/quality-api";
-import { caseDispositionKey } from "./quality-case-presentation";
+import { caseDispositionKey, partyDispositionKey } from "./quality-case-presentation";
 import { QualityAccountReference, QualityExitReference } from "./quality-identity";
 import { getProbeFinding } from "./quality-view";
-import { useAccountDirectory } from "@/entities/account/account-queries";
+import { useAccountDirectory, useRestrictedAccountCount } from "@/entities/account/account-queries";
 import { useEgressNodes } from "@/entities/egress/egress-queries";
 import { useQualityCases } from "@/entities/guard/guard-queries";
 import {
@@ -115,7 +115,8 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 	const [page, setPage] = useState(1);
 
 	const cases = useQualityCases();
-	const accounts = useAccountDirectory();
+	const accounts = useAccountDirectory((cases.data ?? []).flatMap((item) => item.parties.map((party) => party.account_id)));
+	const restricted = useRestrictedAccountCount();
 	const nodes = useEgressNodes();
 
 	const ips = useQuery({
@@ -129,6 +130,7 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 		mutationFn: () => triggerQualityReview(),
 		onSuccess: () => {
 			void cache.invalidateQueries({ queryKey: ["quality"] });
+			void cache.invalidateQueries({ queryKey: ["accounts"] });
 			void cache.invalidateQueries({ queryKey: ["egress-nodes"] });
 		},
 	});
@@ -149,14 +151,8 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 		[accounts.data, nodes.data, ips.data]
 	);
 
-	// Quarantined and remanded assets count
-	const heldAccounts = useMemo(
-		() =>
-			(accounts.data?.items ?? []).filter(
-				(a) => a.quality && a.quality.state !== "active"
-			),
-		[accounts.data]
-	);
+	const heldAccountCount = restricted.isError ? undefined : restricted.data?.total;
+	const hasHeldAccounts = (heldAccountCount ?? 0) > 0;
 	const heldExits = useMemo(
 		() => (nodes.data?.items ?? []).filter((n) => n.quality),
 		[nodes.data]
@@ -234,6 +230,7 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 
 	return (
 		<div className="flex flex-col gap-5 min-w-0 pb-2">
+			{(accounts.isError || restricted.isError) && <LoadFailed retry={() => { void cache.invalidateQueries({ queryKey: ["accounts"] }); }} />}
 			{/* Top 4 KPI Velocity Cards */}
 			<div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
 				{/* Card 1: Active In-Flight Investigations */}
@@ -283,10 +280,10 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 
 				{/* Card 2: Restricted Suspect Accounts (Click to manage accounts) */}
 				<div
-					onClick={() => navigate("/accounts")}
+					onClick={() => navigate("/accounts?quality=restricted")}
 					className={cn(
 						"group relative overflow-hidden rounded-xl border p-4 shadow-sm backdrop-blur-sm transition-all cursor-pointer hover:shadow-md",
-						heldAccounts.length > 0
+						hasHeldAccounts
 							? "border-purple-500/40 bg-purple-500/5 ring-1 ring-purple-500/20 hover:border-purple-500/60"
 							: "border-border/80 bg-card/75 hover:border-border"
 					)}
@@ -301,26 +298,26 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 							variant="outline"
 							className={cn(
 								"text-[10px] font-semibold",
-								heldAccounts.length > 0
+								hasHeldAccounts
 									? "text-purple-600 dark:text-purple-400 border-purple-500/30 bg-purple-500/10"
 									: "text-muted-foreground"
 							)}
 						>
-							{heldAccounts.length > 0 ? (isZh ? "受限隔离" : "Remanded") : (isZh ? "全部可用" : "Ready")}
+							{heldAccountCount === undefined ? t("ops.unknown") : hasHeldAccounts ? (isZh ? "受限隔离" : "Restricted") : (isZh ? "无质量限制" : "No quality holds")}
 						</Badge>
 					</div>
 					<div className="mt-2.5 flex items-baseline gap-2">
 						<span className="text-3xl font-black tracking-tight tabular-nums text-foreground">
-							{heldAccounts.length}
+							{heldAccountCount ?? "—"}
 						</span>
 						<span className="text-xs text-muted-foreground font-medium">
 							{isZh ? "个账号暂停调度" : "held"}
 						</span>
 					</div>
 					<p className="mt-2 text-[11px] text-muted-foreground/80 truncate">
-						{heldAccounts.length > 0
+						{heldAccountCount === undefined ? t("ops.unknown") : hasHeldAccounts
 							? isZh ? "点击前往账号列表管理与解禁 →" : "Click to manage in accounts"
-							: isZh ? "账号池处于纯净可用状态" : "All accounts eligible for dispatch"}
+							: isZh ? "当前没有被质量案件限制的账号" : "No current accounts are held by quality cases"}
 					</p>
 				</div>
 
@@ -578,10 +575,10 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 
 											{account && (
 												<Badge
-													variant={account.disposition === "remanded" ? "destructive" : "secondary"}
+													variant={["remanded", "sentenced"].includes(account.disposition) ? "destructive" : "secondary"}
 													className="text-[10px] px-1.5 py-0 shrink-0 font-mono"
 												>
-													{account.disposition === "remanded" ? (isZh ? "隔离中" : "Held") : (isZh ? "正常" : "Clean")}
+													{t(partyDispositionKey(account.disposition))}
 												</Badge>
 											)}
 										</div>
@@ -617,7 +614,7 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 													variant={exit.disposition === "remanded" || exit.disposition === "sentenced" ? "destructive" : "secondary"}
 													className="text-[10px] px-1.5 py-0 shrink-0 font-mono"
 												>
-													{exit.disposition === "remanded" ? (isZh ? "冻结中" : "Held") : exit.disposition === "sentenced" ? (isZh ? "已禁用" : "Banned") : (isZh ? "正常" : "Clean")}
+													{t(partyDispositionKey(exit.disposition))}
 												</Badge>
 											)}
 										</div>
@@ -732,7 +729,7 @@ function CaseExperiment({
 }) {
 	return (
 		<Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
-			<DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+			<DialogContent className="max-w-2xl max-h-[85vh] grid-cols-1 overflow-y-auto [overflow-wrap:anywhere]">
 				<CaseExperimentContent
 					item={item}
 					accountsMap={accountsMap}
@@ -746,7 +743,7 @@ function CaseExperiment({
 
 function CaseExperimentContent({
 	item,
-	accountsMap,
+	accountsMap: caseAccountsMap,
 	nodesMap,
 	ipByNode,
 }: {
@@ -765,6 +762,7 @@ function CaseExperimentContent({
 		mutationFn: () => releaseQualityCase(item.id, reviewReason.trim()),
 		onSuccess: () => {
 			void cache.invalidateQueries({ queryKey: ["quality"] });
+			void cache.invalidateQueries({ queryKey: ["accounts"] });
 			void cache.invalidateQueries({ queryKey: ["egress-nodes"] });
 			setReviewReason("");
 		},
@@ -777,6 +775,12 @@ function CaseExperimentContent({
 		staleTime: 5000,
 		refetchInterval: item.status === "investigating" ? 5000 : false,
 	});
+
+	const probeAccounts = useAccountDirectory((probes.data ?? []).flatMap((probe) => [probe.defendant, probe.juror, probe.control_account_id ?? 0]));
+	const accountsMap = useMemo(() => new Map([
+		...caseAccountsMap,
+		...(probeAccounts.data?.items ?? []).map((value) => [Number(value.id), { name: value.name, email: value.email }] as const),
+	]), [caseAccountsMap, probeAccounts.data]);
 
 	const account = item.parties.find((p) => p.kind === "account");
 	const exit = item.parties.find((p) => p.kind === "exit");
@@ -814,9 +818,9 @@ function CaseExperimentContent({
 		<>
 			{/* Dialog Header - 100% Matching Probe Report Header */}
 			<DialogHeader>
-				<div className="flex items-center justify-between pr-6">
-					<DialogTitle className="flex items-center gap-2 text-base font-bold">
-						<Gavel className="size-5 text-primary" />
+				<div className="flex flex-wrap items-center justify-between gap-2 pr-6">
+					<DialogTitle className="flex min-w-0 items-start gap-2 text-base font-bold">
+						<Gavel className="size-5 shrink-0 text-primary" />
 						<span>{t("experiment.case", { id: item.id })} · {isZh ? "案情审讯报告" : "Forensic Attribution Report"}</span>
 					</DialogTitle>
 					<StatusPill tone={tone}>
@@ -828,7 +832,7 @@ function CaseExperimentContent({
 				</p>
 			</DialogHeader>
 
-			<div className="space-y-4 py-2 text-xs">
+			<div className="min-w-0 space-y-4 py-2 text-xs">
 				{/* Section 1: Methodology & Accused Parties (100% Matching Section 1 in Probe Report) */}
 				<div className="rounded-lg border border-border/80 bg-muted/20 p-3">
 					<h4 className="font-semibold text-foreground mb-1.5 flex items-center gap-1.5">
@@ -842,16 +846,16 @@ function CaseExperimentContent({
 					</p>
 
 					{/* 2-Column Parties Grid */}
-					<div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/50 pt-2.5">
+					<div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-border/50 pt-2.5">
 						<div>
 							<span className="text-[10px] text-muted-foreground block mb-0.5">
 								{isZh ? "涉案嫌疑账号 (Defendant Account)" : t("guardProbes.defendantAccount")}
 							</span>
 							{account ? (
-								<div className="flex items-center justify-between pr-2">
+								<div className="flex min-w-0 items-center justify-between gap-2 pr-2">
 									<QualityAccountReference id={account.account_id} accounts={accountsMap} />
-									<Badge variant={account.disposition === "remanded" ? "destructive" : "secondary"} className="text-[9px] px-1 py-0">
-										{account.disposition === "remanded" ? (isZh ? "隔离中" : "Held") : (isZh ? "正常" : "Clean")}
+									<Badge variant={["remanded", "sentenced"].includes(account.disposition) ? "destructive" : "secondary"} className="text-[9px] px-1 py-0">
+										{t(partyDispositionKey(account.disposition))}
 									</Badge>
 								</div>
 							) : (
@@ -864,10 +868,10 @@ function CaseExperimentContent({
 								{isZh ? "涉案异常出口 (Incident Exit)" : t("guardProbes.suspectExit")}
 							</span>
 							{exit ? (
-								<div className="flex items-center justify-between pr-2">
+								<div className="flex min-w-0 items-center justify-between gap-2 pr-2">
 									<QualityExitReference node={exit.node_id} epoch={exit.epoch} nodes={nodesMap} ipByNode={ipByNode} />
 									<Badge variant={exit.disposition === "remanded" || exit.disposition === "sentenced" ? "destructive" : "secondary"} className="text-[9px] px-1 py-0">
-										{exit.disposition === "remanded" ? (isZh ? "冻结中" : "Held") : exit.disposition === "sentenced" ? (isZh ? "已禁用" : "Banned") : (isZh ? "正常" : "Clean")}
+										{t(partyDispositionKey(exit.disposition))}
 									</Badge>
 								</div>
 							) : (
@@ -877,10 +881,10 @@ function CaseExperimentContent({
 					</div>
 
 					{/* Control Benchmarks List */}
-					<div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/50 pt-2.5">
+					<div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-border/50 pt-2.5">
 						<div>
 							<span className="text-[10px] text-muted-foreground block mb-1">
-								{isZh ? "对照正常账号 (Control Accounts)" : "Control Benchmark Accounts"}
+								{isZh ? "匹配对照账号 (Control Accounts)" : "Control Benchmark Accounts"}
 							</span>
 							{controlAccountsList.length > 0 ? (
 								<div className="flex flex-wrap gap-1">
@@ -898,7 +902,7 @@ function CaseExperimentContent({
 
 						<div>
 							<span className="text-[10px] text-muted-foreground block mb-1">
-								{isZh ? "对照纯净出口 (Control Exits)" : "Control Clean Exits"}
+								{isZh ? "匹配对照出口 (Control Exits)" : "Matched Control Exits"}
 							</span>
 							{controlExitsList.length > 0 ? (
 								<div className="flex flex-wrap gap-1">
@@ -938,7 +942,7 @@ function CaseExperimentContent({
 							{t(`ops.${verdictKey(item)}`)} · {t(`ops.${caseDispositionKey(item)}`)}
 						</p>
 						{report?.reason && (
-							<p className="text-[11px] opacity-90 mt-0.5">{report.reason}</p>
+							<p className="text-[11px] opacity-90 mt-0.5">{t(`experiment.facts.${report.reason}`, { defaultValue: report.reason })}</p>
 						)}
 					</div>
 
@@ -955,7 +959,7 @@ function CaseExperimentContent({
 										{report.exit_support.map((fact, idx) => (
 											<li key={idx} className="flex items-start gap-1 text-rose-600 dark:text-rose-400">
 												<span className="size-1 rounded-full bg-rose-500 mt-1.5 shrink-0" />
-												<span>{fact}</span>
+												<span>{t(`experiment.facts.${fact}`, { defaultValue: fact })}</span>
 											</li>
 										))}
 									</ul>
@@ -974,7 +978,7 @@ function CaseExperimentContent({
 										{report.account_support.map((fact, idx) => (
 											<li key={idx} className="flex items-start gap-1 text-purple-600 dark:text-purple-400">
 												<span className="size-1 rounded-full bg-purple-500 mt-1.5 shrink-0" />
-												<span>{fact}</span>
+												<span>{t(`experiment.facts.${fact}`, { defaultValue: fact })}</span>
 											</li>
 										))}
 									</ul>
@@ -994,7 +998,7 @@ function CaseExperimentContent({
 							</p>
 							<ul className="list-disc list-inside space-y-0.5 pl-1 opacity-90 text-[10px]">
 								{report.limitations.map((lim, idx) => (
-									<li key={idx}>{lim}</li>
+									<li key={idx}>{t(`experiment.facts.${lim}`, { defaultValue: lim })}</li>
 								))}
 							</ul>
 						</div>
@@ -1035,6 +1039,8 @@ function CaseExperimentContent({
 				)}
 
 				{/* Section 4: Probe Tasks Log */}
+				<p className="text-xs text-muted-foreground">{t("guardProbes.replacementHelp")}</p>
+				{probeAccounts.isError && <LoadFailed retry={() => { void probeAccounts.refetch(); }} />}
 				<div className="rounded-lg border border-border/80 bg-card p-3 space-y-2">
 					<div className="flex items-center justify-between">
 						<h4 className="font-semibold text-foreground flex items-center gap-1.5">
@@ -1055,16 +1061,12 @@ function CaseExperimentContent({
 							{probes.data.map((p) => {
 								const isExitJury = p.direction === "exit" || p.direction === "exit_jury";
 								const finding = getProbeFinding(p, t);
-								const targetAccName = p.control_account_id
-									? (accountsMap.get(p.control_account_id)?.name || accountsMap.get(p.control_account_id)?.email || `#${p.control_account_id}`)
-									: (account ? (accountsMap.get(account.account_id)?.name || `#${account.account_id}`) : "账号");
-								const targetExitName = p.control_node_id
-									? (nodesMap.get(p.control_node_id)?.name || `节点 #${p.control_node_id}`)
-									: (nodesMap.get(p.node_id)?.name || `节点 #${p.node_id}`);
+								const targetAccountID = isExitJury ? p.juror : p.defendant;
+								const controlOutcome = p.control_outcome === "clean" ? "controlClean" : p.control_outcome === "degraded" ? "controlDegraded" : p.control_outcome ? "controlFailed" : "controlNotRun";
 
 								return (
 									<div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 p-2 text-xs">
-										<div className="flex items-center gap-2 min-w-0">
+										<div className="flex flex-wrap items-center gap-2 min-w-0">
 											<span className="font-mono text-[11px] font-bold text-foreground">#{p.id}</span>
 											<Badge variant="outline" className={cn(
 												"text-[9px] px-1 py-0 font-mono",
@@ -1073,14 +1075,20 @@ function CaseExperimentContent({
 												{isExitJury ? (isZh ? "出口陪审" : "Jury") : (isZh ? "账号差分" : "Diff")}
 											</Badge>
 
-											<div className="flex items-center gap-1 text-[10px] text-muted-foreground truncate">
-												<span className="font-medium text-foreground truncate max-w-[90px]">{targetAccName}</span>
+											<div className="flex flex-wrap min-w-0 items-center gap-1 text-[10px] text-muted-foreground">
+												<QualityAccountReference id={targetAccountID} accounts={accountsMap} className="max-w-[160px]" />
 												<ArrowRight className="size-2.5 shrink-0" />
-												<span className="font-medium text-foreground truncate max-w-[90px]">{targetExitName}</span>
+												<QualityExitReference node={p.node_id} epoch={p.epoch} nodes={nodesMap} ipByNode={ipByNode} className="max-w-[120px]" />
+												{p.control_account_id ? (
+													<span className="text-muted-foreground">
+														{t("guardProbes.controlOutcome", { outcome: t(`guardProbes.${controlOutcome}`) })}
+														<QualityAccountReference id={p.control_account_id} accounts={accountsMap} className="max-w-[150px]" />
+													</span>
+												) : null}
 											</div>
 										</div>
 
-										<div className="flex items-center gap-2 shrink-0">
+										<div className="flex flex-wrap items-center gap-2">
 											<span className="text-[10px] text-muted-foreground truncate max-w-[150px]" title={finding.text}>
 												{finding.text}
 											</span>

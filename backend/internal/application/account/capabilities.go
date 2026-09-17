@@ -10,6 +10,7 @@ import (
 // These capabilities share the account lifecycle and conditional-write owner.
 // Consumers receive only their use-case surface; Service is assembled once by app.
 type Administration interface {
+	Identities(ctx context.Context, ids []uint64) ([]accountdomain.Identity, error)
 	List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]View, int64, error)
 	Summary(ctx context.Context) (Summary, error)
 	Get(ctx context.Context, id uint64) (View, error)

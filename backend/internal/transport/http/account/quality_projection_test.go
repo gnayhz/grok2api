@@ -14,15 +14,12 @@ import (
 type qualityDetailAccounts struct{ accountapp.Administration }
 
 func (qualityDetailAccounts) Get(context.Context, uint64) (accountapp.View, error) {
-	return accountapp.View{Credential: accountdomain.Credential{ID: 42}}, nil
+	return accountapp.View{Credential: accountdomain.Credential{ID: 42}, Quality: &accountapp.QualityState{State: "remanded", CaseID: 7}}, nil
 }
 
 func TestAccountDetailIncludesInjectedQualityState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(Dependencies{Administration: qualityDetailAccounts{}})
-	handler.SetQualityStates(func() map[uint64]AccountQualityState {
-		return map[uint64]AccountQualityState{42: {State: "remanded", CaseID: 7}}
-	})
 	router := gin.New()
 	handler.Register(router.Group("/api/admin/v1"))
 	recorder := httptest.NewRecorder()

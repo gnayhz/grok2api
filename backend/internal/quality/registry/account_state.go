@@ -20,18 +20,6 @@ func (r *Registry) AccountState(accountID uint64) model.AccountEntry {
 	return r.accountState(accountID)
 }
 
-// CurrentAccountStates returns the sparse non-active quality projection.
-func (r *Registry) CurrentAccountStates() map[uint64]model.AccountEntry {
-	snap := r.snapshot.load()
-	states := make(map[uint64]model.AccountEntry, len(snap.accounts))
-	for accountID, entry := range snap.accounts {
-		if accountID != 0 && entry.State != model.AccountActive {
-			states[accountID] = entry
-		}
-	}
-	return states
-}
-
 func (r *Registry) accountState(accountID uint64) model.AccountEntry {
 	snap := r.snapshot.load()
 	if entry, ok := snap.accounts[accountID]; ok {

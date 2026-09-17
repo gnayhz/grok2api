@@ -70,30 +70,13 @@ func (refreshTokenImportHTTPAdapter) PrepareImportedCredential(_ context.Context
 	return seed, nil
 }
 
-// TestAttachQualityStatesBadges 锚定裁决亭可见性:缝隙注入后,账号
-// 响应对被裁决亭动过的账号携带质量徽章(状态+案件号),未动过的
-// 账号保持无徽章;缝隙未设时全量空转(剥离形态)。
-func TestAttachQualityStatesBadges(t *testing.T) {
-	handler := &Handler{}
-	handler.SetQualityStates(func() map[uint64]AccountQualityState {
-		return map[uint64]AccountQualityState{
-			4101: {State: "sentenced", CaseID: 243},
-		}
-	})
-	items := []accountResponse{{ID: 4101}, {ID: 4102}}
-	handler.attachQualityStates(items)
-	if items[0].Quality == nil || items[0].Quality.State != "sentenced" || items[0].Quality.CaseID != 243 {
-		t.Fatalf("被裁决账号必须携带质量徽章: %+v", items[0].Quality)
+func TestAccountResponsePreservesApplicationQualityProjection(t *testing.T) {
+	value := newAccountResponse(accountapp.View{Credential: accountdomain.Credential{ID: 4101}, Quality: &accountapp.QualityState{State: "sentenced", CaseID: 243}})
+	if value.Quality == nil || value.Quality.State != "sentenced" || value.Quality.CaseID != 243 {
+		t.Fatalf("quality projection lost: %+v", value.Quality)
 	}
-	if items[1].Quality != nil {
-		t.Fatalf("未动过账号不得携带徽章: %+v", items[1].Quality)
-	}
-
-	bare := &Handler{}
-	bareItems := []accountResponse{{ID: 4101}}
-	bare.attachQualityStates(bareItems)
-	if bareItems[0].Quality != nil {
-		t.Fatalf("剥离形态不得注入: %+v", bareItems[0].Quality)
+	if newAccountResponse(accountapp.View{}).Quality != nil {
+		t.Fatal("invented quality restriction")
 	}
 }
 

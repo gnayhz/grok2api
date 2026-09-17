@@ -243,6 +243,7 @@ export type ListAccountsInput = {
   status?: string;
   renewal?: string;
   risk?: string;
+  quality?: string;
   agreement?: string;
   association?: string;
   // 为空时返回全部 provider 的账号，用于跨 provider 的通用名单（如请求审计筛选）。
@@ -258,6 +259,7 @@ export function listAccounts(input: ListAccountsInput, signal?: AbortSignal): Pr
   if (input.status) query.set("status", input.status);
   if (input.renewal) query.set("renewal", input.renewal);
   if (input.risk) query.set("risk", input.risk);
+  if (input.quality) query.set("quality", input.quality);
   if (input.agreement) query.set("agreement", input.agreement);
   if (input.association) query.set("association", input.association);
   if (input.sortBy && input.sortOrder) {
@@ -268,8 +270,6 @@ export function listAccounts(input: ListAccountsInput, signal?: AbortSignal): Pr
   return apiRequest(`/api/admin/v1/accounts?${query}`, { signal }, decodeAccountPage);
 }
 
-// 管理端少量跨页面关联数据需要完整的账号身份映射。逐页读取而不是把
-// pageSize 写死为某个池规模，避免质量仲裁页面只显示最新一页账号的编号。
 export function getAccountSummary(signal?: AbortSignal): Promise<AccountSummaryDTO> {
   return apiRequest("/api/admin/v1/accounts/summary", { signal }, decodeAccountSummary);
 }
@@ -733,21 +733,18 @@ export function pollDeviceAuthorization(sessionId: string, signal: AbortSignal):
   return apiRequest(`/api/admin/v1/accounts/device/${sessionId}/poll`, { method: "POST", signal }, decodeDevicePoll);
 }
 
-// 管理端少量跨页面关联数据需要完整的账号身份映射。逐页读取而不是把
-// pageSize 写死为某个池规模，避免质量仲裁页面只显示最新一页账号的编号。
-export async function listAllAccounts(
-  input: Omit<ListAccountsInput, "page" | "pageSize"> = {},
-  signal?: AbortSignal,
-): Promise<PaginatedDTO<AccountDTO>> {
-  const pageSize = 2000;
-  const first = await listAccounts({ ...input, page: 1, pageSize }, signal);
-  const items = [...first.items];
-  for (let page = 2; items.length < first.total; page += 1) {
-    const next = await listAccounts({ ...input, page, pageSize }, signal);
-    if (next.items.length === 0) {
-      break;
-    }
-    items.push(...next.items);
+export type AccountIdentityDTO = Pick<AccountDTO, "id" | "name" | "email" | "provider">;
+
+/** Resolve only referenced accounts; absent IDs remain absent after deletion. */
+export async function getAccountIdentities(ids: readonly string[], signal?: AbortSignal): Promise<{ items: AccountIdentityDTO[] }> {
+  const items: AccountIdentityDTO[] = [];
+  const decoder = createValidatedDecoder<{ items: AccountIdentityDTO[] }>("account identities", hasShape({
+    items: isArrayOf(hasShape({ id: isString, name: isString, email: isString, provider: isString })),
+  }));
+  for (let offset = 0; offset < ids.length; offset += 500) {
+    const query = new URLSearchParams({ ids: ids.slice(offset, offset + 500).join(",") });
+    const batch = await apiRequest(`/api/admin/v1/accounts/identities?${query}`, { signal }, decoder);
+    items.push(...batch.items);
   }
-  return { ...first, items, page: 1, pageSize, total: items.length };
+  return { items };
 }

@@ -52,42 +52,18 @@ type Handler struct {
 	// modelSyncUpdates 更新账号并按需补齐模型能力。
 	modelSyncUpdates modelSyncUpdateCoordinator
 	logger           *slog.Logger
-	// qualityStates 质量轴状态注入缝隙(依赖倒置,出口节点同款):
-	// 组合根注入质量层读函数;nil=质量层剥离态,账号响应不含质量字段。
-	qualityStates func() map[uint64]AccountQualityState
 }
 
-// AccountQualityState 是账号质量轴状态的投影(质量层提供;词汇为纯
-// 数据,底座不理解羁押/服刑语义,只透传展示)。
 type AccountQualityState struct {
-	State  string `json:"state"`                   // remanded | sentenced
-	CaseID uint64 `json:"caseId,omitempty,string"` // 关联案件号(可解释性)
+	State  string `json:"state"`
+	CaseID uint64 `json:"caseId,omitempty,string"`
 }
 
-// SetQualityStates 安装质量状态注入缝隙(nil 保持未设——剥离形态)。
-func (h *Handler) SetQualityStates(provider func() map[uint64]AccountQualityState) {
-	if provider == nil {
-		return
+func newQualityState(value *accountapp.QualityState) *AccountQualityState {
+	if value == nil {
+		return nil
 	}
-	h.qualityStates = provider
-}
-
-// attachQualityStates 旁注质量轴状态(缝隙未注入时空转——剥离形态
-// 账号列表照常,只是没有质量徽章)。
-func (h *Handler) attachQualityStates(items []accountResponse) {
-	if h.qualityStates == nil {
-		return
-	}
-	states := h.qualityStates()
-	if len(states) == 0 {
-		return
-	}
-	for i := range items {
-		if state, ok := states[items[i].ID]; ok {
-			quality := state
-			items[i].Quality = &quality
-		}
-	}
+	return &AccountQualityState{State: value.State, CaseID: value.CaseID}
 }
 
 func NewHandler(deps Dependencies, logger ...*slog.Logger) *Handler {
@@ -109,6 +85,7 @@ func (h *Handler) log() *slog.Logger {
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/accounts", h.list)
 	router.GET("/accounts/summary", h.summary)
+	router.GET("/accounts/identities", h.identities)
 	router.GET("/accounts/export", h.exportCredentials)
 	router.POST("/accounts/export", h.exportSelectedCredentials)
 	router.GET("/accounts/:id", h.get)
@@ -322,7 +299,7 @@ func newAccountResponse(value accountapp.View) accountResponse {
 	if c.Provider != accountdomain.ProviderBuild || !buildRouteMode.IsValid() {
 		buildRouteMode = accountdomain.BuildRouteAuto
 	}
-	result := accountResponse{
+	result := accountResponse{Quality: newQualityState(value.Quality),
 		ID: c.ID, Provider: string(c.Provider), AuthType: string(c.AuthType), WebTier: string(c.WebTier),
 		WebTierSyncedAt: c.WebTierSyncedAt, WebNSFWEnabledAt: c.WebNSFWEnabledAt, WebTermsAcceptedAt: c.WebTermsAcceptedAt, Name: c.Name, Email: c.Email, UserID: c.UserID, TeamID: c.TeamID,
 		Enabled: c.Enabled, AuthStatus: string(c.AuthStatus), AuthError: c.AuthError, Refreshable: c.EncryptedRefreshToken != "",

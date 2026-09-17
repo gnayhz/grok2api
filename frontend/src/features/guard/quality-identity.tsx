@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { cn } from "@/shared/lib/cn";
 import {
 	qualityAccountDisplay,
@@ -20,7 +21,10 @@ export function QualityAccountReference({
 	id: number;
 	accounts: Map<number, QualityAccountIdentity>;
 }) {
-	const display = qualityAccountDisplay(id, accounts.get(id));
+	const { t } = useTranslation();
+	const identity = accounts.get(id);
+	const display = qualityAccountDisplay(id, identity);
+	if (!identity) display.secondary = t("guardProbes.accountNameUnavailable");
 	return (
 		<span
 			className={cn(

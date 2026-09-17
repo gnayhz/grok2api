@@ -20,3 +20,14 @@ func (r *AccountRepository) ListIdentityLinks(ctx context.Context) ([]account.Id
     `).Scan(&links).Error
 	return links, err
 }
+
+// ListIdentities selects only display fields and excludes deleted accounts.
+func (r *AccountRepository) ListIdentities(ctx context.Context, ids []uint64) ([]account.Identity, error) {
+	result := make([]account.Identity, 0, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	err := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Select("id, name, email, provider").Where("id IN ?", ids).Order("id ASC").Scan(&result).Error
+	return result, err
+}

@@ -439,87 +439,42 @@ export function testCaseVerdictTone(status: string): "destructive" | "warning" |
 	return "muted";
 }
 
-/** 解析探针结论为人性化中文和色调 */
+/** A task outcome is a measurement; causal attribution belongs to the case report. */
 export function getProbeFinding(
 	task: QualityProbeTask,
 	t: (key: string, opts?: Record<string, unknown>) => string,
-): {
-	text: string;
-	tone: "ok" | "bad" | "warn" | "neutral";
-	badge: string;
-} {
-	if (task.result === "clean") {
-		return {
-			text: t("guardProbes.findingClean"),
-			tone: "ok",
-			badge: t("guardProbes.resultClean"),
-		};
-	}
+): { text: string; tone: "ok" | "bad" | "warn" | "neutral"; badge: string } {
+	const finding = (text: string, badge: string, tone: "ok" | "bad" | "warn" | "neutral") => ({
+		text: t(`guardProbes.${text}`), badge: t(`guardProbes.${badge}`), tone,
+	});
+	if (task.state === "pending") return finding("statePending", "statePending", "neutral");
+	if (task.state === "running") return finding("stateRunning", "stateRunning", "neutral");
+	if (task.state === "cancelled") return finding("stateCancelled", "stateCancelled", "neutral");
+	if (task.state === "done" && task.result === "clean") return finding("findingClean", "resultClean", "ok");
+	if (task.state === "done" && task.result === "degraded") return finding("findingDegraded", "resultDegraded", "bad");
 
+	const kind = task.failure_kind || "";
 	const detail = task.detail || "";
-	const failureKind = task.failure_kind || "";
-
-	if (detail.includes("created_timeout") || failureKind === "created_timeout") {
-		return {
-			text: t("guardProbes.findingCreatedTimeout"),
-			tone: "warn",
-			badge: "建连超时",
-		};
+	// Typed provenance takes precedence over legacy diagnostic text. In particular,
+	// transport_error_not_evidence is a disclaimer, not a transport failure kind.
+	if (kind.startsWith("local/verification/") || (!kind && /(?:epoch_stale|identity_mismatch|path_unverified)/.test(detail))) {
+		return finding("findingUnverified", "resultUnverified", "warn");
 	}
-
-	if (detail.includes("evidence_timeout") || failureKind === "evidence_timeout") {
-		return {
-			text: "上游思考证据等待超时（evidence_timeout），未获取完整思维链。",
-			tone: "warn",
-			badge: "证据超时",
-		};
+	if (kind === "upstream/admission/created_timeout" || kind === "created_timeout" || (!kind && detail.includes("created_timeout"))) {
+		return finding("findingCreatedTimeout", "resultCreatedTimeout", "warn");
 	}
-
-	if (detail.includes("transport") || failureKind === "transport") {
-		return {
-			text: t("guardProbes.findingTransportError"),
-			tone: "warn",
-			badge: "传输中断",
-		};
+	if (kind === "upstream/admission/evidence_timeout" || kind === "evidence_timeout" || (!kind && detail.includes("evidence_timeout"))) {
+		return finding("findingEvidenceTimeout", "resultEvidenceTimeout", "warn");
 	}
-
-	if (detail.includes("upstream_http")) {
-		return {
-			text: t("guardProbes.findingUpstreamHttp"),
-			tone: "warn",
-			badge: "上游异常",
-		};
+	if (kind.startsWith("local/")) return finding("findingUnavailable", "resultUnavailable", "warn");
+	if (kind.startsWith("upstream/headers/") || (!kind && detail.includes("upstream_http"))) {
+		return finding("findingUpstreamHttp", "resultUpstreamHttp", "warn");
 	}
-
-	if (detail.includes("exit-ip-verified") || detail.includes("degraded")) {
-		return {
-			text: t("guardProbes.findingExitDegraded"),
-			tone: "bad",
-			badge: t("guardProbes.resultDegraded"),
-		};
+	if (kind === "upstream/admission/truncated_stream" || kind === "transport" || (!kind && /^(?:transport_error|transport:)/.test(detail))) {
+		return finding("findingTransportError", "resultTransport", "warn");
 	}
-
-	if (task.result === "degraded") {
-		return {
-			text: "多维度测试验证命中降智，响应内容或思维链异常。",
-			tone: "bad",
-			badge: t("guardProbes.resultDegraded"),
-		};
-	}
-
-	if (task.result === "error" || task.state === "failed") {
-		return {
-			text: detail || t("guardProbes.findingGeneric", { detail: detail || "测试失败" }),
-			tone: "warn",
-			badge: t("guardProbes.resultError"),
-		};
-	}
-
-	return {
-		text: detail || t("guardProbes.findingUnknown"),
-		tone: "neutral",
-		badge: t("guardProbes.statePending"),
-	};
+	if (task.result === "error" || task.state === "failed") return finding("findingFailed", "resultError", "warn");
+	return finding("findingUnknown", "stateDone", "neutral");
 }
 
 

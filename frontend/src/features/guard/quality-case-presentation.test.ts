@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { QualityCase } from "@/entities/guard/quality-api";
 import {
 	caseDispositionKey,
+ partyDispositionKey,
 	caseEarlyRelease,
 } from "./quality-case-presentation.ts";
 function example(account: string, exit: string): QualityCase {
@@ -63,4 +64,10 @@ test("early release explanation comes from committed evidence, never inferred fr
 		reason: "exit_controls_clean",
 	});
 	assert.equal(caseEarlyRelease(item, "account"), undefined);
+});
+
+test("sentenced and released parties are never presented as healthy", () => {
+ assert.equal(partyDispositionKey("sentenced"), "experiment.dispositions.sentenced");
+ assert.equal(partyDispositionKey("released"), "experiment.dispositions.released");
+ assert.equal(partyDispositionKey("unexpected"), "experiment.dispositions.unknown");
 });

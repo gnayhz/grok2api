@@ -48,6 +48,7 @@ frontend/src/shared/          API、会话、组件、壳层翻译和通用工�
 - 运行设置边界：`application/settings` 只持有 `domain/settings` 快照；组合根注入完整快照校验及旧持久值的文件基线解析。旧值解析在发布重载快照之前完成，当前编辑输入不使用旧数据缺省规则修复非法值。
 - 版本查询由 `application/updatecheck` 拥有版本比较、快照和合并检查；GitHub URL、请求头、响应限额和 body 关闭归 `infra/updatecheck`，通过 `ReleaseSource` 注入。
 - 质量流程由 `court` / `investigator` / `events` / `enforcement` / `management` 拥有；案件、实验、事件、统计快照与纯规则归 `quality/model`；`registry` / `journal` / `evidence` 是存储及投影实现。用例不能导入这三个存储包，组合根注入消费方定义的接口。法院只在本次动作确实把账号从羁押变为可用时通知账号轴清除质量标记与瞬态冷却；账号仍被其它案件羁押则不通知。
+- 账号管理的质量筛选与徽章消费组合根注入的质量只读投影；质量登记处刷新当前 revision，账号应用层在分页前组合筛选并向 HTTP 提供同一快照的徽章。账号存储只执行通用 ID 集合查询，不解释质量表或裁决规则。
 - `account` 保留单一状态 owner。能力接口限制消费者可调用范围，并不表示导入、管理、刷新已成为独立服务。没有独立状态和生命周期的转发包不作为架构分层。
 
 ### 前端 FSD
@@ -55,7 +56,7 @@ frontend/src/shared/          API、会话、组件、壳层翻译和通用工�
 - 依赖方向 app → features → entities → shared；**feature 之间不互相 import**（页面组合一律在 app 层完成，如 `app/quality-settings-route.tsx` 注入设置表单运行时、deferred-pages 组装状态横幅）。
 - `shared/` 不 import entities/features/app；`entities/` 不 import features/app；shadcn 与通用运营件在 `shared/ui`；时长原语在 `shared/lib/duration`；设置表单模型、时长输入与应用状态徽章在 `entities/settings`；节点投影与按域查询 hooks 在 `entities/{egress,account,guard}`；代理/订阅 URL 校验在 `entities/egress/proxy-url`。
 - 页面模块与所需双语文案在 `app/page-modules.ts` 同时按需加载，加载完成才渲染。`app/register-feature-i18n.ts` 负责合并、并发去重和失败重试；feature/entity 持有文案，shared 仅持有通用基础文案。设置状态与时长控件使用 entities/settings 自己的 `settingsForm` 文案。文案归属及页面传递依赖由 i18n 测试约束。
-- 账号页的列表偏好归页面，Provider 专属表单、选择与操作归带 Provider 标识的工作区；切换 Provider 销毁旧工作区。账号编辑器持有自己的表单与提交，设备登录组件持有创建会话、轮询及取消。`useLifetimeMutation` 在提交时捕获挂载生命周期，向 API 传递取消信号并阻止迟到回调修改新界面；服务端已经接受的工作按后端合同完成，新页面通过查询重新取得状态。
+- 账号页的列表偏好归页面，Provider 专属表单、选择与操作归带 Provider 标识的工作区；切换 Provider 销毁旧工作区。账号编辑器持有自己的表单与提交，设备登录组件持有创建会话、轮询及取消。跨页账号名称通过 `entities/account` 按引用 ID 查询轻量身份投影，与受限数量共享账号查询缓存失效范围；质量页面不枚举全池账号。`useLifetimeMutation` 在提交时捕获挂载生命周期，向 API 传递取消信号并阻止迟到回调修改新界面；服务端已经接受的工作按后端合同完成，新页面通过查询重新取得状态。
 - 边界由 `frontend/src/app/fsd-boundaries.test.ts`（解析静态、动态、类型、重导出和副作用依赖，覆盖别名与相对路径）强制，eslint restricted-imports 提供别名导入的即时检查。
 - Inference/account HTTP 不引用 `provider.VideoOperation` / thinking marker / TTS DTO；标记合同在 `domain/inference`。Account HTTP 按用例拆文件（query/admin/import_export/conversion/refresh/device，另有 handler 装配、web_settings、web_account_scripts 与 SSE stream），handler 接收组合根装配的能力，负责路由、投影与共享错误映射；导入/转换流水线不在 HTTP 内启动同步 goroutine。
 

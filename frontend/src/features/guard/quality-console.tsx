@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Settings2, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -14,12 +15,13 @@ import {
 import { QualityHitStats } from "./quality-hit-stats";
 import { QualityProbeView } from "./quality-probe-view";
 import { QualityTribunalView } from "./quality-tribunal-view";
-import { useAccountDirectory } from "@/entities/account/account-queries";
+import { useRestrictedAccountCount } from "@/entities/account/account-queries";
 import { useEgressNodes } from "@/entities/egress/egress-queries";
 import { useGuardStats, useQualityCases, useQualityGuardSelfCheck } from "@/entities/guard/guard-queries";
 
 export function QualityConsole() {
 	const { t } = useTranslation();
+	const cache = useQueryClient();
 	const location = useLocation();
 	const navigate = useNavigate();
 	const requested = location.hash.slice(1);
@@ -27,7 +29,7 @@ export function QualityConsole() {
 	const guard = useGuardStats();
 	const check = useQualityGuardSelfCheck();
 	const cases = useQualityCases();
-	const accounts = useAccountDirectory();
+	const accounts = useRestrictedAccountCount();
 	const nodes = useEgressNodes();
 	const enabled = guard.data?.effective?.enabled;
 	const checkBad = check.data?.self_check.outcome === "error";
@@ -38,9 +40,7 @@ export function QualityConsole() {
 	}, [guard.isError, check.isError, check.data, enabled, checkBad]);
 
 	const open = useMemo(() => cases.data?.filter((c) => c.status === "investigating").length ?? 0, [cases.data]);
-	const accountCount = useMemo(() => accounts.data?.items.filter(
-		(a) => a.quality && a.quality.state !== "active",
-	).length ?? 0, [accounts.data?.items]);
+	const accountCount = accounts.isError ? undefined : accounts.data?.total;
 	const exitCount = useMemo(() => nodes.data?.items.filter((n) => n.quality).length ?? 0, [nodes.data?.items]);
 
 	// Keep visited tabs in DOM for instant 0ms switching without remounting lag
@@ -88,7 +88,7 @@ export function QualityConsole() {
 							</span>
 						</div>
 						<p className="text-xs text-muted-foreground mt-0.5">
-							{open ?? 0} {t("ops.cases")} · {accountCount ?? 0} {t("ops.heldAccounts")} · {exitCount ?? 0} {t("ops.heldExits")}
+							{open ?? 0} {t("ops.cases")} · {accountCount ?? "—"} {t("ops.heldAccounts")} · {exitCount ?? 0} {t("ops.heldExits")}
 						</p>
 					</div>
 				</div>
@@ -113,7 +113,7 @@ export function QualityConsole() {
 									void guard.refetch();
 									void check.refetch();
 									void cases.refetch();
-									void accounts.refetch();
+									void cache.invalidateQueries({ queryKey: ["accounts"] });
 									void nodes.refetch();
 								}}
 							>

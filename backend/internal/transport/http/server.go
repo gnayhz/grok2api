@@ -76,9 +76,6 @@ type Dependencies struct {
 	// EgressQualityStates 节点质量状态注入(批8 可见性整改:节点列表
 	// 徽章)。nil=质量层剥离态,节点响应不含质量字段(D2)。
 	EgressQualityStates func() map[uint64]egresshttp.NodeQualityState
-	// AccountQualityStates 账号质量状态注入(裁决亭可见性:账号列表
-	// 徽章)。nil=质量层剥离态,账号响应不含质量字段。
-	AccountQualityStates func() map[uint64]accounthttp.AccountQualityState
 }
 
 type ReadinessComponent struct {
@@ -195,9 +192,6 @@ func New(deps Dependencies) *gin.Engine {
 	egressHandler.SetLiveStats(deps.EgressLiveStats)
 	if deps.EgressQualityStates != nil {
 		egressHandler.SetQualityStates(deps.EgressQualityStates)
-	}
-	if deps.AccountQualityStates != nil {
-		accountHandler.SetQualityStates(deps.AccountQualityStates)
 	}
 	egressHandler.Register(adminProtected)
 	guardstatshttp.NewHandler(deps.Gateway).Register(adminProtected)

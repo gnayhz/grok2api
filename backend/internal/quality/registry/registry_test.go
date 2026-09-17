@@ -270,10 +270,10 @@ func TestStickyRemandAutoReleaseOnEpoch(t *testing.T) {
 
 // TestCurrentExitStatesProjection 锚定批8 可见性:快照投影只含当前
 // epoch 的非可用出口(稀疏表示),翻篇后旧 epoch 不再出现。
-// TestCurrentAccountStatesProjection 锚定账号质量徽章数据面:稀疏
+// TestManagementAccountStatesProjection 锚定账号质量徽章数据面:稀疏
 // 投影只含非 ACTIVE 行(ACTIVE/缺席不占)——面板一眼只看到被裁决亭
 // 动过的账号。
-func TestCurrentAccountStatesProjection(t *testing.T) {
+func TestManagementAccountStatesProjection(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
 	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 7, To: model.AccountRemanded, CaseID: 60}); err != nil {
@@ -285,7 +285,11 @@ func TestCurrentAccountStatesProjection(t *testing.T) {
 	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 8, To: model.AccountRemanded, CaseID: 61}); err != nil {
 		t.Fatal(err)
 	}
-	states := registry.CurrentAccountStates()
+	projection, err := registry.ManagementState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := projection.Accounts
 	if len(states) != 2 || states[7].State != model.AccountSentenced || states[8].State != model.AccountRemanded {
 		t.Fatalf("投影 = %+v", states)
 	}
@@ -295,7 +299,11 @@ func TestCurrentAccountStatesProjection(t *testing.T) {
 	if err := registry.ReleaseAccountErase(ctx, 8); err != nil {
 		t.Fatal(err)
 	}
-	states = registry.CurrentAccountStates()
+	projection, err = registry.ManagementState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states = projection.Accounts
 	if _, stuck := states[8]; stuck {
 		t.Fatal("抹除后不得留在投影")
 	}

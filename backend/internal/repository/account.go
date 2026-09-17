@@ -130,6 +130,7 @@ type RoutingLayerRepository interface {
 
 // AccountRepository 定义 OAuth 账号和额度快照持久化能力。
 type AccountRepository interface {
+	ListIdentities(ctx context.Context, ids []uint64) ([]account.Identity, error)
 	ApplyQuotaRecovery(ctx context.Context, ref account.QuotaRecoveryRef, event account.RecoveryEvent) (account.RecoveryResult, error)
 	ApplyCredential(ctx context.Context, ref account.CredentialRef, event account.CredentialEvent) (account.CredentialResult, error)
 	List(ctx context.Context, query AccountListQuery) ([]account.Credential, int64, error)

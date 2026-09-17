@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { caseDecoder, nodeDecoder, probeDecoder, type QualityCase, type QualityProbeTask } from "@/entities/guard/quality-api";
 import { maskIP } from "@/shared/lib/mask-ip";
 import {
+	getProbeFinding,
 	buildQualityExitIPIndex,
 	casePartySummary,
 	caseTrigger,
@@ -412,4 +413,22 @@ test("waitingReasonKey 只接受后端稳定码", () => {
 	strictEqual(waitingReasonKey("probes_settled"), "quality.tribunal.waitingReason.probes_settled");
 	strictEqual(waitingReasonKey("something_new"), null);
 	strictEqual(waitingReasonKey(undefined), null);
+});
+
+
+test("probe findings distinguish sample results, timeout stages and unavailable paths", () => {
+ const t = (key: string) => key;
+ const cases = [
+  [{ state: "done", result: "degraded", detail: "comparison=degraded exit-ip-verified:ipv4+ipv6", control_outcome: "error" }, "resultDegraded", "findingDegraded"],
+  [{ state: "failed", result: "error", failure_kind: "upstream/admission/created_timeout", detail: "" }, "resultCreatedTimeout", "findingCreatedTimeout"],
+  [{ state: "failed", result: "error", failure_kind: "local/verification/path", detail: "comparison_epoch_stale | transport_error_not_evidence" }, "resultUnverified", "findingUnverified"],
+  [{ state: "failed", result: "error", failure_kind: "local/measurement/resource_limit", detail: "created_timeout" }, "resultUnavailable", "findingUnavailable"],
+  [{ state: "running", result: "clean" }, "stateRunning", "stateRunning"],
+  [{ state: "cancelled", result: "clean" }, "stateCancelled", "stateCancelled"],
+ ] as const;
+ for (const [fields, badge, text] of cases) {
+  const finding = getProbeFinding({ ...probeTask({}), ...fields }, t);
+  strictEqual(finding.badge, `guardProbes.${badge}`);
+  strictEqual(finding.text, `guardProbes.${text}`);
+ }
 });

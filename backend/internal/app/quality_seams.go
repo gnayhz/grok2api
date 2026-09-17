@@ -2,11 +2,12 @@ package app
 
 import (
 	"context"
+	"time"
+
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
-	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
-	"time"
 )
 
 // 底座缝隙的质量层实现适配器(重写批2,D3):组合根把质量层接到
@@ -62,22 +63,20 @@ func (p egressQualityStatesProvider) states() map[uint64]egresshttp.NodeQualityS
 	return states
 }
 
-// accountQualityStatesProvider 适配账号列表质量徽章注入:登记处非
-// ACTIVE 账号状态 → 管理面账号响应投影(裁决亭可见性,与出口节点
-// 徽章同款)。底座只透传展示,不理解羁押/服刑语义(B4 依赖铁律)。
+// accountQualityStatesProvider adapts the current quality revision for account
+// management queries. Filtering and badges consume the same read projection.
 type accountQualityStatesProvider struct {
 	registry *qualityregistry.Registry
 }
 
-func (p accountQualityStatesProvider) states() map[uint64]accounthttp.AccountQualityState {
-	entries := p.registry.CurrentAccountStates()
-	states := make(map[uint64]accounthttp.AccountQualityState, len(entries))
-	for accountID, entry := range entries {
-		state := accounthttp.AccountQualityState{
-			State:  string(entry.State),
-			CaseID: entry.CurrentCaseID,
-		}
-		states[accountID] = state
+func (p accountQualityStatesProvider) states(ctx context.Context) (map[uint64]accountapp.QualityState, error) {
+	projection, err := p.registry.ManagementState(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return states
+	states := make(map[uint64]accountapp.QualityState, len(projection.Accounts))
+	for id, entry := range projection.Accounts {
+		states[id] = accountapp.QualityState{State: string(entry.State), CaseID: entry.CurrentCaseID}
+	}
+	return states, nil
 }

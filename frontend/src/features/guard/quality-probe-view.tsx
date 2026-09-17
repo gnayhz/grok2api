@@ -43,7 +43,7 @@ import {
 	TableRow,
 } from "@/shared/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { listAllAccounts } from "@/entities/account/account-api";
+import { useAccountDirectory } from "@/entities/account/account-queries";
 import { listAllEgressNodes } from "@/entities/egress/egress-api";
 import { Pagination } from "@/shared/components/pagination";
 import { cn } from "@/shared/lib/cn";
@@ -96,12 +96,7 @@ export function QualityProbeView() {
 		staleTime: 60_000,
 	});
 
-	const accountsQuery = useQuery({
-		queryKey: ["quality", "account-names"],
-		queryFn: ({ signal }) => listAllAccounts({}, signal),
-		staleTime: 5 * 60_000,
-		refetchInterval: 5 * 60_000,
-	});
+	const accountsQuery = useAccountDirectory((probesQuery.data ?? []).flatMap((probe) => [probe.defendant, probe.juror, probe.control_account_id ?? 0]));
 
 	const egressNamesQuery = useQuery({
 		queryKey: ["quality", "egress-names"],
@@ -474,6 +469,7 @@ export function QualityProbeView() {
 			</div>
 
 			{/* Main Content: Cards vs Table */}
+			{accountsQuery.isError && <LoadFailed onRetry={() => void accountsQuery.refetch()} />}
 			{probesQuery.isError ? (
 				<LoadFailed
 					message={String(probesQuery.error)}

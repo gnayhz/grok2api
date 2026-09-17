@@ -35,3 +35,9 @@ export function caseEarlyRelease(
 		reason: typeof reason === "string" ? reason : undefined,
 	};
 }
+
+/** Resource disposition describes this case's hold, not account health. */
+export function partyDispositionKey(disposition: string): string {
+	return ["remanded", "sentenced", "released", "withdrawn", "dismissed"].includes(disposition)
+		? `experiment.dispositions.${disposition}` : "experiment.dispositions.unknown";
+}

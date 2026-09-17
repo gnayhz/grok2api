@@ -122,11 +122,11 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 		if len(input.Filter.AccountIDs) == 0 {
 			query = query.Where("1 = 0")
 		} else {
-			query = query.Where("provider_accounts.id IN ?", input.Filter.AccountIDs)
+			query = accountIDFilter(query, input.Filter.AccountIDs, false)
 		}
 	}
 	if len(input.Filter.ExcludeIDs) > 0 {
-		query = query.Where("provider_accounts.id NOT IN ?", input.Filter.ExcludeIDs)
+		query = accountIDFilter(query, input.Filter.ExcludeIDs, true)
 	}
 	if input.Filter.AfterID > 0 {
 		query = query.Where("provider_accounts.id > ?", input.Filter.AfterID)
