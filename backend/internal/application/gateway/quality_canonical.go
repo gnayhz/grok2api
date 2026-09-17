@@ -17,7 +17,7 @@ import (
 // those events once; converters later borrow the exact retained frames.
 func peekCanonicalQualityStream(ctx context.Context, body io.ReadCloser, stream *responseflow.Stream, protocol string, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
 	cfg = normalizeQualityRetry(cfg)
-	state := qualityScanState{kernel: cfg.kernel, protocol: protocol, startedAt: time.Now()}
+	state := qualityScanState{kernel: cfg.Kernel(), protocol: protocol, startedAt: time.Now()}
 	var useful atomic.Bool
 	liveness := newQualityLivenessTimer(cfg)
 	defer liveness.timer.Stop()

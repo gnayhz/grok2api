@@ -106,3 +106,20 @@ func TestNormalizeAndDisplayUpstreamModel(t *testing.T) {
 		t.Fatalf("display upstream = %q", got)
 	}
 }
+
+// IsCanonicalPublicID 与 PublicIDCandidates 原为生产导出,生产路径分别
+// 使用 NormalizePublicID 与 PublicIDCandidateGroups;两者只被本包测试
+// 消费,已按接缝规则移入 _test.go。
+func IsCanonicalPublicID(provider account.Provider, value string) bool {
+	normalized, ok := NormalizePublicID(provider, value)
+	return ok && normalized == value
+}
+
+func PublicIDCandidates(value string) []string {
+	groups := PublicIDCandidateGroups(value)
+	result := make([]string, 0, len(account.Providers())+1)
+	for _, group := range groups {
+		result = append(result, group...)
+	}
+	return result
+}

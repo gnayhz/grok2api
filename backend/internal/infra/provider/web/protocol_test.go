@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"mime"
@@ -29,11 +30,12 @@ import (
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -103,7 +105,7 @@ func TestWebImagePublicNamesMatchProtocolProducts(t *testing.T) {
 }
 
 func TestWebChatPricingUsesGrok45(t *testing.T) {
-	registry := provider.NewRegistry(&Adapter{})
+	registry := providerimpl.NewRegistry(&Adapter{})
 	for _, upstreamModel := range []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-heavy"} {
 		if got := registry.PricingModel(account.ProviderWeb, upstreamModel); got != "grok-4.5" {
 			t.Fatalf("pricing model for %s = %q", upstreamModel, got)
@@ -419,7 +421,7 @@ func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 	content, _ := json.Marshal([]any{
 		map[string]any{"type": "text", "text": "inspect"},
 		map[string]any{"type": "image_url", "image_url": map[string]any{"url": dataURI}},
@@ -495,7 +497,7 @@ func TestForwardMessagesWebSearchEndToEnd(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual"}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+			adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual"}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 			body, _ := json.Marshal(map[string]any{
 				"model": "public", "max_tokens": 256, "stream": streaming,
 				"messages":    []any{map[string]any{"role": "user", "content": "Perform a web search for the query: rust tutorials"}},
@@ -586,7 +588,7 @@ func TestOpenChatScopesStreamIdleTimeoutToTextStreams(t *testing.T) {
 	}
 	adapter := NewAdapter(Config{
 		BaseURL: server.URL, StatsigMode: "manual", ChatTimeout: 5 * time.Second, StreamIdleTimeout: 1 * time.Second,
-	}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 	credential := account.Credential{ID: 1, Provider: account.ProviderWeb, UserID: "497f19f8-49d4-458a-bee4-43ec3dcaf8ca", EncryptedAccessToken: encrypted}
 	spec, ok := Resolve("grok-chat-fast")
 	if !ok {
@@ -636,7 +638,7 @@ func TestWebNonStreamingResponseStillProtectsGatewayStream(t *testing.T) {
 	}
 	adapter := NewAdapter(Config{
 		BaseURL: server.URL, StatsigMode: "manual", ChatTimeout: 5 * time.Second, StreamIdleTimeout: 175 * time.Millisecond,
-	}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 	body := []byte(`{"model":"grok-chat-fast","input":"hello","stream":false}`)
 	started := time.Now()
 	_, err = adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
@@ -726,7 +728,7 @@ func TestLiteChatStreamFailsBeforeReturningSuccessResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual"}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, imageAssetStoreStub{})
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual"}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, imageAssetStoreStub{})
 	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
 		Credential: account.Credential{ID: 1, Provider: account.ProviderWeb, UserID: "497f19f8-49d4-458a-bee4-43ec3dcaf8ca", EncryptedAccessToken: encrypted},
 		Method:     http.MethodPost, Path: "/v1/chat/completions", Model: "grok-imagine-image", Operation: conversation.OperationChat,
@@ -1185,7 +1187,7 @@ func TestOnlyChatModelsExposeRateLimitModes(t *testing.T) {
 			}
 			continue
 		}
-		if isImagineQuotaMode(spec.Mode) {
+		if account.IsWebImagineQuotaMode(spec.Mode) {
 			continue
 		}
 		if spec.Mode != "" {
@@ -1636,7 +1638,7 @@ func TestGenerateVideoRefreshesOnlyReloadStatsigForbidden(t *testing.T) {
 			}
 			adapter := NewAdapter(Config{
 				BaseURL: server.URL, StatsigMode: "url", StatsigSignerURL: server.URL + "/sign", VideoTimeout: 5 * time.Second,
-			}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+			}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 			adapter.statsig.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
 				return "current-page-meta", nil
 			}
@@ -1712,7 +1714,7 @@ func TestGenerateVideoClassifiesOnlyExplicitHTTPRejectionAsCreateFailure(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "test"}, manager, cipher, nil, nil)
 	request := provider.VideoRequest{

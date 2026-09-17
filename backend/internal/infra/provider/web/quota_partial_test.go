@@ -16,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 func partialQuotaAdapter(t *testing.T, endpoint string) (*Adapter, account.Credential) {
@@ -28,7 +29,7 @@ func partialQuotaAdapter(t *testing.T, endpoint string) (*Adapter, account.Crede
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return NewAdapter(Config{BaseURL: endpoint, StatsigMode: "manual", StatsigManualValue: base64.RawStdEncoding.EncodeToString(make([]byte, 70))}, manager, cipher, nil, nil), account.Credential{ID: 1, Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, EncryptedAccessToken: token}
 }

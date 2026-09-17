@@ -23,16 +23,16 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
+import { Button } from "@/shared/ui/button";
+import { Spinner } from "@/shared/ui/spinner";
 import { AuditResultBadge } from "./audit-result-badge";
 import { auditCachedUsageAvailable } from "./audit-usage";
 import { auditBilling, auditResult, completionTone } from "./audit-presentation";
-import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/shared/ui/badge";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/shared/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { GenerationUsagePanel } from "./generation-usage-panel";
-import { getRequestAudit, type AuditAttemptDTO, type AuditBillingBreakdownDTO, type AuditBillingComponentDTO, type AuditDTO } from "@/features/audits/request-audits-api";
+import { getRequestAudit, type AuditAttemptDTO, type AuditBillingBreakdownDTO, type AuditBillingComponentDTO, type AuditDTO } from "@/entities/audit/audit-api";
 import { CopyButton } from "@/shared/components/copy-button";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
 import { useAfterPaint } from "@/shared/hooks/use-after-paint";

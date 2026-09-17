@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,7 +25,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -180,7 +183,7 @@ func compactionToolGateway(t *testing.T, dialect, upstream string) (*httptest.Se
 	if err := testsupport.Discover(ctx, models, account.ProviderBuild, []string{"grok-4.5"}); err != nil {
 		t.Fatal(err)
 	}
-	network := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+	network := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 	network.SetLogger(logger)
 	t.Cleanup(func() { _ = network.Close(context.Background()) })
 	build := cli.NewAdapter(cli.Config{BaseURL: upstream + "/v1"}, cipher)
@@ -189,21 +192,21 @@ func compactionToolGateway(t *testing.T, dialect, upstream string) (*httptest.Se
 	history := historyapp.New(memory.NewReasoningReplayStore(32), historyapp.Config{Enabled: true, TTL: time.Hour}, logger)
 	history.UseJournal(relational.NewConversationJournal(db, cipher, 8<<20), time.Hour, time.Hour)
 	build.SetReasoningReplay(history)
-	registry := provider.NewRegistry(build)
+	registry := providerimpl.NewRegistry(build)
 	sticky := memory.NewStickyStore()
 	concurrency := memory.NewConcurrencyLimiter()
-	maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clients := clientkeyapp.NewService("compaction-tools", keys, memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+	maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+	clients := clientkeyapp.NewService("compaction-tools", keys, memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 	t.Cleanup(func() { closeClientKeyService(t, clients) })
 	key, err := clients.Create(ctx, clientkeyapp.CreateInput{Name: "compaction-tools", Enabled: true, RPMLimit: 120, MaxConcurrent: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
-	selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-	service := gateway.NewService(models, audits, maintenance, clients, registry, selector, relational.NewResponseRepository(db), 2)
+	selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+	service := gateway.NewService(models, audits, maintenance, clients, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 	service.SetLogger(logger)
 	router := gin.New()
-	router.Use(middleware.RequestID(), middleware.ClientAuth(clients))
+	router.Use(middleware.RequestID(nil), middleware.ClientAuth(clients))
 	NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 	handled := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { router.ServeHTTP(w, r); handled <- struct{}{} }))

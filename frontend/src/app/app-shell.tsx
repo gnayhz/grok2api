@@ -32,7 +32,7 @@ import { z } from "zod";
 
 import { preloadPage } from "@/app/page-modules";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@/shared/ui/button";
 import {
 	Dialog,
 	DialogContent,
@@ -40,7 +40,7 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "@/components/ui/dialog";
+} from "@/shared/ui/dialog";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -50,9 +50,9 @@ import {
 	DropdownMenuSubContent,
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from "@/shared/ui/dropdown-menu";
+import { Input } from "@/shared/ui/input";
+import { Label } from "@/shared/ui/label";
 import {
 	Sheet,
 	SheetContent,
@@ -60,7 +60,7 @@ import {
 	SheetHeader,
 	SheetTitle,
 	SheetTrigger,
-} from "@/components/ui/sheet";
+} from "@/shared/ui/sheet";
 import { useAuth } from "@/shared/auth/use-auth";
 import { GitHubMark } from "@/shared/components/github-mark";
 import { SiteFooter } from "@/shared/components/site-footer";
@@ -165,7 +165,6 @@ export function AppShell() {
 	const [documentationOpen, setDocumentationOpen] = useState<
 		Record<string, boolean>
 	>({});
-	const compactPageHeader = false;
 	const isMediaWorkspace = [
 		"/creative-console",
 		"/gallery",
@@ -509,11 +508,9 @@ export function AppShell() {
 				<main
 					className={cn(
 						"w-full lg:w-auto mx-auto lg:mx-[36px] max-w-[1400px] flex-1 px-5 sm:px-8 lg:px-[36px]",
-						compactPageHeader
-							? "py-6"
-							: isMediaWorkspace
-								? "pt-6 pb-0 lg:pt-[36px]"
-								: "pt-6 pb-2 lg:pt-[36px] lg:pb-3",
+						isMediaWorkspace
+							? "pt-6 pb-0 lg:pt-[36px]"
+							: "pt-6 pb-2 lg:pt-[36px] lg:pb-3",
 					)}
 				>
 					<Outlet />

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,8 +86,8 @@ func TestProbeIdentityChangeKeepsAccountCapacity(t *testing.T) {
 						group, members := r.IdentityGroupOf(build)
 						return model.WithProbeIdentity(parent, group, len(members) > 1)
 					}
-					first, second := &Selector{concurrency: firstLimiter}, &Selector{concurrency: secondLimiter}
-					release, err := first.acquireProbeResources(identityContext(a, ctx), build)
+					first, second := selector.NewSelector(nil, firstLimiter, nil, nil, 0, 0, 0), selector.NewSelector(nil, secondLimiter, nil, nil, 0, 0, 0)
+					release, err := first.AcquireProbeResources(identityContext(a, ctx), build)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -106,7 +107,7 @@ func TestProbeIdentityChangeKeepsAccountCapacity(t *testing.T) {
 					// Hold the refreshed group, then use A's stale unlinked snapshot.
 					if change == "peer_snapshot_stale" {
 						release()
-						release, err = first.acquireProbeResources(identityContext(b, ctx), build)
+						release, err = first.AcquireProbeResources(identityContext(b, ctx), build)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -115,7 +116,7 @@ func TestProbeIdentityChangeKeepsAccountCapacity(t *testing.T) {
 					}
 					deadline, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 					defer cancel()
-					extra, err := second.acquireProbeResources(identityContext(b, deadline), build)
+					extra, err := second.AcquireProbeResources(identityContext(b, deadline), build)
 					if extra != nil {
 						extra()
 					}
@@ -123,7 +124,7 @@ func TestProbeIdentityChangeKeepsAccountCapacity(t *testing.T) {
 						t.Fatalf("same Build account overlapped after %s: err=%v", change, err)
 					}
 					release()
-					next, err := second.acquireProbeResources(identityContext(b, ctx), build)
+					next, err := second.AcquireProbeResources(identityContext(b, ctx), build)
 					if err != nil {
 						t.Fatal(err)
 					}

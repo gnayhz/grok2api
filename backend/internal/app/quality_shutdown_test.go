@@ -62,6 +62,7 @@ func TestApplicationCloseStopsQualityBeforeRuntimeAndSQL(t *testing.T) {
 	cfg := enforcement.DefaultConfig()
 	cfg.Logger = a.logger
 	a.qualityEnforcement = enforcement.New(cfg, a.quality, source, source, nil)
+	a.qualityEnforcement.Run(context.Background())
 	<-source.started
 	if err := a.Close(); err != nil {
 		t.Fatal(err)

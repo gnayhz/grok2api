@@ -20,7 +20,7 @@ func (r *rebindingImageResolver) LookupNetIP(context.Context, string, string) ([
 
 func TestRemoteImageTargetPinsFirstValidatedResolution(t *testing.T) {
 	resolver := &rebindingImageResolver{}
-	target, err := validateRemoteImageURLWithResolver(context.Background(), "https://images.example.test/photo.png?size=large", resolver)
+	target, err := validateRemoteAttachmentURLWithResolver(context.Background(), "https://images.example.test/photo.png?size=large", resolver, errInvalidChatImage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestRemoteImageTargetRejectsAnyPrivateResolution(t *testing.T) {
 		netip.MustParseAddr("93.184.216.34"),
 		netip.MustParseAddr("10.0.0.8"),
 	}}
-	if _, err := validateRemoteImageURLWithResolver(context.Background(), "https://images.example.test/photo.png", resolver); err == nil {
+	if _, err := validateRemoteAttachmentURLWithResolver(context.Background(), "https://images.example.test/photo.png", resolver, errInvalidChatImage); err == nil {
 		t.Fatal("mixed public and private DNS result was accepted")
 	}
 }

@@ -6,18 +6,19 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	dialect "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
 type webMediaUpstreamError struct {
@@ -74,7 +75,7 @@ func isClearanceRefreshableMediaError(e *webMediaUpstreamError) bool {
 // response, but the same code can also wrap a definitive account block; blocked
 // credentials must remain terminal and must not be replayed with a fresh signature.
 func isStatsigRefreshableMediaError(e *webMediaUpstreamError, body []byte) bool {
-	if e == nil || e.status != http.StatusForbidden || e.bodyKind != "json" || provider.IsDefinitiveAccountBlockBody(body) {
+	if e == nil || e.status != http.StatusForbidden || e.bodyKind != "json" || dialect.IsDefinitiveAccountBlockBody(body) {
 		return false
 	}
 	code, message, structured := extractWebMediaUpstreamErrorFields(body)
@@ -186,7 +187,7 @@ func (a *Adapter) logWebMediaUpstreamRejection(stage string, response *http.Resp
 			"content_encoding", safeWebMediaDiagnostic(response.Header.Get("Content-Encoding"), 64),
 			"server", safeWebMediaDiagnostic(response.Header.Get("Server"), 128),
 			"cf_ray", safeWebMediaDiagnostic(response.Header.Get("CF-Ray"), 128),
-			"upstream_request_id", safeWebMediaDiagnostic(firstNonEmpty(response.Header.Get("X-Request-Id"), response.Header.Get("X-Xai-Request-Id")), 128),
+			"upstream_request_id", safeWebMediaDiagnostic(texts.FirstNonEmpty(response.Header.Get("X-Request-Id"), response.Header.Get("X-Xai-Request-Id")), 128),
 		)
 	}
 	a.log().Warn("web_media_upstream_rejected", attributes...)
@@ -389,7 +390,7 @@ func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credenti
 		}
 		lease.Release()
 	}
-	return provider.NewCompletionReadCloser(response.Body, onFinished), contentType, response.ContentLength, nil
+	return dialect.NewCompletionReadCloser(response.Body, onFinished), contentType, response.ContentLength, nil
 }
 
 func parseVideoStream(response *http.Response, progress func(int)) (provider.VideoResult, string, error) {

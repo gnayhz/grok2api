@@ -26,7 +26,7 @@ func TestResponseResourcePolicyHasOneOwner(t *testing.T) {
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && path == "../infra/provider/web/chat.go" {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (path == "../infra/provider/web/chat.go" || path == "../infra/provider/web/chat_open.go") {
 					if sel.Sel.Name == "LookupWeb" {
 						nativeReads++
 					}

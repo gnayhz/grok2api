@@ -75,7 +75,7 @@ func (s *Service) RecoverCriticalCredentials(ctx context.Context, expiresWithin 
 // WakeCredentialRefresh 合并调度唤醒；导入、手动刷新和失败退避更新不会阻塞调用方。
 func (s *Service) WakeCredentialRefresh() {
 	select {
-	case s.credentialRefreshWake <- struct{}{}:
+	case s.credentialLifecycle.wake <- struct{}{}:
 	default:
 	}
 }
@@ -88,7 +88,7 @@ func (s *Service) RunCredentialRefresh(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.credentialRefreshWake:
+		case <-s.credentialLifecycle.wake:
 		case <-timer.C:
 		}
 		runFailed := false

@@ -139,8 +139,8 @@ func TestSharedChildPoolBoundsCategoryAcrossProcesses(t *testing.T) {
 
 func TestChildPoolsBoundConcurrentRequestsByCategoryAndGlobalLimit(t *testing.T) {
 	global := NewPool(3)
-	refresh := NewChildPool(2, global)
-	syncPool := NewChildPool(2, global)
+	refresh := NewSharedChildPool(2, nil, "refresh", global)
+	syncPool := NewSharedChildPool(2, nil, "sync", global)
 
 	var globalActive atomic.Int64
 	var globalPeak atomic.Int64
@@ -298,7 +298,7 @@ func TestMapStopsSubmittingAfterCancellation(t *testing.T) {
 
 func TestPoolHotResizeAndChildLimit(t *testing.T) {
 	global := NewPool(3)
-	child := NewChildPool(1, global)
+	child := NewSharedChildPool(1, nil, "child", global)
 	started := make(chan struct{}, 3)
 	release := make(chan struct{})
 	done := make(chan error, 3)
@@ -339,7 +339,7 @@ func TestPoolHotResizeAndChildLimit(t *testing.T) {
 
 func TestChildSnapshotSeparatesQueuedFromActiveWork(t *testing.T) {
 	global := NewPool(1)
-	child := NewChildPool(1, global)
+	child := NewSharedChildPool(1, nil, "child", global)
 	blockerStarted := make(chan struct{})
 	releaseBlocker := make(chan struct{})
 	blockerDone := make(chan error, 1)

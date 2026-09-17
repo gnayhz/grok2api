@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"math"
 	"net/http"
 	"net/url"
@@ -16,10 +17,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type VoiceWebSocketInput struct {
@@ -63,9 +64,9 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 		publicModel = defaultModel
 	}
 
-	ctx, egressTrace := infraegress.WithTrace(ctx)
+	ctx, egressTrace := portphysical.WithTrace(ctx)
 	startedAt := time.Now()
-	eventID := newAuditEventID()
+	eventID := s.newAuditEventID()
 
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
@@ -97,11 +98,11 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 		return nil, err
 	}
 	ctx = attemptmeta.WithRequest(ctx, eventID, 0, "", nil)
-	ctx = infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
+	ctx = s.startPhysicalTrace(ctx, string(route.Provider), string(operation))
 	// Routing attempts bound account selection. The shared physical budget
 	// includes cold DPoP preparation, its retry and every WS handshake.
-	requestBudget := inferencedomain.NewAttemptBudget(infraegress.MaxPhysicalCalls)
-	ctx = infraegress.WithPhysicalCallBudget(ctx, requestBudget)
+	requestBudget := inferencedomain.NewAttemptBudget(portphysical.MaxPhysicalCalls)
+	ctx = portphysical.WithPhysicalCallBudget(ctx, requestBudget)
 	ctx, cancelExecution := context.WithCancel(ctx)
 	handedOff := false
 	defer func() {
@@ -115,7 +116,7 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 	attemptPolicy := newRoutingAttemptPolicy(int(s.maxAttempts.Load()))
 	excluded := make(map[uint64]bool)
 	selection := preselectedSession
-	var lease *accountLease
+	var lease *selector.Lease
 	defer func() {
 		if !handedOff {
 			lease.Release()
@@ -162,14 +163,14 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 
 	for attempt := 0; attemptPolicy.allows(attempt); attempt++ {
 		if selection == nil {
-			selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, input.ClientKey.AccountScope())
+			selection, err = s.selector.BeginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, input.ClientKey.AccountScope())
 		}
 		if err == nil {
 			lease, err = selection.Acquire(ctx, excluded, false)
 		}
 		if err != nil {
 			errorCode := "upstream_unavailable"
-			var selectionFailure *SelectionUnavailableError
+			var selectionFailure *selector.SelectionUnavailableError
 			if errors.As(err, &selectionFailure) {
 				errorCode = selectionFailure.Code()
 			}
@@ -185,7 +186,7 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 			lease.Release()
 			continue
 		}
-		lease.markSelectorUpstreamStarted()
+		lease.MarkSelectorUpstreamStarted()
 		attemptCtx := attemptmeta.WithAccount(ctx, credential.ID, string(route.Provider), route.UpstreamModel)
 		request := prepared
 		request.Credential = credential
@@ -196,7 +197,7 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 				cleanup()
 			}
 			if errors.Is(dialErr, inferencedomain.ErrAttemptBudget) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 				lease.Release()
 				writeFailureAudit(http.StatusServiceUnavailable, "physical_attempt_limit", &credential)
 				return nil, &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "physical_attempt_limit", PublicMessage: "上游尝试次数达到安全上限", Cause: dialErr}
@@ -283,19 +284,19 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 				}
 				successful := strings.TrimSpace(outcome.ErrorCode) == ""
 				generated := generation.snapshot()
-				if !generated.completed && !outcome.UpstreamFailed {
-					accountLeaseRef.skipSelectorObservation()
+				if !generated.Completed && !outcome.UpstreamFailed {
+					accountLeaseRef.SkipSelectorObservation()
 				} else {
-					accountLeaseRef.completeSelectorObservation(generated.completed)
+					accountLeaseRef.CompleteSelectorObservation(generated.Completed)
 				}
 				accountLeaseRef.Release()
 
 				budget := newFinalizationBudget(string(operation), string(route.Provider))
 				accountID := accountCredential.ID
-				if generated.completed && accountLeaseRef.QuotaMode != "" {
+				if generated.Completed && accountLeaseRef.QuotaMode != "" {
 					s.finishQuotaConsumption(budget, accountdomain.QuotaConsumption{EventID: "quota_" + eventID, AccountID: accountID, Mode: accountLeaseRef.QuotaMode, SnapshotVersion: accountLeaseRef.QuotaSnapshotVersion, Units: 1})
 				}
-				if generated.completed && quotaMode != "" {
+				if generated.Completed && quotaMode != "" {
 					if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow {
 						s.accounts.QueueQuotaRefresh(accountID, quotaMode)
 					}
@@ -308,7 +309,7 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 				if outcome.ClientUpgraded {
 					record.AdmissionOutcome = "admitted"
 				}
-				record.GenerationOutcome = generated.outcome
+				record.GenerationOutcome = generated.Outcome
 				record.DeliveryOutcome = "failed"
 				if successful {
 					record.DeliveryOutcome = "completed"
@@ -324,10 +325,10 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 				record.AccountID = &accountID
 				record.AccountName = accountCredential.Name
 				applyAuditEgress(&record, egressTrace, route.Provider)
-				if generated.durationReported && operation == audit.OperationSTT {
+				if generated.DurationReported && operation == audit.OperationSTT {
 					record.UsageSource = audit.UsageSourceUpstream
-					record.AudioDurationMS = int64(math.Round(min(generated.duration*1000, float64(math.MaxInt64-1024))))
-					if pricing, priced := audit.EstimateOfficialSTTCost(generated.duration, true); priced {
+					record.AudioDurationMS = int64(math.Round(min(generated.Duration*1000, float64(math.MaxInt64-1024))))
+					if pricing, priced := audit.EstimateOfficialSTTCost(generated.Duration, true); priced {
 						record.EstimatedCostInUSDTicks = pricing.CostInUSDTicks
 						record.PricingModel = pricing.Model
 						record.PricingVersion = audit.OfficialPricingAsOf
@@ -354,7 +355,7 @@ func (s *Service) OpenVoiceWebSocket(ctx context.Context, input VoiceWebSocketIn
 			if cleanup != nil {
 				cleanup()
 			}
-			accountLeaseRef.skipSelectorObservation()
+			accountLeaseRef.SkipSelectorObservation()
 			accountLeaseRef.Release()
 			if !owned {
 				finalize(VoiceWebSocketOutcome{ErrorCode: "request_canceled"})

@@ -4,9 +4,10 @@ import { useState, type ReactNode } from "react";
 import { Navigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { listModels } from "@/entities/model/model-api";
+import { uniqueModelsByPublicID } from "@/entities/model/projection";
 import type { ModelRouteDTO } from "@/entities/model/types";
 import { getSystemInfo } from "@/entities/system/system-api";
 import { runtimeConfig } from "@/shared/config/runtime-config";
@@ -342,15 +343,6 @@ export function ApiDocsPage() {
       </div>
     </div>
   );
-}
-
-function uniqueModelsByPublicID(models: ModelRouteDTO[]): ModelRouteDTO[] {
-  const seen = new Set<string>();
-  return models.filter((model) => {
-    if (seen.has(model.publicId)) return false;
-    seen.add(model.publicId);
-    return true;
-  });
 }
 
 function withExampleModel(response: Record<string, unknown>, model: string): Record<string, unknown> {

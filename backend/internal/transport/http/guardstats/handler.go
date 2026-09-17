@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -12,12 +12,8 @@ import (
 // 部署时每实例各自统计,与 egress routing-stats 同语义。
 type Handler struct{ gateway *gateway.Service }
 
-func NewHandler(services ...*gateway.Service) *Handler {
-	h := &Handler{}
-	if len(services) > 0 {
-		h.gateway = services[0]
-	}
-	return h
+func NewHandler(service *gateway.Service) *Handler {
+	return &Handler{gateway: service}
 }
 
 func (h *Handler) Register(router *gin.RouterGroup) {

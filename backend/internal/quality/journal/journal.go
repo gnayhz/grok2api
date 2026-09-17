@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -19,19 +19,6 @@ var ErrConflict = errors.New("guard event identity conflict")
 var ErrBacklogFull = errors.New("guard event backlog capacity exhausted")
 
 const DefaultBacklogLimit int64 = 10000
-
-type Event struct {
-	Physical  *attemptmeta.PhysicalFact `json:"physical,omitempty"`
-	Attempt   attemptmeta.Identity      `json:"attempt"`
-	Stage     string                    `json:"stage"`
-	Outcome   string                    `json:"outcome"`
-	Rule      string                    `json:"rule,omitempty"`
-	ErrorCode string                    `json:"error_code,omitempty"`
-	At        time.Time                 `json:"at"`
-	HoldUntil time.Time                 `json:"hold_until,omitempty"`
-}
-
-func (e Event) ID() string { return e.Attempt.ID + "/" + e.Stage }
 
 type EventRow struct {
 	ID         string    `gorm:"size:160;primaryKey"`
@@ -90,12 +77,12 @@ func New(db *gorm.DB) *Store { return &Store{db: db, completions: newCompletionT
 // RecordMany commits related facts under one receipt, with no nested savepoints.
 // Admission write tokens track overlapping finalizers; only committed
 // admissions become eligible for renewal.
-func (s *Store) RecordMany(ctx context.Context, events []Event) error {
+func (s *Store) RecordMany(ctx context.Context, events []qualitymodel.Event) error {
 	if len(events) > 128 {
 		return errors.New("guard event batch too large")
 	}
 	s.beginCompletions(events)
-	var inserted []Event
+	var inserted []qualitymodel.Event
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for _, event := range events {
 			if err := s.record(tx, event, &inserted); err != nil {
@@ -131,19 +118,19 @@ func (s *Store) CheckCapacity(ctx context.Context) error {
 
 // Record returns a receipt only after the fact, restriction and outbox commit.
 // Replaying an identical event neither extends its TTL nor recreates its hold.
-func (s *Store) Record(ctx context.Context, e Event) error {
-	return s.RecordMany(ctx, []Event{e})
+func (s *Store) Record(ctx context.Context, e qualitymodel.Event) error {
+	return s.RecordMany(ctx, []qualitymodel.Event{e})
 }
 
-func (s *Store) record(tx *gorm.DB, e Event, inserted ...*[]Event) error {
+func (s *Store) record(tx *gorm.DB, e qualitymodel.Event, inserted ...*[]qualitymodel.Event) error {
 	if e.Attempt.ID == "" || len(e.Attempt.ID) > 128 || e.Attempt.AccountID == 0 || e.At.IsZero() || len(e.Rule) > 100 || len(e.ErrorCode) > 128 ||
-		(e.Stage != "admission" && e.Stage != "completion" && e.Stage != "exchange" && e.Stage != "recovery") {
+		(e.Stage != qualitymodel.EventStageAdmission && e.Stage != qualitymodel.EventStageCompletion && e.Stage != qualitymodel.EventStageExchange && e.Stage != qualitymodel.EventStageRecovery) {
 		return errors.New("invalid guard event")
 	}
-	if (e.Stage == "admission" && e.Outcome != "delivered" && e.Outcome != "degraded" && e.Outcome != "rejected") ||
-		(e.Stage == "completion" && e.Outcome != "completed" && e.Outcome != "interrupted" && e.Outcome != "canceled") ||
-		(e.Stage == "recovery" && e.Outcome != "unconfirmed") ||
-		(e.Stage == "exchange" && (e.Outcome != "observed" || e.Physical == nil || e.Physical.Attempt != e.Attempt)) {
+	if (e.Stage == qualitymodel.EventStageAdmission && e.Outcome != qualitymodel.EventOutcomeAdmitted && e.Outcome != qualitymodel.EventOutcomeDegraded && e.Outcome != qualitymodel.EventOutcomeRejected) ||
+		(e.Stage == qualitymodel.EventStageCompletion && e.Outcome != qualitymodel.EventOutcomeCompleted && e.Outcome != qualitymodel.EventOutcomeInterrupted && e.Outcome != qualitymodel.EventOutcomeCanceled) ||
+		(e.Stage == qualitymodel.EventStageRecovery && e.Outcome != qualitymodel.EventOutcomeUnconfirmed) ||
+		(e.Stage == qualitymodel.EventStageExchange && (e.Outcome != qualitymodel.EventOutcomeObserved || e.Physical == nil || e.Physical.Attempt != e.Attempt)) {
 		return errors.New("invalid guard outcome for stage")
 	}
 	if e.Stage == "admission" && e.Outcome == "degraded" && (!e.HoldUntil.After(e.At) || e.HoldUntil.Sub(e.At) > 24*time.Hour) {
@@ -178,7 +165,7 @@ func (s *Store) record(tx *gorm.DB, e Event, inserted ...*[]Event) error {
 	// Only incidents require asynchronous domain processing. Archival facts
 	// are already acknowledged and never compete with completion writes.
 	outbox := OutboxRow{EventID: e.ID(), ReadyAt: e.At}
-	if e.Stage == "admission" && e.Outcome == "degraded" {
+	if e.Stage == qualitymodel.EventStageAdmission && e.Outcome == qualitymodel.EventOutcomeDegraded {
 		reservation := tx.Model(&CapacityRow{}).Where("id = 1 AND pending < capacity_limit").Update("pending", gorm.Expr("pending + 1"))
 		if reservation.Error != nil {
 			return reservation.Error
@@ -192,7 +179,7 @@ func (s *Store) record(tx *gorm.DB, e Event, inserted ...*[]Event) error {
 	if err := s.recordCompletionObligation(tx, e, string(payload)); err != nil {
 		return err
 	}
-	if e.Stage == "admission" && e.Outcome == "degraded" {
+	if e.Stage == qualitymodel.EventStageAdmission && e.Outcome == qualitymodel.EventOutcomeDegraded {
 		if err := tx.Create(&RestrictionRow{Owner: e.ID(), AccountID: e.Attempt.AccountID,
 			Reason: "admission_rejected", ExpiresAt: e.HoldUntil}).Error; err != nil {
 			return err
@@ -210,6 +197,10 @@ func (s *Store) record(tx *gorm.DB, e Event, inserted ...*[]Event) error {
 // AccountAllowed is the authoritative final admission check. One SQL snapshot
 // sees both the temporary holds and the case projection across replicas.
 // A hold committed after this read applies to subsequent admissions.
+//
+// 跨存储域显式合同:本查询联查 registry 拥有的 q_account_state/
+// q_case_party 列(字段与状态值是两包的共同合同);registry 改这两张
+// 表的列名或状态值时必须同步此 SQL。
 func (s *Store) AccountAllowed(ctx context.Context, id uint64, now time.Time) (bool, error) {
 	var blocked bool
 	err := s.db.WithContext(ctx).Raw(`SELECT EXISTS(
@@ -229,14 +220,14 @@ func (s *Store) Release(ctx context.Context, owner string, now time.Time) error 
 }
 
 type Claim struct {
-	Event    Event
+	Event    qualitymodel.Event
 	Owner    string
 	Attempts int
 }
 
 // Claim uses compare-and-swap for SQLite and PostgreSQL. A dead worker's claim
 // expires, and an old worker cannot acknowledge a replacement worker's lease.
-func (s *Store) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claim, error) {
+func (s *Store) claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claim, error) {
 	if owner == "" || lease <= 0 || limit < 1 || limit > 64 {
 		return nil, errors.New("invalid outbox claim")
 	}
@@ -260,7 +251,7 @@ func (s *Store) Claim(ctx context.Context, owner string, now time.Time, lease ti
 		if err := s.db.WithContext(ctx).First(&row, "id = ?", candidate.EventID).Error; err != nil {
 			return claims, err
 		}
-		var e Event
+		var e qualitymodel.Event
 		if err := json.Unmarshal([]byte(row.Payload), &e); err != nil {
 			return claims, err
 		}
@@ -269,7 +260,7 @@ func (s *Store) Claim(ctx context.Context, owner string, now time.Time, lease ti
 	return claims, nil
 }
 
-func (s *Store) Complete(ctx context.Context, claim Claim, now time.Time) error {
+func (s *Store) complete(ctx context.Context, claim Claim, now time.Time) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := ensureCapacity(tx); err != nil {
 			return err
@@ -306,19 +297,8 @@ func ensureCapacity(tx *gorm.DB) error {
 	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&CapacityRow{ID: 1, Pending: count, InFlight: active, Limit: DefaultBacklogLimit}).Error
 }
 
-type BacklogStats struct {
-	InFlight        int64      `json:"in_flight"`
-	Unconfirmed     int64      `json:"unconfirmed"`
-	OldestExpiredAt *time.Time `json:"oldest_expired_at,omitempty"`
-	Pending         int64      `json:"pending"`
-	Limit           int64      `json:"limit"`
-	OldestAt        *time.Time `json:"oldest_at,omitempty"`
-	Leased          int64      `json:"leased"`
-	Retrying        int64      `json:"retrying"`
-}
-
-func (s *Store) Stats(ctx context.Context) (BacklogStats, error) {
-	stats := BacklogStats{Limit: DefaultBacklogLimit}
+func (s *Store) Stats(ctx context.Context) (qualitymodel.BacklogStats, error) {
+	stats := qualitymodel.BacklogStats{Limit: DefaultBacklogLimit}
 	db := s.db.WithContext(ctx)
 	var capacity []CapacityRow
 	if err := db.Where("id = 1").Find(&capacity).Error; err != nil {
@@ -344,7 +324,7 @@ func (s *Store) Stats(ctx context.Context) (BacklogStats, error) {
 	if err := db.Model(&OutboxRow{}).Where("processed_at IS NULL AND attempts > 0").Count(&stats.Retrying).Error; err != nil {
 		return stats, err
 	}
-	if err := db.Model(&EventRow{}).Where("stage = ? AND NOT EXISTS (SELECT 1 FROM q_guard_event c WHERE c.attempt_id = q_guard_event.attempt_id AND c.stage = ?)", "recovery", "completion").Count(&stats.Unconfirmed).Error; err != nil {
+	if err := db.Model(&EventRow{}).Where("stage = ? AND NOT EXISTS (SELECT 1 FROM q_guard_event c WHERE c.attempt_id = q_guard_event.attempt_id AND c.stage = ?)", qualitymodel.EventStageRecovery, qualitymodel.EventStageCompletion).Count(&stats.Unconfirmed).Error; err != nil {
 		return stats, err
 	}
 	var expired []OutboxRow
@@ -357,7 +337,7 @@ func (s *Store) Stats(ctx context.Context) (BacklogStats, error) {
 	return stats, nil
 }
 
-func (s *Store) Retry(ctx context.Context, claim Claim, now time.Time) error {
+func (s *Store) retry(ctx context.Context, claim Claim, now time.Time) error {
 	backoff := time.Second * time.Duration(1<<min(claim.Attempts, 6))
 	return s.db.WithContext(ctx).Model(&OutboxRow{}).
 		Where("event_id = ? AND lease_owner = ? AND processed_at IS NULL", claim.Event.ID(), claim.Owner).
@@ -366,8 +346,8 @@ func (s *Store) Retry(ctx context.Context, claim Claim, now time.Time) error {
 
 // ProcessOne deliberately claims one item: its processing timeout must remain
 // below the lease even when the downstream court is slow.
-func (s *Store) ProcessOne(ctx context.Context, owner string, handle func(context.Context, Event) error) (bool, error) {
-	claims, err := s.Claim(ctx, owner, time.Now().UTC(), 15*time.Second, 1)
+func (s *Store) ProcessOne(ctx context.Context, owner string, handle func(context.Context, qualitymodel.Event) error) (bool, error) {
+	claims, err := s.claim(ctx, owner, time.Now().UTC(), 15*time.Second, 1)
 	if err != nil || len(claims) == 0 {
 		return false, err
 	}
@@ -376,10 +356,10 @@ func (s *Store) ProcessOne(ctx context.Context, owner string, handle func(contex
 	err = handle(workCtx, claim.Event)
 	cancel()
 	if err != nil {
-		if retryErr := s.Retry(ctx, claim, time.Now().UTC()); retryErr != nil {
+		if retryErr := s.retry(ctx, claim, time.Now().UTC()); retryErr != nil {
 			return true, errors.Join(err, retryErr)
 		}
 		return true, fmt.Errorf("process guard event: %w", err)
 	}
-	return true, s.Complete(ctx, claim, time.Now().UTC())
+	return true, s.complete(ctx, claim, time.Now().UTC())
 }

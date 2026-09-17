@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const consoleImageJSONLimit = 128 << 20

@@ -1,5 +1,8 @@
-import type { QualityCase, QualityCaseLive, QualityNodeView, QualityProbeTask } from "./quality-api";
+import type { QualityCase, QualityCaseLive, QualityNodeView, QualityProbeTask } from "@/entities/guard/quality-api";
 // 质量防护监控台的视图模型(纯函数层)。见文件尾。
+// 导出缝说明:未被运行时组件消费、仅被 quality-view.test.ts 引用的
+// 导出(如 splitCases/verdictNarrative/waitingReasonKey)是测试缝——
+// 纯函数契约由离线夹具测试锁定,保留导出以便测试直接驱动。
 
 // 仲裁/调查页面使用的最小身份投影。账号与节点的完整管理 DTO 不应
 // 进入质量视图模型，质量页面只需要可读名称、邮箱和稳定编号。
@@ -18,7 +21,7 @@ export type QualityExitIPIndex = Map<number, {
 	epochs: Map<number, string>;
 }>;
 
-export type QualityIdentityDisplay = {
+type QualityIdentityDisplay = {
 	primary: string;
 	secondary: string;
 	title: string;
@@ -162,7 +165,7 @@ export function parseGoDurationMs(value: string | null | undefined): number | nu
 }
 
 /** 证据进度条:当前值/门槛/是否达标。 */
-export type Meter = { current: number; target: number; fraction: number; met: boolean };
+type Meter = { current: number; target: number; fraction: number; met: boolean };
 
 function meter(current: number, target: number): Meter {
 	const safeTarget = target > 0 ? target : 1;
@@ -185,7 +188,7 @@ export function caseTrigger(item: QualityCase): string {
 }
 
 /** 结案/在审案件的证据摘要(裁决流"依据"行):从证据 JSON 提取可读字段。 */
-export type EvidenceDigest = {
+type EvidenceDigest = {
 	trigger: string;
 	degradedExits: number | null;
 	spanNodes: number | null;
@@ -193,18 +196,11 @@ export type EvidenceDigest = {
 	defendant: number | null;
 	exitNode: number | null;
 	auxiliary: string | null;
-	accountConfidence: number | null;
-	exitConfidence: number | null;
-	confidenceThreshold: number | null;
-	accountTransportSupport: number | null;
-	uncertaintyPenalty: number | null;
 	differentialValid: number | null;
 	differentialFailed: number | null;
 	differentialTransportFailed: number | null;
 	differentialAttempts: number | null;
 	juryFailed: number | null;
-	accountScore: number | null;
-	exitScore: number | null;
 };
 
 export function evidenceDigest(item: QualityCase): EvidenceDigest | null {
@@ -229,32 +225,20 @@ export function evidenceDigest(item: QualityCase): EvidenceDigest | null {
 		defendant: num(evidence.defendant),
 		exitNode: exitRecord ? num(exitRecord.node) : null,
 		auxiliary: typeof evidence.auxiliary === "string" && evidence.auxiliary.length > 0 ? evidence.auxiliary : null,
-		accountConfidence: num(evidence.account_confidence_percent) !== null ? num(evidence.account_confidence_percent)! / 100 : null,
-		exitConfidence: num(evidence.exit_confidence_percent) !== null ? num(evidence.exit_confidence_percent)! / 100 : null,
-		confidenceThreshold: num(evidence.confidence_threshold_percent) !== null ? num(evidence.confidence_threshold_percent)! / 100 : null,
-		accountTransportSupport: num(evidence.account_transport_support_tenths) !== null ? num(evidence.account_transport_support_tenths)! / 10 : null,
-		uncertaintyPenalty: num(evidence.uncertainty_tenths) !== null ? num(evidence.uncertainty_tenths)! / 10 : null,
 		differentialValid: num(evidence.diff_valid) ?? (differentialClean !== null && differentialDegraded !== null ? differentialClean + differentialDegraded : null),
 		differentialFailed: num(evidence.diff_failed),
 		differentialTransportFailed: num(evidence.diff_transport_failed),
 		differentialAttempts: num(evidence.diff_tasks),
 		juryFailed: num(evidence.jury_failed),
-		accountScore: num(evidence.account_score_tenths) !== null ? num(evidence.account_score_tenths)! / 10 : null,
-		exitScore: num(evidence.exit_score_tenths) !== null ? num(evidence.exit_score_tenths)! / 10 : null,
 	};
 }
 
 /** 实时证据面 → 四条定罪进度(账号侧两条,出口侧两条)。 */
-export type LiveMeters = {
+type LiveMeters = {
 	account: Array<{ key: "degradedExits" | "spanNodes"; meter: Meter }>;
 	exit: Array<{ key: "witnesses" | "degradedVotes"; meter: Meter }>;
 	pendingProbes: number;
 	waitingReason: string;
-	accountConfidence: number | null;
-	exitConfidence: number | null;
-	confidenceThreshold: number | null;
-	accountTransportSupport: number | null;
-	uncertaintyPenalty: number | null;
 	differentialValid: number | null;
 	differentialFailed: number | null;
 	differentialTransportFailed: number | null;
@@ -278,11 +262,6 @@ export function liveMeters(live: QualityCaseLive | undefined): LiveMeters | null
 		],
 		pendingProbes: live.pending_probes,
 		waitingReason: live.waiting_reason,
-		accountConfidence: typeof live.account_confidence === "number" ? live.account_confidence : null,
-		exitConfidence: typeof live.exit_confidence === "number" ? live.exit_confidence : null,
-		confidenceThreshold: typeof live.confidence_threshold === "number" ? live.confidence_threshold : null,
-		accountTransportSupport: typeof live.account_transport_support === "number" ? live.account_transport_support : null,
-		uncertaintyPenalty: typeof live.uncertainty_penalty === "number" ? live.uncertainty_penalty : null,
 		differentialValid: typeof live.differential_valid === "number" ? live.differential_valid : null,
 		differentialFailed: typeof live.differential_failed === "number" ? live.differential_failed : null,
 		differentialTransportFailed: typeof live.differential_transport_failed === "number" ? live.differential_transport_failed : null,
@@ -294,10 +273,10 @@ export function liveMeters(live: QualityCaseLive | undefined): LiveMeters | null
 
 /** 探针近期结论统计窗:与证据窗口对齐——旧结论随窗口滑出归零,
  * 不允许"无新活动但数字常驻"(清态事故的显示侧教训)。 */
-export const PROBE_RECENT_WINDOW_MS = 30 * 60 * 1000;
+const PROBE_RECENT_WINDOW_MS = 30 * 60 * 1000;
 
 /** 探针队列汇总:在飞(全量,含僵尸可见)+ 近期结论计数(窗口内)。 */
-export type ProbeSummary = { pending: number; running: number; cancelled: number; clean: number; degraded: number; error: number; inFlight: number };
+type ProbeSummary = { pending: number; running: number; cancelled: number; clean: number; degraded: number; error: number; inFlight: number };
 
 export function probeSummary(probes: QualityProbeTask[], nowMs: number = Date.now(), windowMs: number = PROBE_RECENT_WINDOW_MS): ProbeSummary {
 	const summary: ProbeSummary = { pending: 0, running: 0, cancelled: 0, clean: 0, degraded: 0, error: 0, inFlight: 0 };
@@ -351,7 +330,7 @@ export function probeDurationMs(task: QualityProbeTask): number | null {
 }
 
 /** 案件的调查动作分组:账号差分(对比账户)与出口陪审(对比 IP)。 */
-export type CaseProbes = { account: QualityProbeTask[]; exit: QualityProbeTask[] };
+type CaseProbes = { account: QualityProbeTask[]; exit: QualityProbeTask[] };
 
 export function groupProbesByCase(probes: QualityProbeTask[]): Map<number, CaseProbes> {
 	const grouped = new Map<number, CaseProbes>();
@@ -372,7 +351,7 @@ export function groupProbesByCase(probes: QualityProbeTask[]): Map<number, CaseP
  * 同槽重派(IP 失效换 IP 再试)只更新该槽最新结论——位子不变,结果
  * 更新;有界替代会扩展槽位以保留每个新目标,不会无限堆圆点。未填槽=待派(hollow)。
  */
-export type ProbeSlot = { task: QualityProbeTask | null; key: string };
+type ProbeSlot = { task: QualityProbeTask | null; key: string };
 
 export function slotProbes(tasks: QualityProbeTask[], keyOf: (task: QualityProbeTask) => string, slots: number): ProbeSlot[] {
 	const latestByKey = new Map<string, QualityProbeTask>();
@@ -397,41 +376,6 @@ export function differentialSlotKey(task: QualityProbeTask): string {
 /** 陪审槽键:陪审员账号。 */
 export function jurySlotKey(task: QualityProbeTask): string {
 	return "juror-" + task.juror;
-}
-
-/** 探针失败的人话归因:从底层详情提取病根,没有则返回空串(用通用标签)。 */
-export function probeFailureNote(task: QualityProbeTask): string {
-	const detail = task.detail ?? "";
-	if (detail.includes("cross-face")) {
-		return "probeNote.crossFace";
-	}
-	if (detail.includes("same-exit-ip")) {
-		return "probeNote.sameExitIP";
-	}
-	if (detail.includes("same-node")) {
-		return "probeNote.sameNode";
-	}
-	if (detail.includes("exit-ip-unresolved") || detail.includes("no-ip-resolver") || detail.includes("ip-verify:")) {
-		return "probeNote.ipUnresolved";
-	}
-	if (detail.includes("single-path (direct)")) {
-		return "probeNote.directOnly";
-	}
-	if (detail.includes("transport_error_not_evidence") || detail.includes("cause=transport") ||
-		detail.includes("cause=created_timeout") || detail.includes("cause=evidence_timeout") ||
-		detail.includes("cause=empty_stream") || detail.includes("cause=upstream_http") ||
-		detail.includes("cause=provider_unavailable") || detail.includes("cause=account_unavailable") ||
-		detail.includes("cause=credential_unavailable") || detail.includes("cause=route_unavailable") ||
-		detail.includes("comparison_epoch_stale") || detail.includes("baseline_epoch_stale")) {
-		return "probeNote.transportError";
-	}
-	if (detail.startsWith("attempt1=error") || detail.includes("forward:") || detail.includes("upstream HTTP")) {
-		return "probeNote.attempt1Error";
-	}
-	if (detail.includes("load account")) {
-		return "probeNote.accountMissing";
-	}
-	return "";
 }
 
 /** 调查圆点色调:绿=干净,红=降智,琥珀=在途,灰=失败/不可采。 */
@@ -466,20 +410,6 @@ export function casePartySummary(item: QualityCase): { defendantAccounts: number
 	return { defendantAccounts, exits };
 }
 
-/** 出口状态 → 语义色调。 */
-export function exitStateTone(state: string): "ok" | "held" | "banned" | "unknown" {
-	if (state === "available") {
-		return "ok";
-	}
-	if (state === "remanded") {
-		return "held";
-	}
-	if (state === "banned") {
-		return "banned";
-	}
-	return "unknown";
-}
-
 /** 处置 → 徽章色调。 */
 export function dispositionTone(disposition: string): "destructive" | "warning" | "ok" | "muted" {
 	if (disposition === "remanded" || disposition === "sentenced") {
@@ -491,8 +421,9 @@ export function dispositionTone(disposition: string): "destructive" | "warning" 
 	return "muted";
 }
 
-/** 裁决 → 徽章色调。 */
-export function verdictTone(status: string): "destructive" | "warning" | "ok" | "muted" {
+/** 裁决 → 徽章色调。与 quality-tribunal-view.tsx 里同名但按案件对象
+ * 取值的 verdictTone 不同,这里是纯字符串状态的测试缝投影。 */
+export function testCaseVerdictTone(status: string): "destructive" | "warning" | "ok" | "muted" {
 	if (status === "account_guilty") {
 		return "destructive";
 	}
@@ -508,14 +439,6 @@ export function verdictTone(status: string): "destructive" | "warning" | "ok" | 
 	return "muted";
 }
 
-/** IP 展示只保留前两段(管理面板最小化展示;完整 IP 在节点详情)。 */
-export function maskIP(ip: string): string {
-	const parts = ip.split(".");
-	if (parts.length === 4) {
-		return parts.slice(0, 2).join(".") + ".*.*";
-	}
-	return ip.length > 12 ? ip.slice(0, 12) + "…" : ip;
-}
 /** 解析探针结论为人性化中文和色调 */
 export function getProbeFinding(
 	task: QualityProbeTask,
@@ -604,7 +527,7 @@ export function getProbeFinding(
  * 与后端 summarizeSimpleProbes 的 admissibility 对齐:陪审 done 即票;
  * 差分 clean 即票,degraded 必须验证过 IP 变化;失败/取消不算票)。
  * 案件级全量任务(不受全局窗口截断)是数据源,保证历史案件叙事不缺数。 */
-export type CaseProbeTally = {
+type CaseProbeTally = {
 	juryTotal: number;
 	juryClean: number;
 	juryDegraded: number;
@@ -654,7 +577,7 @@ export function tallyCaseProbes(probes: { account: QualityProbeTask[]; exit: Qua
 /** 裁决叙事:把对照实验结果翻译成"为什么支持账号/出口/无法区分"的一句话。
  * 输入的 tally 来自案件全量探针行(带真实身份显示名);数据不足时返回
  * null,由调用方回退到通用文案。纯函数,离线夹具可测。 */
-export type VerdictNarrative = { key: string; params: Record<string, string | number> };
+type VerdictNarrative = { key: string; params: Record<string, string | number> };
 
 export function verdictNarrative(input: {
 	verdict: string;

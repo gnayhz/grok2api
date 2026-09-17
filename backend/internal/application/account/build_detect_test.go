@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -17,8 +18,8 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type detectResponsesAdapter struct {
@@ -73,7 +74,7 @@ func TestFinishBuildDetectCredentialErrorClassifiesPermanentRefreshAsInvalid(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(repo, nil, nil, nil, provider.NewRegistry(detectResponsesAdapter{}), cipher, nil)
+	service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(detectResponsesAdapter{}), cipher, security.RandomTokenSource{}, nil, nil, nil)
 
 	for _, refreshErr := range []error{
 		ErrCredentialRefreshPermanent,
@@ -118,7 +119,7 @@ func TestFinishBuildDetectResponseUsesScopedFailureState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(repo, nil, nil, nil, provider.NewRegistry(detectResponsesAdapter{}), cipher, nil)
+	service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(detectResponsesAdapter{}), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	response := &provider.Response{
 		StatusCode: http.StatusPaymentRequired,
 		Body:       io.NopCloser(bytes.NewReader([]byte(`{"code":"personal-team-blocked:spending-limit","error":"blocked"}`))),
@@ -267,9 +268,9 @@ func TestDetectBuildAccountsStreamsInvalidOnlyForAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 401 属于凭据拒绝；全量模式只将 invalid 明细推送给 observer。
-	service := NewService(repo, nil, nil, nil, provider.NewRegistry(detectResponsesAdapter{
+	service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(detectResponsesAdapter{
 		status: http.StatusUnauthorized,
-	}), cipher, nil)
+	}), cipher, security.RandomTokenSource{}, nil, nil, nil)
 
 	var items []BuildDetectItemResult
 	succeeded, failed, err := service.DetectBuildAccountsWithProgress(ctx, nil, true, nil, func(item BuildDetectItemResult) error {
@@ -395,9 +396,9 @@ func newConcurrentInvalidBuildDetectService(t *testing.T, accountCount int) *Ser
 			t.Fatal(err)
 		}
 	}
-	service := NewService(repo, nil, nil, nil, provider.NewRegistry(detectResponsesAdapter{
+	service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(detectResponsesAdapter{
 		status: http.StatusUnauthorized,
-	}), cipher, nil)
+	}), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	service.SetDetectPool(batch.NewPool(accountCount))
 	return service
 }

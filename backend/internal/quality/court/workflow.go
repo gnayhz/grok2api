@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 // ReleaseAfterReview records the operator's reason and the complete previous
@@ -57,21 +56,33 @@ func (s *Service) ReleaseAfterReview(ctx context.Context, id uint64, reason stri
 	if err != nil {
 		return err
 	}
+	// The party list is what identifies the accounts this revocation may have
+	// freed; it is read before the settle because afterwards the case's own
+	// disposition no longer distinguishes "freed by this call" from "already
+	// free".
 	parties, err := s.registry.ListParties(ctx, id)
 	if err != nil {
 		return err
 	}
+	// Record the custody state before settling: only an account that was
+	// detained and became eligible counts as freed by this action. Without
+	// the before/after comparison an account already released by an earlier
+	// disposition would be re-reported and could clear quality marks set
+	// after that release.
+	heldBefore := make(map[uint64]bool, len(parties))
+	for _, p := range parties {
+		if p.Kind == model.PartyAccount && !s.registry.AccountEligible(p.AccountID) {
+			heldBefore[p.AccountID] = true
+		}
+	}
 	if err := s.registry.SettleInvestigation(ctx, id, model.VerdictInsufficient, string(raw), time.Now().UTC(), true, true); err != nil {
 		return err
 	}
+	// Report every account this revocation actually freed. An account still
+	// detained by another case stays ineligible and is not reported.
 	for _, p := range parties {
-		if p.Kind == model.PartyAccount && s.registry.AccountEligible(p.AccountID) {
-			s.mu.RLock()
-			hook := s.releaseHook
-			s.mu.RUnlock()
-			if hook != nil {
-				hook(ctx, p.AccountID)
-			}
+		if p.Kind == model.PartyAccount && heldBefore[p.AccountID] && s.registry.AccountEligible(p.AccountID) {
+			s.notifyAccountReleased(ctx, p.AccountID)
 		}
 	}
 	return nil
@@ -90,7 +101,7 @@ func (s *Service) advanceInvestigations(ctx context.Context, source EvidenceSour
 	if err != nil {
 		return stats, err
 	}
-	var expired, active []registry.CaseRecord
+	var expired, active []model.CaseRecord
 	for _, record := range cases {
 		if !now.Before(casePolicy(record, cfg).DeadlineAt) {
 			expired = append(expired, record)
@@ -100,7 +111,7 @@ func (s *Service) advanceInvestigations(ctx context.Context, source EvidenceSour
 	}
 	// Deadline closure runs before reconciliation, new discovery or replacement
 	// planning. Each group resumes after the last attempted case across replicas.
-	for group, records := range [][]registry.CaseRecord{rotateCases(expired, expiredCursor), rotateCases(active, activeCursor)} {
+	for group, records := range [][]model.CaseRecord{rotateCases(expired, expiredCursor), rotateCases(active, activeCursor)} {
 		for i, record := range records {
 			if ctx.Err() != nil {
 				return stats, errors.Join(append(errs, ctx.Err())...)
@@ -177,16 +188,16 @@ func boundedCaseBudget(ctx context.Context, remaining int, budget time.Duration)
 	return max(budget, time.Nanosecond)
 }
 
-func rotateCases(records []registry.CaseRecord, cursor uint64) []registry.CaseRecord {
+func rotateCases(records []model.CaseRecord, cursor uint64) []model.CaseRecord {
 	for i, record := range records {
 		if record.ID > cursor {
-			return append(append(make([]registry.CaseRecord, 0, len(records)), records[i:]...), records[:i]...)
+			return append(append(make([]model.CaseRecord, 0, len(records)), records[i:]...), records[:i]...)
 		}
 	}
 	return records
 }
 
-func (s *Service) advanceExperiment(ctx context.Context, record registry.CaseRecord, now time.Time, cfg Config) (model.Verdict, int, error) {
+func (s *Service) advanceExperiment(ctx context.Context, record model.CaseRecord, now time.Time, cfg Config) (model.Verdict, int, error) {
 	policy := casePolicy(record, cfg)
 	// Upgrade old open cases once. Later settings changes cannot extend an
 	// existing hold or move the evidence thresholds underneath an experiment.
@@ -211,7 +222,7 @@ func (s *Service) advanceExperiment(ctx context.Context, record registry.CaseRec
 	if err != nil {
 		return "", 0, err
 	}
-	store := registry.NewProbeTaskStore(s.registry)
+	store := s.probes
 	tasks, err := store.ListProbeTasksForCase(ctx, record.ID)
 	if err != nil {
 		return "", 0, err
@@ -256,12 +267,12 @@ func (s *Service) advanceExperiment(ctx context.Context, record registry.CaseRec
 			if err != nil {
 				return "", 0, err
 			}
-			wasHeld := !s.registry.AccountEligible(defendant)
+			accountHeldBeforeRelease := !s.registry.AccountEligible(defendant)
 			if err := s.registry.ReleaseClearedParties(ctx, record.ID, report.AccountCleared, report.ExitCleared, string(raw), now); err != nil {
 				return "", 0, err
 			}
-			if wasHeld && s.registry.AccountEligible(defendant) {
-				s.notifyAccountRelease(ctx, defendant)
+			if accountHeldBeforeRelease && s.registry.AccountEligible(defendant) {
+				s.notifyAccountReleased(ctx, defendant)
 			}
 		}
 		if report.Account.Pending+report.Exit.Pending > 0 && !expired {
@@ -337,18 +348,15 @@ func (s *Service) advanceExperiment(ctx context.Context, record registry.CaseRec
 	if err != nil {
 		return "", 0, err
 	}
-	wasHeld := s.registry.AccountState(defendant).State == model.AccountRemanded
+	accountHeldBeforeSettle := s.registry.AccountState(defendant).State == model.AccountRemanded
 	err = s.registry.SettleInvestigation(ctx, record.ID, report.Verdict, string(raw), now, banExit)
 	if err != nil {
 		return "", 0, err
 	}
-	if wasHeld && s.registry.AccountEligible(defendant) {
-		s.mu.RLock()
-		hook := s.releaseHook
-		s.mu.RUnlock()
-		if hook != nil {
-			hook(ctx, defendant)
-		}
+	// Only a settle that moved this account from held to eligible is a release;
+	// a sentencing verdict leaves it ineligible and reports nothing.
+	if accountHeldBeforeSettle && s.registry.AccountEligible(defendant) {
+		s.notifyAccountReleased(ctx, defendant)
 	}
 	return report.Verdict, 0, factErr
 }
@@ -366,17 +374,8 @@ func (s *Service) withControls(ctx context.Context, spec DispatchSpec, baseline 
 	if err != nil {
 		return spec, err
 	}
-	controls := s.dispatchSpecFromCandidates(spec.CaseID, spec.Defendant, baseline, s.evidence.CrossValidate(snapshot), policy, accounts, nodes)
+	controls := s.dispatchSpecFromCandidates(ctx, spec.CaseID, spec.Defendant, baseline, s.evidence.CrossValidate(snapshot), policy, accounts, nodes)
 	spec.ControlAccounts = controls.Jurors
 	spec.ControlExits = controls.HealthyExits
 	return spec, nil
-}
-
-func (s *Service) notifyAccountRelease(ctx context.Context, defendant uint64) {
-	s.mu.RLock()
-	hook := s.releaseHook
-	s.mu.RUnlock()
-	if hook != nil {
-		hook(ctx, defendant)
-	}
 }

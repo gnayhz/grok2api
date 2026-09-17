@@ -11,6 +11,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/events"
 	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"gorm.io/driver/postgres"
 )
@@ -24,7 +25,7 @@ func TestPostgresQualityShutdownCancelsActiveSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reg.Close()
-	source, err := evidence.New(context.Background(), reg.DB(), evidence.DefaultConfig())
+	source, err := evidence.New(context.Background(), reg.DB(), qualitymodel.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,8 @@ func TestPostgresQualityShutdownCancelsActiveSQL(t *testing.T) {
 			var closeWorker func(context.Context) error
 			var pending *journal.Store
 			if table == "q_coordination" {
-				service := court.New(court.Config{EvaluateEvery: time.Second}, reg, source, nil)
+				service := court.New(court.Config{EvaluateEvery: time.Second}, reg, source, nil, qualityregistry.NewProbeTaskStore(reg))
+				service.Run(context.Background())
 				closeWorker = service.Close
 			} else {
 				pending = journal.New(reg.DB())

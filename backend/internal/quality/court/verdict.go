@@ -8,7 +8,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
@@ -18,7 +17,7 @@ func (s *Service) isCurrentExitEpoch(key model.EpochKey) bool {
 
 // marshalOpeningEvidence stores only stable identifiers and the original
 // epoch. Raw IPs, credentials, and provider responses never enter the case.
-func marshalOpeningEvidence(defendant uint64, exit model.EpochKey, estimate evidence.Estimate) (string, error) {
+func marshalOpeningEvidence(defendant uint64, exit model.EpochKey, estimate model.Estimate) (string, error) {
 	subject := estimate.Accounts[defendant]
 	payload := map[string]any{
 		"trigger":   "traffic_degraded",
@@ -45,7 +44,7 @@ func marshalEvidence(payload map[string]any) (string, error) {
 // currently usable, unimplicated exits and accounts, then shuffled so the
 // same low IDs are not repeatedly used as witnesses. Replacement rounds use
 // the same dispatch boundary with an explicit, already-filtered candidate set.
-func (s *Service) dispatchSpecFor(ctx context.Context, caseID, defendant uint64, baseline model.EpochKey, estimate evidence.Estimate, policy ExperimentPolicy) (DispatchSpec, error) {
+func (s *Service) dispatchSpecFor(ctx context.Context, caseID, defendant uint64, baseline model.EpochKey, estimate model.Estimate, policy ExperimentPolicy) (DispatchSpec, error) {
 	if !s.isCurrentExitEpoch(baseline) {
 		return DispatchSpec{CaseID: caseID, Defendant: defendant}, nil
 	}
@@ -57,10 +56,10 @@ func (s *Service) dispatchSpecFor(ctx context.Context, caseID, defendant uint64,
 	if err != nil {
 		return DispatchSpec{}, err
 	}
-	return s.dispatchSpecFromCandidates(caseID, defendant, baseline, estimate, policy, accounts, nodes), nil
+	return s.dispatchSpecFromCandidates(ctx, caseID, defendant, baseline, estimate, policy, accounts, nodes), nil
 }
 
-func (s *Service) dispatchSpecFromCandidates(caseID, defendant uint64, baseline model.EpochKey, estimate evidence.Estimate, policy ExperimentPolicy, accounts []uint64, nodes map[uint64]bool) DispatchSpec {
+func (s *Service) dispatchSpecFromCandidates(ctx context.Context, caseID, defendant uint64, baseline model.EpochKey, estimate model.Estimate, policy ExperimentPolicy, accounts []uint64, nodes map[uint64]bool) DispatchSpec {
 	spec := DispatchSpec{CaseID: caseID, Defendant: defendant, BaselineExit: baseline}
 	seenNodes := map[uint64]struct{}{baseline.NodeID: {}}
 	seenKeys := map[model.EpochKey]struct{}{baseline: {}}
@@ -83,6 +82,13 @@ func (s *Service) dispatchSpecFromCandidates(caseID, defendant uint64, baseline 
 		seenKeys[key] = struct{}{}
 		spec.HealthyExits = append(spec.HealthyExits, key)
 	}
+	// Advisory pre-filter: a comparison exit KNOWN to share the baseline's
+	// real egress would only burn a real upstream probe and lose one
+	// admissible evidence item — with bounded replacement rounds that can end
+	// the case as "insufficient evidence". Unknown never excludes, and an
+	// all-excluded plan simply has no comparison path, exactly like a case
+	// whose traffic window has no healthy exit at all.
+	spec.HealthyExits = s.filterKnownSameExitCandidates(ctx, baseline.NodeID, spec.HealthyExits)
 
 	accountIDs := make([]uint64, 0, len(estimate.Accounts))
 	for accountID, subject := range estimate.Accounts {
@@ -105,6 +111,26 @@ func (s *Service) dispatchSpecFromCandidates(caseID, defendant uint64, baseline 
 		spec.Jurors = spec.Jurors[:policy.JurySize]
 	}
 	return spec
+}
+
+// filterKnownSameExitCandidates drops comparison-exit candidates the advisory
+// seam already knows to share the baseline's real egress. It runs before the
+// plan cap and the shuffle so the finite comparison budget is spent on usable
+// candidates, and it never re-admits a dropped candidate: when every candidate
+// is excluded the plan keeps today's behaviour for a case with no healthy
+// exit — an empty comparison set.
+func (s *Service) filterKnownSameExitCandidates(ctx context.Context, baselineNodeID uint64, candidates []model.EpochKey) []model.EpochKey {
+	if baselineNodeID == 0 || len(candidates) == 0 {
+		return candidates
+	}
+	kept := candidates[:0]
+	for _, candidate := range candidates {
+		if s.excludesKnownSameExit(ctx, baselineNodeID, candidate.NodeID) {
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return kept
 }
 
 func randomizeDirectDispatch(spec *DispatchSpec) {

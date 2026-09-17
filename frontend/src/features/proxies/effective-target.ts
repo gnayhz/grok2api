@@ -1,4 +1,4 @@
-import type { EgressRoutingTarget } from "@/features/settings/settings-api";
+import type { EgressRoutingTarget } from "@/entities/egress/egress-api";
 
 export type EffectiveRoutingConfig = {
   defaultTarget: EgressRoutingTarget;

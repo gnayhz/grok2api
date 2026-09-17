@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,8 +17,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 func BenchmarkStatsigQuotaRefresh(b *testing.B) {
@@ -75,7 +76,7 @@ func BenchmarkStatsigQuotaRefresh(b *testing.B) {
 				}
 			}))
 			defer upstream.Close()
-			manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+			manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 			defer manager.Close(ctx)
 			var signs atomic.Int64
 			signerServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +89,7 @@ func BenchmarkStatsigQuotaRefresh(b *testing.B) {
 			adapter.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 			adapter.statsig.client = signerServer.Client()
 			adapter.statsig.validateEndpoint = func(context.Context, string) error { return nil }
-			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			if _, err := service.RefreshQuota(ctx, value.ID); err != nil {
 				b.Fatal(err)
 			}

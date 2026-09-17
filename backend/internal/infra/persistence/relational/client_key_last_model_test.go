@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"strings"
 	"testing"
 
@@ -26,8 +27,8 @@ func TestClientKeyDeletingLastGrantedModelDoesNotAuthorizeOtherModels(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			secret := security.FormatClientKey("deadbeefcafe", strings.Repeat("ab", 24))
-			created, err := keys.Create(ctx, clientkey.Key{Name: "restricted", Prefix: "deadbeefcafe", SecretHash: security.HashToken(secret), EncryptedSecret: "fixture", Enabled: true, AllowedModels: []uint64{allowed.ID}})
+			secret := clientkey.FormatClientKey("deadbeefcafe", strings.Repeat("ab", 24))
+			created, err := keys.Create(ctx, clientkey.Key{Name: "restricted", Prefix: "deadbeefcafe", SecretHash: tokenhash.HashToken(secret), EncryptedSecret: "fixture", Enabled: true, AllowedModels: []uint64{allowed.ID}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -37,7 +38,7 @@ func TestClientKeyDeletingLastGrantedModelDoesNotAuthorizeOtherModels(t *testing
 			if err := models.Delete(ctx, allowed.ID); err != nil {
 				t.Fatal(err)
 			}
-			service := clientkeyapp.NewService("fixture", keys, nil, nil, 0, 0, nil)
+			service := clientkeyapp.NewService("fixture", keys, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 			defer service.Close(ctx)
 			actual, release, err := service.Authenticate(ctx, secret)
 			if err != nil {

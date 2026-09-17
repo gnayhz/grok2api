@@ -2,7 +2,9 @@ import { lazy, Suspense, type ComponentType } from "react";
 
 import { AccountsPageModule, AppShellModule, RequestAuditsPageModule, ClientKeysPageModule, CreativeConsolePageModule, DashboardPageModule, ApiDocsPageModule, GalleryPageModule, QualityConsoleModule, QualitySettingsPageModule, VideoGalleryPageModule, ModelsPageModule, ProxiesPageModule, SettingsPageModule } from "./page-modules";
 
-import { Spinner } from "@/components/ui/spinner";
+import { Spinner } from "@/shared/ui/spinner";
+import { GuardStatusBanner } from "@/features/guard/guard-status-banner";
+import { VersionUpdateBanner, VersionUpdateSection } from "@/features/system/version-update";
 
 const AccountsPage = lazy(AccountsPageModule.load);
 const AppShell = lazy(AppShellModule.load);
@@ -32,7 +34,12 @@ export function DeferredAppShell() {
 }
 
 export function DeferredDashboardPage() {
-  return <DeferredPage page={DashboardPage} />;
+  // App 层组合:状态横幅来自 guard/system feature,页面本身保持 feature 无互赖。
+  return (
+    <Suspense fallback={<PageLoadingFallback />}>
+      <DashboardPage bannerSlot={<><VersionUpdateBanner /><GuardStatusBanner /></>} />
+    </Suspense>
+  );
 }
 
 export function DeferredModelsPage() {
@@ -76,7 +83,11 @@ export function DeferredApiDocsPage() {
 }
 
 export function DeferredSettingsPage() {
-  return <DeferredPage page={SettingsPage} />;
+  return (
+    <Suspense fallback={<PageLoadingFallback />}>
+      <SettingsPage versionSection={<VersionUpdateSection />} />
+    </Suspense>
+  );
 }
 
 function PageLoadingFallback({ fullScreen = false }: { fullScreen?: boolean }) {

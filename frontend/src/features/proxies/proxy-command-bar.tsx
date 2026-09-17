@@ -24,29 +24,30 @@ import {
 	AlertDialogFooter,
 	AlertDialogHeader,
 	AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Spinner } from "@/components/ui/spinner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useNow } from "@/features/guard/quality-hooks";
-import { networkSummary } from "@/features/operations/operations-data";
-import { useOperationsNodes, useOperationsPools } from "@/features/operations/operations-queries";
-import { OperationsDialogContent, OperationsAlertDialogContent } from "@/features/operations/operations-ui";
+} from "@/shared/ui/alert-dialog";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/shared/ui/dialog";
+import { Label } from "@/shared/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
+import { Spinner } from "@/shared/ui/spinner";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { useNow } from "@/shared/lib/use-now";
+import { networkSummary } from "@/entities/egress/node-condition";
+
+import { OperationsDialogContent, OperationsAlertDialogContent } from "@/shared/ui/operations";
 import {
 	cleanupUnhealthyEgressNodes,
 	previewUnhealthyEgressNodes,
 	testEgressNodes,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 import { cn } from "@/shared/lib/cn";
 
-import { getNetworkRuntime } from "./network-api";
+import { getNetworkRuntime } from "@/entities/egress/network-runtime-api";
 import { IntervalInput } from "./operations-context";
 import { useEgressOperations } from "./operations-shared";
 import { getLatencyTone } from "./proxy-format";
+import { useEgressNodes, useEgressPools } from "@/entities/egress/egress-queries";
 
 export function ProxyCommandBar({
 	onOpenAddModal,
@@ -56,8 +57,8 @@ export function ProxyCommandBar({
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const operations = useEgressOperations();
-	const nodes = useOperationsNodes();
-	const pools = useOperationsPools();
+	const nodes = useEgressNodes();
+	const pools = useEgressPools();
 	const now = useNow(15_000);
 
 	// Runtime connections telemetry query

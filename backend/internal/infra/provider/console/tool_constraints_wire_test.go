@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -98,7 +99,7 @@ func TestToolConstraintsWire(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				manager := infraegress.NewManager(consoleEgressRepositoryStub{}, cipher)
+				manager := infraegress.NewManagerWithLimits(consoleEgressRepositoryStub{}, cipher, netbudget.Limits{})
 				defer manager.Close(context.Background())
 				adapter := NewAdapter(Config{BaseURL: server.URL, Timeout: 5 * time.Second}, manager, cipher, nil)
 				credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}

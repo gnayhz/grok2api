@@ -1,9 +1,9 @@
 import { Check, ListFilter, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
+import { Button } from "@/shared/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/shared/ui/dropdown-menu";
+import { Input } from "@/shared/ui/input";
 
 // Groups turn an option into a third menu level: the option itself stays
 // selectable as the unnarrowed value, and every group entry narrows it further.
@@ -49,7 +49,6 @@ type DataTableTextFilter = {
 };
 
 export type DataTableFilter = DataTableOptionFilter | DataTableTextFilter;
-export type { DataTableFilterOption, DataTableFilterOptionGroup };
 
 function findGroupLabel(groups: DataTableFilterOptionGroup[], value: string): string | undefined {
   if (!value) return undefined;

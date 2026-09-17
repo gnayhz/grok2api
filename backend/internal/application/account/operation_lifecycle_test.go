@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -10,7 +11,7 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -22,7 +23,7 @@ func TestCredentialCommittedAfterCancellationIsSharedWithoutAnotherRotation(t *t
 	defer finish()
 	ownerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.providers = provider.NewRegistry(operationRefreshAdapter{base, func(ctx context.Context, v accountdomain.Credential) (provider.RefreshedCredential, error) {
+	s.providers = providerimpl.NewRegistry(operationRefreshAdapter{base, func(ctx context.Context, v accountdomain.Credential) (provider.RefreshedCredential, error) {
 		close(entered)
 		<-release
 		cancel()
@@ -107,7 +108,7 @@ func TestCredentialOperationWaitsForCanceledOwnerCleanupBeforeTakingOver(t *test
 	finish := func() { once.Do(func() { close(release) }) }
 	defer finish()
 	var calls atomic.Int32
-	s.providers = provider.NewRegistry(operationRefreshAdapter{base, func(ctx context.Context, v accountdomain.Credential) (provider.RefreshedCredential, error) {
+	s.providers = providerimpl.NewRegistry(operationRefreshAdapter{base, func(ctx context.Context, v accountdomain.Credential) (provider.RefreshedCredential, error) {
 		if calls.Add(1) == 1 {
 			close(entered)
 			<-ctx.Done()
@@ -166,7 +167,7 @@ func TestCredentialCanceledOwnerDoesNotGrantWaiterPermanentRetry(t *testing.T) {
 	defer finish()
 	ownerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.providers = provider.NewRegistry(operationRefreshAdapter{base, func(ctx context.Context, v accountdomain.Credential) (provider.RefreshedCredential, error) {
+	s.providers = providerimpl.NewRegistry(operationRefreshAdapter{base, func(ctx context.Context, v accountdomain.Credential) (provider.RefreshedCredential, error) {
 		close(entered)
 		<-release
 		cancel()
@@ -255,7 +256,7 @@ func TestQuotaFullModeAndProbeWaitersCancelIndependently(t *testing.T) {
 				t.Fatal(err)
 			}
 			a := &consoleQuotaSnapshotAdapter{fullStarted: make(chan struct{}, 1), fullRelease: make(chan struct{})}
-			s.providers = provider.NewRegistry(a)
+			s.providers = providerimpl.NewRegistry(a)
 			var once sync.Once
 			finish := func() { once.Do(func() { close(a.fullRelease) }) }
 			defer finish()

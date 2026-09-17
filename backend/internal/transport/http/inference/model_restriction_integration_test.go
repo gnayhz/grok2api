@@ -6,6 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +25,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -84,22 +88,22 @@ func TestHTTPModelRestrictionsUseActualAttemptGeneration(t *testing.T) {
 						}
 					}))
 					defer upstream.Close()
-					registry := provider.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher))
+					registry := providerimpl.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher))
 					concurrency := memory.NewConcurrencyLimiter()
 					sticky := memory.NewStickyStore()
-					accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-					clientService := clientkeyapp.NewService("model-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+					accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+					clientService := clientkeyapp.NewService("model-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 					defer closeClientKeyService(t, clientService)
 					key, err := clientService.Create(ctx, clientkeyapp.CreateInput{Name: "model", Enabled: true, RPMLimit: 120, MaxConcurrent: 4})
 					if err != nil {
 						t.Fatal(err)
 					}
-					selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+					selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
 					accounts.SetInvalidationObserver(func(_ context.Context, e repository.InvalidationEvent) { selector.ApplyInvalidation(e) })
-					service := gateway.NewService(models, audits, accountService, clientService, registry, selector, relational.NewResponseRepository(db), 2)
+					service := gateway.NewService(models, audits, accountService, clientService, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 					gin.SetMode(gin.TestMode)
 					router := gin.New()
-					router.Use(middleware.RequestID(), middleware.ClientAuth(clientService))
+					router.Use(middleware.RequestID(nil), middleware.ClientAuth(clientService))
 					NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 					server := httptest.NewServer(router)
 					defer server.Close()
@@ -155,12 +159,20 @@ func TestHTTPModelRestrictionsUseActualAttemptGeneration(t *testing.T) {
 							t.Fatalf("restriction reason=%s", block.Reason)
 						}
 					}
-					lease, err := selector.Acquire(ctx, v.Provider, 0, "grok-4.5", "", "", nil, false)
-					if err == nil {
+					acquireErr := func() error {
+						session, sessionErr := selector.BeginSelectionSessionForKey(ctx, v.Provider, 0, "grok-4.5", "", "", nil, false, clientkeydomain.AccountScope{})
+						if sessionErr != nil {
+							return sessionErr
+						}
+						lease, leaseErr := session.Acquire(ctx, nil, false)
+						if leaseErr != nil {
+							return leaseErr
+						}
 						lease.Release()
-					}
-					if (err != nil) != wantBlock {
-						t.Fatalf("cached selector block=%t want=%t err=%v", err != nil, wantBlock, err)
+						return nil
+					}()
+					if (acquireErr != nil) != wantBlock {
+						t.Fatalf("cached selector block=%t want=%t err=%v", acquireErr != nil, wantBlock, acquireErr)
 					}
 					current, err := accounts.Get(ctx, v.ID)
 					if err != nil || current.AuthStatus != account.AuthStatusActive || current.FailureCount != 0 || current.CooldownUntil != nil {

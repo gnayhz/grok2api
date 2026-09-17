@@ -12,7 +12,7 @@ const precisionSchema = `{"type":"object","properties":{"id":{"type":"integer","
 
 func TestBuildToolSchemaNumberPrecision(t *testing.T) {
 	body := []byte(`{"input":"hi","tools":[{"type":"namespace","name":"db","tools":[{"type":"function","name":"lookup","parameters":` + precisionSchema + `}]}]}`)
-	normalized, compatibility, err := normalizeResponsesRequest(body, "grok-4.3")
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata(body, "grok-4.3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestBuildNumericProtocolControlsKeepDecimalForms(t *testing.T) {
 			t.Fatalf("sequence %q = %d, %v", raw, value, ok)
 		}
 		body := []byte(`{"input":[{"type":"local_shell_call_output","call_id":"call_1","output":"done","exit_code":` + raw + `}]}`)
-		normalized, _, err := normalizeResponsesRequest(body, "grok-4.3")
+		normalized, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.3", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,14 +78,14 @@ func BenchmarkNormalizeBuildToolSchemas(b *testing.B) {
 	body := []byte(`{"input":"hi","tools":[` + strings.Join(tools, ",") + `]}`)
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, _, err := normalizeResponsesRequest(body, "grok-4.3"); err != nil {
+		if _, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.3", nil); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
 func TestResponsesNullInputReturnsError(t *testing.T) {
-	if _, _, err := normalizeResponsesRequest([]byte("null"), "grok-4.6"); err == nil {
+	if _, _, err := normalizeResponsesRequestWithMetadata([]byte("null"), "grok-4.6", nil); err == nil {
 		t.Fatal("null request accepted")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,9 +23,9 @@ import (
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // Only upstream protocol parsing is synthetic. The maintenance policy, initial
@@ -160,10 +161,10 @@ func newInitialFixture(t testing.TB, dialect string, handler http.HandlerFunc) *
 	}))
 	t.Cleanup(server.Close)
 	adapter := &initialHTTPAdapter{url: server.URL, client: server.Client()}
-	registry := provider.NewRegistry(adapter)
-	f.maintenance = accountapp.NewService(f.accounts, relational.NewAuditRepository(f.db), nil, nil, registry, cipher, nil)
+	registry := providerimpl.NewRegistry(adapter)
+	f.maintenance = accountapp.NewService(f.accounts, relational.NewAuditRepository(f.db), nil, nil, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	f.models = modelapp.NewService(relational.NewModelRepository(f.db), f.accounts, f.maintenance, registry)
-	f.service = accountsyncapp.NewService(slog.New(slog.NewTextHandler(io.Discard, nil)), f.maintenance, f.maintenance, f.maintenance, f.models)
+	f.service = accountsyncapp.NewService(slog.New(slog.NewTextHandler(io.Discard, nil)), f.maintenance, f.maintenance, f.maintenance, f.maintenance, f.maintenance, f.maintenance, f.maintenance, f.models)
 	f.service.SetBulkPool(f.pool)
 	return f
 }

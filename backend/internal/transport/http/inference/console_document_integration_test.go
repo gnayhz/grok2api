@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
@@ -106,7 +107,7 @@ func TestHTTPConsoleTruncatedUsagePreservesAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			router := gin.New()
-			accounthttp.NewHandler(f.accountService, nil).Register(router.Group("/api/admin/v1"))
+			accounthttp.NewHandler(accounthttp.Dependencies{Administration: f.accountService, Credentials: f.accountService, Maintenance: f.accountService, Onboarding: accountsyncapp.NewOnboarding(f.accountService, f.accountService, nil)}).Register(router.Group("/api/admin/v1"))
 			refresh := func() *httptest.ResponseRecorder {
 				response := httptest.NewRecorder()
 				router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/v1/accounts/%d/refresh-quota", f.accountID), nil))

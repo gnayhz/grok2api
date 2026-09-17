@@ -15,7 +15,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	dialect "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -132,7 +133,7 @@ func (a *Adapter) SyncQuotaGroup(ctx context.Context, credential account.Credent
 	if response.StatusCode == http.StatusUnauthorized {
 		return provider.QuotaGroupSnapshot{}, provider.ErrUnauthorized
 	}
-	if response.StatusCode == http.StatusForbidden && provider.IsDefinitiveAccountBlockBody(body) {
+	if response.StatusCode == http.StatusForbidden && dialect.IsDefinitiveAccountBlockBody(body) {
 		return provider.QuotaGroupSnapshot{}, fmt.Errorf("%w: account blocked", provider.ErrUnauthorized)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -155,10 +156,6 @@ type imagineQuotaProduct struct {
 	RemainingQueries  *int       `json:"remainingQueries"`
 	WindowSizeSeconds *int       `json:"windowSizeSeconds"`
 	NextAvailableAt   *time.Time `json:"nextAvailableAt"`
-}
-
-func isImagineQuotaMode(mode string) bool {
-	return account.IsWebImagineQuotaMode(mode)
 }
 
 func decodeImagineQuotaSnapshot(body []byte, accountID uint64, now time.Time) ([]account.QuotaWindow, error) {
@@ -364,7 +361,7 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 		}
 		if response.StatusCode == http.StatusForbidden {
 			// Preserve definitive account-block signals before a Statsig retry can discard the first response.
-			if provider.IsDefinitiveAccountBlockBody(body) {
+			if dialect.IsDefinitiveAccountBlockBody(body) {
 				return account.QuotaWindow{}, fmt.Errorf("%w: account blocked", provider.ErrUnauthorized)
 			}
 			lease.InvalidateClearance()
@@ -378,7 +375,7 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 		if response.StatusCode == http.StatusUnauthorized {
 			return account.QuotaWindow{}, provider.ErrUnauthorized
 		}
-		if response.StatusCode == http.StatusForbidden && provider.IsDefinitiveAccountBlockBody(body) {
+		if response.StatusCode == http.StatusForbidden && dialect.IsDefinitiveAccountBlockBody(body) {
 			return account.QuotaWindow{}, fmt.Errorf("%w: account blocked", provider.ErrUnauthorized)
 		}
 		lease.Observe(response.StatusCode, nil)
@@ -446,7 +443,7 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 		if response.StatusCode == http.StatusUnauthorized {
 			return account.QuotaWindow{}, provider.ErrUnauthorized
 		}
-		if response.StatusCode == http.StatusForbidden && provider.IsDefinitiveAccountBlockBody(body) {
+		if response.StatusCode == http.StatusForbidden && dialect.IsDefinitiveAccountBlockBody(body) {
 			return account.QuotaWindow{}, fmt.Errorf("%w: account blocked", provider.ErrUnauthorized)
 		}
 		if response.StatusCode == http.StatusForbidden {

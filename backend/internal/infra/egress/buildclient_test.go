@@ -18,7 +18,7 @@ import (
 )
 
 func TestBuildClientUsesConfiguredResponseHeaderTimeout(t *testing.T) {
-	client, err := newBuildClient("", 7*time.Minute)
+	client, err := newBuildClientConfigured("", 7*time.Minute, buildConnectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,11 +32,11 @@ func TestBuildClientUsesConfiguredResponseHeaderTimeout(t *testing.T) {
 }
 
 func TestBuildEnvironmentClientPreservesEnvironmentProxyLookup(t *testing.T) {
-	direct, err := newBuildClient("", 7*time.Minute)
+	direct, err := newBuildClientConfigured("", 7*time.Minute, buildConnectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	environment, err := newBuildEnvironmentClient(7 * time.Minute)
+	environment, err := newBuildClientConfigured("", 7*time.Minute, buildConnectionOptions{environmentProxy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestBuildClientResponseHeaderTimeoutDoesNotLimitResponseBody(t *testing.T) 
 		_, _ = io.WriteString(writer, "ok")
 	}))
 	defer server.Close()
-	client, err := newBuildClient("", 100*time.Millisecond)
+	client, err := newBuildClientConfigured("", 100*time.Millisecond, buildConnectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestBuildClientClassifiesDelayedResponseHeaders(t *testing.T) {
 		writer.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	client, err := newBuildClient("", 50*time.Millisecond)
+	client, err := newBuildClientConfigured("", 50*time.Millisecond, buildConnectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestNewBuildClientUsesStandardTransportForEveryProxyFamily(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client, err := newBuildClient(test.proxyURL, 5*time.Minute)
+			client, err := newBuildClientConfigured(test.proxyURL, 5*time.Minute, buildConnectionOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,7 +124,7 @@ func TestNewBuildClientUsesStandardTransportForEveryProxyFamily(t *testing.T) {
 }
 
 func TestNewBuildClientRejectsUnsupportedProxyScheme(t *testing.T) {
-	if _, err := newBuildClient("ftp://proxy.example:21", 5*time.Minute); err == nil {
+	if _, err := newBuildClientConfigured("ftp://proxy.example:21", 5*time.Minute, buildConnectionOptions{}); err == nil {
 		t.Fatal("unsupported proxy scheme was accepted")
 	}
 }
@@ -148,12 +148,12 @@ func TestValidatedProxySchemesCreateBuildAndBrowserClients(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			build, err := newBuildClient(normalized, 5*time.Minute)
+			build, err := newBuildClientConfigured(normalized, 5*time.Minute, buildConnectionOptions{})
 			if err != nil {
 				t.Fatalf("build client: %v", err)
 			}
 			build.CloseIdleConnections()
-			browser, err := newBrowserClient(normalized, DefaultUserAgent)
+			browser, err := newBrowserClientWithBudget(normalized, DefaultUserAgent, nil)
 			if err != nil {
 				t.Fatalf("browser client: %v", err)
 			}
@@ -185,7 +185,7 @@ func TestBuildClientRoutesThroughSOCKS5HWithRemoteDNS(t *testing.T) {
 	proxyDone := make(chan error, 1)
 	go func() { proxyDone <- serveSOCKS5TunnelOnce(listener, upstreamAddress, requestedHost) }()
 
-	client, err := newBuildClient("socks5h://"+listener.Addr().String(), 5*time.Minute)
+	client, err := newBuildClientConfigured("socks5h://"+listener.Addr().String(), 5*time.Minute, buildConnectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

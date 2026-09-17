@@ -14,8 +14,8 @@ import (
 // 未知 token 丢弃、快照按固定顺序平铺且 JSON 键为 exempts。
 func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 	collector := newGuardStatsCollector()
-	collector.recordExempt(QualityExemptMessagesNoThink)
-	collector.recordExempt(QualityExemptMessagesNoThink)
+	collector.recordExempt(QualityExemptModelNoReasoning)
+	collector.recordExempt(QualityExemptModelNoReasoning)
 	collector.recordExempt(QualityExemptModelScope)
 	collector.recordExempt("totally_unknown_reason")
 
@@ -27,8 +27,8 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 	if len(snapshot.Exempts) != len(guardExemptOrder) {
 		t.Fatalf("exempt rows = %d want %d", len(snapshot.Exempts), len(guardExemptOrder))
 	}
-	if got := byReason[QualityExemptMessagesNoThink].Count; got != 2 {
-		t.Fatalf("messages_thinking_off count = %d", got)
+	if got := byReason[QualityExemptModelNoReasoning].Count; got != 2 {
+		t.Fatalf("model_no_reasoning count = %d", got)
 	}
 	if got := byReason[QualityExemptModelScope].Count; got != 1 {
 		t.Fatalf("model_out_of_scope count = %d", got)
@@ -36,7 +36,7 @@ func TestGuardStatsExemptsCountAndSerialize(t *testing.T) {
 	if got := byReason[QualityExemptDisabled].Count; got != 0 {
 		t.Fatalf("untouched reason must stay zero, got %d", got)
 	}
-	if byReason[QualityExemptMessagesNoThink].LastSeen == nil {
+	if byReason[QualityExemptModelNoReasoning].LastSeen == nil {
 		t.Fatal("lastSeen must be set on count")
 	}
 	collector.recordExempt(QualityExemptDisabled)
@@ -75,7 +75,6 @@ func TestGuardExemptOrderCoversQualityExemptTokens(t *testing.T) {
 		QualityExemptCompaction,
 		QualityExemptProvider,
 		QualityExemptModelScope,
-		QualityExemptMessagesNoThink,
 		QualityExemptModelNoReasoning,
 	}
 	if len(guardExemptOrder) != len(constants) {

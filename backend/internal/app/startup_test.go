@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +13,6 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
@@ -62,7 +62,7 @@ func TestReadinessKeepsBuildReadyWhenWebIsUnavailable(t *testing.T) {
 	state := newStartupState(0)
 	state.setPhase("running")
 	state.setStatsig("unavailable", "test", 0)
-	snapshot := readinessSnapshot(ctx, state, func(context.Context) error { return nil }, models, accounts, provider.NewRegistry(), nil)
+	snapshot := readinessSnapshot(ctx, state, func(context.Context) error { return nil }, models, accounts, providerimpl.NewRegistry(), nil)
 	if !snapshot.Ready || snapshot.State != "degraded" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
@@ -102,7 +102,7 @@ func TestReadinessRejectsAccountWithoutAccessToken(t *testing.T) {
 	}
 	state := newStartupState(0)
 	state.setPhase("running")
-	snapshot := readinessSnapshot(ctx, state, func(context.Context) error { return nil }, models, accounts, provider.NewRegistry(), nil)
+	snapshot := readinessSnapshot(ctx, state, func(context.Context) error { return nil }, models, accounts, providerimpl.NewRegistry(), nil)
 	if snapshot.Ready || snapshot.Components["grok_build"].State != "unavailable" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
@@ -138,7 +138,7 @@ func TestReadinessRestoresPersistedCooldownWithoutUpstreamProbe(t *testing.T) {
 	}
 	state := newStartupState(0)
 	state.setPhase("running")
-	snapshot := readinessSnapshot(ctx, state, func(context.Context) error { return nil }, models, accounts, provider.NewRegistry(), nil)
+	snapshot := readinessSnapshot(ctx, state, func(context.Context) error { return nil }, models, accounts, providerimpl.NewRegistry(), nil)
 	if snapshot.Ready || snapshot.State != "not_ready" || snapshot.Components["grok_build"].State != "unavailable" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}

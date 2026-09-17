@@ -51,7 +51,7 @@ func TestMessagesToolInputNumberPrecisionBothModes(t *testing.T) {
 	done, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "item": item})
 	completed, _ := json.Marshal(map[string]any{"type": "response.completed", "response": response})
 	stream := "data: " + string(added) + "\n\ndata: " + string(done) + "\n\ndata: " + string(completed) + "\n\n"
-	reader := ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationMessages)
+	reader := ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{})
 	defer reader.Close()
 	output, err := io.ReadAll(reader)
 	if err != nil {

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
-
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	infraimport "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/sessionidentity"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
+	"strings"
 )
 
 const (
@@ -40,7 +42,7 @@ func parseImportedCredentials(data []byte) ([]provider.CredentialSeed, error) {
 	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
 		return parsePlainTextCredentials(trimmed)
 	}
-	entries, err := provider.DecodeCredentialJSONEntries[importEntry](data, string(account.ProviderConsole), maxImportAccounts)
+	entries, err := infraimport.DecodeCredentialJSONEntries[importEntry](data, string(account.ProviderConsole), maxImportAccounts)
 	if err != nil {
 		return nil, fmt.Errorf("解析 Grok Console 账号 JSON: %w", err)
 	}
@@ -50,7 +52,7 @@ func parseImportedCredentials(data []byte) ([]provider.CredentialSeed, error) {
 	seen := make(map[string]struct{}, len(entries))
 	result := make([]provider.CredentialSeed, 0, len(entries))
 	for index, entry := range entries {
-		token := sanitizeSSOToken(firstNonEmpty(entry.SSOToken, entry.Token))
+		token := sessionidentity.SanitizeSSOToken(texts.FirstNonEmpty(entry.SSOToken, entry.Token))
 		if token == "" {
 			return nil, fmt.Errorf("第 %d 个账号缺少 sso_token", index+1)
 		}
@@ -79,7 +81,7 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 	seen := make(map[string]struct{}, len(lines))
 	result := make([]provider.CredentialSeed, 0, len(lines))
 	for index, line := range lines {
-		token := sanitizeSSOToken(line)
+		token := sessionidentity.SanitizeSSOToken(line)
 		if token == "" {
 			continue
 		}
@@ -118,24 +120,4 @@ func marshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
 		return nil, err
 	}
 	return append(data, '\n'), nil
-}
-
-func sanitizeSSOToken(value string) string {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(strings.ToLower(value), "sso=") {
-		value = strings.TrimSpace(value[len("sso="):])
-	}
-	if token, _, found := strings.Cut(value, ";"); found {
-		value = token
-	}
-	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(value))
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

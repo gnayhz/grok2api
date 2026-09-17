@@ -7,6 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"math"
 	"mime/multipart"
@@ -17,12 +23,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 const (
@@ -95,7 +95,7 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 		}
 		if err := json.Unmarshal(data, &envelope); err != nil {
 			if !strings.Contains(contentType, "application/json") {
-				return provider.TTSResult{InputCharacters: utf8.RuneCountInString(text), Audio: data, ContentType: firstNonEmpty(contentType, "audio/mpeg")}, nil
+				return provider.TTSResult{InputCharacters: utf8.RuneCountInString(text), Audio: data, ContentType: texts.FirstNonEmpty(contentType, "audio/mpeg")}, nil
 			}
 			return provider.TTSResult{}, fmt.Errorf("解析 Console TTS JSON 响应失败: %w", err)
 		}
@@ -108,7 +108,7 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 		}
 		result := provider.TTSResult{
 			InputCharacters: utf8.RuneCountInString(text),
-			Audio:           audio, ContentType: firstNonEmpty(envelope.ContentType, contentType, "audio/mpeg"),
+			Audio:           audio, ContentType: texts.FirstNonEmpty(envelope.ContentType, contentType, "audio/mpeg"),
 			Duration: envelope.Duration, Base64Audio: envelope.Audio, JSONEnvelope: true,
 		}
 		if envelope.AudioTimestamps != nil {
@@ -123,7 +123,7 @@ func (a *Adapter) SynthesizeSpeech(ctx context.Context, request provider.TTSRequ
 		}
 		return result, nil
 	}
-	return provider.TTSResult{InputCharacters: utf8.RuneCountInString(text), Audio: data, ContentType: firstNonEmpty(contentType, "audio/mpeg")}, nil
+	return provider.TTSResult{InputCharacters: utf8.RuneCountInString(text), Audio: data, ContentType: texts.FirstNonEmpty(contentType, "audio/mpeg")}, nil
 }
 
 func (a *Adapter) ListTTSVoices(ctx context.Context, credential account.Credential) ([]provider.VoiceInfo, error) {

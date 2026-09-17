@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +15,9 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -99,7 +100,7 @@ func TestBuildDetectionCurrentOutcome(t *testing.T) {
 			defer server.Close()
 			adapter := NewAdapter(Config{BaseURL: server.URL}, cipher)
 			adapter.http = server.Client()
-			service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			service.SetDetectPool(batch.NewPool(1))
 			ids := []uint64{values[0].ID}
 			if scenario == "observer_failure" {
@@ -107,7 +108,7 @@ func TestBuildDetectionCurrentOutcome(t *testing.T) {
 			}
 			if formalHTTP {
 				router := gin.New()
-				accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+				accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, nil)}).Register(router.Group("/api/admin/v1"))
 				body := fmt.Sprintf(`{"ids":["%d"]}`, values[0].ID)
 				if scenario == "all_http" {
 					body = `{"all":true}`
@@ -213,7 +214,7 @@ func TestBuildDetectionObserverFailureCancelsInflightAndReleasesPool(t *testing.
 	defer server.Close()
 	adapter := NewAdapter(Config{BaseURL: server.URL}, cipher)
 	adapter.http = server.Client()
-	service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+	service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	pool := batch.NewPool(3)
 	service.SetDetectPool(pool)
 	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)

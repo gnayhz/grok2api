@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
-import type { TTSResult } from "./creative-console-api.ts";
+import type { TTSResult } from "@/entities/creative-console/creative-console-api";
 
 let dom: JSDOM;
 let react: typeof import("react");
 let reactDOM: typeof import("react-dom/client");
 let SpeechPlayback: typeof import("./speech-playback.tsx").SpeechPlayback;
-let synthesizeSpeech: typeof import("./creative-console-api.ts").synthesizeSpeech;
+let synthesizeSpeech: typeof import("@/entities/creative-console/creative-console-api").synthesizeSpeech;
 const originals = new Map<string, PropertyDescriptor | undefined>();
 const request = { apiKey: "fixture-client", model: "tts", text: "hello", voiceId: "eve", language: "en" };
 
@@ -20,7 +20,7 @@ before(async () => {
   react = await import("react");
   reactDOM = await import("react-dom/client");
   ({ SpeechPlayback } = await import("./speech-playback.tsx"));
-  ({ synthesizeSpeech } = await import("./creative-console-api.ts"));
+  ({ synthesizeSpeech } = await import("@/entities/creative-console/creative-console-api"));
 });
 
 after(() => {

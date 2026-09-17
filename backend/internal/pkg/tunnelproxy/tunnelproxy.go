@@ -7,19 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
-	"time"
-
 	"github.com/Asutorufa/yuhaiin/pkg/net/netapi"
 	"github.com/Asutorufa/yuhaiin/pkg/net/proxy/trojan"
 	visionproxy "github.com/Asutorufa/yuhaiin/pkg/net/proxy/vision"
 	yuhaiinvless "github.com/Asutorufa/yuhaiin/pkg/net/proxy/vless"
 	"github.com/Asutorufa/yuhaiin/pkg/net/proxy/vmess"
 	"github.com/Asutorufa/yuhaiin/pkg/protos/node/protocol"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	singvmess "github.com/metacubex/sing-vmess"
@@ -27,6 +21,12 @@ import (
 	singmetadata "github.com/metacubex/sing/common/metadata"
 	sscore "github.com/shadowsocks/go-shadowsocks2/core"
 	"github.com/shadowsocks/go-shadowsocks2/socks"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type Config struct {
@@ -111,7 +111,7 @@ func parseUserInfoProxy(value string) (Config, error) {
 		return Config{}, err
 	}
 	query := parsed.Query()
-	transport := strings.ToLower(firstNonEmpty(query.Get("type"), query.Get("network")))
+	transport := strings.ToLower(texts.FirstNonEmptyTrimmed(query.Get("type"), query.Get("network")))
 	if transport == "" || transport == "none" {
 		transport = "tcp"
 	}
@@ -174,11 +174,11 @@ func parseUserInfoProxy(value string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	serverName := firstNonEmpty(query.Get("sni"), query.Get("peer"), parsed.Hostname())
-	realityPublicKey := firstNonEmpty(query.Get("pbk"), query.Get("public-key"), query.Get("publicKey"))
-	realityShortID := firstNonEmpty(query.Get("sid"), query.Get("short-id"), query.Get("shortId"))
-	fingerprint := strings.ToLower(firstNonEmpty(query.Get("fp"), query.Get("fingerprint"), query.Get("client-fingerprint")))
-	spiderX := firstNonEmpty(query.Get("spx"), query.Get("spider-x"), query.Get("spiderX"))
+	serverName := texts.FirstNonEmptyTrimmed(query.Get("sni"), query.Get("peer"), parsed.Hostname())
+	realityPublicKey := texts.FirstNonEmptyTrimmed(query.Get("pbk"), query.Get("public-key"), query.Get("publicKey"))
+	realityShortID := texts.FirstNonEmptyTrimmed(query.Get("sid"), query.Get("short-id"), query.Get("shortId"))
+	fingerprint := strings.ToLower(texts.FirstNonEmptyTrimmed(query.Get("fp"), query.Get("fingerprint"), query.Get("client-fingerprint")))
+	spiderX := texts.FirstNonEmptyTrimmed(query.Get("spx"), query.Get("spider-x"), query.Get("spiderX"))
 	if securityMode == "reality" {
 		if realityPublicKey == "" {
 			return Config{}, errors.New("VLESS Reality public key 不能为空")
@@ -192,7 +192,7 @@ func parseUserInfoProxy(value string) (Config, error) {
 	} else if realityPublicKey != "" || realityShortID != "" || fingerprint != "" || spiderX != "" {
 		return Config{}, errors.New("Reality 参数只能用于 Reality security")
 	}
-	wsHost := firstNonEmpty(query.Get("host"), serverName)
+	wsHost := texts.FirstNonEmptyTrimmed(query.Get("host"), serverName)
 	if err := validateWebSocketHost(wsHost); transport == "ws" && err != nil {
 		return Config{}, err
 	}
@@ -374,17 +374,17 @@ func parseVMess(value string) (Config, error) {
 		return Config{}, errors.New("VMess UUID 无效")
 	}
 	userID := parsedUUID.String()
-	alterID, err := strconv.Atoi(firstNonEmpty(jsonString(raw, "aid"), "0"))
+	alterID, err := strconv.Atoi(texts.FirstNonEmptyTrimmed(jsonString(raw, "aid"), "0"))
 	if err != nil || alterID < 0 || alterID > 65535 {
 		return Config{}, errors.New("VMess alterId 无效")
 	}
-	cipher := strings.ToLower(firstNonEmpty(jsonString(raw, "scy"), jsonString(raw, "security"), "auto"))
+	cipher := strings.ToLower(texts.FirstNonEmptyTrimmed(jsonString(raw, "scy"), jsonString(raw, "security"), "auto"))
 	switch cipher {
 	case "auto", "aes-128-gcm", "chacha20-poly1305", "none":
 	default:
 		return Config{}, fmt.Errorf("暂不支持 VMess cipher %q", cipher)
 	}
-	transport := strings.ToLower(firstNonEmpty(jsonString(raw, "net"), "tcp"))
+	transport := strings.ToLower(texts.FirstNonEmptyTrimmed(jsonString(raw, "net"), "tcp"))
 	if transport == "websocket" {
 		transport = "ws"
 	}
@@ -399,12 +399,12 @@ func parseVMess(value string) (Config, error) {
 		return Config{}, fmt.Errorf("暂不支持 VMess TLS 模式 %q", tlsMode)
 	}
 	tlsEnabled := tlsMode == "tls"
-	serverName := firstNonEmpty(jsonString(raw, "sni"), address)
+	serverName := texts.FirstNonEmptyTrimmed(jsonString(raw, "sni"), address)
 	alpn, err := jsonStringList(raw, "alpn")
 	if err != nil {
 		return Config{}, err
 	}
-	host := firstNonEmpty(jsonString(raw, "host"), serverName)
+	host := texts.FirstNonEmptyTrimmed(jsonString(raw, "host"), serverName)
 	if err := validateWebSocketHost(host); transport == "ws" && err != nil {
 		return Config{}, err
 	}
@@ -795,15 +795,6 @@ func decodeBase64Bytes(value string) ([]byte, error) {
 		}
 	}
 	return nil, errors.New("invalid base64")
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func splitList(value string) []string {

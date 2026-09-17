@@ -11,9 +11,9 @@ import (
 
 	reasoningreplay "github.com/chenyme/grok2api/backend/internal/application/history"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestForwardResponseDefersReplayUntilGuardAccepts(t *testing.T) {

@@ -98,7 +98,7 @@ func completionSuccessFrame(frame []byte) bool {
 		line = bytes.TrimSuffix(line, []byte("\r"))
 		if bytes.HasPrefix(line, []byte("event:")) {
 			kind := string(bytes.TrimSpace(line[6:]))
-			if kind == "response.completed" || kind == "response.done" || kind == "message_stop" || kind == "image_generation.completed" || kind == "image_edit.completed" {
+			if completionSuccessEventKind(kind) {
 				return true
 			}
 		}
@@ -123,7 +123,7 @@ func completionSuccessFrame(frame []byte) bool {
 	if json.Unmarshal(data, &event) != nil {
 		return false
 	}
-	if event.Type == "response.completed" || event.Type == "response.done" || event.Type == "message_stop" || event.Type == "image_generation.completed" || event.Type == "image_edit.completed" || event.Delta.StopReason != nil {
+	if completionSuccessEventType(event.Type) || event.Delta.StopReason != nil {
 		return true
 	}
 	for _, c := range event.Choices {

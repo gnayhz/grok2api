@@ -19,15 +19,15 @@ func benchRegistry(b *testing.B) *Registry {
 	// 预置 1000 个羁押账号 + 500 个 ban 出口,模拟有状态的缓存规模。
 	ctx := context.Background()
 	for i := 1; i <= 1000; i++ {
-		if err := registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: uint64(i), To: model.AccountRemanded, CaseID: uint64(i)}); err != nil {
+		if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: uint64(i), To: model.AccountRemanded, CaseID: uint64(i)}); err != nil {
 			b.Fatal(err)
 		}
 	}
 	for i := 1; i <= 500; i++ {
-		if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: uint64(i), To: model.ExitRemanded, CaseID: uint64(i)}); err != nil {
+		if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: uint64(i), To: model.ExitRemanded, CaseID: uint64(i)}); err != nil {
 			b.Fatal(err)
 		}
-		if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: uint64(i), To: model.ExitBanned, CaseID: uint64(i)}); err != nil {
+		if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: uint64(i), To: model.ExitBanned, CaseID: uint64(i)}); err != nil {
 			b.Fatal(err)
 		}
 	}

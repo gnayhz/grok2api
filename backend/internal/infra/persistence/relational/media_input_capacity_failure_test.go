@@ -98,7 +98,7 @@ func TestInputAssetAdmissionFailureReleasesObjectAndCapacity(t *testing.T) {
 							return nil
 						}
 					}
-					service := mediaapp.NewService(boundary, nil, objects, nil, cfg)
+					service := mediaapp.NewServiceWithTickets(boundary, nil, nil, objects, nil, cfg)
 					save := func(ctx context.Context, service *mediaapp.Service) error {
 						if kind == "image" {
 							_, err := service.SaveInputImage(ctx, payload)
@@ -143,7 +143,7 @@ func TestInputAssetAdmissionFailureReleasesObjectAndCapacity(t *testing.T) {
 					if err != nil || fileErr != nil || total != 0 || len(files)+len(temps) != 0 {
 						t.Fatalf("failed admission retained resources: total=%d files=%d/%d err=%v/%v", total, len(files), len(temps), err, fileErr)
 					}
-					retry := mediaapp.NewService(NewMediaAssetRepository(peer), nil, objects, nil, cfg)
+					retry := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(peer), nil, nil, objects, nil, cfg)
 					if err := save(ctx, retry); err != nil {
 						t.Fatalf("peer could not retry full capacity: %v", err)
 					}

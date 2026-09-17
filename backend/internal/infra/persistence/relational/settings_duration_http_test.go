@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
@@ -87,7 +86,7 @@ func TestSettingsHTTPCommitDelayPreservesValidatedMilliseconds(t *testing.T) {
 							wantDelay = time.Duration(tc.ms) * time.Millisecond
 						}
 					}
-					loaded, _, persistedRevision, err := settingsapp.LoadPersisted(ctx, base, peer)
+					loaded, _, persistedRevision, err := loadSettingsConfig(ctx, base, peer)
 					if err != nil {
 						t.Fatal(err)
 					}

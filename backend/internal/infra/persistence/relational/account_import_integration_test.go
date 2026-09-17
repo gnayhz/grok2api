@@ -66,12 +66,6 @@ func TestAccountImportCurrentDeletionAcrossConnections(t *testing.T) {
 					if _, _, err := rb.UpsertByIdentity(ctx, v); !errors.Is(err, repository.ErrConflict) {
 						t.Fatalf("single convenience bypassed deletion: %v", err)
 					}
-					if n, err := rb.ClearTombstones(ctx, []string{"  " + email + "  "}); err != nil || n != 1 {
-						t.Fatalf("explicit clear: %d, %v", n, err)
-					}
-					if _, created, err := rb.UpsertByIdentity(ctx, v); err != nil || !created {
-						t.Fatalf("clear did not restore import: %t, %v", created, err)
-					}
 				})
 			}
 		})

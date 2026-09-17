@@ -3,9 +3,9 @@ import { Search } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Spinner } from "@/components/ui/spinner";
+import { Checkbox } from "@/shared/ui/checkbox";
+import { Input } from "@/shared/ui/input";
+import { Spinner } from "@/shared/ui/spinner";
 import { listModelAccountOptions } from "@/entities/model/model-api";
 import type { ModelRouteDTO } from "@/entities/model/types";
 import { Pagination } from "@/shared/components/pagination";

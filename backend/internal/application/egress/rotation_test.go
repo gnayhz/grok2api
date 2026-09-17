@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -114,7 +115,18 @@ func newRotationTestService(t *testing.T, node domain.Node, webhookOK bool, prob
 }
 
 func fastRotationConfig() RotationConfig {
-	cfg := DefaultRotationConfig()
+	// 与已删除的 DefaultRotationConfig() 等值的保守默认,显式构造便于审查。
+	cfg := RotationConfig{
+		Enabled:                  true,
+		MaxAttemptsPerQuarantine: 3,
+		MinNodeInterval:          3 * time.Minute,
+		MaxGlobalPerHour:         6,
+		WebhookTimeout:           15 * time.Second,
+		WebhookRetries:           2,
+		SettleDelay:              20 * time.Second,
+		ProbeTimeout:             2 * time.Minute,
+		ProbeInterval:            5 * time.Second,
+	}
 	cfg.SettleDelay = 0
 	cfg.ProbeTimeout = 2 * time.Second
 	cfg.ProbeInterval = 10 * time.Millisecond
@@ -239,4 +251,5 @@ func setTestRotationConfig(service *Service, cfg RotationConfig) {
 		service.SetRotationCoordination(memory.NewLockStore(), memory.NewRateLimiter())
 	}
 	service.SetRotationConfig(cfg)
+	service.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
 }

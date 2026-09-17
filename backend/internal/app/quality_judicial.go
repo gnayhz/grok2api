@@ -12,9 +12,6 @@ import (
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
-// 调查局接线(重写批3):任务队列存取面 + 派发适配器(court 的
-// Dispatcher 经此进入 investigator,词汇共享靠 model)。
-
 // qualityDispatcher 适配 court.Dispatcher → investigator.Service。
 type qualityDispatcher struct {
 	service *qualityinvestigator.Service
@@ -37,11 +34,11 @@ type qualityEvidenceSource struct {
 	store *qualityevidence.Store
 }
 
-func (s qualityEvidenceSource) SnapshotWindow(now time.Time) qualityevidence.Snapshot {
+func (s qualityEvidenceSource) SnapshotWindow(now time.Time) model.Snapshot {
 	return s.store.AttributionWindow(now)
 }
 
-func (s qualityEvidenceSource) CrossValidate(snapshot qualityevidence.Snapshot) qualityevidence.Estimate {
+func (s qualityEvidenceSource) CrossValidate(snapshot model.Snapshot) model.Estimate {
 	return s.store.CrossValidate(snapshot)
 }
 
@@ -52,7 +49,7 @@ func bootstrapJudicialLayer(qualityRegistry *qualityregistry.Registry, evidenceS
 	probeStore := qualityregistry.NewProbeTaskStore(qualityRegistry)
 	investigatorService := qualityinvestigator.New(qualityinvestigator.DefaultConfig(), probeStore, evidenceRecorderAdapter{store: evidenceStore})
 	courtService := qualitycourt.New(courtCfg, qualityRegistry,
-		qualityEvidenceSource{store: evidenceStore}, qualityDispatcher{service: investigatorService})
+		qualityEvidenceSource{store: evidenceStore}, qualityDispatcher{service: investigatorService}, probeStore)
 	return courtService, investigatorService
 }
 

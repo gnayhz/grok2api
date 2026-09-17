@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,8 +13,9 @@ import (
 
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -79,7 +81,8 @@ type Service struct {
 	defaultMax    atomic.Int64
 	authCache     *authKeyCache
 	touches       *touchTracker
-	cipher        security.Cryptor
+	cipher        portcrypto.Cryptor
+	tokens        portcrypto.TokenSource
 	activeMu      sync.RWMutex
 	activeBilling map[string]struct{}
 	billingOwner  string
@@ -95,8 +98,8 @@ type internalKeyInspector interface {
 	CountInternalKeys(context.Context, []uint64) (int64, error)
 }
 
-func NewService(billingOwner string, keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher security.Cryptor) *Service {
-	service := &Service{billingOwner: strings.TrimSpace(billingOwner), keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, activeBilling: make(map[string]struct{})}
+func NewService(billingOwner string, keys repository.ClientKeyRepository, rateLimiter repository.RateLimiter, concurrency repository.ConcurrencyLimiter, defaultRPM, defaultMax int, cipher portcrypto.Cryptor, tokens portcrypto.TokenSource) *Service {
+	service := &Service{billingOwner: strings.TrimSpace(billingOwner), keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher, tokens: tokens, activeBilling: make(map[string]struct{})}
 	service.UpdateDefaults(defaultRPM, defaultMax)
 	return service
 }
@@ -121,10 +124,10 @@ func (s *Service) ApplyInvalidation(event repository.InvalidationEvent) {
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]clientkeydomain.Key, int64, error) {
 	page, pageSize = normalizePage(page, pageSize)
-	if !validListFilter(filter.Status, "", "active", "disabled", "expired") || !validListFilter(filter.ModelScope, "", "all", "restricted") || !repository.IsValidSort(filter.Sort, "name", "prefix", "status", "rpmLimit", "maxConcurrent", "billingLimit", "expiresAt", "lastUsedAt") {
+	if !slices.Contains([]string{"", "active", "disabled", "expired"}, filter.Status) || !slices.Contains([]string{"", "all", "restricted"}, filter.ModelScope) || !repository.IsValidSort(filter.Sort, "name", "prefix", "status", "rpmLimit", "maxConcurrent", "billingLimit", "expiresAt", "lastUsedAt") {
 		return nil, 0, ErrInvalidFilter
 	}
-	if prefix, ok := security.SplitClientKey(strings.TrimSpace(search)); ok {
+	if prefix, ok := clientkeydomain.SplitClientKey(strings.TrimSpace(search)); ok {
 		search = prefix
 	}
 	return s.keys.List(ctx, repository.ClientKeyListQuery{Page: repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: search, Sort: filter.Sort}, Filter: repository.ClientKeyListFilter{Status: filter.Status, ModelScope: filter.ModelScope, Now: time.Now().UTC()}})
@@ -138,15 +141,6 @@ func (s *Service) Get(ctx context.Context, id uint64) (clientkeydomain.Key, erro
 	}
 	value, err := s.keys.Get(ctx, id)
 	return value, mapRepositoryError(err)
-}
-
-func validListFilter(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 // Create 创建客户端 Key；哈希用于鉴权，加密副本仅供管理员按需再次复制。
@@ -179,15 +173,15 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 	if err != nil {
 		return Created{}, invalidInput(err.Error())
 	}
-	prefix, err := security.NewHexToken(6)
+	prefix, err := s.tokens.NewHexToken(6)
 	if err != nil {
 		return Created{}, err
 	}
-	secretPart, err := security.NewOpaqueToken(24)
+	secretPart, err := s.tokens.NewOpaqueToken(24)
 	if err != nil {
 		return Created{}, err
 	}
-	raw := security.FormatClientKey(prefix, secretPart)
+	raw := clientkeydomain.FormatClientKey(prefix, secretPart)
 	if s.cipher == nil {
 		return Created{}, errors.New("客户端 Key 加密器未配置")
 	}
@@ -209,7 +203,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 		return Created{}, invalidInput("RPM 和最大并发不能小于零")
 	}
 	value, err := s.keys.Create(ctx, clientkeydomain.Key{
-		Name: strings.TrimSpace(input.Name), Prefix: prefix, SecretHash: security.HashToken(raw), EncryptedSecret: encryptedSecret,
+		Name: strings.TrimSpace(input.Name), Prefix: prefix, SecretHash: tokenhash.HashToken(raw), EncryptedSecret: encryptedSecret,
 		Enabled: input.Enabled, ExpiresAt: input.ExpiresAt, RPMLimit: input.RPMLimit, MaxConcurrent: input.MaxConcurrent,
 		BillingLimitUSDTicks: input.BillingLimitUSDTicks, AllowModelAliases: input.AllowModelAliases, AllowedModels: allowedModels, ModelScope: modelScope,
 		ProviderScope: providerScope, TierScope: tierScope,
@@ -238,8 +232,8 @@ func (s *Service) RevealSecret(ctx context.Context, id uint64) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("解密客户端 Key: %w", err)
 	}
-	prefix, ok := security.SplitClientKey(raw)
-	if !ok || prefix != value.Prefix || subtle.ConstantTimeCompare([]byte(security.HashToken(raw)), []byte(value.SecretHash)) != 1 {
+	prefix, ok := clientkeydomain.SplitClientKey(raw)
+	if !ok || prefix != value.Prefix || subtle.ConstantTimeCompare([]byte(tokenhash.HashToken(raw)), []byte(value.SecretHash)) != 1 {
 		return "", errors.New("客户端 Key 加密副本校验失败")
 	}
 	return raw, nil
@@ -316,7 +310,7 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 
 // Authenticate 校验 API Key、RPM 和并发限制，并返回请求结束时必须调用的 release。
 func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain.Key, func(), error) {
-	prefix, ok := security.SplitClientKey(raw)
+	prefix, ok := clientkeydomain.SplitClientKey(raw)
 	if !ok {
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
 	}
@@ -344,7 +338,7 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 	if !value.IsAvailable(now) {
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
 	}
-	want := security.HashToken(raw)
+	want := tokenhash.HashToken(raw)
 	if subtle.ConstantTimeCompare([]byte(want), []byte(value.SecretHash)) != 1 {
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
 	}

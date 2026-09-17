@@ -22,7 +22,7 @@ func TestMediaCleanupStartupCancellationReleasesDatabaseWait(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service := mediaapp.NewService(NewMediaAssetRepository(db), NewMediaJobRepository(db), objects, nil, mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute})
+			service := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(db), NewMediaJobRepository(db), nil, objects, nil, mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute})
 			pool, err := db.db.DB()
 			if err != nil {
 				t.Fatal(err)

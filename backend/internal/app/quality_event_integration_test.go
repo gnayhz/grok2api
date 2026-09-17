@@ -157,7 +157,7 @@ func TestApplicationQualityReceiptAndIncidentConsumer(t *testing.T) {
 					seen := map[string]string{}
 					physicalID := ""
 					for _, row := range rows {
-						var event journal.Event
+						var event model.Event
 						if err := json.Unmarshal([]byte(row.Payload), &event); err != nil {
 							t.Fatal(err)
 						}

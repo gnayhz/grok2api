@@ -177,7 +177,7 @@ func (a *Adapter) resolveGatewayUserID(ctx context.Context, baseURL string, cred
 	// Imported and pre-Gateway accounts may only contain an SSO token or email.
 	// Resolve the uid just in time so they remain immediately usable; the normal
 	// account synchronization path persists the same identity for later calls.
-	identity, err := sessionidentity.FetchWithLease(ctx, baseURL, token, lease, a.egress)
+	identity, err := sessionidentity.FetchWithLease(ctx, baseURL, token, lease)
 	if err != nil {
 		return "", fmt.Errorf("同步 Grok Web Gateway 用户身份: %w", err)
 	}

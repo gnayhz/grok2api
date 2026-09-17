@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,7 +91,7 @@ func newAdminForceFixture(t *testing.T, switchAfter int64, lock repository.Distr
 		ClearanceBindingFingerprint: clearanceBindingFingerprint(cfg, proxyPlain),
 		EncryptedCloudflareCookie:   staleCookie, UserAgent: "ua-old",
 	})
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.SetClearanceLock(lock)
 	manager.UpdateClearanceConfig(cfg)

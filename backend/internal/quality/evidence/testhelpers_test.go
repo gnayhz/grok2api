@@ -9,7 +9,9 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// openTestSQLiteAt 在指定路径打开测试用 SQLite(gorm 句柄)。
+// openTestSQLiteAt 在指定路径打开测试用 SQLite(gorm 句柄)。建表对齐
+// registry 的统一迁移语义:直接 AutoMigrate evidence.Models()(生产中
+// 由 registry.New 完成,evidence.New 不再自跑迁移)。
 func openTestSQLiteAt(path string) (*gorm.DB, error) {
 	dsn := "file:" + filepath.Clean(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	db, err := gorm.Open(glebarezsqlite.Open(dsn), &gorm.Config{
@@ -17,6 +19,13 @@ func openTestSQLiteAt(path string) (*gorm.DB, error) {
 		TranslateError: true,
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := db.AutoMigrate(Models()...); err != nil {
+		sqlDB, closeErr := db.DB()
+		if closeErr == nil {
+			_ = sqlDB.Close()
+		}
 		return nil, err
 	}
 	return db, nil

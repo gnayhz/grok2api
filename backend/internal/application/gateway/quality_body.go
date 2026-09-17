@@ -136,7 +136,7 @@ func verdictForBodyState(replay io.ReadCloser, state *qualityScanState, cfg Qual
 		verdict, verdictErr := state.emptyStreamVerdict(cfg.ReasoningExpected)
 		return replay, verdict, state.usage, verdictErr
 	}
-	return replay, cfg.classify(state.signals()), state.usage, nil
+	return replay, classifyQualityHold(cfg, state.signals()), state.usage, nil
 }
 
 // qualityResponseBody 覆盖非流式上游响应（Build/Console 均为 Responses 形状）
@@ -165,20 +165,6 @@ type qualityResponseBody struct {
 			ReasoningTokens int64 `json:"reasoning_tokens"`
 		} `json:"output_tokens_details"`
 	} `json:"usage"`
-}
-
-// peekQualityBody 非流式响应的完整 body 判决。客户端本就要等完整 JSON 才能
-// 收到任何字节，读完再判的扣留附加延迟为零：不存在流式路径的时序复杂度
-// （读完即判，无窗口/阈值等待）。证据规则与流式扫描器一致：可见思考
-// 文本是唯一健康证据。无法识别的响应形状与超限响应返回错误，不交付，
-// 不向质量归因层报告健康或降智。
-func peekQualityBody(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, error) {
-	replay, verdict, usage, _, err := peekQualityBodyReport(body, cfg)
-	return replay, verdict, usage, err
-}
-
-func peekQualityBodyReport(body io.ReadCloser, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
-	return peekQualityBodyReportWithBudget(body, cfg, responsebuffer.BudgetOf(body))
 }
 
 func peekQualityBodyReportWithBudget(body io.ReadCloser, cfg QualityRetryRuntime, budget *responsebuffer.Budget) (io.ReadCloser, QualityVerdict, Usage, qualityHoldFingerprint, error) {
@@ -220,7 +206,7 @@ func peekQualityBodyReportWithBudget(body io.ReadCloser, cfg QualityRetryRuntime
 		// Unknown shapes are protocol errors, not healthy quality observations.
 		return replay, QualityWait, Usage{}, empty.fingerprint(QualityWait, errQualityBodyShape), errQualityBodyShape
 	}
-	state := qualityScanState{kernel: cfg.kernel, protocol: qualityProtocolResponses, startedAt: empty.startedAt, sawDataEvent: true}
+	state := qualityScanState{kernel: cfg.Kernel(), protocol: qualityProtocolResponses, startedAt: empty.startedAt, sawDataEvent: true}
 	noteQualityEncrypted(&state, data)
 	noteQualityEvent(&state, "response.completed")
 	for _, item := range parsed.Output {
@@ -293,6 +279,6 @@ func peekQualityBodyReportWithBudget(body io.ReadCloser, cfg QualityRetryRuntime
 	// body 已完整到达：恒为终态证据。
 	sig := state.signals()
 	sig.Terminal = true
-	verdict := cfg.classify(sig)
+	verdict := classifyQualityHold(cfg, sig)
 	return replay, verdict, usage, state.fingerprint(verdict, nil), nil
 }

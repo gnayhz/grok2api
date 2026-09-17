@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,15 +51,15 @@ func TestCanonicalResponseResourcesUnderConcurrentDeliveryAndAbort(t *testing.T)
 			workers.Add(1)
 			go func(mode int) {
 				defer workers.Done()
-				ctx, owner := newAttemptResources(context.Background())
-				defer owner.close()
+				ctx, owner := selector.NewAttemptResources(context.Background())
+				defer owner.Close()
 				request, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
 				response, err := client.Do(request)
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				stream := responsecheck.Stream(responseflow.New(owner.own(response.Body), pool.Request(32<<20)))
+				stream := responsecheck.Stream(responseflow.New(owner.Own(response.Body), pool.Request(32<<20)))
 				body, verdict, _, _, err := peekQualityStreamReport(ctx, stream, qualityProtocolResponses, QualityRetryRuntime{})
 				if body != nil {
 					defer body.Close()
@@ -67,7 +68,7 @@ func TestCanonicalResponseResourcesUnderConcurrentDeliveryAndAbort(t *testing.T)
 					t.Errorf("admission: %s %v", verdict, err)
 					return
 				}
-				converted := conversation.ConvertResponseStream(body, conversation.OperationChat)
+				converted := conversation.ConvertResponseStreamWithOptions(body, conversation.OperationChat, conversation.ResponseOptions{})
 				defer converted.Close()
 				switch mode {
 				case 0:
@@ -76,7 +77,7 @@ func TestCanonicalResponseResourcesUnderConcurrentDeliveryAndAbort(t *testing.T)
 				case 1:
 					var first [1]byte
 					_, _ = converted.Read(first[:])
-					owner.close()
+					owner.Close()
 				default:
 					if _, err := io.Copy(io.Discard, converted); err != nil {
 						t.Errorf("complete delivery: %v", err)

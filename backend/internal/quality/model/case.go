@@ -32,7 +32,7 @@ const (
 	VerdictExitGuilty Verdict = "exit_guilty"
 	// VerdictInsufficient 证据不足:双方释放,案件关闭。
 	VerdictInsufficient Verdict = "insufficient"
-	// VerdictDismissed 兼容历史词汇;当前有限闭环与 insufficient 一起关闭案件。
+	// VerdictDismissed 仅兼容历史存量行,新写入路径不再产生该值。
 	VerdictDismissed Verdict = "dismissed"
 )
 
@@ -70,6 +70,6 @@ const (
 	// DispositionWithdrawn 出口方因 epoch 翻篇自动退出案件
 	// (统一 ban 律:新 IP 不继承旧嫌疑;账号方继续审理)。
 	DispositionWithdrawn PartyDisposition = "withdrawn"
-	// DispositionDismissed 恢复销案(无痕)。
+	// DispositionDismissed 仅兼容历史存量行,新写入路径不再产生该值。
 	DispositionDismissed PartyDisposition = "dismissed"
 )

@@ -1,7 +1,7 @@
 import { apiRequest } from "@/shared/api/client";
 import { createObjectDecoder, isBoolean, isOneOf, isString, type ValueValidator } from "@/shared/api/decoder";
 
-export type SystemInfoDTO = {
+type SystemInfoDTO = {
   publicApiBaseURL: string;
 };
 
@@ -11,9 +11,9 @@ export function getSystemInfo(): Promise<SystemInfoDTO> {
   return apiRequest("/api/admin/v1/system", {}, decodeSystemInfo);
 }
 
-export type UpdateStatus = "unchecked" | "up_to_date" | "update_available" | "check_failed";
+type UpdateStatus = "unchecked" | "up_to_date" | "update_available" | "check_failed";
 
-export type VersionInfoDTO = {
+type VersionInfoDTO = {
   currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;

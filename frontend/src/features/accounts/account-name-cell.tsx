@@ -1,8 +1,8 @@
 import { Bot, Compass, Gavel, Handshake, ShieldAlert, SquareTerminal, VenusAndMars, Webhook, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { AccountDTO, AccountProvider, LinkedAccountDTO } from "@/features/accounts/accounts-api";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { AccountDTO, AccountProvider, LinkedAccountDTO } from "@/entities/account/account-api";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime } from "@/shared/lib/format";
 

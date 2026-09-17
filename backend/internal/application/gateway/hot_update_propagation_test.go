@@ -12,6 +12,7 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	relational "github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 // TestRoutingConfigHotUpdatePropagation 锁定配置热更新的传播链:管理端保存
@@ -53,7 +54,7 @@ func TestRoutingConfigHotUpdatePropagation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	service := egressapp.NewService(repo, cipher)
 	// 与 app.go 相同的失效器装配——本测试守护的正是这两根线。

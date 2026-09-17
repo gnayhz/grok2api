@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/gin-gonic/gin"
 )

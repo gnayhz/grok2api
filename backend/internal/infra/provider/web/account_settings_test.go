@@ -18,8 +18,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestWebAccountSettingsMatchCapturedProtocol(t *testing.T) {
@@ -84,7 +85,7 @@ func TestWebAccountSettingsMatchCapturedProtocol(t *testing.T) {
 	encryptedToken, _ := cipher.Encrypt("test-sso")
 	encryptedCookies, _ := cipher.Encrypt("cf_clearance=clear")
 	statsig := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{'s'}, 70))
-	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 	adapter.accountsBaseURL = server.URL
 	credential := account.Credential{
 		ID: 1, Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO,
@@ -116,7 +117,7 @@ func TestWebAccountSettingsMapUnauthorized(t *testing.T) {
 		t.Fatal(err)
 	}
 	encryptedToken, _ := cipher.Encrypt("expired-sso")
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 	adapter.accountsBaseURL = server.URL
 	err = adapter.AcceptTerms(context.Background(), account.Credential{
 		ID: 2, Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
@@ -149,7 +150,7 @@ func TestAcceptTermsRequiresBothUpstreamSteps(t *testing.T) {
 	}
 	encryptedToken, _ := cipher.Encrypt("test-sso")
 	statsig := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{'s'}, 70))
-	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 	adapter.accountsBaseURL = server.URL
 	err = adapter.AcceptTerms(context.Background(), account.Credential{
 		ID: 3, Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
@@ -189,7 +190,7 @@ func TestWebAccountBirthDateMapsOnlyAlreadySetResponse(t *testing.T) {
 			}
 			encryptedToken, _ := cipher.Encrypt("test-sso")
 			statsig := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{'s'}, 70))
-			adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+			adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 
 			err = adapter.SetBirthDate(context.Background(), account.Credential{
 				ID: 4, Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
@@ -220,7 +221,7 @@ func TestWebAccountSettingsRejectsBodyTrailerFailure(t *testing.T) {
 	}
 	encryptedToken, _ := cipher.Encrypt("test-sso")
 	statsig := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{'s'}, 70))
-	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 
 	err = adapter.EnableNSFW(context.Background(), account.Credential{
 		ID: 3, Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encryptedToken,

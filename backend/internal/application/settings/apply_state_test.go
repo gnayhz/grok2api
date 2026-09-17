@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 )
 
 func TestApplySnapshotVisibleAndNewerUpdateSerialized(t *testing.T) {
@@ -22,7 +22,7 @@ func TestApplySnapshotVisibleAndNewerUpdateSerialized(t *testing.T) {
 	}()
 	repo := &runtimeSettingsRepositoryStub{}
 	var installed atomic.Int64
-	service := NewService(testConfig(t), time.Time{}, 0, repo, nil, []ApplyTarget{{Name: "consumer", Apply: func(_ context.Context, cfg config.Config) error {
+	service := NewService(runtimeOf(testConfig(t)), time.Time{}, 0, repo, nil, []ApplyTarget{{Name: "consumer", Apply: func(_ context.Context, cfg settingsdomain.Config) error {
 		if cfg.Server.MaxConcurrentRequests == 2 {
 			close(started)
 			<-resume
@@ -65,7 +65,7 @@ func TestSavedCancellationAndNotificationFailureRecovery(t *testing.T) {
 	defer cancel()
 	calls := [2]int{}
 	notificationCalls := 0
-	service := NewService(testConfig(t), time.Time{}, 0, &runtimeSettingsRepositoryStub{}, func(ctx context.Context) error {
+	service := NewService(runtimeOf(testConfig(t)), time.Time{}, 0, &runtimeSettingsRepositoryStub{}, func(ctx context.Context) error {
 		if ctx.Err() != nil {
 			t.Error("saved notification inherited caller cancellation")
 		}
@@ -75,8 +75,8 @@ func TestSavedCancellationAndNotificationFailureRecovery(t *testing.T) {
 		}
 		return nil
 	}, []ApplyTarget{
-		{Name: "first", Apply: func(context.Context, config.Config) error { calls[0]++; cancel(); return nil }},
-		{Name: "second", Apply: func(context.Context, config.Config) error {
+		{Name: "first", Apply: func(context.Context, settingsdomain.Config) error { calls[0]++; cancel(); return nil }},
+		{Name: "second", Apply: func(context.Context, settingsdomain.Config) error {
 			calls[1]++
 			if calls[1] == 1 {
 				return errors.New("private-token")

@@ -31,7 +31,6 @@ var schemaModels = []any{
 	&egressPoolMemberModel{},
 	&egressNodeModel{},
 	&egressOperationsConfigModel{},
-	&accountRiskVerdictModel{},
 	// accountTombstoneModel 账号删除墓碑:手动删除的账号不再被
 	// 导入/同步复活(批9 事故:删除后 SSO 批量导入重建同号,反复涉案)。
 	&accountTombstoneModel{},
@@ -51,7 +50,8 @@ var schemaModels = []any{
 	&accountModelCapabilityModel{},
 	&accountModelSyncStateModel{},
 	&accountModelQuotaBlockModel{},
-	&accountEgressLeaseBlockModel{},
+	// account_egress_lease_blocks 已无读写路径：不再注册模型，也不建索引；
+	// 历史库中的该表与数据保留不动(AutoMigrate 与索引阶段都不会删表)。
 	&clientKeyModel{},
 	&clientKeyModelPermission{},
 	&billingReservationModel{},
@@ -81,7 +81,6 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_accounts_auto_clean_reauth_cursor ON provider_accounts(auth_status, enabled, id, reauth_marked_at)",
 	"CREATE INDEX IF NOT EXISTS idx_account_credentials_refresh_due ON account_credentials(refresh_due_at, account_id)",
 	"CREATE INDEX IF NOT EXISTS idx_account_credentials_build_bot_flag ON account_credentials(build_bot_flag_source, account_id)",
-	"CREATE INDEX IF NOT EXISTS idx_account_egress_lease_blocks_due ON account_egress_lease_blocks(cooldown_until, account_id, node_id)",
 	"CREATE INDEX IF NOT EXISTS idx_quota_windows_due ON account_quota_windows(remaining, reset_at, account_id)",
 	"CREATE INDEX IF NOT EXISTS idx_model_routes_public_id_lookup ON model_routes(public_id)",
 	// Catalog/discovered rows remain idempotent per API capability. One public
@@ -288,6 +287,9 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 	if err := d.dropModelPublicIDUniqueIndex(ctx); err != nil {
 		return fmt.Errorf("迁移模型路由名称唯一约束: %w", err)
 	}
+	// Retired account_risk_verdicts rows remain available for historical
+	// inspection and rollback. Removing a runtime consumer is not a data
+	// retention policy; new databases simply do not create this table.
 	for _, statement := range schemaIndexes {
 		if err := db.Exec(statement).Error; err != nil {
 			return fmt.Errorf("初始化数据库索引: %w", err)

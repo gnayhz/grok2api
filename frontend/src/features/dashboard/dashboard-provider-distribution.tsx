@@ -3,9 +3,9 @@ import type { TFunction } from "i18next";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
-import { Spinner } from "@/components/ui/spinner";
-import type { DashboardDTO } from "@/features/dashboard/dashboard-api";
-import { DashboardPanel } from "@/features/dashboard/dashboard-panel";
+import { Spinner } from "@/shared/ui/spinner";
+import type { DashboardDTO } from "@/entities/dashboard/dashboard-api";
+import { DashboardPanel } from "./dashboard-panel";
 import { cn } from "@/shared/lib/cn";
 import { formatNumber } from "@/shared/lib/format";
 

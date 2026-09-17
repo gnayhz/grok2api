@@ -91,12 +91,3 @@ func (m *clearanceRuntime) observeRejection(nodeID uint64, scope domain.Scope) {
 		m.invalidateNodeClearancesLocked(nodeID)
 	}
 }
-
-func (m *clearanceRuntime) generationFor(key string) uint64 {
-	if key == "" {
-		return 0
-	}
-	m.clearanceMu.Lock()
-	defer m.clearanceMu.Unlock()
-	return m.clearances[key].generation
-}

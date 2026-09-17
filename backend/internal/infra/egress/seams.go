@@ -24,9 +24,10 @@ type ExitAdmission interface {
 	CheckExitAdmission(context.Context, uint64) (bool, error)
 }
 
-// Dialer 是拨号器缝隙(D3-2):转发循环消费的出口拨号面。底座自带直连
-// 拨号(未配置路由时的 fallback transport);质量层注入代理路由拨号器
-// (批4 proxy 包)。Manager 满足本接口(下方编译期断言)。
+// Dialer 是拨号器缝隙:转发循环消费的出口拨号面。底座自带直连拨号
+// (未配置路由时的 fallback transport)。组合根可注入一层观测包装
+// (quality/proxy.DialerPolicy 只记选择分布,不改路由/池决策)。
+// Manager 满足本接口(下方编译期断言)。
 type Dialer interface {
 	// AcquireIfConfigured 按路由配置取出口租约;未配置时返回
 	// configured=false,由调用方走自带直连。

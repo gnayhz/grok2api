@@ -67,14 +67,14 @@ func eventRegistries(t *testing.T, driver string) (*registry.Registry, *registry
 func eventServices(t *testing.T, reg *registry.Registry) (*Service, *journal.Store, *evidence.Store, *court.Service) {
 	t.Helper()
 	store := journal.New(reg.DB())
-	ev, err := evidence.New(context.Background(), reg.DB(), evidence.DefaultConfig())
+	ev, err := evidence.New(context.Background(), reg.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := court.DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
 	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	judge := court.New(cfg, reg, qualityEvidenceSource{store: ev}, nil)
+	judge := court.New(cfg, reg, qualityEvidenceSource{store: ev}, nil, registry.NewProbeTaskStore(reg))
 	t.Cleanup(func() { judge.Close(context.Background()) })
 	return New(store, ev, judge), store, ev, judge
 }
@@ -157,7 +157,7 @@ func TestEventConsumptionRecoveryAcrossReplicas(t *testing.T) {
 					case "release_before", "release_after":
 						first.journal = releaseFault{store, strings.HasSuffix(stage, "after"), failure}
 					}
-					processed, err := store.ProcessOne(ctx, "first", func(ctx context.Context, event journal.Event) error {
+					processed, err := store.ProcessOne(ctx, "first", func(ctx context.Context, event model.Event) error {
 						if err := first.handle(ctx, event); err != nil {
 							return err
 						}

@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -12,7 +13,6 @@ import (
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/web"
@@ -60,7 +60,7 @@ func BenchmarkPublicModelDiscovery(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	registry := provider.NewRegistry(cli.NewAdapter(cli.Config{}, nil), web.NewAdapter(web.Config{}, nil, nil, nil, nil), console.NewAdapter(console.Config{}, nil, nil, nil))
+	registry := providerimpl.NewRegistry(cli.NewAdapter(cli.Config{}, nil), web.NewAdapter(web.Config{}, nil, nil, nil, nil), console.NewAdapter(console.Config{}, nil, nil, nil))
 	service := modelapp.NewService(repo, accounts, nil, registry)
 	handler := NewHandler(nil, service, 1<<20)
 	router := gin.New()

@@ -3,6 +3,7 @@ package egress
 import (
 	"errors"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"testing"
 )
 
@@ -18,7 +19,7 @@ func TestCanonicalUsageObjectIgnoresNestedCounters(t *testing.T) {
 		}
 		recordPhysicalCall(ctx, nil, errors.New("test close"))
 		ObservePhysicalPayload(ctx, attemptmeta.FromContext(ctx).ID, []byte(payload))
-		fact := PhysicalFacts(ctx)[0]
+		fact := physical.PhysicalFacts(ctx)[0]
 		if fact.Usage.Input != 20 || fact.Usage.Cached != 0 || fact.Usage.ContextInput != 0 {
 			t.Fatalf("nested counters changed canonical usage: %+v", fact.Usage)
 		}

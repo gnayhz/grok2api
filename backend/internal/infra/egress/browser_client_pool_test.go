@@ -48,7 +48,7 @@ func TestBrowserClientConnectionPoolReuse(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 	baseURL := "http://" + listener.Addr().String()
 
-	client, err := newBrowserClient("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+	client, err := newBrowserClientWithBudget("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36", nil)
 	if err != nil {
 		t.Fatalf("newBrowserClient: %v", err)
 	}

@@ -67,30 +67,30 @@ rg '目标规则或函数' backend/internal/architecture
 | 要做什么 | 从哪里开始 | 必须一起检查 |
 | --- | --- | --- |
 | 新增或修改公开 API | `transport/http/inference/`、`transport/http/server.go` | gateway 用例、Key 权限、模型能力、JSON/SSE/WS 完成、错误码、Swagger |
-| 新增 Provider | `infra/provider/definition.go`、`provider.go`、相邻 Provider、`app/` | 认证/刷新、目录、额度、媒体/语音声明、网络预算、历史、实际用量与拒绝分类 |
+| 新增 Provider | `port/provider`（合同、Registry、Definition）、`infra/provider/{cli,web,console}`、`app/` | 认证/刷新、目录、额度、媒体/语音声明、网络预算、历史、实际用量与拒绝分类；application/transport/适配器依赖 `port/provider`；根包只保留凭据 JSON 与完成流包装 |
 | 新模型、模型别名或能力 | `application/model/`、`domain/model/`、Provider Definition/Catalog | 公开 ID 与 route/upstream ID 的区别、账号能力观察、Key scope、前端模型选项 |
-| 选号、亲和或额度回退 | `application/gateway/selector*.go`、`application/account/`、`quotarecovery/` | 当前资格、原子并发领取、材料代际、取消/释放、真实 SQL/Redis 协作 |
-| 账号导入、启停、凭据或同步 | `application/account/`、`domain/account/`、账号 repository | 凭据/身份代际、关联账号、独立状态维度、迟到结果与事务提交 |
+| 选号、亲和或额度回退 | `application/selector/`、`application/account/`、`quotarecovery/` | 当前资格、原子并发领取、材料代际、取消/释放、真实 SQL/Redis 协作 |
+| 账号导入、启停、凭据或同步 | `application/account/` 的能力接口、`application/accountsync/`、`domain/account/`、账号 repository | 凭据/身份代际、关联账号、独立状态维度、导入后同步的取消/等待、迟到结果与事务提交 |
 | 对话历史、压缩、恢复 | `application/history/`、`domain/history/`、gateway 和 Provider 的 history 文件 | Key/Provider/账号 scope、分支 CAS、previous response 授权、工具许可、精确 JSON 数字 |
 | 请求重试或流式完成 | gateway 的 attempt、completion、delivery、quality_retry 文件 | 物理总预算、已提交请求、已交付字节、必要历史/归属提交、独立账本与回执 |
 | 代理池、路由或出口管理 | `application/egress/`、`domain/egress/` | 当前事务中的回退图/引用合法性、订阅代际、敏感地址回显、前端网络草稿 |
 | 连接、TLS、HTTP/2、SOCKS、容量 | `infra/egress/`、对应 `pkg/` 网络组件 | socket/client/request/waiter 额度、活跃流隔离、EOF/取消、binding/health revision |
 | 响应质量准入 | `quality/guard/`、`domain/guard/`、gateway 的准入文件 | 规范事件解释、策略快照、内存预算、扣留与交付、未知/失败不得当降智票 |
 | 调查、案件、人工解除限制 | `quality/investigator/`、`court/`、`registry/`、`management/` | 受控对照、实际路径、证据协议、当前 epoch、其他案件持有的限制、原子结案 |
-| 上传、图片、视频、下载或删除 | `application/media/`、`infra/mediafetch/`、gateway 的 image/video 文件 | SSRF、文件引用授权、暂存/claim、归档来源、恢复同一作业、计费与孤儿回收 |
-| TTS、STT 或实时语音 | gateway 的 voice 文件、HTTP inference、Provider 语音实现 | 输入格式/选项、双向泵、终态完整性、生成与交付分离、取消后的用量 |
+| 上传、图片、视频、下载或删除 | `application/media/`、`infra/mediafetch/`、gateway 媒体执行、`application/mediajob/` 生成事实 | SSRF、文件引用授权、暂存/claim、归档来源、恢复同一作业、计费与孤儿回收 |
+| TTS、STT 或实时语音 | gateway 的 voice 文件、`application/mediajob/voice_generation.go`、HTTP inference、Provider 语音实现 | 执行与双向通道归 gateway；输入格式/选项、终态完整性、生成与交付分离、取消后的用量 |
 | 管理员登录或浏览器会话 | `application/adminauth/`、管理鉴权中间件；`frontend/src/shared/auth/` | 密码代际、刷新族复用、撤销、旧请求/缓存隔离、退出后的迟到响应 |
 | Key 权限、速率或费用上限 | `application/clientkey/`、`domain/clientkey/`、middleware | all/restricted/空 restricted、预留与结算、已删除 Key 的迟到完成、恢复资源授权 |
 | 新配置字段或热更新 | `infra/config/`、`application/settings/`、对应业务服务 | 默认值/范围/单位、严格解析、DTO、revision/CAS/reset、apply、重启、旧客户端 |
 | 审计、费用、统计或保留 | `application/audit/`、`domain/audit/`、relational、dashboard | 独立完成维度、持久待写、永久结算身份、删除详情后重放、聚合一致快照 |
-| 新管理页面或交互 | `frontend/src/app/`、`features/<业务>/`、`shared/api/` | 后端 DTO/权限、会话取消、Query key、表单基线、中英文、错误/空/加载状态 |
+| 新管理页面或交互 | `frontend/src/app/`、`features/<业务>/`、`entities/<域>/` | 后端 DTO/权限、会话取消、Query key、表单基线、中英文、错误/空/加载状态；跨 feature 组合放 app 层（见 ARCHITECTURE 前端 FSD） |
 | 启动、worker 或优雅关闭 | `app/application.go`、`application_lifecycle.go`、`http_lifecycle.go` | 构造失败清理、Run/Close 所有权、HTTP/WS 排空、writer 先于数据库关闭 |
 
 ## 常见扩展做法
 
 ### 新增一个业务命令或接口
 
-在领域/应用服务定义命令与规则，使用能够表达原子操作的窄端口；SQL 实现在锁或事务内执行当前状态检查。HTTP 只解析、鉴权、调用和编码。前端提交最小必要字段并展示服务端结果。涉及列表加详情的页面，说明分页、排序、空值以及是否需要一致快照。
+在领域/应用服务定义命令与规则，使用能够表达原子操作的窄端口；SQL 实现在锁或事务内执行当前状态检查。HTTP 只解析、鉴权、调用和编码。账号导入/转换及初始同步由 `accountsync.Onboarding` 协调；HTTP 接收能力接口，服务与适配器由 app 装配。质量用例的案件/任务/事件/证据值从 `quality/model` 获取，存储实现经消费方接口注入，不能为了使用一个 DTO 反向依赖 registry/evidence/journal。前端提交最小必要字段并展示服务端结果。涉及列表加详情的页面，说明分页、排序、空值以及是否需要一致快照。
 
 先扩展已有业务 owner；只有新能力拥有独立政策、状态和生命周期时才引入新服务。跨模块功能由用例协调窄端口，不让 Gateway、组合根或 shared 成为通用业务收纳处。可以保持同一包内的内聚协作；依赖例外以架构合同的具体范围为准，不能将一个现有例外推广到所有模块。
 
@@ -162,6 +162,12 @@ SQLite 和 PostgreSQL 都是受支持实现。模式与持久化修改检查 `in
 请求审计与逐次生成明细的 `cached_input_tokens_reported` 为可空布尔列，HTTP 对应可选的 `cachedInputTokensReported`。`true` 表示上游明确报告缓存用量（包括零），`false` 表示已报告用量但缺少缓存字段，`NULL` / HTTP 缺省表示旧记录或没有用量事实。历史正缓存数仍可展示；未知零值展示为未知，不回填为明确未命中。数值字段、计费与聚合合同保留，缺失缓存不能被估算成命中。
 
 SQLite / PostgreSQL 通过现有受锁保护的启动迁移添加可空列，不扫描回填旧业务行。审计、生成明细及费用结算继续在原事务内写入，待写日志兼容缺省字段。旧程序可忽略新列，新程序把旧写入方产生的空值视为未知；仅此加列允许混合版本读写，回退不需删除列，也不会补造旧程序遗漏的存在性信息。质量实验版本升级另遵守质量模块的排空要求。
+
+### 退役账号元数据的保留
+
+`provider_accounts.egress_assignment_mode` / `egress_assigned_at`、`account_risk_verdicts` 和 `account_egress_lease_blocks` 已没有当前运行时消费者。新库不创建这些字段或表；SQLite / PostgreSQL 旧库中的列、约束与数据保留，启动和重复初始化不删除或清空。账号显式绑定仍由 `egress_node_id` 表达，当前质量案件继续由质量模块管理。删除旧实现不意味着授权删除历史业务数据，也不应仅为减少表数引入不可逆迁移。
+
+回退旧二进制会按旧 schema 补建新库缺少的字段或表；已有旧值保留，但新版本不会补写退役记录，也不承诺这些记录在新旧版本间保持同步。已经运行过删除它们的开发版本只能从一致性备份恢复原始数据，自动迁移不能重建丢失的值。其他质量协议、配置格式的升级与排空要求仍独立适用。
 
 ### 审计保留的兼容要求
 

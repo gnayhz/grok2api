@@ -3,15 +3,16 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestCanonicalAdmissionSharesRawEventsWithClientEncoder(t *testing.T) {
@@ -20,20 +21,20 @@ func TestCanonicalAdmissionSharesRawEventsWithClientEncoder(t *testing.T) {
 	stream := responseflow.New(io.NopCloser(strings.NewReader(raw)), pool.Request(1<<20))
 	observed := 0
 	stream.Observe(func(*responseflow.Event) { observed++ })
-	_, resources := newAttemptResources(context.Background())
-	replay, verdict, _, _, err := peekQualityStreamReport(context.Background(), resources.own(stream), qualityProtocolResponses, QualityRetryRuntime{})
+	_, resources := selector.NewAttemptResources(context.Background())
+	replay, verdict, _, _, err := peekQualityStreamReport(context.Background(), resources.Own(stream), qualityProtocolResponses, QualityRetryRuntime{})
 	if err != nil || verdict != QualityDeliver || observed != 1 {
 		t.Fatalf("verdict=%s err=%v observed=%d", verdict, err, observed)
 	}
 	response := &provider.Response{Body: replay, ConvertStream: func(body io.ReadCloser) io.ReadCloser {
-		return conversation.ConvertResponseStream(body, conversation.OperationChat)
+		return conversation.ConvertResponseStreamWithOptions(body, conversation.OperationChat, conversation.ResponseOptions{})
 	}}
 	if err := applyDeferredStreamConversion(response); err != nil {
 		t.Fatal(err)
 	}
 	data, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	resources.close()
+	resources.Close()
 	if err != nil || !strings.Contains(string(data), "plan") || observed != 2 {
 		t.Fatalf("converted=%s err=%v observed=%d", data, err, observed)
 	}

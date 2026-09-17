@@ -1,8 +1,8 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
-import type { TTSResult } from "./creative-console-api";
+import { Button } from "@/shared/ui/button";
+import type { TTSResult } from "@/entities/creative-console/creative-console-api";
 
 export function SpeechPlayback({ result }: { result: TTSResult }) {
   const { t } = useTranslation();

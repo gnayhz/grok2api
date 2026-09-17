@@ -16,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 func TestStatsigQuotaWaiterDeadlineDoesNotWaitForLeader(t *testing.T) {
@@ -57,7 +58,7 @@ func TestStatsigQuotaWaiterDeadlineDoesNotWaitForLeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
 	defer func() { _ = manager.Close(context.Background()) }()
 	adapter := NewAdapter(Config{BaseURL: upstream.URL, StatsigMode: "url", StatsigSignerURL: signerServer.URL, QuotaTimeout: 2 * time.Second}, manager, cipher, nil, nil)
 	adapter.statsig.client = signerServer.Client()

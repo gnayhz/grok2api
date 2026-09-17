@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -15,9 +16,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
@@ -60,7 +61,7 @@ func TestCreateAndUpdatePreserveProviderPrefixedPublicNames(t *testing.T) {
 	}
 	modelRepo := relational.NewModelRepository(database)
 	accountRepo := relational.NewAccountRepository(database)
-	registry := provider.NewRegistry(&modelRouteAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{}})
+	registry := providerimpl.NewRegistry(&modelRouteAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{}})
 	service := NewService(modelRepo, accountRepo, nil, registry)
 
 	created, err := service.Create(ctx, CreateInput{
@@ -153,12 +154,12 @@ func TestSyncAggregatesCapabilitiesFromAllAccounts(t *testing.T) {
 	webAdapter := &modelCapabilityAdapter{provider: account.ProviderWeb, models: map[uint64][]string{
 		webAccount.ID: {"grok-chat-fast", "grok-chat-auto"},
 	}}
-	registry := provider.NewRegistry(adapter, webAdapter)
+	registry := providerimpl.NewRegistry(adapter, webAdapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	service := NewService(modelRepo, accountRepo, accountService, registry)
 
-	count, err := service.Sync(ctx)
+	count, err := service.SyncObserved(ctx, nil)
 	if err != nil || count != 4 {
 		t.Fatalf("sync count = %d, err = %v", count, err)
 	}
@@ -278,8 +279,8 @@ func TestSyncAccountNormalizesBuildVideo15ByBillingSuper(t *testing.T) {
 	webAdapter := &modelCapabilityAdapter{provider: account.ProviderWeb, models: map[uint64][]string{
 		webAccount.ID: {"grok-chat-fast", "grok-imagine-video"},
 	}}
-	registry := provider.NewRegistry(buildAdapter, webAdapter)
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	registry := providerimpl.NewRegistry(buildAdapter, webAdapter)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	service := NewService(modelRepo, accountRepo, accountService, registry)
 
 	for _, id := range []uint64{superPrimary.ID, superFallback.ID, freeAccount.ID, unknownAccount.ID, webAccount.ID} {
@@ -376,8 +377,8 @@ func TestSyncAccountRunsUpstreamDiscoveryConcurrently(t *testing.T) {
 		accountIDs = append(accountIDs, value.ID)
 		adapter.models[value.ID] = []string{"grok-shared"}
 	}
-	registry := provider.NewRegistry(adapter)
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	registry := providerimpl.NewRegistry(adapter)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	service := NewService(modelRepo, accountRepo, accountService, registry)
 
 	results := make(chan error, accountCount)

@@ -11,7 +11,7 @@ import (
 func TestThinkingEvidenceCommentEmittedWithoutAnthropicThinking(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	converter := newStreamConverter(&out, OperationMessages, ResponseOptions{})
+	converter := newStreamConverterWithBudget(&out, OperationMessages, ResponseOptions{}, nil)
 	if err := converter.handle("response.reasoning_summary_text.delta", []byte(`{"type":"response.reasoning_summary_text.delta","delta":"对比体感温度"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestThinkingEvidenceCommentEmittedWithoutAnthropicThinking(t *testing.T) {
 func TestThinkingEvidenceCommentOnRawTextDelta(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	converter := newStreamConverter(&out, OperationMessages, ResponseOptions{})
+	converter := newStreamConverterWithBudget(&out, OperationMessages, ResponseOptions{}, nil)
 	if err := converter.handle("response.reasoning_text.delta", []byte(`{"type":"response.reasoning_text.delta","delta":"hmm"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestThinkingEvidenceCommentOnRawTextDelta(t *testing.T) {
 func TestBlankDeltaDoesNotEmitEvidenceComment(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	converter := newStreamConverter(&out, OperationMessages, ResponseOptions{})
+	converter := newStreamConverterWithBudget(&out, OperationMessages, ResponseOptions{}, nil)
 	if err := converter.handle("response.reasoning_summary_text.delta", []byte(`{"type":"response.reasoning_summary_text.delta","delta":"
 "}`)); err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestBlankDeltaDoesNotEmitEvidenceComment(t *testing.T) {
 func TestNoEvidenceCommentWhenThinkingEnabledOrChat(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	enabled := newStreamConverter(&out, OperationMessages, ResponseOptions{AnthropicThinking: true})
+	enabled := newStreamConverterWithBudget(&out, OperationMessages, ResponseOptions{AnthropicThinking: true}, nil)
 	if err := enabled.handle("response.reasoning_text.delta", []byte(`{"type":"response.reasoning_text.delta","delta":"hmm"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestNoEvidenceCommentWhenThinkingEnabledOrChat(t *testing.T) {
 		t.Fatal("thinking-enabled messages must forward thinking_delta")
 	}
 	var chatOut bytes.Buffer
-	chat := newStreamConverter(&chatOut, OperationChat, ResponseOptions{})
+	chat := newStreamConverterWithBudget(&chatOut, OperationChat, ResponseOptions{}, nil)
 	if err := chat.handle("response.reasoning_text.delta", []byte(`{"type":"response.reasoning_text.delta","delta":"hmm"}`)); err != nil {
 		t.Fatal(err)
 	}

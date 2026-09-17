@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"log/slog"
 	"net/http"
@@ -41,7 +42,7 @@ func TestProbeResponseRequiresCompleteBoundedDocument(t *testing.T) {
 						_, _ = io.WriteString(w, body)
 					}))
 					defer origin.Close()
-					manager := NewManager(egressRepositoryTestStub{}, nil)
+					manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 					defer manager.Close(context.Background())
 					manager.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 					result, err := manager.probeEgressEndpoint(context.Background(), preparedEgressProbe{nodeID: 1}, domain.ProbeProviderCloudflare, family, origin.URL)
@@ -81,7 +82,7 @@ func BenchmarkProbeCompleteResponse(b *testing.B) {
 					_, _ = io.WriteString(w, body)
 				}))
 				defer origin.Close()
-				manager := NewManager(egressRepositoryTestStub{}, nil)
+				manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 				defer manager.Close(context.Background())
 				manager.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 				b.ReportAllocs()

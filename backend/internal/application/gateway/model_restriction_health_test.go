@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,21 +32,29 @@ func TestModelRestrictionInvalidationPreservesLatestHealth(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				selector := NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Hour, time.Hour)
+				sel := selector.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Hour, time.Hour)
 				if cleared {
 					if _, err := repo.ApplyHealth(ctx, v.ID, v.Provider, account.HealthEvent{Kind: account.HealthFailure, Status: 503, CooldownBase: time.Hour, CooldownMax: time.Hour}); err != nil {
 						t.Fatal(err)
 					}
 				}
-				repo.SetInvalidationObserver(func(_ context.Context, e repository.InvalidationEvent) { selector.ApplyInvalidation(e) })
+				repo.SetInvalidationObserver(func(_ context.Context, e repository.InvalidationEvent) { sel.ApplyInvalidation(e) })
 				acquire := func(want bool) {
 					t.Helper()
-					lease, err := selector.Acquire(ctx, v.Provider, 0, "other-model", "", "", nil, false)
-					if err == nil {
+					acquireErr := func() error {
+						session, sessionErr := sel.BeginSelectionSessionForKey(ctx, v.Provider, 0, "other-model", "", "", nil, false, clientkeydomain.AccountScope{})
+						if sessionErr != nil {
+							return sessionErr
+						}
+						lease, leaseErr := session.Acquire(ctx, nil, false)
+						if leaseErr != nil {
+							return leaseErr
+						}
 						lease.Release()
-					}
-					if (err == nil) != want {
-						t.Fatalf("health eligibility=%v want=%v err=%v", err == nil, want, err)
+						return nil
+					}()
+					if (acquireErr == nil) != want {
+						t.Fatalf("health eligibility=%v want=%v err=%v", acquireErr == nil, want, acquireErr)
 					}
 				}
 				acquire(!cleared) // Warm the base snapshot before the health transition.
@@ -53,20 +63,20 @@ func TestModelRestrictionInvalidationPreservesLatestHealth(t *testing.T) {
 						t.Fatal(err)
 					}
 				} else {
-					selector.MarkFailure(ctx, v, 503, time.Hour)
+					sel.MarkFailure(ctx, v, 503, time.Hour)
 				}
 				acquire(cleared)
 				switch invalidation {
 				case "quota":
-					selector.MarkModelQuotaExhausted(ctx, v, nil, "limited-model", time.Hour)
+					sel.MarkModelQuotaExhausted(ctx, v, nil, "limited-model", time.Hour)
 				case "denial":
-					if err := selector.MarkModelAccessDenied(ctx, v, "limited-model", time.Hour); err != nil {
+					if err := sel.MarkModelAccessDenied(ctx, v, "limited-model", time.Hour); err != nil {
 						t.Fatal(err)
 					}
 				case "capability":
-					selector.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountCapabilityChanged, Provider: v.Provider, AccountID: v.ID})
+					sel.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountCapabilityChanged, Provider: v.Provider, AccountID: v.ID})
 				case "route":
-					selector.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationRouteChanged, Provider: v.Provider})
+					sel.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationRouteChanged, Provider: v.Provider})
 				}
 				acquire(cleared)
 			})

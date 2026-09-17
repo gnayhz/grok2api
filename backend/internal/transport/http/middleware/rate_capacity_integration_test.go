@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -81,7 +82,7 @@ func TestAuthenticationPreservesLimitsUnderRuntimePressure(t *testing.T) {
 				t.Fatal(err)
 			}
 			limiter := memory.NewRateLimiter()
-			keys := keyapp.NewService("rate-capacity", relational.NewClientKeyRepository(db), limiter, memory.NewConcurrencyLimiter(), 60, 5, cipher)
+			keys := keyapp.NewService("rate-capacity", relational.NewClientKeyRepository(db), limiter, memory.NewConcurrencyLimiter(), 60, 5, cipher, security.RandomTokenSource{})
 			t.Cleanup(func() {
 				closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
@@ -97,7 +98,7 @@ func TestAuthenticationPreservesLimitsUnderRuntimePressure(t *testing.T) {
 				}
 				secrets[i] = v.Secret
 			}
-			admins := adminapp.NewService(relational.NewAdminRepository(db), relational.NewAdminSessionRepository(db), security.NewTokenService("rate-capacity-fixture-signing-key"), time.Minute, time.Hour)
+			admins := adminapp.NewService(relational.NewAdminRepository(db), relational.NewAdminSessionRepository(db), security.NewTokenService("rate-capacity-fixture-signing-key"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 			admins.SetLoginRateLimiter(limiter)
 			if err := admins.Bootstrap(ctx, "rate-owner", "fixture-password"); err != nil {
 				t.Fatal(err)
@@ -128,11 +129,11 @@ func TestAuthenticationPreservesLimitsUnderRuntimePressure(t *testing.T) {
 			// Prime the real administrator's fixed username window through the same
 			// runtime port. The HTTP request below must still be refused before bcrypt.
 			for range 12 {
-				if ok, _, e := limiter.Allow(ctx, "admin-login:user:"+security.HashToken("rate-owner"), 12, time.Now()); e != nil || !ok {
+				if ok, _, e := limiter.Allow(ctx, "admin-login:user:"+tokenhash.HashToken("rate-owner"), 12, time.Now()); e != nil || !ok {
 					t.Fatal(ok, e)
 				}
 			}
-			if ok, _, e := limiter.Allow(ctx, "admin-login:ip:"+security.HashToken("192.0.2.8"), 30, time.Now()); e != nil || !ok {
+			if ok, _, e := limiter.Allow(ctx, "admin-login:ip:"+tokenhash.HashToken("192.0.2.8"), 30, time.Now()); e != nil || !ok {
 				t.Fatal(ok, e)
 			}
 			for i := range 40000 {

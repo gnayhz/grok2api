@@ -4,6 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -16,7 +21,6 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
@@ -88,15 +92,15 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 		responses[credential.ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
 	}
 	adapter := &scriptedBuildAdapter{responses: responses}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
-	service.UpdateQualityRetry(QualityRetryRuntime{
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 999)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: accounts,
-		OnExhausted: qualityRetryFailClosed,
-	})
+		OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"},
+	}))
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-failclosed", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
@@ -138,7 +142,7 @@ func TestAttemptLoopQualityFailClosedRejectsAndNeverLeaksDegradedBytes(t *testin
 		if account.CooldownUntil != nil || account.LastError != "" || !account.Enabled {
 			t.Fatalf("quality hold changed manual/health fields: %+v", account)
 		}
-		if selector.localQualityAllowed(account.ID, time.Now()) {
+		if sel.LocalQualityAllowed(account.ID, time.Now()) {
 			t.Fatalf("account %d missing hold", account.ID)
 		}
 	}

@@ -14,8 +14,9 @@ import (
 
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	dialect "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // DialVoiceWebSocket opens an authenticated Console websocket for realtime or STT streaming.
@@ -126,7 +127,7 @@ func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.Voice
 				continue
 			}
 		}
-		dpopRequired := status == http.StatusForbidden && provider.IsDPoPProofRequiredBody(body)
+		dpopRequired := status == http.StatusForbidden && dialect.IsDPoPProofRequiredBody(body)
 		if status == http.StatusForbidden && shouldInvalidateConsoleClearance(body) {
 			lease.InvalidateClearance()
 		}

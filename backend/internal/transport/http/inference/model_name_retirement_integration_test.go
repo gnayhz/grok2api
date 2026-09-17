@@ -18,7 +18,7 @@ import (
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
 	"github.com/gin-gonic/gin"
 )

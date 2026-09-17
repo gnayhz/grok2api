@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	relational "github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -101,7 +103,7 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 	}
 	_ = saved
 
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	roundTrip := func(t *testing.T, traceCtx context.Context) (*audit.Record, uint64) {
 		t.Helper()
@@ -129,7 +131,7 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 	}
 
 	t.Run("pool member via real proxy", func(t *testing.T) {
-		traceCtx, _ := infraegress.WithTrace(ctx)
+		traceCtx, _ := physical.WithTrace(ctx)
 		record, served := roundTrip(t, infraegress.WithTrafficClass(traceCtx, egressdomain.TrafficClassInference))
 		if proxyAHits.Load() != 1 || originHits.Load() != 1 {
 			t.Fatalf("traffic did not traverse the node's proxy: proxyHits=%d originHits=%d", proxyAHits.Load(), originHits.Load())
@@ -164,7 +166,7 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 		}
 		manager.InvalidateOperationsConfig()
 		manager.InvalidatePoolCache()
-		traceCtx, trace := infraegress.WithTrace(ctx)
+		traceCtx, trace := physical.WithTrace(ctx)
 		lease, acquireErr := manager.Acquire(traceCtx, egressdomain.ScopeBuild, "audit-direct")
 		if acquireErr != nil || lease == nil {
 			t.Fatalf("direct acquire: lease=%v err=%v", lease, acquireErr)
@@ -199,7 +201,7 @@ func TestEgressAuditTrailMatchesActualExit(t *testing.T) {
 		manager.InvalidateOperationsConfig()
 		manager.InvalidatePoolCache()
 
-		traceCtx, trace := infraegress.WithTrace(ctx)
+		traceCtx, trace := physical.WithTrace(ctx)
 		lease, outcome, acquireErr := manager.AcquirePoolRouted(infraegress.WithTrafficClass(traceCtx, egressdomain.TrafficClassInference), egressdomain.ScopeBuild, "audit-fallback", pool.ID, true, "")
 		if acquireErr != nil || outcome != infraegress.PoolRouteDirect || lease == nil {
 			t.Fatalf("pool-direct fallback: lease=%v outcome=%v err=%v", lease, outcome, acquireErr)

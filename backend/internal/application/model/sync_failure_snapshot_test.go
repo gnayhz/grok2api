@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,7 +12,6 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
@@ -52,8 +52,8 @@ func TestSyncProgressReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := provider.NewRegistry(failingModelsAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{}})
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	registry := providerimpl.NewRegistry(failingModelsAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{}})
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	service := NewService(modelRepo, accountRepo, accountService, registry)
 
 	if _, err := service.SyncObserved(ctx, nil); err == nil {

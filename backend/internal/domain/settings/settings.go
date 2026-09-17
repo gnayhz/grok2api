@@ -1,6 +1,9 @@
 package settings
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	DefaultBuildResponseHeaderTimeout = 5 * time.Minute
@@ -17,6 +20,20 @@ const (
 	MaxProviderStreamIdleTimeout    = 10 * time.Minute
 )
 
+// DefaultBuildFallbackBaseURL 是主 Build API 对可回退推理操作 403 时探测的
+// XAI API 根地址。该默认与规范化只有这一个解释点；文件解码、运行设置与
+// Provider 适配器都复用本规则，不再各自实现。
+const DefaultBuildFallbackBaseURL = "https://api.x.ai/v1"
+
+// NormalizeBuildFallbackBaseURL 规范化 Build 回退根地址；显式清空回退到
+// 默认地址（与运行设置的空值语义一致）。
+func NormalizeBuildFallbackBaseURL(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return DefaultBuildFallbackBaseURL
+	}
+	return strings.TrimSpace(value)
+}
+
 // Config 表示可跨重启持久化并支持热加载的网关运行参数。
 type Config struct {
 	Server            ServerConfig
@@ -31,7 +48,7 @@ type Config struct {
 	ClientKeyDefaults ClientKeyDefaultsConfig
 	Accounts          AccountsConfig
 	// RequestRetry/EgressRotation 为指针节：旧持久化载荷整段缺失
-	// 时保持 nil,applyDomainConfig 沿用文件基线,而不是把零值当作"全部关闭"。
+	// 时保持 nil，持久配置解析沿用文件基线,而不是把零值当作"全部关闭"。
 	RequestRetry   *RequestRetryConfig
 	EgressRotation *EgressRotationConfig
 }
@@ -72,6 +89,19 @@ type EgressRotationConfig struct {
 // FrontendConfig 定义公开 API 地址的运行时覆盖值；留空时使用配置文件值。
 type FrontendConfig struct {
 	PublicAPIBaseURL string
+	// FilePublicAPIBaseURL is the local fallback, never a durable override.
+	FilePublicAPIBaseURL string `json:"-"`
+}
+
+const DefaultPublicAPIBaseURL = "http://127.0.0.1:8000"
+
+func (c FrontendConfig) EffectivePublicAPIBaseURL() string {
+	for _, value := range []string{c.PublicAPIBaseURL, c.FilePublicAPIBaseURL} {
+		if normalized := strings.TrimRight(strings.TrimSpace(value), "/"); normalized != "" {
+			return normalized
+		}
+	}
+	return DefaultPublicAPIBaseURL
 }
 
 type ProviderConsoleConfig struct {
@@ -159,6 +189,10 @@ type AuditConfig struct {
 	RetentionPeriod *time.Duration `json:",omitempty"`
 	// RetentionDays reads pre-migration payloads; new saves write only RetentionPeriod.
 	RetentionDays *int `json:",omitempty"`
+	// RetentionSource attributes the effective retention to "runtime",
+	// "legacy_runtime" or the file baseline's own value. Derived on load/merge;
+	// persistedConfig clears it before saving so the stored row never changes shape.
+	RetentionSource string `json:",omitempty"`
 }
 
 // ClientKeyDefaultsConfig 定义新建客户端密钥的默认限制。

@@ -1,17 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { DashboardActivity } from "@/features/dashboard/dashboard-activity";
-import { getDashboard, type DashboardPeriod } from "@/features/dashboard/dashboard-api";
-import { DashboardOverview, DashboardResources } from "@/features/dashboard/dashboard-overview";
-import { DashboardProviderDistribution } from "@/features/dashboard/dashboard-provider-distribution";
-import { DashboardTopModels } from "@/features/dashboard/dashboard-top-models";
-import { DashboardTrend } from "@/features/dashboard/dashboard-trend";
-import { GuardStatusBanner } from "@/features/guard/guard-status-banner";
-import { VersionUpdateBanner } from "@/features/system/version-update";
+import { Button } from "@/shared/ui/button";
+import { DashboardActivity } from "./dashboard-activity";
+import { getDashboard, type DashboardPeriod } from "@/entities/dashboard/dashboard-api";
+import { DashboardOverview, DashboardResources } from "./dashboard-overview";
+import { DashboardProviderDistribution } from "./dashboard-provider-distribution";
+import { DashboardTopModels } from "./dashboard-top-models";
+import { DashboardTrend } from "./dashboard-trend";
 import { ErrorState } from "@/shared/components/data-state";
 import { PeriodSelector } from "@/shared/components/period-selector";
 import { PERIOD_DAYS, toPeriodValue, type PeriodDays } from "@/shared/lib/period";
@@ -21,7 +20,7 @@ type DashboardPreferences = { periodDays: PeriodDays };
 const DASHBOARD_PREFERENCES_KEY = "grok2api:dashboard-preferences";
 const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = { periodDays: 30 };
 
-export function DashboardPage() {
+export function DashboardPage({ bannerSlot }: { bannerSlot?: ReactNode }) {
   const { t, i18n } = useTranslation();
   const [preferences, setPreferences] = useState<DashboardPreferences>(readDashboardPreferences);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -85,13 +84,12 @@ export function DashboardPage() {
           </div>
         </header>
 
-        <VersionUpdateBanner />
-        <GuardStatusBanner />
+        {bannerSlot}
       </div>
 
       <DashboardOverview dashboard={dashboard} locale={i18n.language} loading={loading} />
 
-      <div className="grid items-stretch gap-2 xl:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
+      <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 xl:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
         <DashboardTrend
           dashboard={dashboard}
           locale={i18n.language}
@@ -100,7 +98,7 @@ export function DashboardPage() {
         <DashboardProviderDistribution dashboard={dashboard} locale={i18n.language} loading={loading} />
       </div>
 
-      <div className="grid items-stretch gap-2 xl:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
+      <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 xl:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
         <DashboardTopModels dashboard={dashboard} locale={i18n.language} loading={loading} />
         <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2 xl:h-full">
           <DashboardActivity dashboard={dashboard} locale={i18n.language} loading={loading} />

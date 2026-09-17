@@ -4,11 +4,12 @@ package management
 import (
 	"encoding/json"
 	"fmt"
-	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
-	qualityevidence "github.com/chenyme/grok2api/backend/internal/quality/evidence"
-	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
-	"github.com/chenyme/grok2api/backend/internal/repository"
 	"time"
+
+	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
+	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 type Config struct {
@@ -30,7 +31,7 @@ type Config struct {
 func DefaultConfig() Config {
 	courtCfg := qualitycourt.DefaultConfig()
 	invCfg := qualityinvestigator.DefaultConfig()
-	evCfg := qualityevidence.DefaultConfig()
+	evCfg := qualitymodel.DefaultEvidenceConfig()
 	return Config{
 		AccountNeedExits:     courtCfg.AccountNeedExits,
 		AccountSpanNodes:     courtCfg.AccountSpanNodes,

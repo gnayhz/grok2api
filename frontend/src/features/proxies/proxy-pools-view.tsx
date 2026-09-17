@@ -28,28 +28,28 @@ import {
 	AlertDialogFooter,
 	AlertDialogHeader,
 	AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { OperationsDialogContent, OperationsAlertDialogContent } from "@/features/operations/operations-ui";
+} from "@/shared/ui/alert-dialog";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
+import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/shared/ui/dialog";
+import { OperationsDialogContent, OperationsAlertDialogContent } from "@/shared/ui/operations";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useNow } from "@/features/guard/quality-hooks";
-import { nodeCondition } from "@/features/operations/operations-data";
-import { useOperationsNodes, useOperationsPools } from "@/features/operations/operations-queries";
+} from "@/shared/ui/dropdown-menu";
+import { Input } from "@/shared/ui/input";
+import { Label } from "@/shared/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
+import { Spinner } from "@/shared/ui/spinner";
+import { Switch } from "@/shared/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { useNow } from "@/shared/lib/use-now";
+import { nodeCondition } from "@/entities/egress/node-condition";
+
 import {
 	createEgressPool,
 	deleteEgressPool,
@@ -61,10 +61,12 @@ import {
 	type EgressPoolDTO,
 	type EgressPoolFallbackMode,
 	type EgressPoolStrategy,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 import { cn } from "@/shared/lib/cn";
 
-import { formatTimeAgo, getLatencyTone, maskIP } from "./proxy-format";
+import { maskIP } from "@/shared/lib/mask-ip";
+import { formatTimeAgo, getLatencyTone } from "./proxy-format";
+import { useEgressNodes, useEgressPools } from "@/entities/egress/egress-queries";
 
 export function ProxyPoolsView({
 	focusPoolId,
@@ -75,8 +77,8 @@ export function ProxyPoolsView({
 }) {
 	const { t, i18n } = useTranslation();
 	const queryClient = useQueryClient();
-	const poolsQuery = useOperationsPools();
-	const nodesQuery = useOperationsNodes();
+	const poolsQuery = useEgressPools();
+	const nodesQuery = useEgressNodes();
 	const now = useNow(15_000);
 
 	const [search, setSearch] = useState("");

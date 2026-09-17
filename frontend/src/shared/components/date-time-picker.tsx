@@ -5,10 +5,10 @@ import { useRef } from "react"
 import { useTranslation } from "react-i18next"
 import { enUS as enUSDayPicker, zhCN as zhCNDayPicker } from "react-day-picker/locale"
 
-import { Button } from "@/components/ui/button"
-import { Calendar } from "@/components/ui/calendar"
-import { Input } from "@/components/ui/input"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Button } from "@/shared/ui/button"
+import { Calendar } from "@/shared/ui/calendar"
+import { Input } from "@/shared/ui/input"
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover"
 import { cn } from "@/shared/lib/cn"
 import { toDateTimeLocal } from "@/shared/lib/format"
 
@@ -53,7 +53,7 @@ export function DateTimePicker({ value, onChange, placeholder, disabled = false 
         <Button type="button" variant="secondary" disabled={disabled} className={cn("h-8 w-full min-w-0 justify-start rounded-md bg-secondary/55 px-3 text-left font-normal", !selected && "text-muted-foreground")}>
           <CalendarIcon />
           <span className="truncate">
-            {selected ? format(selected, isChinese ? "yyyy年M月d日 HH:mm:ss" : "MMM d, yyyy HH:mm:ss", { locale: isChinese ? zhCN : enUS }) : (placeholder ?? t("keys.neverExpires"))}
+            {selected ? format(selected, isChinese ? "yyyy年M月d日 HH:mm:ss" : "MMM d, yyyy HH:mm:ss", { locale: isChinese ? zhCN : enUS }) : (placeholder ?? t("common.neverExpires"))}
           </span>
         </Button>
       </PopoverTrigger>
@@ -66,13 +66,13 @@ export function DateTimePicker({ value, onChange, placeholder, disabled = false 
           locale={isChinese ? zhCNDayPicker : enUSDayPicker}
         />
         <div className="flex items-center gap-2 border-t px-3 py-2">
-          <span className="text-xs text-muted-foreground">{t("keys.expiryTime")}</span>
+          <span className="text-xs text-muted-foreground">{t("common.expiryTime")}</span>
           <div className="ml-auto flex items-center gap-1 text-xs">
             {timeParts.map((part, index) => (
               <div className="contents" key={index}>
                 {index > 0 ? <span className="text-muted-foreground">:</span> : null}
                 <Input
-                  aria-label={`${t("keys.expiryTime")} ${index === 0 ? "HH" : index === 1 ? "MM" : "SS"}`}
+                  aria-label={`${t("common.expiryTime")} ${index === 0 ? "HH" : index === 1 ? "MM" : "SS"}`}
                   className="h-7 w-9 bg-background px-1 text-center text-xs tabular-nums"
                   inputMode="numeric"
                   maxLength={2}

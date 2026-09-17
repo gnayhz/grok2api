@@ -1677,14 +1677,14 @@ func TestConvertResponsesStreamRefusalAcrossChatAndMessages(t *testing.T) {
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
 	}, "\n")
-	chat, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(source)), OperationChat))
+	chat, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(source)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if text := string(chat); !strings.Contains(text, `"refusal":"Cannot comply"`) || !strings.Contains(text, `"finish_reason":"content_filter"`) {
 		t.Fatalf("chat refusal stream = %s", text)
 	}
-	messages, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(source)), OperationMessages))
+	messages, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(source)), OperationMessages, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1750,7 +1750,7 @@ func TestConvertResponsesStream(t *testing.T) {
 		`data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}`, "", "",
 	}, "\n")
 	for _, operation := range []string{OperationChat, OperationMessages} {
-		converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), operation))
+		converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), operation, ResponseOptions{}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1775,7 +1775,7 @@ func TestConvertResponsesStreamChatErrorIsTerminal(t *testing.T) {
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1810,7 +1810,7 @@ func TestConvertResponsesStreamChatPrefersRawReasoningOverSummary(t *testing.T) 
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1825,7 +1825,7 @@ func TestConvertResponsesStreamChatFlushesSummaryAtEOF(t *testing.T) {
 		`event: response.reasoning_summary_text.delta`,
 		`data: {"type":"response.reasoning_summary_text.delta","delta":"summary only"}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("truncated stream error = %v", err)
 	}
@@ -1857,7 +1857,7 @@ func TestConvertResponsesStreamChatFlushesManySummaryDeltasAsOneChunk(t *testing
 	}
 	body.WriteString("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}\n\n")
 	body.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(body.String())), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(body.String())), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1883,7 +1883,7 @@ func TestConvertResponsesStreamChatAdoptsLateReasoningItemID(t *testing.T) {
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1931,7 +1931,7 @@ func TestConvertResponsesStreamMessagesNormalizesTerminalError(t *testing.T) {
 		`event: response.failed`,
 		`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"quota denied","code":"forbidden"}}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationMessages))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2050,7 +2050,7 @@ func TestConvertResponsesStreamChatUsesContiguousToolIndexes(t *testing.T) {
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2069,7 +2069,7 @@ func TestConvertResponsesStreamChatPreservesAnnotations(t *testing.T) {
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2087,7 +2087,7 @@ func TestConvertResponsesStreamMessagesInputTokens(t *testing.T) {
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5","status":"completed","usage":{"input_tokens":194,"output_tokens":7,"cost_in_usd_ticks":9000,"context_details":{"input_tokens":180,"output_tokens":6}}}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationMessages))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2119,7 +2119,7 @@ func TestConvertResponsesStreamMergesPartialUsageFrames(t *testing.T) {
 		{operation: OperationMessages, want: []string{`"input_tokens":40`, `"output_tokens":30`, `"cache_read_input_tokens":80`, `"thinking_tokens":12`, `"cost_in_usd_ticks":9000`}},
 	}
 	for _, test := range tests {
-		converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), test.operation))
+		converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), test.operation, ResponseOptions{}))
 		if err != nil {
 			t.Fatalf("%s conversion: %v", test.operation, err)
 		}

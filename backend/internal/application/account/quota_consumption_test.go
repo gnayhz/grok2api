@@ -2,13 +2,14 @@ package account
 
 import (
 	"context"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -28,16 +29,16 @@ func TestDurableQuotaRecoveryKeepsRetryBudgetAndAccountDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &quotaCountingAdapter{}
-	service := NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	fact := accountdomain.QuotaConsumption{EventID: "pending-quota", AccountID: credential.ID, Mode: "fast", Units: 1}
 	if receipt, err := repo.ConsumeQuota(ctx, fact, time.Now().UTC()); err != nil || receipt.State != accountdomain.QuotaConsumptionPendingRefresh {
 		t.Fatalf("pending=%+v %v", receipt, err)
 	}
-	if cursor := service.recoverDurableQuotaRefreshes(ctx, 0); cursor != credential.ID || len(service.quotaRefreshQueue) != 1 {
-		t.Fatalf("persisted work not discovered: cursor=%d queue=%d", cursor, len(service.quotaRefreshQueue))
+	if cursor := service.recoverDurableQuotaRefreshes(ctx, 0); cursor != credential.ID || len(service.quotaRefresh.queue) != 1 {
+		t.Fatalf("persisted work not discovered: cursor=%d queue=%d", cursor, len(service.quotaRefresh.queue))
 	}
-	request := <-service.quotaRefreshQueue
-	state := service.quotaRefreshes[request.key]
+	request := <-service.quotaRefresh.queue
+	state := service.quotaRefresh.obs[request.key]
 	state.queued = false
 	state.failures = quotaRefreshFailureBudget
 	service.requeueQuotaRefreshes()
@@ -45,14 +46,14 @@ func TestDurableQuotaRecoveryKeepsRetryBudgetAndAccountDeletion(t *testing.T) {
 		service.recoverDurableQuotaRefreshes(ctx, 0)
 		service.requeueQuotaRefreshes()
 	}
-	if len(service.quotaRefreshQueue) != 0 || state.pending || state.failures != quotaRefreshFailureBudget || !state.durable {
+	if len(service.quotaRefresh.queue) != 0 || state.pending || state.failures != quotaRefreshFailureBudget || !state.durable {
 		t.Fatalf("background scan reset retry episode: %+v", state)
 	}
 	if pending, err := repo.ListPendingQuotaRefreshes(ctx, 0, 100); err != nil || len(pending) != 1 {
 		t.Fatalf("parking lost durable demand: %+v %v", pending, err)
 	}
 	service.QueueQuotaRefresh(credential.ID, "fast")
-	request = <-service.quotaRefreshQueue
+	request = <-service.quotaRefresh.queue
 	service.runQuotaRefresh(ctx, request)
 	if adapter.modeCalls.Load() != 1 {
 		t.Fatalf("explicit demand did not resume once: %d", adapter.modeCalls.Load())

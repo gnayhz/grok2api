@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,7 +15,6 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	gatewayapp "github.com/chenyme/grok2api/backend/internal/application/gateway"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
@@ -36,7 +38,7 @@ func TestQuotaResetHTTPPreservesSelectorRestrictions(t *testing.T) {
 					t.Fatal(err)
 				}
 				repo := relational.NewAccountRepository(db)
-				selector := gatewayapp.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+				selector := selector.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 				repo.SetInvalidationObserver(func(_ context.Context, e repository.InvalidationEvent) { selector.ApplyInvalidation(e) })
 				v, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{Provider: accountdomain.ProviderBuild, Name: "reset-http", SourceKey: "reset-http", EncryptedAccessToken: "token", Enabled: true, AuthStatus: accountdomain.AuthStatusActive, Priority: 100, MaxConcurrent: 1})
 				if err != nil {
@@ -44,12 +46,20 @@ func TestQuotaResetHTTPPreservesSelectorRestrictions(t *testing.T) {
 				}
 				acquire := func(wantAvailable bool) {
 					t.Helper()
-					lease, err := selector.Acquire(ctx, v.Provider, 0, "quota-model", "", "", map[uint64]bool{}, false)
-					if err == nil {
+					acquireErr := func() error {
+						session, sessionErr := selector.BeginSelectionSessionForKey(ctx, v.Provider, 0, "quota-model", "", "", map[uint64]bool{}, false, clientkeydomain.AccountScope{})
+						if sessionErr != nil {
+							return sessionErr
+						}
+						lease, leaseErr := session.Acquire(ctx, map[uint64]bool{}, false)
+						if leaseErr != nil {
+							return leaseErr
+						}
 						lease.Release()
-					}
-					if (err == nil) != wantAvailable {
-						t.Fatalf("selector available=%t want=%t err=%v", err == nil, wantAvailable, err)
+						return nil
+					}()
+					if (acquireErr == nil) != wantAvailable {
+						t.Fatalf("selector available=%t want=%t err=%v", acquireErr == nil, wantAvailable, acquireErr)
 					}
 				}
 				acquire(true) // Warm a real candidate cache before the independent restriction.
@@ -61,7 +71,7 @@ func TestQuotaResetHTTPPreservesSelectorRestrictions(t *testing.T) {
 					}
 					_, err = repo.ApplyHealth(ctx, v.ID, v.Provider, event)
 				case "risk":
-					err = repo.UpdateRiskAttribution(ctx, v.ID, repository.RiskAttribution{Status: accountdomain.RiskStatusRSCDenied, Trigger: accountdomain.RiskTriggerManual})
+					_, err = repo.UpdateAdministration(ctx, v.ID, repository.AccountAdminPatch{Risk: &repository.RiskAttribution{Status: accountdomain.RiskStatusRSCDenied, Trigger: accountdomain.RiskTriggerManual}})
 				case "model_access":
 					err = testsupport.ModelRestriction(ctx, repo, accountdomain.ModelQuotaBlock{AccountID: v.ID, UpstreamModel: "quota-model", Reason: "model_access_denied", CooldownUntil: time.Now().Add(2 * time.Hour)})
 				case "authentication":
@@ -83,9 +93,9 @@ func TestQuotaResetHTTPPreservesSelectorRestrictions(t *testing.T) {
 					t.Fatal(err)
 				}
 				acquire(false)
-				service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, nil, nil)
+				service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 				router := gin.New()
-				NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+				newTestHandler(service, nil).Register(router.Group("/api/admin/v1"))
 				server := httptest.NewServer(router)
 				defer server.Close()
 				path := "/api/admin/v1/accounts/batch/reset-quota"

@@ -105,12 +105,10 @@ func (c *poolNodeStatCounters) touchLocked(key poolStatKey) {
 	}
 }
 
-// RecordPoolNodeFailure 在节点请求失败被记账时调用（Feedback 隔离/传输
+// recordPoolNodeFailures 在节点请求失败被记账时调用（Feedback 隔离/传输
 // 失败/防爬拒绝）。失败按节点计数:租约上下文不透传到反馈路径,无法
 // 归因到具体池——同一节点在 N 个池里各 +1 会伪装成池归因,这里只记
 // 全局节点计数,快照读取时按节点合并展示。
-func RecordPoolNodeFailure(nodeID uint64) { recordPoolNodeFailures(nodeID, 1) }
-
 func recordPoolNodeFailures(nodeID uint64, count int) {
 	poolNodeStats.mu.Lock()
 	defer poolNodeStats.mu.Unlock()

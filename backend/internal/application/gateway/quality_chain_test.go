@@ -2,6 +2,11 @@ package gateway
 
 import (
 	"context"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"io"
 	"net/http"
@@ -18,8 +23,8 @@ import (
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
@@ -143,22 +148,22 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 	}, "\n\n") + "\n\n"
 
 	adapter := &qualityChainAdapter{degradedID: degraded.ID, degradedSSE: degradedSSE, cleanSSE: cleanSSE, nodeID: 1}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	cipher := testCipher(t)
 	sticky := memory.NewStickyStore()
 	concurrency := memory.NewConcurrencyLimiter()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clientService := clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil)
-	selector := NewSelector(accountRepo, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+	clientService := clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{})
+	sel := selector.NewSelector(accountRepo, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: 3,
-		OnExhausted:     qualityRetryFailClosed,
+		OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"},
 		EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond,
 		AccountCooldown: 12 * time.Hour,
-	})
-	incidentReporter := &recordingQualityObserver{}
-	service.SetQualityObserver(incidentReporter)
+	}))
+	incidentReporter := &recordingQualityEventRecorder{selector: sel}
+	service.SetQualityEventRecorder(incidentReporter)
 
 	// 请求 1：降智账号（高优先级）→ 扣留 → 换 clean 账号交付。
 	first, err := service.CreateResponse(ctx, Input{
@@ -217,4 +222,20 @@ func TestQualityGuardTransparentFailoverChain(t *testing.T) {
 	if string(body2) != cleanSSE {
 		t.Fatalf("请求2 客户端字节不纯：含降智标记=%v", strings.Contains(string(body2), "DEGRADED-LEAK-MARKER-A"))
 	}
+}
+
+// recordingQualityEventRecorder 捕获权威质量回执用于断言,并模拟生产
+// events 消费方的行为:降智观测持久落地后按冷却时长限制该账号
+// (此前该限制由"无 recorder"的本地兜底路径隐式提供)。
+type recordingQualityEventRecorder struct {
+	events   []QualityObservation
+	selector *selector.Selector
+}
+
+func (r *recordingQualityEventRecorder) RecordQualityEvent(_ context.Context, obs QualityObservation, ttl time.Duration) error {
+	r.events = append(r.events, obs)
+	if obs.Outcome == QualityObservedDegraded && r.selector != nil {
+		r.selector.HoldLocalQuality(obs.AccountID, obs.Attempt.ID, obs.At.Add(ttl))
+	}
+	return nil
 }

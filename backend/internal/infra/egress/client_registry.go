@@ -116,35 +116,6 @@ func (m *clientRegistry) UpdateAccountIsolatedConnections(enabled bool) {
 	m.log().Info("egress_account_connection_isolation_updated", "enabled", enabled, "evicted_clients", len(stale))
 }
 
-func (m *clientRegistry) invalidateClientLocked(nodeID uint64) []requestClient {
-	m.invalidateClientVersionLocked(nodeID)
-	var stale []requestClient
-	for key, cached := range m.clients {
-		if key.nodeID != nodeID {
-			continue
-		}
-		delete(m.clients, key)
-		stale = append(stale, cached.client)
-	}
-	return stale
-}
-
-func (m *clientRegistry) invalidateClientForScopeLocked(nodeID uint64, scope domain.Scope) []requestClient {
-	m.invalidateClientVersionLocked(nodeID)
-	if scope == domain.ScopeWebAsset {
-		scope = domain.ScopeWeb
-	}
-	var stale []requestClient
-	for key, cached := range m.clients {
-		if key.nodeID != nodeID || key.scope != scope {
-			continue
-		}
-		delete(m.clients, key)
-		stale = append(stale, cached.client)
-	}
-	return stale
-}
-
 func (m *clientRegistry) closeIdle() {
 	m.clientMu.RLock()
 	clients := make([]requestClient, 0, len(m.clients))

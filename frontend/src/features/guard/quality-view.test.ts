@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { deepStrictEqual, ok, strictEqual } from "node:assert";
 import { test } from "node:test";
 
-import { caseDecoder, nodeDecoder, probeDecoder, type QualityCase, type QualityProbeTask } from "./quality-api.ts";
+import { caseDecoder, nodeDecoder, probeDecoder, type QualityCase, type QualityProbeTask } from "@/entities/guard/quality-api";
+import { maskIP } from "@/shared/lib/mask-ip";
 import {
 	buildQualityExitIPIndex,
 	casePartySummary,
@@ -16,11 +17,9 @@ import {
 	heldExitCount,
 	jurySlotKey,
 	liveMeters,
-	maskIP,
 	parseGoDurationMs,
 	probeDotTone,
 	probeDurationMs,
-	probeFailureNote,
 	probeSummary,
 	qualityAccountDisplay,
 	qualityExitDisplay,
@@ -29,7 +28,7 @@ import {
 	splitCases,
 	tallyCaseProbes,
 	verdictNarrative,
-	verdictTone,
+	testCaseVerdictTone,
 	waitingReasonKey,
 } from "./quality-view.ts";
 
@@ -194,7 +193,7 @@ test("出口视图:排序重者在前,IP 掩码保两段(线上抓取)", () => {
 		ok(nodes[i - 1]!.degrade_total >= nodes[i]!.degrade_total);
 	}
 	strictEqual(maskIP("198.51.100.7"), "198.51.*.*");
-	strictEqual(maskIP("2001:0db8:85a3::8a2e:0370:7334"), "2001:0db8:85…");
+	strictEqual(maskIP("2001:0db8:85a3::8a2e:0370:7334"), "2001:0db8:****:****");
 });
 
 test("人工身份展示:名称优先且稳定保留账号/出口 ID 与 epoch", () => {
@@ -299,21 +298,12 @@ test("槽位制圆点:槽数=配置,同槽重派取最新,未填=空槽", () => 
 	strictEqual(differentialSlotKey({ ...target, epoch: target.epoch + 1 }), "node-" + target.node_id + "-epoch-" + (target.epoch + 1), "epoch 变化必须占独立槽");
 });
 
-test("失败归因:底层详情→人话键稳定", () => {
-	strictEqual(probeFailureNote({ detail: "cross-face probe rejected: build probe on non-build account | x" } as never), "probeNote.crossFace");
-	strictEqual(probeFailureNote({ detail: "attempt1=degraded attempt2=degraded same-exit-ip | y" } as never), "probeNote.sameExitIP");
-	strictEqual(probeFailureNote({ detail: "attempt1=error | z" } as never), "probeNote.attempt1Error");
-	strictEqual(probeFailureNote({ detail: "attempt1=error | cause=transport | transport_error_not_evidence" } as never), "probeNote.transportError");
-	strictEqual(probeFailureNote({ detail: "load account: 账号不存在 | w" } as never), "probeNote.accountMissing");
-	strictEqual(probeFailureNote({ detail: "jury single-attempt" } as never), "");
-});
-
 test("色调映射:处置/裁决语义色稳定", () => {
 	strictEqual(dispositionTone("remanded"), "destructive");
 	strictEqual(dispositionTone("released"), "ok");
-	strictEqual(verdictTone("account_guilty"), "destructive");
-	strictEqual(verdictTone("exit_guilty"), "warning");
-	strictEqual(verdictTone("dismissed"), "ok");
+	strictEqual(testCaseVerdictTone("account_guilty"), "destructive");
+	strictEqual(testCaseVerdictTone("exit_guilty"), "warning");
+	strictEqual(testCaseVerdictTone("dismissed"), "ok");
 	deepStrictEqual(dispositionTone("withdrawn"), "muted");
 });
 

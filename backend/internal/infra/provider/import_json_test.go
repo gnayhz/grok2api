@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	portprovider "github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type credentialJSONTestEntry struct {
@@ -57,7 +59,7 @@ func TestDecodeCredentialJSONEntriesRejectsNonObjects(t *testing.T) {
 func TestDecodeCredentialJSONEntriesEnforcesLimitAcrossValues(t *testing.T) {
 	data := []byte("{\"accounts\":[{\"token\":\"one\"}]}\n{\"token\":\"two\"}\n")
 	_, err := DecodeCredentialJSONEntries[credentialJSONTestEntry](data, "grok_test", 1)
-	if !errors.Is(err, ErrCredentialLimit) {
+	if !errors.Is(err, portprovider.ErrCredentialLimit) {
 		t.Fatalf("error = %v, want credential limit", err)
 	}
 }
@@ -201,7 +203,7 @@ func TestDecodeCredentialJSONEntriesAllowsArrayExactlyAtLimit(t *testing.T) {
 
 func TestDecodeCredentialJSONEntriesLimitTakesPriorityOverBadElements(t *testing.T) {
 	_, err := DecodeCredentialJSONEntries[credentialJSONTestEntry]([]byte(`[{"token":"one"}, "bad-element"]`), "grok_test", 1)
-	if !errors.Is(err, ErrCredentialLimit) {
+	if !errors.Is(err, portprovider.ErrCredentialLimit) {
 		t.Fatalf("error = %v, want credential limit", err)
 	}
 }
@@ -210,7 +212,7 @@ func TestDecodeCredentialJSONEntriesLimitTakesPriorityOverBadElements(t *testing
 func TestDecodeCredentialJSONEntriesLimitSkipsElementParsingEntirely(t *testing.T) {
 	countedJSONEntryUnmarshalCalls.Store(0)
 	_, err := DecodeCredentialJSONEntries[countedJSONEntry]([]byte(`[{"token":"one"},{"token":"two"}]`), "grok_test", 1)
-	if !errors.Is(err, ErrCredentialLimit) {
+	if !errors.Is(err, portprovider.ErrCredentialLimit) {
 		t.Fatalf("error = %v, want credential limit", err)
 	}
 	if calls := countedJSONEntryUnmarshalCalls.Load(); calls != 0 {

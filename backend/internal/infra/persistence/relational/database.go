@@ -66,6 +66,10 @@ func openSQLite(ctx context.Context, path string, durable bool) (*Database, erro
 	if err != nil {
 		return nil, fmt.Errorf("打开 SQLite: %w", err)
 	}
+	// 双连接池预算(记录):底座主池固定 16/16(SQLite);质量层
+	// registry.Open 默认 8/8 打开同一文件(相同 WAL/busy_timeout/IMMEDIATE
+	// 约定,见 quality/registry Open 注释)——同库两池合计峰值 24 个打开连接,
+	// busy_timeout 5000ms 吸收跨池写锁等待。PostgreSQL 下两池均走配置值。
 	database, err := configureDatabase(ctx, db, "sqlite", 16, 16)
 	if err != nil {
 		return nil, err

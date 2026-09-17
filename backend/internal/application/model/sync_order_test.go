@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -14,9 +15,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -67,8 +68,8 @@ func TestAccountCapabilitySyncRejectsLateResults(t *testing.T) {
 				old := &lateCapabilityAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{models: map[uint64][]string{credential.ID: {"old-model"}}, entered: make(chan struct{}), release: make(chan struct{})}, fail: failOld}
 				makeService := func(database *relational.Database, adapter provider.Adapter) *Service {
 					ar := relational.NewAccountRepository(database)
-					registry := provider.NewRegistry(adapter)
-					as := accountapp.NewService(ar, relational.NewAuditRepository(database), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+					registry := providerimpl.NewRegistry(adapter)
+					as := accountapp.NewService(ar, relational.NewAuditRepository(database), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 					return NewService(relational.NewModelRepository(database), ar, as, registry)
 				}
 				older := makeService(db, old)
@@ -163,8 +164,8 @@ func TestAccountCapabilitySyncKeepsClaimThroughCredentialRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &refreshingCapabilityAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{models: map[uint64][]string{v.ID: {"refreshed-model"}}}}
-	registry := provider.NewRegistry(adapter)
-	as := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	registry := providerimpl.NewRegistry(adapter)
+	as := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	models := relational.NewModelRepository(db)
 	service := NewService(models, accounts, as, registry)
 	if count, err := service.SyncAccount(ctx, v.ID); err != nil || count != 1 {

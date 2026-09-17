@@ -12,7 +12,7 @@ func TestIncidentClosuresAreScopedMonotonicAndTransactional(t *testing.T) {
 	r := openTestRegistry(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	key := IncidentKey{AccountID: 7, Exit: model.EpochKey{NodeID: 5}}
+	key := model.IncidentKey{AccountID: 7, Exit: model.EpochKey{NodeID: 5}}
 	id, err := r.OpenInvestigation(ctx, key.AccountID, key.Exit, now, `{}`)
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +42,7 @@ func TestIncidentClosuresAreScopedMonotonicAndTransactional(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	keys := []IncidentKey{key, {AccountID: 7}, {AccountID: 7, Exit: model.EpochKey{NodeID: 5, Epoch: 1}}, {AccountID: 7, Exit: model.EpochKey{NodeID: 6}}, {AccountID: 8, Exit: key.Exit}}
+	keys := []model.IncidentKey{key, {AccountID: 7}, {AccountID: 7, Exit: model.EpochKey{NodeID: 5, Epoch: 1}}, {AccountID: 7, Exit: model.EpochKey{NodeID: 6}}, {AccountID: 8, Exit: key.Exit}}
 	got, err := r.LastClosedAtForIncidents(ctx, keys)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestIncidentClosuresAreScopedMonotonicAndTransactional(t *testing.T) {
 	if err := r.CloseCase(ctx, id, model.CaseDismissed, model.VerdictInsufficient, now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	got, err = r.LastClosedAtForIncidents(ctx, []IncidentKey{key})
+	got, err = r.LastClosedAtForIncidents(ctx, []model.IncidentKey{key})
 	if err != nil || !got[key].Equal(now) {
 		t.Fatalf("watermark regressed: %v %v", got, err)
 	}
@@ -86,7 +86,7 @@ func TestIncidentClosureUpgradeIsAtomicAndPreservesLegacyBaselines(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, p := range []PartyRecord{
+			for _, p := range []model.PartyRecord{
 				{CaseID: id, Kind: model.PartyAccount, AccountID: 7, Role: model.RoleDefendant, Disposition: model.DispositionReleased},
 				{CaseID: id, Kind: model.PartyExit, NodeID: 5, Epoch: 1, Role: model.RoleCoRemanded, Disposition: model.DispositionReleased},
 				{CaseID: id, Kind: model.PartyExit, NodeID: 6, Epoch: 2, Role: model.RoleCoRemanded, Disposition: model.DispositionReleased},
@@ -124,7 +124,7 @@ func TestIncidentClosureUpgradeIsAtomicAndPreservesLegacyBaselines(t *testing.T)
 			if err := r.migrateIncidentClosures(ctx); err != nil {
 				t.Fatal(err)
 			}
-			keys := []IncidentKey{{AccountID: 7, Exit: model.EpochKey{NodeID: 5, Epoch: 1}}, {AccountID: 7, Exit: model.EpochKey{NodeID: 6, Epoch: 2}}}
+			keys := []model.IncidentKey{{AccountID: 7, Exit: model.EpochKey{NodeID: 5, Epoch: 1}}, {AccountID: 7, Exit: model.EpochKey{NodeID: 6, Epoch: 2}}}
 			got, err := r.LastClosedAtForIncidents(ctx, keys)
 			if err != nil || len(got) != 2 {
 				t.Fatalf("legacy baselines lost: %v %v", got, err)

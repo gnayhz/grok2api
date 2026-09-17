@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,9 +20,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/gin-gonic/gin"
 )
 
@@ -260,7 +260,7 @@ func TestWebImageURLCompletionIntegration(t *testing.T) {
 					}
 					budget := inferencedomain.NewAttemptBudget(limit)
 					defer budget.Close()
-					ctx = egress.WithPhysicalCallBudget(ctx, budget)
+					ctx = physical.WithPhysicalCallBudget(ctx, budget)
 				}
 				partials := 0
 				if stage == "preview" {
@@ -434,7 +434,7 @@ func TestWebLiteImageCompletionIntegration(t *testing.T) {
 				}
 				budget := inferencedomain.NewAttemptBudget(limit)
 				defer budget.Close()
-				ctx = egress.WithPhysicalCallBudget(ctx, budget)
+				ctx = physical.WithPhysicalCallBudget(ctx, budget)
 			}
 			result, err := fx.service.GenerateImage(ctx, gateway.ImageGenerationInput{RequestID: "web-lite", ClientKey: fx.created.Key, PublicModel: fx.publicModel, Prompt: "synthetic", Count: 2, ResponseFormat: "url"})
 			if err != nil {

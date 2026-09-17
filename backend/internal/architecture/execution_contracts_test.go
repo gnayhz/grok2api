@@ -17,7 +17,7 @@ import (
 // with implementations used by composition and provider adapters.
 func TestGatewayConsumesExecutionContracts(t *testing.T) {
 	contracts := map[string]map[string]bool{
-		"infra/egress": {
+		"port/physical": {
 			"Trace": true, "WithTrace": true,
 			"WithNodeExclusions": true, "WithQualityVerificationNode": true,
 			"ErrClientRetired": true, "ErrPhysicalCallLimit": true,
@@ -28,6 +28,7 @@ func TestGatewayConsumesExecutionContracts(t *testing.T) {
 			"PhysicalFacts": true, "PhysicalObservations": true,
 			"ConfirmPhysicalFacts": true, "ObservePhysicalGeneration": true,
 			"ObservePhysicalPayload": true, "ObservePhysicalUsage": true,
+			"JournalFactory": true, "ObserveCanonicalPhysicalUsage": true,
 		},
 		"quality/guard": {"Judge": true, "Signals": true},
 	}

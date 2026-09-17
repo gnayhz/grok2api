@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestBuildDetectModelRestrictionsRespectIndependentFactsAndGeneration(t *testing.T) {
@@ -31,7 +32,7 @@ func TestBuildDetectModelRestrictionsRespectIndependentFactsAndGeneration(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			service := NewService(repo, nil, nil, nil, nil, nil, nil)
+			service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 			apply := func(callCtx context.Context, denial bool) {
 				t.Helper()
 				body := `{"error":"You've used all the included free usage for model grok-4.5"}`

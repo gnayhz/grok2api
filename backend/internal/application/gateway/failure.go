@@ -10,10 +10,10 @@ import (
 	"unicode"
 
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // UpstreamFailure 保存可安全暴露给下游和审计的上游失败分类，不包含响应正文或凭据。
@@ -287,22 +287,24 @@ func isDefinitiveAccountBlock(text string) bool {
 	return provider.IsDefinitiveAccountBlockText(text)
 }
 
+// 配额耗尽信号词表单源维护在 port/provider(与上游响应分类共享);
+// 网关失败投影只委托,不另持副本——两处词表曾各改一份导致漂移。
+// credit 判定在网关侧额外并入 spending-limit(port 将两者作为独立事实
+// 组合,网关投影在此处合成),词表本身仍单源。
 func isCreditQuotaExhaustion(text string) bool {
-	return isPaidQuotaExhaustion(text) || containsAny(text,
-		"run out of credits", "out of credits", "usage balance exhausted", "usage limit reached",
-	)
+	return provider.ContainsSpendingLimitSignal(text) || provider.ContainsCreditExhaustionSignal(text)
 }
 
 func isPaidQuotaExhaustion(text string) bool {
-	return strings.Contains(text, "personal-team-blocked:spending-limit")
+	return provider.ContainsSpendingLimitSignal(text)
 }
 
 func isFreeQuotaExhaustion(text string) bool {
-	return provider.ContainsAny(text, "subscription:free-usage-exhausted", "used all the included free usage for model")
+	return provider.ContainsFreeQuotaExhaustionSignal(text)
 }
 
 func isModelQuotaExhaustion(text string) bool {
-	return strings.Contains(text, "used all the included free usage for model")
+	return provider.ContainsModelQuotaExhaustionSignal(text)
 }
 
 func containsAny(text string, signals ...string) bool {

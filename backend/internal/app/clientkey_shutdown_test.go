@@ -49,7 +49,7 @@ func TestCloseRetainsDependenciesUntilClientKeyTouchReturns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.clientKeys = clientkeyapp.NewService("shutdown-owner", repo, nil, nil, 0, 0, cipher)
+	a.clientKeys = clientkeyapp.NewService("shutdown-owner", repo, nil, nil, 0, 0, cipher, security.RandomTokenSource{})
 	created, err := a.clientKeys.Create(context.Background(), clientkeyapp.CreateInput{Name: "closing-key", Enabled: true, RPMUnlimited: true, ConcurrencyUnlimited: true})
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestRunCancellationWaitsForClientKeyTouch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.clientKeys = clientkeyapp.NewService("run-shutdown-owner", repo, nil, nil, 0, 0, cipher)
+	a.clientKeys = clientkeyapp.NewService("run-shutdown-owner", repo, nil, nil, 0, 0, cipher, security.RandomTokenSource{})
 	created, err := a.clientKeys.Create(context.Background(), clientkeyapp.CreateInput{Name: "run-closing-key", Enabled: true, RPMUnlimited: true, ConcurrencyUnlimited: true})
 	if err != nil {
 		t.Fatal(err)

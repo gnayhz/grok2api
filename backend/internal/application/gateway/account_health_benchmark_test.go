@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"path/filepath"
 	"testing"
 	"time"
@@ -28,13 +29,13 @@ func BenchmarkAccountHealthWrite(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			s := NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-			s.markSuccess(ctx, v, nil)
+			s := selector.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+			s.MarkSuccessWithRecovery(ctx, v, nil)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
 				if kind == "healthy_success" {
-					s.markSuccess(ctx, v, nil)
+					s.MarkSuccessWithRecovery(ctx, v, nil)
 				} else {
 					s.MarkFailure(ctx, v, 0, 0)
 				}

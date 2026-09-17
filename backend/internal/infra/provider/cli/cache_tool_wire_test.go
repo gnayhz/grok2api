@@ -16,8 +16,8 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestBuildCacheToolPermissionWire(t *testing.T) {

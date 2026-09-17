@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -126,27 +127,27 @@ func TestProbeCandidatesSharePinnedEligibility(t *testing.T) {
 						}
 					}
 					limiter := memory.NewConcurrencyLimiter()
-					selector := NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+					sel := selector.NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 					if scenario == "quality_held" {
-						selector.SetQualityEligibility(stubAccountEligibility{ineligible: map[uint64]bool{value.ID: true}})
+						sel.SetQualityEligibility(stubAccountEligibility{ineligible: map[uint64]bool{value.ID: true}})
 					}
 					before, err := repo.Get(ctx, value.ID)
 					if err != nil {
 						t.Fatal(err)
 					}
 					recoveryBefore, recoveryErr := repo.GetQuotaRecovery(ctx, value.ID)
-					ids, err := selector.qualityProbeCandidates(ctx, account.ProviderBuild, 0, "grok-4.6", "fast")
+					ids, err := sel.QualityProbeCandidates(ctx, account.ProviderBuild, 0, "grok-4.6", "fast")
 					if err != nil {
 						t.Fatal(err)
 					}
 					if got := slices.Contains(ids, value.ID); got != want {
 						t.Fatalf("planned=%v want=%v", got, want)
 					}
-					current, err := limiter.Current(ctx, accountConcurrencyKey(value.ID))
+					current, err := limiter.Current(ctx, repository.AccountConcurrencyKey(value.ID))
 					if err != nil || current != 0 {
 						t.Fatalf("planning claimed capacity: %d %v", current, err)
 					}
-					lease, err := selector.AcquirePinnedForQualityProbe(ctx, account.ProviderBuild, value.ID, 0, "grok-4.6", "fast", clientkey.AccountScope{})
+					lease, err := sel.AcquirePinnedForQualityProbe(ctx, account.ProviderBuild, value.ID, 0, "grok-4.6", "fast", clientkey.AccountScope{})
 					if want {
 						if err != nil || lease == nil {
 							t.Fatalf("planned but not admitted: %v", err)
@@ -170,7 +171,7 @@ func TestProbeCandidatesSharePinnedEligibility(t *testing.T) {
 						t.Fatal("planning/measurement modified quota recovery")
 					}
 					if scenario == "recovery_due" {
-						lease, err := selector.AcquirePinned(ctx, account.ProviderBuild, value.ID, 0, "grok-4.6", "fast", true)
+						lease, err := sel.AcquirePinnedForKey(ctx, account.ProviderBuild, value.ID, 0, "grok-4.6", "fast", true, clientkey.AccountScope{})
 						if err != nil || lease == nil {
 							t.Fatalf("ordinary recovery stopped working: %v", err)
 						}
@@ -181,10 +182,10 @@ func TestProbeCandidatesSharePinnedEligibility(t *testing.T) {
 					}
 				})
 			}
-			selector := NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+			sel := selector.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
-			if _, err := selector.qualityProbeCandidates(cancelled, account.ProviderBuild, 0, "grok-4.6", "fast"); !errors.Is(err, context.Canceled) {
+			if _, err := sel.QualityProbeCandidates(cancelled, account.ProviderBuild, 0, "grok-4.6", "fast"); !errors.Is(err, context.Canceled) {
 				t.Fatalf("candidate cancellation lost: %v", err)
 			}
 		})

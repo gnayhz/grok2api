@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"

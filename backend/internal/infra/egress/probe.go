@@ -16,6 +16,7 @@ import (
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/pkg/proxyurl"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 type preparedEgressProbe struct {
@@ -142,14 +143,31 @@ func (m *Manager) ProbeNodeExitAddrs(ctx context.Context, nodeID uint64) (domain
 
 // KnownNodeExitAddrs returns the last-known per-family egress addresses per
 // node from the node snapshot (probe-maintained, possibly stale). It backs
-// the differential probe's exclusion set: pool members listed as separate
-// nodes but sharing one real egress must be excluded as a group, judged
-// per family. Nodes without any known address are omitted — "unknown" must
-// stay distinguishable from "same". Callers must treat the data as advisory
-// only: admission still requires the live per-node verification, so
+// the differential probe's advisory exclusion pre-filter: pool members listed
+// as separate nodes but sharing one real egress are skipped as a group,
+// judged per family. Nodes without any known address are omitted — "unknown"
+// must stay distinguishable from "same". Callers must treat the data as
+// advisory only: admission still requires the live per-node verification, so
 // staleness can never fabricate a differential.
+//
+// 读取完整节点投影:运行时路由投影(runtimeNodeColumns)刻意不带探活结果,
+// 经 listNodes 读取会得到永远为空的排除集。此处按需回源,结果按节点快照
+// TTL 缓存,返回的 map 是只读共享快照,调用方不得修改——法院的排除缝按
+// 候选逐对询问,大机队一次计划会问上百次。
+//
+// 已接线:组合根(internal/app)把本方法适配成法院的 SameExit 前置过滤缝,
+// 已知与 baseline 共享真实出口的比对候选在派发前被跳过。代价不是错误
+// 归因——gateway.verifySecondPath 本就把同出口测量判为不可采——而是白耗
+// 一次真实上游探针、少一条可采证据;在有限补派轮次下,这可能把案件推向
+// "证据不足"。因此该数据只是建议性预筛:是否可采仍以活体按节点核实为唯一
+// 权威,陈旧快照只会多跳过候选,永远不会伪造差分。
 func (m *Manager) KnownNodeExitAddrs(ctx context.Context) (map[uint64]domain.ExitAddresses, error) {
-	nodes, err := m.listNodes(ctx, time.Now().UTC())
+	m.knownExitAddrs.mu.Lock()
+	defer m.knownExitAddrs.mu.Unlock()
+	if m.knownExitAddrs.addrs != nil && time.Since(m.knownExitAddrs.loadedAt) < nodeSnapshotTTL {
+		return m.knownExitAddrs.addrs, nil
+	}
+	nodes, err := m.repository.ListEgressNodes(ctx, repository.SortQuery{})
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +178,16 @@ func (m *Manager) KnownNodeExitAddrs(ctx context.Context) (map[uint64]domain.Exi
 			addrs[node.ID] = known
 		}
 	}
+	m.knownExitAddrs.addrs, m.knownExitAddrs.loadedAt = addrs, time.Now()
 	return addrs, nil
+}
+
+// invalidateKnownExitAddrs 丢弃已知出口地址快照;节点事实变化时必须与运行时
+// 快照一起失效,否则新一轮探活写入的地址最多晚一个 TTL 才可见。
+func (m *Manager) invalidateKnownExitAddrs() {
+	m.knownExitAddrs.mu.Lock()
+	m.knownExitAddrs.addrs, m.knownExitAddrs.loadedAt = nil, time.Time{}
+	m.knownExitAddrs.mu.Unlock()
 }
 
 func (m *Manager) prepareEgressProbe(node domain.Node) (preparedEgressProbe, string, string, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/gin-gonic/gin"
 )
@@ -42,8 +42,8 @@ func TestBatchRefreshBillingContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 空 Provider 注册表：Billing 适配器缺失 → 单账号失败计数，路由仍 200。
-	service := accountapp.NewService(repo, audits, nil, nil, provider.NewRegistry(), cipher, nil)
-	handler := NewHandler(service, nil)
+	service := accountapp.NewService(repo, audits, nil, nil, providerimpl.NewRegistry(), cipher, security.RandomTokenSource{}, nil, nil, nil)
+	handler := newTestHandler(service, nil)
 
 	build, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "b1", SourceKey: "b1",

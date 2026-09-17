@@ -10,7 +10,9 @@ import (
 )
 
 const (
-	maxWebAccountScriptAccounts = 1000
+	// MaxWebAccountScriptAccounts 是单次 Web 账号脚本能指向的账号上限,
+	// 传输层用它做入参预检;改上限只改这一处。
+	MaxWebAccountScriptAccounts = 1000
 	webAccountScriptLockTTL     = 5 * time.Minute
 )
 
@@ -30,7 +32,7 @@ func (s *Service) RunWebAccountScriptsWithProgress(ctx context.Context, ids []ui
 	if err != nil {
 		return 0, 0, err
 	}
-	ids, err = normalizeIDs(ids, maxWebAccountScriptAccounts)
+	ids, err = normalizeIDs(ids, MaxWebAccountScriptAccounts)
 	if err != nil {
 		return 0, 0, err
 	}

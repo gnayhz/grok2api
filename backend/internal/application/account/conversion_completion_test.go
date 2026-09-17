@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"testing"
@@ -40,7 +40,7 @@ func TestConversionAssociationBelongsToObservedSource(t *testing.T) {
 		}
 	}}
 	service.accounts = port
-	service.providers = provider.NewRegistry(&conversionCompletionAdapter{after: func() {}})
+	service.providers = providerimpl.NewRegistry(&conversionCompletionAdapter{after: func() {}})
 	service.refreshLock = memory.NewLockStore()
 	buildID, _, _, callErr := service.convertWebAccountToBuild(ctx, v.ID, BuildConversionAll)
 	current, err := repo.Get(ctx, v.ID)

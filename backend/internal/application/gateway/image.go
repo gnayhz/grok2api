@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"net/http"
 	"time"
 
@@ -12,12 +13,12 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // ImageGenerationInput 表示图片生成用例已经完成协议校验后的输入。
@@ -118,9 +119,9 @@ func (s *Service) executeImage(
 	path string,
 	headers map[string][]string,
 ) (*Result, error) {
-	ctx, egressTrace := infraegress.WithTrace(ctx)
+	ctx, egressTrace := portphysical.WithTrace(ctx)
 	startedAt := time.Now()
-	eventID := newAuditEventID()
+	eventID := s.newAuditEventID()
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
 		// 候选为空出口统一消歧（round 60：image/video/voice-ws 三处与
@@ -153,9 +154,9 @@ func (s *Service) executeImage(
 		return nil, err
 	}
 	ctx = attemptmeta.WithRequest(ctx, eventID, 0, "", nil)
-	ctx = infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
-	requestBudget := inferencedomain.NewAttemptBudget(infraegress.MaxPhysicalCalls)
-	ctx = infraegress.WithPhysicalCallBudget(ctx, requestBudget)
+	ctx = s.startPhysicalTrace(ctx, string(route.Provider), string(operation))
+	requestBudget := inferencedomain.NewAttemptBudget(portphysical.MaxPhysicalCalls)
+	ctx = portphysical.WithPhysicalCallBudget(ctx, requestBudget)
 	// A 128 MiB image JSON may briefly retain its old array while growing. It
 	// uses the process pool and never replaces a stricter caller-owned budget.
 	ctx = responsebuffer.WithRequestLimit(ctx, 256<<20)
@@ -223,7 +224,7 @@ func (s *Service) executeImage(
 	attemptPolicy := newRoutingAttemptPolicy(int(s.maxAttempts.Load()))
 	excluded := make(map[uint64]bool)
 	selection := preselectedSession
-	var lease *accountLease
+	var lease *selector.Lease
 	defer func() {
 		if !handedOff {
 			lease.Release()
@@ -236,14 +237,14 @@ func (s *Service) executeImage(
 	var lastCredentialError error
 	for attempt := 0; attemptPolicy.allows(attempt); attempt++ {
 		if selection == nil {
-			selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, key.AccountScope())
+			selection, err = s.selector.BeginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, key.AccountScope())
 		}
 		if err == nil {
 			lease, err = selection.Acquire(ctx, excluded, false)
 		}
 		if err != nil {
 			errorCode := "upstream_unavailable"
-			var selectionFailure *SelectionUnavailableError
+			var selectionFailure *selector.SelectionUnavailableError
 			if errors.As(err, &selectionFailure) {
 				errorCode = selectionFailure.Code()
 			}
@@ -260,7 +261,7 @@ func (s *Service) executeImage(
 			lease.Release()
 			continue
 		}
-		lease.markSelectorUpstreamStarted()
+		lease.MarkSelectorUpstreamStarted()
 		attemptCtx := attemptmeta.WithAccount(ctx, credential.ID, string(route.Provider), route.UpstreamModel)
 		generation = &imageGeneration{}
 		response, err = execute(attemptCtx, route.Provider, credential, route.UpstreamModel, generation.observe)
@@ -271,7 +272,7 @@ func (s *Service) executeImage(
 			}
 			var validation *inferencedomain.RequestValidationError
 			if errors.As(err, &validation) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 				lease.Release()
 				writeFailureAudit(http.StatusBadRequest, validation.Code, nil)
 				return nil, err
@@ -286,7 +287,7 @@ func (s *Service) executeImage(
 				break
 			}
 			if errors.Is(err, inferencedomain.ErrAttemptBudget) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 				lease.Release()
 				writeFailureAudit(http.StatusServiceUnavailable, "physical_attempt_limit", &credential)
 				return nil, &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "physical_attempt_limit", PublicMessage: "上游尝试次数达到安全上限", Cause: err}
@@ -301,7 +302,7 @@ func (s *Service) executeImage(
 			}
 			// Network, resource and protocol failures do not establish an account
 			// health restriction. Only explicit refusal paths below do so.
-			lease.skipSelectorObservation()
+			lease.SkipSelectorObservation()
 			lease.Release()
 			errorCode := "upstream_unavailable"
 			if provider.IsMediaPostProcessingError(err) {
@@ -377,11 +378,11 @@ func (s *Service) executeImage(
 		release: func() {
 			facts, _ := generation.snapshot()
 			if facts.Completed {
-				lease.completeSelectorObservation(true)
+				lease.CompleteSelectorObservation(true)
 			} else if ctx.Err() != nil || provider.IsMediaPostProcessingError(err) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 			} else {
-				lease.completeSelectorObservation(false)
+				lease.CompleteSelectorObservation(false)
 			}
 			lease.Release()
 		},
@@ -433,26 +434,6 @@ func (s *Service) executeImage(
 		}
 	}
 	return result, nil
-}
-
-// quotaFinalizationModes separates the immediate local consumption fence from
-// the authoritative provider refresh. A refresh group may update several
-// upstream windows atomically, while the local fence must charge the exact
-// window selected for this account so concurrent media requests cannot
-// over-allocate during the short refresh delay.
-func quotaFinalizationModes(effectiveMode, refreshGroup string) (refreshMode, decrementMode, availabilityMode string) {
-	// Availability-only Imagine products on paid Web tiers are governed by the
-	// shared weekly pool. Refresh its numeric counter and also re-read the
-	// product group so available=false/nextAvailableAt can install an exact
-	// product fence that overrides weekly routing.
-	if effectiveMode == "weekly" {
-		return effectiveMode, effectiveMode, refreshGroup
-	}
-	refreshMode = effectiveMode
-	if refreshGroup != "" {
-		refreshMode = refreshGroup
-	}
-	return refreshMode, effectiveMode, ""
 }
 
 // finishImageQuota is shared by REST images and image generation encoded in

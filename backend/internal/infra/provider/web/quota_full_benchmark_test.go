@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +17,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 func BenchmarkWebFullQuotaRefresh(b *testing.B) {
@@ -81,10 +82,10 @@ func BenchmarkWebFullQuotaRefresh(b *testing.B) {
 				}
 			}))
 			defer upstream.Close()
-			manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+			manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 			defer manager.Close(ctx)
 			adapter := NewAdapter(Config{BaseURL: upstream.URL, StatsigMode: "manual", StatsigManualValue: base64.RawStdEncoding.EncodeToString(make([]byte, 70))}, manager, cipher, nil, nil)
-			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {

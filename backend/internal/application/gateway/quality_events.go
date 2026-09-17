@@ -5,13 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
 )
 
 type qualityEventRecorder struct{ value QualityEventRecorder }
-
-const maxLocalQualityOwners = 8192
 
 func (s *Service) checkQualityEventCapacity(ctx context.Context) error {
 	if recorder := s.qualityEvents.Load(); recorder != nil {
@@ -25,7 +23,7 @@ func (s *Service) checkQualityEventCapacity(ctx context.Context) error {
 }
 
 func (s *Service) recordPhysicalEvents(ctx context.Context, pendingID ...string) error {
-	facts := infraegress.PhysicalFacts(ctx, pendingID...)
+	facts := portphysical.PhysicalFacts(ctx, pendingID...)
 	if len(facts) == 0 {
 		return nil
 	}
@@ -38,7 +36,7 @@ func (s *Service) recordPhysicalEvents(ctx context.Context, pendingID ...string)
 			}
 		}
 	}
-	infraegress.ConfirmPhysicalFacts(ctx, facts)
+	portphysical.ConfirmPhysicalFacts(ctx, facts)
 	return nil
 }
 
@@ -49,7 +47,7 @@ func (s *Service) finishPhysicalReceipt(ctx context.Context) string {
 	if recorder := s.qualityEvents.Load(); recorder != nil && recorder.value != nil {
 		if _, ok := recorder.value.(PhysicalEventRecorder); ok {
 			outcome = "not_recorded"
-			if infraegress.PhysicalCallCount(ctx) > 0 {
+			if portphysical.PhysicalCallCount(ctx) > 0 {
 				outcome = "committed"
 			}
 		}
@@ -68,7 +66,7 @@ func (s *Service) SetQualityEventRecorder(recorder QualityEventRecorder) {
 func (s *Service) recordQualityEvent(ctx context.Context, obs QualityObservation, ttl time.Duration) error {
 	localHold := func() {
 		if obs.Outcome == QualityObservedDegraded && s.selector != nil {
-			s.selector.holdLocalQuality(obs.AccountID, obs.Attempt.ID, obs.At.Add(ttl))
+			s.selector.HoldLocalQuality(obs.AccountID, obs.Attempt.ID, obs.At.Add(ttl))
 		}
 	}
 	if recorder := s.qualityEvents.Load(); recorder != nil && recorder.value != nil {
@@ -81,67 +79,7 @@ func (s *Service) recordQualityEvent(ctx context.Context, obs QualityObservation
 	} else {
 		localHold()
 	}
-	if observer := s.qualityObservationObserver(); observer != nil {
-		observer.RecordQualityObservation(obs)
-	}
 	return nil
-}
-
-// The embedded gateway and a failed persistence attempt retain a short local
-// hold without changing manual Enabled or account health. Production admission
-// still requires its authoritative database check; this is only a local fence.
-func (s *Selector) holdLocalQuality(accountID uint64, owner string, until time.Time) {
-	s.qualityHoldsMu.Lock()
-	defer s.qualityHoldsMu.Unlock()
-	now := time.Now()
-	ownerCount := 0
-	for account, owners := range s.qualityHolds {
-		for key, expiry := range owners {
-			if !expiry.After(now) {
-				delete(owners, key)
-			}
-		}
-		if len(owners) == 0 {
-			delete(s.qualityHolds, account)
-		}
-		ownerCount += len(owners)
-	}
-	if s.qualityHolds == nil {
-		s.qualityHolds = make(map[uint64]map[string]time.Time)
-	}
-	if _, exists := s.qualityHolds[accountID][owner]; exists {
-		return
-	}
-	if ownerCount >= maxLocalQualityOwners {
-		// Retaining another owner would exceed local protection capacity. A
-		// short global fence preserves rejection without evicting active owners.
-		if until.After(s.qualityHoldOverflow) {
-			s.qualityHoldOverflow = until
-		}
-		s.qualityHoldOverflows++
-		return
-	}
-	if s.qualityHolds[accountID] == nil {
-		s.qualityHolds[accountID] = make(map[string]time.Time)
-	}
-	if _, exists := s.qualityHolds[accountID][owner]; !exists {
-		s.qualityHolds[accountID][owner] = until
-	}
-}
-
-func (s *Selector) localQualityAllowed(accountID uint64, now time.Time) bool {
-	s.qualityHoldsMu.Lock()
-	defer s.qualityHoldsMu.Unlock()
-	if s.qualityHoldOverflow.After(now) {
-		return false
-	}
-	for _, until := range s.qualityHolds[accountID] {
-		if until.After(now) {
-			return false
-		}
-	}
-	delete(s.qualityHolds, accountID)
-	return true
 }
 
 func physicalUsage(usage Usage) jsonpeek.TokenUsage {

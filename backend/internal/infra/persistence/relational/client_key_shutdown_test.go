@@ -48,7 +48,7 @@ func TestClientKeyCloseCancelsRealSQLWait(t *testing.T) {
 			var resumeOnce sync.Once
 			defer resumeOnce.Do(func() { close(resume) })
 			repo := observedTouchRepository{ClientKeyRepository: NewClientKeyRepository(db), entered: make(chan struct{}), resume: resume, finished: make(chan touchSQLResult, 1)}
-			service := keyapp.NewService("sql-touch-owner", repo, nil, nil, 0, 0, cipher)
+			service := keyapp.NewService("sql-touch-owner", repo, nil, nil, 0, 0, cipher, security.RandomTokenSource{})
 			defer service.Close(ctx)
 			created, err := service.Create(ctx, keyapp.CreateInput{Name: "touch", Enabled: true, RPMUnlimited: true, ConcurrencyUnlimited: true})
 			if err != nil {
@@ -133,7 +133,7 @@ func TestClientKeyCloseCancelsRealSQLWait(t *testing.T) {
 			// A newly constructed service can still persist successful display
 			// writes; shutdown only retires the old service's admission.
 			nextRepo := observedTouchRepository{ClientKeyRepository: NewClientKeyRepository(db), entered: make(chan struct{}), finished: make(chan touchSQLResult, 1)}
-			next := keyapp.NewService("next-owner", nextRepo, nil, nil, 0, 0, cipher)
+			next := keyapp.NewService("next-owner", nextRepo, nil, nil, 0, 0, cipher, security.RandomTokenSource{})
 			defer next.Close(ctx)
 			_, release, err = next.Authenticate(ctx, created.Secret)
 			if err != nil {

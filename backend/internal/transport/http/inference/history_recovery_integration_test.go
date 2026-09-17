@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,7 +28,6 @@ import (
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -140,24 +143,24 @@ func TestHTTPGatewayHistoryRecoveryBudget(t *testing.T) {
 					replay := historyapp.New(memory.NewReasoningReplayStore(32), historyapp.Config{Enabled: true, TTL: time.Hour}, nil)
 					replay.UseJournal(relational.NewConversationJournal(db, cipher, 8<<20), time.Hour, time.Hour)
 					build.SetReasoningReplay(replay)
-					egress := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+					egress := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 					defer egress.Close(ctx)
 					build.SetEgress(egress)
-					registry := provider.NewRegistry(build)
+					registry := providerimpl.NewRegistry(build)
 					sticky := memory.NewStickyStore()
 					concurrency := memory.NewConcurrencyLimiter()
-					accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-					clientService := clientkeyapp.NewService("test-owner", keys, memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+					accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+					clientService := clientkeyapp.NewService("test-owner", keys, memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 					defer closeClientKeyService(t, clientService)
 					created, err := clientService.Create(ctx, clientkeyapp.CreateInput{Name: "history", Enabled: true, RPMLimit: 120, MaxConcurrent: 4})
 					if err != nil {
 						t.Fatal(err)
 					}
-					selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-					service := gateway.NewService(models, audits, accountService, clientService, registry, selector, relational.NewResponseRepository(db), limit)
+					selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+					service := gateway.NewService(models, audits, accountService, clientService, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, limit)
 					gin.SetMode(gin.TestMode)
 					router := gin.New()
-					router.Use(middleware.RequestID(), middleware.ClientAuth(clientService))
+					router.Use(middleware.RequestID(nil), middleware.ClientAuth(clientService))
 					NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 					server := httptest.NewServer(router)
 					defer server.Close()

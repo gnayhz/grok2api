@@ -3,15 +3,15 @@ package court
 import (
 	"context"
 	"errors"
-	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
-	"gorm.io/gorm"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
+	"gorm.io/gorm"
 )
 
 type testBench struct {
@@ -20,10 +20,10 @@ type testBench struct {
 }
 
 func newBench(t testing.TB) *testBench {
-	return newBenchWithEvidenceConfig(t, evidence.DefaultConfig())
+	return newBenchWithEvidenceConfig(t, model.DefaultEvidenceConfig())
 }
 
-func newBenchWithEvidenceConfig(t testing.TB, cfg evidence.Config, links ...registry.AccountLinks) *testBench {
+func newBenchWithEvidenceConfig(t testing.TB, cfg model.EvidenceConfig, links ...registry.AccountLinks) *testBench {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "court.db")
@@ -88,11 +88,11 @@ func newTestCourt(bench *testBench, cfg Config) *Service {
 
 type storeSource struct{ store *evidence.Store }
 
-func (s storeSource) SnapshotWindow(now time.Time) evidence.Snapshot {
+func (s storeSource) SnapshotWindow(now time.Time) model.Snapshot {
 	return s.store.SnapshotWindow(now)
 }
 
-func (s storeSource) CrossValidate(snapshot evidence.Snapshot) evidence.Estimate {
+func (s storeSource) CrossValidate(snapshot model.Snapshot) model.Estimate {
 	return s.store.CrossValidate(snapshot)
 }
 
@@ -106,7 +106,8 @@ func (f fixtureProbeAccounts) QualityProbeAccounts(ctx context.Context, _ model.
 	return ids, err
 }
 func newFixtureCourt(cfg Config, reg *registry.Registry, source EvidenceSource, dispatcher Dispatcher) *Service {
-	s := New(cfg, reg, source, dispatcher)
+	s := New(cfg, reg, source, dispatcher, registry.NewProbeTaskStore(reg))
+	go s.Run(context.Background())
 	s.SetProbeAccounts(fixtureProbeAccounts{reg})
 	s.SetNodes(fixtureNodes{reg})
 	return s

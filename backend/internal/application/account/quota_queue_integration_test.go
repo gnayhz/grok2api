@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,8 +20,8 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -119,7 +120,7 @@ func newQuotaHTTPFixture(t testing.TB, dialect string, pair quotaRuntimePair, ha
 	t.Cleanup(server.Close)
 	adapter, closeNetwork := NewQuotaQueueWebFixture(db, cipher, server.URL)
 	t.Cleanup(func() { _ = closeNetwork(ctx) })
-	f.service = NewService(f.repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, pair.lock)
+	f.service = NewService(f.repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, pair.lock)
 	f.service.SetQuotaRefreshCoordinator(pair.first)
 	f.service.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	f.service.now = func() time.Time { return time.Unix(0, f.clock.Load()).UTC() }
@@ -130,16 +131,16 @@ func (f *quotaHTTPFixture) runOne(t testing.TB, ctx context.Context) {
 	t.Helper()
 	var request quotaRefreshRequest
 	select {
-	case request = <-f.service.quotaRefreshQueue:
+	case request = <-f.service.quotaRefresh.queue:
 	default:
 		t.Fatal("expected pending quota request")
 	}
-	f.service.quotaRefreshMu.Lock()
-	state := f.service.quotaRefreshes[request.key]
+	f.service.quotaRefresh.mu.Lock()
+	state := f.service.quotaRefresh.obs[request.key]
 	state.queued = false
 	state.running = true
 	state.pending = false
-	f.service.quotaRefreshMu.Unlock()
+	f.service.quotaRefresh.mu.Unlock()
 	f.service.runQuotaRefresh(ctx, request)
 	if stats := f.service.syncPool.Snapshot(); stats.Active != 0 || stats.Queued != 0 {
 		t.Fatalf("quota pool retained work: %+v", stats)
@@ -180,8 +181,8 @@ func TestQuotaQueueActualHTTPBudgetAndNewDemand(t *testing.T) {
 								f.service.recoverSharedQuotaRefreshes(ctx, f.service.now())
 								f.service.requeueQuotaRefreshes()
 							}
-							if got := f.calls.Load(); got != quotaRefreshFailureBudget || len(f.service.quotaRefreshQueue) != 0 {
-								t.Fatalf("same demand resumed: calls=%d queue=%d", got, len(f.service.quotaRefreshQueue))
+							if got := f.calls.Load(); got != quotaRefreshFailureBudget || len(f.service.quotaRefresh.queue) != 0 {
+								t.Fatalf("same demand resumed: calls=%d queue=%d", got, len(f.service.quotaRefresh.queue))
 							}
 							if durable {
 								if receipt, err := f.repo.ConsumeQuota(ctx, fact, f.service.now()); err != nil || receipt.State != accountdomain.QuotaConsumptionPendingRefresh {
@@ -277,17 +278,17 @@ func TestQuotaQueueCompletionFailuresUseBudget(t *testing.T) {
 						}
 						f.retry()
 					}
-					if len(f.service.quotaRefreshQueue) != 0 {
+					if len(f.service.quotaRefresh.queue) != 0 {
 						t.Fatalf("completion failure bypassed parking: %s", phase)
 					}
-					state := f.service.quotaRefreshes[strconv.FormatUint(f.id, 10)+":fast"]
+					state := f.service.quotaRefresh.obs[strconv.FormatUint(f.id, 10)+":fast"]
 					if state == nil || state.failures != quotaRefreshFailureBudget {
 						t.Fatalf("lost completion failure budget: %+v", state)
 					}
 					fault.disabled = true
 					f.service.QueueQuotaRefresh(f.id, "fast")
 					f.runOne(t, ctx)
-					if len(f.service.quotaRefreshes) != 0 {
+					if len(f.service.quotaRefresh.obs) != 0 {
 						t.Fatalf("explicit demand did not recover after %s: %+v", phase, f.service.QuotaRefreshStats())
 					}
 				})
@@ -348,14 +349,14 @@ func TestQuotaQueueNewDemandDuringFailedAttempt(t *testing.T) {
 					case <-time.After(3 * time.Second):
 						t.Fatal("old attempt did not exit")
 					}
-					state := f.service.quotaRefreshes[strconv.FormatUint(f.id, 10)+":fast"]
+					state := f.service.quotaRefresh.obs[strconv.FormatUint(f.id, 10)+":fast"]
 					if state == nil || state.failures != 0 || !state.pending || state.running {
 						t.Fatalf("old attempt charged new demand: %+v", state)
 					}
 					f.service.requeueQuotaRefreshes()
 					f.runOne(t, ctx)
-					if f.calls.Load() != 2 || len(f.service.quotaRefreshes) != 0 {
-						t.Fatalf("new demand did not finish once: calls=%d states=%d", f.calls.Load(), len(f.service.quotaRefreshes))
+					if f.calls.Load() != 2 || len(f.service.quotaRefresh.obs) != 0 {
+						t.Fatalf("new demand did not finish once: calls=%d states=%d", f.calls.Load(), len(f.service.quotaRefresh.obs))
 					}
 				})
 			}
@@ -423,7 +424,7 @@ func TestQuotaQueueCancellationAndRestart(t *testing.T) {
 				t.Fatalf("cancelled worker retained shared lock: %v %v", acquired, err)
 			}
 			release()
-			restored := NewService(f.repo, nil, nil, nil, f.service.providers, f.service.cipher, pair.lock)
+			restored := NewService(f.repo, nil, nil, nil, f.service.providers, f.service.cipher, security.RandomTokenSource{}, nil, nil, pair.lock)
 			restored.SetQuotaRefreshCoordinator(pair.second)
 			restored.recoverDurableQuotaRefreshes(freshCtx, 0)
 			(&quotaHTTPFixture{service: restored}).runOne(t, freshCtx)
@@ -459,7 +460,7 @@ func TestQuotaQueueParkingExpiresWithoutLosingDurableFact(t *testing.T) {
 						f.retry()
 					}
 					key := strconv.FormatUint(f.id, 10) + ":fast"
-					state := f.service.quotaRefreshes[key]
+					state := f.service.quotaRefresh.obs[key]
 					if state == nil {
 						t.Fatal("missing parked demand")
 					}
@@ -467,16 +468,16 @@ func TestQuotaQueueParkingExpiresWithoutLosingDurableFact(t *testing.T) {
 					f.service.recoverSharedQuotaRefreshes(ctx, f.service.now())
 					f.service.requeueQuotaRefreshes()
 					if !durable {
-						if f.service.quotaRefreshes[key] != nil {
+						if f.service.quotaRefresh.obs[key] != nil {
 							t.Fatal("expired temporary parking retained forever")
 						}
 						return
 					}
-					if state = f.service.quotaRefreshes[key]; state == nil || state.failures != quotaRefreshFailureBudget || state.sharedVersion.Generation != 0 {
+					if state = f.service.quotaRefresh.obs[key]; state == nil || state.failures != quotaRefreshFailureBudget || state.sharedVersion.Generation != 0 {
 						t.Fatalf("expiry reset SQL failure budget: %+v", state)
 					}
 					f.service.recoverDurableQuotaRefreshes(ctx, 0)
-					if len(f.service.quotaRefreshQueue) != 0 {
+					if len(f.service.quotaRefresh.queue) != 0 {
 						t.Fatal("SQL scan restarted expired parked demand")
 					}
 					f.status.Store(200)
@@ -506,8 +507,8 @@ func TestQuotaQueueParkingExpiresWithoutLosingDurableFact(t *testing.T) {
 						f.service.recoverDurableQuotaRefreshes(ctx, cursor)
 						f.service.recoverDurableQuotaRefreshes(ctx, 0)
 					}
-					if f.service.quotaRefreshes[key] != nil {
-						t.Fatalf("resolved SQL demand retained parking: %+v", f.service.quotaRefreshes[key])
+					if f.service.quotaRefresh.obs[key] != nil {
+						t.Fatalf("resolved SQL demand retained parking: %+v", f.service.quotaRefresh.obs[key])
 					}
 					receipt, err := f.repo.ConsumeQuota(ctx, fact, f.service.now())
 					want := accountdomain.QuotaConsumptionRefreshed
@@ -552,7 +553,7 @@ func TestQuotaQueuePublicationReplyDoesNotReplaceNewerObservation(t *testing.T) 
 			f.service.SetQuotaRefreshCoordinator(race)
 			f.service.QueueQuotaRefresh(f.id, "fast")
 			f.runOne(t, ctx)
-			state := f.service.quotaRefreshes[strconv.FormatUint(f.id, 10)+":fast"]
+			state := f.service.quotaRefresh.obs[strconv.FormatUint(f.id, 10)+":fast"]
 			if state.failures != 0 || state.sharedVersion.Generation != 2 || state.runningVersion.Generation != 1 {
 				t.Fatalf("old publication charged/regressed new demand: %+v", state)
 			}
@@ -583,10 +584,10 @@ func TestQuotaQueuePanicReleasesSharedLock(t *testing.T) {
 			f := newQuotaHTTPFixture(t, "sqlite", pair, nil)
 			original := f.service.providers
 			adapter, _ := original.Get(accountdomain.ProviderWeb)
-			f.service.providers = provider.NewRegistry(quotaPanickingAdapter{adapter})
+			f.service.providers = providerimpl.NewRegistry(quotaPanickingAdapter{adapter})
 			f.service.QueueQuotaRefresh(f.id, "fast")
 			f.runOne(t, ctx)
-			state := f.service.quotaRefreshes[strconv.FormatUint(f.id, 10)+":fast"]
+			state := f.service.quotaRefresh.obs[strconv.FormatUint(f.id, 10)+":fast"]
 			if state == nil || state.running || state.failures != 1 {
 				t.Fatalf("panic lost retry state: %+v", state)
 			}
@@ -599,8 +600,8 @@ func TestQuotaQueuePanicReleasesSharedLock(t *testing.T) {
 			f.status.Store(200)
 			f.retry()
 			f.runOne(t, ctx)
-			if f.calls.Load() != 1 || len(f.service.quotaRefreshes) != 0 {
-				t.Fatalf("panic recovery: calls=%d states=%d", f.calls.Load(), len(f.service.quotaRefreshes))
+			if f.calls.Load() != 1 || len(f.service.quotaRefresh.obs) != 0 {
+				t.Fatalf("panic recovery: calls=%d states=%d", f.calls.Load(), len(f.service.quotaRefresh.obs))
 			}
 		})
 	}
@@ -634,20 +635,20 @@ func TestQuotaQueueSQLScanFailureCannotRetireParking(t *testing.T) {
 				f.retry()
 			}
 			key := strconv.FormatUint(f.id, 10) + ":fast"
-			state := f.service.quotaRefreshes[key]
+			state := f.service.quotaRefresh.obs[key]
 			f.clock.Store(state.sharedVersion.ExpiresAt.Add(time.Second).UnixNano())
 			f.service.recoverSharedQuotaRefreshes(ctx, f.service.now())
 			f.service.requeueQuotaRefreshes()
 			fault := &quotaScanFault{AccountRepository: f.repo, fail: true}
 			f.service.accounts = fault
 			f.service.recoverDurableQuotaRefreshes(ctx, 0)
-			if f.service.quotaRefreshes[key] == nil {
+			if f.service.quotaRefresh.obs[key] == nil {
 				t.Fatal("failed SQL pass retired demand")
 			}
 			fault.fail = false
 			cursor := f.service.recoverDurableQuotaRefreshes(ctx, 0)
 			f.service.recoverDurableQuotaRefreshes(ctx, cursor)
-			if len(f.service.quotaRefreshQueue) != 0 || !state.durable || state.failures != quotaRefreshFailureBudget {
+			if len(f.service.quotaRefresh.queue) != 0 || !state.durable || state.failures != quotaRefreshFailureBudget {
 				t.Fatalf("recovered SQL scan reset budget: %+v", state)
 			}
 		})

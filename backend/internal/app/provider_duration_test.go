@@ -23,6 +23,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -268,7 +269,7 @@ func TestWebQuotaUsesConfiguredFractionalDeadline(t *testing.T) {
 		_, _ = io.WriteString(w, `{"remainingQueries":7,"totalQueries":10,"windowSizeSeconds":3600}`)
 	}))
 	defer server.Close()
-	manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+	manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 	defer manager.Close(context.Background())
 	// Only the local protocol endpoint and deterministic signer differ from
 	// production wiring; SQL routing, lease, HTTP transport and adapter are real.

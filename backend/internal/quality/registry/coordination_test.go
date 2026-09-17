@@ -115,14 +115,14 @@ func TestCoordinatorFencesOldWriterAfterTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer releaseNew()
-	if err := first.TransitionAccount(oldCtx, AccountTransitionRequest{AccountID: 42, To: model.AccountRemanded, CaseID: 1}); err == nil {
+	if err := first.TransitionAccount(oldCtx, model.AccountTransitionRequest{AccountID: 42, To: model.AccountRemanded, CaseID: 1}); err == nil {
 		t.Fatal("old coordinator wrote after takeover")
 	}
-	if err := second.TransitionAccount(newCtx, AccountTransitionRequest{AccountID: 42, To: model.AccountRemanded, CaseID: 1}); err != nil {
+	if err := second.TransitionAccount(newCtx, model.AccountTransitionRequest{AccountID: 42, To: model.AccountRemanded, CaseID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	releaseOld()
-	if err := second.TransitionAccount(newCtx, AccountTransitionRequest{AccountID: 43, To: model.AccountRemanded, CaseID: 1}); err != nil {
+	if err := second.TransitionAccount(newCtx, model.AccountTransitionRequest{AccountID: 43, To: model.AccountRemanded, CaseID: 1}); err != nil {
 		t.Fatalf("old release unlocked peer: %v", err)
 	}
 }

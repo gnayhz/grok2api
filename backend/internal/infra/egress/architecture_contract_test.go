@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net"
 	"net/http"
@@ -37,7 +38,7 @@ func blockedBrowserHandshake(t *testing.T) (*browserClient, context.CancelFunc, 
 		close(entered)
 		_, _ = io.Copy(io.Discard, conn)
 	}()
-	client, err := newBrowserClient("", DefaultUserAgent)
+	client, err := newBrowserClientWithBudget("", DefaultUserAgent, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestRuntimeHealthyOriginIsolatedFromOtherOriginTLS(t *testing.T) {
 
 func TestRuntimeBuildAcquireDoesNotWaitForBrowserRetirement(t *testing.T) {
 	client, cancelBlocked, blockedDone := blockedBrowserHandshake(t)
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	now := time.Now()
 	// Saturate the client cache while its oldest browser client is still in a
@@ -107,7 +108,7 @@ func TestRuntimeBuildAcquireDoesNotWaitForBrowserRetirement(t *testing.T) {
 	m.transport.lastClientCleanup = now
 	done := make(chan error, 1)
 	go func() {
-		_, err := m.transport.clientFor(100000, domain.ScopeBuild, "", "", "", false, "")
+		_, err := m.transport.clientForContext(context.Background(), 100000, domain.ScopeBuild, "", "", "", false, "", clientOptions{})
 		done <- err
 	}()
 	select {

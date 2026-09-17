@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	clientkey "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestGuardAcceptsOnlyDeliveredAttemptBeforeMessagesConversion(t *testing.T) {

@@ -4,24 +4,13 @@ import (
 	"context"
 	"time"
 
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // 节点降智台账(G8):流行病学管理数据,永久保留(B3 决议3),
 // 不影响调度资格。节点看总数,历史看 IP 明细。
-
-// DegradeLedgerEntry 是台账的一行:(节点,epoch,IP) 聚合。
-// json 标签是前端契约(批8 契约测试抓出:无标签时序列化成 Go 原生
-// 字段名,前端 degrade_detail 从未解析成功)。
-type DegradeLedgerEntry struct {
-	NodeID  uint64    `json:"node_id"`
-	Epoch   uint64    `json:"epoch"`
-	IP      string    `json:"ip"`
-	Count   int64     `json:"count"`
-	FirstAt time.Time `json:"first_at"`
-	LastAt  time.Time `json:"last_at"`
-}
 
 // AppendDegrade 记录一次降智事件到台账:同键计数递增,新键插入。
 // 台账与状态转移无关(写台账永不改变调度资格)。
@@ -59,7 +48,7 @@ func (r *Registry) NodeDegradeTotal(ctx context.Context, nodeID uint64) (int64, 
 }
 
 // ListNodeDegradeHistory 返回节点台账明细(按最近时间倒序)。
-func (r *Registry) ListNodeDegradeHistory(ctx context.Context, nodeID uint64, limit int) ([]DegradeLedgerEntry, error) {
+func (r *Registry) ListNodeDegradeHistory(ctx context.Context, nodeID uint64, limit int) ([]qualitymodel.DegradeLedgerEntry, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -68,9 +57,9 @@ func (r *Registry) ListNodeDegradeHistory(ctx context.Context, nodeID uint64, li
 		Order("last_at DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	entries := make([]DegradeLedgerEntry, 0, len(rows))
+	entries := make([]qualitymodel.DegradeLedgerEntry, 0, len(rows))
 	for _, row := range rows {
-		entries = append(entries, DegradeLedgerEntry{
+		entries = append(entries, qualitymodel.DegradeLedgerEntry{
 			NodeID: row.NodeID, Epoch: row.Epoch, IP: row.IP,
 			Count: row.Count, FirstAt: row.FirstAt, LastAt: row.LastAt,
 		})

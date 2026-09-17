@@ -1,7 +1,7 @@
 package inference
 
 import (
-	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"github.com/gin-gonic/gin"
 	"net/http/httptest"
 	"testing"
@@ -18,7 +18,7 @@ func TestSelectionRetryAfterDoesNotWrapLongestWait(t *testing.T) {
 	} {
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
-		selectionErrorResponse(ctx, &gateway.SelectionUnavailableError{Reason: gateway.SelectionCooling, RetryAfter: c.delay})
+		encodeClientError(ctx, classifyClientError(&selector.SelectionUnavailableError{Reason: selector.SelectionCooling, RetryAfter: c.delay}), false)
 		if got := recorder.Header().Get("Retry-After"); got != c.want {
 			t.Errorf("delay=%v got=%s want=%s", c.delay, got, c.want)
 		}

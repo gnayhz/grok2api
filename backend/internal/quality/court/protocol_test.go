@@ -2,24 +2,23 @@ package court
 
 import (
 	"fmt"
-	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"testing"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
-func experimentFixture(diff model.ProbeResult, jury model.ProbeResult) []registry.ProbeTaskView {
-	var tasks []registry.ProbeTaskView
+func experimentFixture(diff model.ProbeResult, jury model.ProbeResult) []model.ProbeTaskView {
+	var tasks []model.ProbeTaskView
 	for i := uint64(1); i <= 3; i++ {
 		key := fmt.Sprintf("exit-%d", i)
-		tasks = append(tasks, registry.ProbeTaskView{ID: i, Direction: model.ProbeAccountDifferential, Defendant: 7, NodeID: i, State: model.ProbeDone,
+		tasks = append(tasks, model.ProbeTaskView{ID: i, Direction: model.ProbeAccountDifferential, Defendant: 7, NodeID: i, State: model.ProbeDone,
 			Result: diff, VerifiedIPChange: true, PathKey: key, FailureKind: string(model.ProbeFailureCreatedTimeout), ControlAccountID: 50 + i, ControlNodeID: i,
 			ControlOutcome: model.ProbeResultClean, ControlVerified: true, ControlPathKey: key})
 	}
 	for i := uint64(1); i <= 4; i++ {
-		tasks = append(tasks, registry.ProbeTaskView{ID: i + 3, Direction: model.ProbeExitJury, Defendant: 7, Juror: 50 + i, NodeID: 10, State: model.ProbeDone,
+		tasks = append(tasks, model.ProbeTaskView{ID: i + 3, Direction: model.ProbeExitJury, Defendant: 7, Juror: 50 + i, NodeID: 10, State: model.ProbeDone,
 			Result: jury, PathKey: "incident", ControlAccountID: 50 + i, ControlNodeID: i, ControlOutcome: model.ProbeResultClean,
 			ControlVerified: true, ControlPathKey: fmt.Sprintf("exit-%d", i)})
 	}
@@ -39,7 +38,7 @@ func TestControlledAttributionScenarios(t *testing.T) {
 	tests := []struct {
 		name       string
 		diff, jury model.ProbeResult
-		edit       func([]registry.ProbeTaskView) []registry.ProbeTaskView
+		edit       func([]model.ProbeTaskView) []model.ProbeTaskView
 		verdict    model.Verdict
 		reason     string
 	}{
@@ -48,53 +47,53 @@ func TestControlledAttributionScenarios(t *testing.T) {
 		{"exit quality", model.ProbeResultClean, model.ProbeResultDegraded, nil, model.VerdictExitGuilty, "exit_quality_pattern"},
 		{"both healthy", model.ProbeResultClean, model.ProbeResultClean, nil, model.VerdictNone, "not_reproduced"},
 		{"both degraded", model.ProbeResultDegraded, model.ProbeResultDegraded, nil, model.VerdictNone, "conflicting_evidence"},
-		{"one account anomaly", model.ProbeResultDegraded, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView { return append(v[:1], v[3:]...) }, model.VerdictNone, "insufficient_controls"},
-		{"single transport", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView { return append(v[:1], v[3:]...) }, model.VerdictNone, "insufficient_controls"},
-		{"same physical IP", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"one account anomaly", model.ProbeResultDegraded, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView { return append(v[:1], v[3:]...) }, model.VerdictNone, "insufficient_controls"},
+		{"single transport", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView { return append(v[:1], v[3:]...) }, model.VerdictNone, "insufficient_controls"},
+		{"same physical IP", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 0; i < 3; i++ {
 				v[i].PathKey = "shared"
 				v[i].ControlPathKey = "shared"
 			}
 			return v
 		}, model.VerdictNone, "insufficient_controls"},
-		{"late clean alias cannot be hidden", model.ProbeResultDegraded, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"late clean alias cannot be hidden", model.ProbeResultDegraded, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			alias := v[0]
 			alias.NodeID = 98
 			alias.Attempt.Path.NodeID = 98
 			alias.Result = model.ProbeResultClean
 			return append(v, alias)
 		}, model.VerdictNone, "conflicting_evidence"},
-		{"unobserved paths still suspicious", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"unobserved paths still suspicious", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 0; i < 3; i++ {
 				v[i].VerifiedIPChange = false
 			}
 			return v
 		}, model.VerdictNone, "repeated_anomaly_unconfirmed"},
-		{"path outage controls fail", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"path outage controls fail", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 0; i < 3; i++ {
 				v[i].ControlOutcome = model.ProbeResultError
 			}
 			return v
 		}, model.VerdictNone, "repeated_anomaly_unconfirmed"},
-		{"credential failure is not transport", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"credential failure is not transport", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 0; i < 3; i++ {
 				v[i].FailureKind = "credential_unavailable"
 			}
 			return v
 		}, model.VerdictNone, "insufficient_controls"},
-		{"contradictory clean defendant", model.ProbeResultDegraded, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"contradictory clean defendant", model.ProbeResultDegraded, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			v[0].Result = model.ProbeResultClean
 			return v
 		}, model.VerdictNone, "conflicting_evidence"},
-		{"missing jury calibration", model.ProbeResultClean, model.ProbeResultDegraded, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"missing jury calibration", model.ProbeResultClean, model.ProbeResultDegraded, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 3; i < len(v); i++ {
 				v[i].ControlOutcome = ""
 			}
 			return v
 		}, model.VerdictNone, "insufficient_controls"},
-		{"jury quorum missing", model.ProbeResultClean, model.ProbeResultDegraded, func(v []registry.ProbeTaskView) []registry.ProbeTaskView { return v[:6] }, model.VerdictNone, "insufficient_controls"},
-		{"rotating incident exit", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView { v[3].PathKey = "different-ip"; return v }, model.VerdictNone, "insufficient_controls"},
-		{"duplicate juror", model.ProbeResultClean, model.ProbeResultDegraded, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"jury quorum missing", model.ProbeResultClean, model.ProbeResultDegraded, func(v []model.ProbeTaskView) []model.ProbeTaskView { return v[:6] }, model.VerdictNone, "insufficient_controls"},
+		{"rotating incident exit", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView { v[3].PathKey = "different-ip"; return v }, model.VerdictNone, "insufficient_controls"},
+		{"duplicate juror", model.ProbeResultClean, model.ProbeResultDegraded, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 3; i < len(v); i++ {
 				v[i].Juror = 99
 				v[i].Attempt.AccountID = 99
@@ -103,13 +102,13 @@ func TestControlledAttributionScenarios(t *testing.T) {
 			}
 			return v
 		}, model.VerdictNone, "insufficient_controls"},
-		{"pending is not failure", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"pending is not failure", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 0; i < 3; i++ {
 				v[i].State = model.ProbePending
 			}
 			return v
 		}, model.VerdictNone, "awaiting_probes"},
-		{"worker cancelled is not failure", model.ProbeResultError, model.ProbeResultClean, func(v []registry.ProbeTaskView) []registry.ProbeTaskView {
+		{"worker cancelled is not failure", model.ProbeResultError, model.ProbeResultClean, func(v []model.ProbeTaskView) []model.ProbeTaskView {
 			for i := 0; i < 3; i++ {
 				v[i].State = model.ProbeCancelled
 			}

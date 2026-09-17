@@ -89,7 +89,7 @@ func TestUpgradeAddsLeasesAndRepairsExistingQueue(t *testing.T) {
 		t.Fatalf("reclaim=%d err=%v", n, err)
 	}
 	store := NewProbeTaskStore(r)
-	archive, err := evidence.New(ctx, r.DB(), evidence.DefaultConfig())
+	archive, err := evidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

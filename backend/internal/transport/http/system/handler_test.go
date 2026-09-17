@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
+	updatecheckinfra "github.com/chenyme/grok2api/backend/internal/infra/updatecheck"
 	"github.com/gin-gonic/gin"
 )
 
@@ -45,7 +46,7 @@ func TestHandlerReturnsAndChecksVersion(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Notes"}`))}, nil
 	})}
 	router := gin.New()
-	updates := updatecheckapp.NewService("v3.0.0", client)
+	updates := updatecheckapp.NewService("v3.0.0", updatecheckinfra.NewGitHubSource(client))
 	NewHandler(nil, updates).Register(router.Group("/api/admin/v1"))
 
 	for _, test := range []struct {

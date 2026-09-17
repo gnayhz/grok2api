@@ -9,20 +9,20 @@ import { z } from "zod";
 
 import { CopyButton } from "@/shared/components/copy-button";
 
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Spinner } from "@/components/ui/spinner";
-import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/shared/ui/alert-dialog";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/shared/ui/dialog";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/shared/ui/dropdown-menu";
+import { Input } from "@/shared/ui/input";
+import { Label } from "@/shared/ui/label";
+import { Switch } from "@/shared/ui/switch";
+import { Spinner } from "@/shared/ui/spinner";
+import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/shared/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { listModels } from "@/entities/model/model-api";
-import { createClientKey, deleteClientKey, deleteClientKeys, getClientKeySecret, listClientKeys, updateClientKey, updateClientKeysEnabled, type ClientKeyDTO, type ClientKeyInput, type CreateKeyResponseDTO, type ProviderScopeValue, type TierScopeValue } from "@/features/client-keys/client-keys-api";
+import { createClientKey, deleteClientKey, deleteClientKeys, getClientKeySecret, listClientKeys, updateClientKey, updateClientKeysEnabled, type ClientKeyDTO, type ClientKeyInput, type CreateKeyResponseDTO, type ProviderScopeValue, type TierScopeValue } from "@/entities/client-key/client-key-api";
 import { EmptyState, ErrorState, LoadingState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -33,6 +33,7 @@ import { VirtualTableBody } from "@/shared/components/virtual-table-body";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, toDateTimeLocal } from "@/shared/lib/format";
+import { showErrorToast } from "@/shared/lib/show-error";
 import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 
 const USD_TICKS = 10_000_000_000;
@@ -202,7 +203,7 @@ export function ClientKeysPage() {
   });
 
   function showError(error: unknown): void {
-    toast.error(error instanceof Error ? error.message : t("errors.generic"));
+    showErrorToast(error, t);
   }
 
   function beginCreate(): void {
@@ -371,7 +372,7 @@ export function ClientKeysPage() {
                   <TableCell className="text-center text-xs tabular-nums">{key.rpmLimit > 0 ? key.rpmLimit : t("keys.unlimited")}</TableCell>
                   <TableCell className="text-center text-xs tabular-nums">{key.maxConcurrent > 0 ? key.maxConcurrent : t("keys.unlimited")}</TableCell>
                   <TableCell><BillingUsage value={key} /></TableCell>
-                  <TableCell className="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground" title={key.expiresAt ? formatDateTime(key.expiresAt, i18n.language) : t("keys.neverExpires")}>{key.expiresAt ? formatDateTime(key.expiresAt, i18n.language) : t("keys.neverExpires")}</TableCell>
+                  <TableCell className="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground" title={key.expiresAt ? formatDateTime(key.expiresAt, i18n.language) : t("common.neverExpires")}>{key.expiresAt ? formatDateTime(key.expiresAt, i18n.language) : t("common.neverExpires")}</TableCell>
                   <TableCell className="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground" title={formatDateTime(key.lastUsedAt, i18n.language)}>{formatDateTime(key.lastUsedAt, i18n.language)}</TableCell>
                   <TableActionCell>
                     <DropdownMenu>
@@ -456,7 +457,7 @@ export function ClientKeysPage() {
                       }} />
                     </div>
                   </div>
-                  <Controller control={form.control} name="expiresAt" render={({ field }) => <DateTimePicker value={expiryUnlimited ? "" : field.value} onChange={field.onChange} disabled={expiryUnlimited} placeholder={expiryUnlimited ? t("keys.neverExpires") : t("keys.selectExpiry")} />} />
+                  <Controller control={form.control} name="expiresAt" render={({ field }) => <DateTimePicker value={expiryUnlimited ? "" : field.value} onChange={field.onChange} disabled={expiryUnlimited} placeholder={expiryUnlimited ? t("common.neverExpires") : t("keys.selectExpiry")} />} />
                   {form.formState.errors.expiresAt ? <p className="text-xs text-destructive">{form.formState.errors.expiresAt.message}</p> : null}
                 </div>
               </div>

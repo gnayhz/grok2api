@@ -200,6 +200,19 @@ type Manager struct {
 	failureProbeMu         sync.Mutex
 	failureProber          FailureProber
 	failureProbes          map[uint64]failureProbeState
+	// knownExitAddrs 是 KnownNodeExitAddrs 的短命快照(knownExitAddrsCache)。
+	knownExitAddrs knownExitAddrsCache
+}
+
+// knownExitAddrsCache 缓存 KnownNodeExitAddrs 的结果:法院的同出口排除缝
+// 按比对候选逐对询问,大机队下一次计划会问上百次,每次都回源读整张节点表
+// 不可接受。该数据本就声明为"最后已知、可能过期"的建议性输入,沿用节点
+// 快照的 TTL;节点事实失效(InvalidateNodeSnapshots)会一并丢弃它,因此
+// 探活写入后立即可见。
+type knownExitAddrsCache struct {
+	mu       sync.Mutex
+	loadedAt time.Time
+	addrs    map[uint64]domain.ExitAddresses
 }
 
 // rotationPersistState 由 rotationMu 保护。
@@ -268,10 +281,7 @@ type cachedOperationsConfig struct {
 	expiresAt time.Time
 }
 
-func NewManager(repository repository.EgressRuntimeRepository, cipher security.Cryptor) *Manager {
-	return NewManagerWithLimits(repository, cipher, netbudget.Limits{})
-}
-
+// NewManagerWithLimits 是 Manager 的唯一构造器;limits 零值等于无上限。
 func NewManagerWithLimits(repository repository.EgressRuntimeRepository, cipher security.Cryptor, limits netbudget.Limits) *Manager {
 	// cipher 为 nil 时归一化为「无凭据加解密能力」占位：对空串与
 	// *Cipher 一致（幂等返回空），对非空密文返回明确错误而非 panic。
@@ -403,11 +413,6 @@ func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 	m.clearance.UpdateClearanceConfig(value)
 }
 
-func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
-	lease, _, err := m.acquire(ctx, scope, affinity, true, "")
-	return lease, err
-}
-
 // AcquireBuildEnvironmentDirect preserves environment proxy selection while
 // keeping the default Build path under the runtime's resource ownership.
 func (m *Manager) AcquireBuildEnvironmentDirect(ctx context.Context, affinity string) (*Lease, error) {
@@ -434,6 +439,12 @@ func (m *Manager) AcquireBuildEnvironmentDirectIfIsolated(ctx context.Context, a
 
 // AcquireCredential binds the outbound proxy identity to one persisted
 // Provider credential. Resin templates use this identity as their Account.
+// CredentialLeaser 是 Provider 适配器可见的网络能力合同:仅凭据
+// 租约获取;节点管理、轮换配置等 Manager 管理面不在消费面上。
+type CredentialLeaser interface {
+	AcquireCredential(ctx context.Context, scope domain.Scope, credential accountdomain.Credential) (*Lease, error)
+}
+
 func (m *Manager) AcquireCredential(ctx context.Context, scope domain.Scope, credential accountdomain.Credential) (*Lease, error) {
 	identity := strings.TrimSpace(credential.EgressIdentity)
 	if identity == "" {
@@ -483,14 +494,6 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 // target is a strict binding, never silently rerouted to other exits.
 var ErrRoutingTargetUnavailable = errors.New("egress routing target unavailable")
 
-// acquireFixedTarget leases one fixed routing-target node. It uses the
-// cached target lookup so rule hits do not turn into a DB round trip per
-// request, and waits for an in-flight failure probe like the automatic
-// path so a transport hiccup does not immediately degrade the route.
-func (m *Manager) acquireFixedTarget(ctx context.Context, scope domain.Scope, affinity, encryptedCredentialCookies string, managedClearance bool, nodeID uint64, verification bool) (*Lease, error) {
-	return m.routing.acquireFixedTarget(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, nodeID, verification)
-}
-
 func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (domain.OperationsConfig, bool, error) {
 	return m.routing.loadOperationsConfig(ctx, now)
 }
@@ -535,7 +538,7 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 		}
 	}
 	credentialCookies := ""
-	if !managedClearance && usesBrowserClearance(scope) && strings.TrimSpace(encryptedCredentialCookies) != "" {
+	if !managedClearance && isGrokWebScope(scope) && strings.TrimSpace(encryptedCredentialCookies) != "" {
 		decryptedCookies, decryptErr := m.cipher.Decrypt(encryptedCredentialCookies)
 		if decryptErr != nil {
 			return nil, true, decryptErr
@@ -551,11 +554,12 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 		return nil, false, err
 	}
 	sticky := domain.IsAccountTemplateProxy(proxyURL)
-	rotating := selected.ProxyPool
 	// 外部代理池:出口由服务商自动更换(粘性/每请求),连接阶段重试与全新
 	// CONNECT 即新出口。自建 WARP 出口(换IP Webhook)是固定 IP,不在此列。
-	proxyPool := rotating || sticky
-	freshTunnel := rotating && !sticky
+	// 池模式判定(代理池标志或账号模板)统一委托 domain 唯一策略;此处已持有
+	// 明文代理 URL,故用节点判定而非自行拼标志。
+	proxyPool := selected.IsPoolModeNode(proxyURL)
+	freshTunnel := selected.ProxyPool && !sticky
 	if sticky {
 		accountKey := accountFromContext(ctx)
 		if accountKey == "" && strings.TrimSpace(affinity) != "" {
@@ -567,7 +571,7 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 		}
 	}
 	cookies := ""
-	if usesBrowserClearance(scope) {
+	if isGrokWebScope(scope) {
 		if credentialCookies != "" {
 			// 账号自带 cookie 必然覆盖节点 cookie,不必先解密再丢弃。
 			cookies = credentialCookies
@@ -665,14 +669,6 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 	return &Lease{buildEnvironmentProxy: options.buildEnvironmentProxy, clientHandle: client.handle, healthProxy: selected.EncryptedProxyURL, healthBindingRevision: selected.BindingRevision, healthBaseline: selected.HealthState(), NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, proxyPool: proxyPool, connectionPolicy: client.policy, clearanceKey: clearanceKey, clearanceGeneration: clearanceGeneration, clearanceManager: m, release: func() { stopRelease(); release() }}, true, nil
 }
 
-// Console assets are served from public media hosts. They still need the
-// selected proxy and browser user agent, but forwarding account or node
-// clearance cookies would unnecessarily expose credentials to a different
-// origin and make an otherwise anonymous download depend on cookie storage.
-func usesBrowserClearance(scope domain.Scope) bool {
-	return scope != domain.ScopeBuild && scope != domain.ScopeConsoleAsset
-}
-
 func (m *Manager) incrementInflight(nodeID uint64) { m.routing.incrementInflight(nodeID) }
 
 func (m *Manager) decrementInflight(nodeID uint64) { m.routing.decrementInflight(nodeID) }
@@ -719,34 +715,6 @@ func normalizeProxyAccount(value string) string {
 	return value[:95] + "_" + fmt.Sprintf("%x", digest[:16])
 }
 
-func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
-	return m.routing.selectNode(nodes, affinity)
-}
-
-// pinSessionNode 把会话钉在既有出口节点上,返回实际应使用的节点。
-// 上游提示缓存按「连接→后端实例」亲和复用,而自动调度按账号哈希选
-// 节点,可用集的任何增减(冷却/恢复/上下线/排除)都会改变哈希取模
-// 的落点——节点一换,代理与连接池整体更换,进行中的会话缓存立即
-// 清零。会话级钉扎让可用集波动只影响新会话;钉住的节点失效时立即
-// 重钉到本次常规选择(已考虑排除与冷却),代价是该会话下一轮冷一次。
-func (m *Manager) pinSessionNode(ctx context.Context, session string, available []domain.Node, fallback domain.Node) domain.Node {
-	return m.routing.pinSessionNode(ctx, session, available, fallback)
-}
-
-// sweepSessionPinsLocked 清理过期钉扎并限制表大小。节流执行:每次
-// pinSessionNode 都全量扫描在会话数大时会放大请求热路径成本。
-func (m *Manager) sweepSessionPinsLocked(now time.Time) { m.routing.sweepSessionPinsLocked(now) }
-func (m *Manager) inflightCount(nodeID uint64) int64    { return m.routing.inflightCount(nodeID) }
-
-func (m *Manager) isStickyProxyNode(value domain.Node) bool {
-	return m.routing.isStickyProxyNode(value)
-}
-
-// stickyFlagDirect 不经记忆表直接解密判定。replaceNodeSnapshotLocked 在
-// 持有 nodeMu 写锁时构建 poolFlags, 不能走 stickyFlagMemoized(会对同一把
-// 锁再次加写锁, 自死锁); 快照按 TTL 重建, 每周期一次解密是预期成本。
-func (m *Manager) stickyFlagDirect(value domain.Node) bool { return m.routing.stickyFlagDirect(value) }
-
 // proxyFlagMemoEntry 记忆一次粘性判定; ciphertext 参与相等性比较,
 // 变更后自然 miss 重算。
 type proxyFlagMemoEntry struct {
@@ -758,23 +726,8 @@ type proxyFlagMemoEntry struct {
 // 丢弃任意条目(下次解密重建), 保证内存有界。
 const proxyFlagMemoMax = 8192
 
-func (m *Manager) stickyFlagMemoized(nodeID uint64, ciphertext string) bool {
-	return m.routing.stickyFlagMemoized(nodeID, ciphertext)
-}
-
 // isProxyPoolNode 委托 domain 的唯一判定(Node.IsPoolModeNode 的解密版)。
 func (m *Manager) isProxyPoolNode(value domain.Node) bool { return m.routing.isProxyPoolNode(value) }
-
-// isProxyPoolNodeDirect 是持 nodeMu 时的版本(见 stickyFlagDirect)。
-func (m *Manager) isProxyPoolNodeDirect(value domain.Node) bool {
-	return m.routing.isProxyPoolNodeDirect(value)
-}
-
-// snapshotProxyPoolFlag 是 isProxyPoolNode 的热路径版本:先查快照里预算
-// 好的判定表,未命中(单节点查询路径,不在快照内)才回退到解密。
-func (m *Manager) snapshotProxyPoolFlag(value domain.Node) bool {
-	return m.routing.snapshotProxyPoolFlag(value)
-}
 
 func BuildSSOCookie(token, cloudflareCookies string) string {
 	token = strings.TrimSpace(token)

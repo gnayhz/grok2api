@@ -3,11 +3,11 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
@@ -35,7 +35,7 @@ func TestQuotaProbeLateCompletionDoesNotUndoReset(t *testing.T) {
 			if err := testsupport.Recovery(ctx, s.accounts, accountdomain.QuotaRecovery{AccountID: v.ID, Kind: accountdomain.QuotaRecoveryKindPaid, Status: accountdomain.QuotaRecoveryStatusProbing, UpdatedAt: now}); err != nil {
 				t.Fatal(err)
 			}
-			s.providers = provider.NewRegistry(&quotaProbeCompletionAdapter{credentialRefreshAdapter: a, complete: func() {
+			s.providers = providerimpl.NewRegistry(&quotaProbeCompletionAdapter{credentialRefreshAdapter: a, complete: func() {
 				if _, err := s.BatchResetQuotaState(ctx, []uint64{v.ID}); err != nil {
 					t.Fatal(err)
 				}

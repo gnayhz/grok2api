@@ -1,14 +1,13 @@
+// Package proxy 是代理网络在质量层的观测面:节点三型画像与拨号选择分布。
+// 池策略与路由分层统计的生产实现在 infra/egress——本包不平行实现选路。
 package proxy
 
 import (
 	"context"
-	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"time"
-)
 
-// Package proxy 是代理网络在质量层的观测面(G10 数据面):节点三型画像
-// (B4)与拨号选择分布。池策略(含 G9 最少使用)与路由分层统计(G11)
-// 的生产实现在底座 infra/egress——质量层不再保留平行实现。
+	"github.com/chenyme/grok2api/backend/internal/quality/model"
+)
 
 // NodeProfile 是节点的代理网络画像(从底座数据派生,只读)。
 type NodeProfile struct {
@@ -19,9 +18,9 @@ type NodeProfile struct {
 	RotationWebhook     bool
 	CanServeFixedTarget bool
 	CooldownUntil       *time.Time
-	// PoolSticky 池隧道粘性子型(供应商规定时间内固定);按请求子型
-	// 数据面暂无区分字段,统一按粘性处理——按请求池每次探测必见新
-	// IP,epoch 翻篇自动释放,行为等价(批4 决议,见进度档)。
+	// PoolSticky 池隧道粘性子型。当前 NodeFacts 没有独立子型字段,
+	// 组合根把所有池节点标成 sticky;按请求池每次探测见新 IP,
+	// epoch 翻篇同样释放,与粘性池在质量处置上等价。
 	PoolSticky bool
 }
 

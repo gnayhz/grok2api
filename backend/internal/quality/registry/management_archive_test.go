@@ -2,9 +2,10 @@ package registry
 
 import (
 	"context"
-	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"path/filepath"
 	"testing"
+
+	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 func TestNodeArchivesUseDurableStateOfSelectedEpoch(t *testing.T) {
@@ -26,7 +27,7 @@ func TestNodeArchivesUseDurableStateOfSelectedEpoch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := a.TransitionExit(ctx, ExitTransitionRequest{NodeID: 7, Epoch: epoch, To: model.ExitRemanded, CaseID: 1}); err != nil {
+			if err := a.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 7, Epoch: epoch, To: model.ExitRemanded, CaseID: 1}); err != nil {
 				t.Fatal(err)
 			}
 			want := model.ExitRemanded

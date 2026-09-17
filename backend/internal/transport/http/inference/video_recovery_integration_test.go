@@ -19,9 +19,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
@@ -103,7 +103,7 @@ func TestVideoRecoveryDoesNotCreateAnotherGeneration(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					fx.service.ConfigureMedia(fx.jobs, 1)
+					fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 					fx.service.UpdateVideoMaxAttempts(1)
 					job := createVideoRecoveryJob(t, fx, operation)
 					firstCtx, firstCancel := context.WithCancel(ctx)
@@ -162,7 +162,7 @@ func TestVideoRecoveryDoesNotCreateAnotherGeneration(t *testing.T) {
 					if recoverErr != nil || len(recoverable) != 1 {
 						t.Fatalf("expired task was not recoverable: values=%+v err=%v stored=%+v", recoverable, recoverErr, stored)
 					}
-					fx.service.ConfigureMedia(fx.jobs, 1)
+					fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 					if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 						t.Fatal(err)
 					}
@@ -249,7 +249,7 @@ func TestVideoArchiveFailureRetainsKnownGeneration(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			fx.service.UpdateVideoMaxAttempts(1)
 			job := createVideoAuthorizationJob(t, fx)
 			done := make(chan struct{})
@@ -320,7 +320,7 @@ func TestXAIVideoRecoveryKeepsNativeJobAndUpload(t *testing.T) {
 			var build *cli.Adapter
 			fx := newProviderCompletionFixture(t, upstream.URL, "grok-imagine-video-1.5", account.ProviderBuild, func(store provider.ImageAssetStore) provider.ImageAssetStore { return store }, func(adapter provider.Adapter) provider.Adapter { build = adapter.(*cli.Adapter); return adapter })
 			mediaRouter := gin.New()
-			mediahttp.NewHandler(fx.media, nil).RegisterPublic(mediaRouter)
+			mediahttp.NewHandler(fx.media, nil).RegisterPublic(mediaRouter.Group("/v1/media"))
 			uploadServer := httptest.NewTLSServer(mediaRouter)
 			defer uploadServer.Close()
 			fx.media.UpdateConfig(mediaapp.Config{PublicBaseURL: uploadServer.URL})
@@ -335,7 +335,7 @@ func TestXAIVideoRecoveryKeepsNativeJobAndUpload(t *testing.T) {
 			if _, err := fx.accounts.UpdateAdministration(ctx, credential.ID, repository.AccountAdminPatch{BuildSuperEntitled: &credential.BuildSuperEntitled, BuildRouteMode: &credential.BuildRouteMode}); err != nil {
 				t.Fatal(err)
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			fx.service.ConfigureMediaAssets(fx.media)
 			job := createVideoAuthorizationJob(t, fx)
 			firstCtx, firstCancel := context.WithCancel(ctx)
@@ -400,7 +400,7 @@ func TestXAIVideoRecoveryKeepsNativeJobAndUpload(t *testing.T) {
 			if _, err := fx.accounts.UpdateAdministration(ctx, credential.ID, repository.AccountAdminPatch{BuildSuperEntitled: &credential.BuildSuperEntitled, BuildRouteMode: &credential.BuildRouteMode}); err != nil {
 				t.Fatal(err)
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -561,7 +561,7 @@ func TestVideoRecoveryAfterCheckpointWriteFailure(t *testing.T) {
 				case "terminal", "failed_terminal":
 					fault.terminal = true
 				}
-				fx.service.ConfigureMedia(fault, 1)
+				fx.service.ConfigureMedia(fault, mediaapp.NewVideoResources(fault, nil), 1)
 				fx.service.UpdateVideoMaxAttempts(3)
 				job := createVideoAuthorizationJob(t, fx)
 				firstCtx, firstCancel := context.WithCancel(ctx)
@@ -594,7 +594,7 @@ func TestVideoRecoveryAfterCheckpointWriteFailure(t *testing.T) {
 				if err := fx.jobs.UpdateMediaJob(ctx, stored); err != nil {
 					t.Fatal(err)
 				}
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 				if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -675,7 +675,7 @@ func TestLegacyInProgressVideoCannotBeAssumedUnsubmitted(t *testing.T) {
 	if err := fx.jobs.CreateMediaJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	fx.service.ConfigureMedia(fx.jobs, 1)
+	fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 	if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -779,7 +779,7 @@ func TestVideoNativeTerminalFacts(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 				fx.service.UpdateVideoMaxAttempts(3)
 				job := createVideoAuthorizationJob(t, fx)
 				done := make(chan struct{})

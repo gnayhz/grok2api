@@ -45,6 +45,3 @@ func (r *ReadCloser) Close() error {
 	r.cancel(nil)
 	return r.ReadCloser.Close()
 }
-
-// TimedOut exposes immutable timeout state for lifecycle tests and diagnostics.
-func (r *ReadCloser) TimedOut() bool { return r.timedOut.Load() }

@@ -6,43 +6,24 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-	"sync"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
+)
+
+type (
+	Selection = physical.Selection
+	Trace     = physical.Trace
 )
 
 // buildSessionContextKey carries a soft Build reuse hint. Pool strategy,
 // eligibility, account isolation and fresh connections remain network policy.
 type buildSessionContextKey struct{}
 
-// Selection is the egress snapshot actually selected for an upstream request. It contains only metadata safe for audit
-// and excludes proxy URLs, credentials, User-Agent, and Cookies.
-type Selection struct {
-	NodeID   uint64
-	NodeName string
-	Scope    domain.Scope
-	Proxied  bool
-	// Pool marks a proxy-pool (rotating-endpoint) selection: consecutive
-	// requests through the same node leave through DIFFERENT exit IPs, which
-	// the Build risk probe relies on for its differential second attempt.
-	Pool       bool
-	Connection ConnectionPolicy
-}
-
-// Trace retains the most recent actual egress selection per scope. When a request retries egress, audit records the final attempt.
-// Web asset archival uses an independent scope and does not overwrite the primary Grok Web inference egress.
-type Trace struct {
-	mu         sync.RWMutex
-	selections map[domain.Scope]Selection
-}
-
-type traceContextKey struct{}
 type accountContextKey struct{}
 type pinnedNodeContextKey struct{}
-type qualityVerificationContextKey struct{}
 type trafficClassContextKey struct{}
-type nodeExclusionsContextKey struct{}
 
 // WithTrafficClass labels one upstream call with its operational purpose so
 // egress route rules can select a dedicated exit without matching URLs. Calls
@@ -90,10 +71,10 @@ func WithCredential(ctx context.Context, credential accountdomain.Credential) co
 }
 
 // WithPinnedNode pins one upstream call to a specific node, bypassing routing
-// but still honoring cooldowns, degrade-guard exclusions and probe waits.
-// It is set by degraded same-account retries (the retry re-enters the same exit
-// unless it is cooling) and by tests; exit-IP quality verification instead uses
-// WithQualityVerificationNode, which bypasses those guards.
+// but still honoring cooldowns, degrade-guard exclusions and probe waits. It
+// is a live-test/debug pinning entry (not on the main request path);
+// exit-IP quality verification instead uses WithQualityVerificationNode,
+// which bypasses those guards.
 func WithPinnedNode(ctx context.Context, nodeID uint64) context.Context {
 	if ctx == nil || nodeID == 0 {
 		return ctx
@@ -109,24 +90,8 @@ func pinnedNodeFromContext(ctx context.Context) uint64 {
 	return value
 }
 
-// WithQualityVerificationNode 把一次调用钉到受检节点并绕过冷却/排除守卫。
-// 出口质量 canary 验证的对象必然处于质量隔离冷却(L2 软冷却也可能仍在生效,
-// 它们在 canary 判定通过/暂定放行时才被清除); 若钉住路径同样拒绝冷却节点,
-// canary 永远无法执行, "验证通过→解除隔离"的回池链路整体失效。与
-// WithPinnedNode(降智同号重试, 仍受冷却与探活等待约束)语义不同。
-func WithQualityVerificationNode(ctx context.Context, nodeID uint64) context.Context {
-	if ctx == nil || nodeID == 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, qualityVerificationContextKey{}, nodeID)
-}
-
 func qualityVerificationNodeFromContext(ctx context.Context) uint64 {
-	if ctx == nil {
-		return 0
-	}
-	value, _ := ctx.Value(qualityVerificationContextKey{}).(uint64)
-	return value
+	return physical.QualityVerificationNode(ctx)
 }
 
 // account-bound proxy templates such as Resin. Providers that represent the
@@ -177,77 +142,16 @@ func buildSessionFromContext(ctx context.Context) string {
 	return value
 }
 
-// WithTrace creates or reuses a concurrency-safe egress selection trace for one gateway request.
-func WithTrace(ctx context.Context) (context.Context, *Trace) {
-	if existing := TraceFromContext(ctx); existing != nil {
-		return ctx, existing
-	}
-	trace := &Trace{selections: make(map[domain.Scope]Selection)}
-	return context.WithValue(ctx, traceContextKey{}, trace), trace
-}
-
-// TraceFromContext returns the egress trace from context, or nil when none is configured.
 func TraceFromContext(ctx context.Context) *Trace {
-	if ctx == nil {
-		return nil
-	}
-	trace, _ := ctx.Value(traceContextKey{}).(*Trace)
-	return trace
-}
-
-// Selection returns a safe snapshot of the most recent actual egress selection for a scope.
-func (t *Trace) Selection(scope domain.Scope) (Selection, bool) {
-	if t == nil {
-		return Selection{}, false
-	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	value, ok := t.selections[scope]
-	return value, ok
-}
-
-// Record appends an actual egress selection for a scope. It is the exported
-// counterpart of the manager-internal recordSelection: provider test doubles
-// use it to seed the trace (e.g. rotating-pool selections) so request-path
-// policies that depend on the egress shape can be exercised end to end.
-func (t *Trace) Record(value Selection) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	t.selections[value.Scope] = value
-	t.mu.Unlock()
-}
-
-// WithNodeExclusions attaches the request-scoped set of egress node IDs that
-// must not serve this request. The real-time quality guard populates it after
-// a degraded attempt so the in-request retry lands on a different fixed exit
-// IP instead of re-entering the same degraded node (account bindings included).
-func WithNodeExclusions(ctx context.Context, nodeIDs map[uint64]struct{}) context.Context {
-	if ctx == nil || len(nodeIDs) == 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, nodeExclusionsContextKey{}, nodeIDs)
+	return physical.TraceFromContext(ctx)
 }
 
 func nodeExcluded(ctx context.Context, nodeID uint64) bool {
-	if ctx == nil || nodeID == 0 {
-		return false
-	}
-	excluded, ok := ctx.Value(nodeExclusionsContextKey{}).(map[uint64]struct{})
-	if !ok {
-		return false
-	}
-	_, hit := excluded[nodeID]
-	return hit
+	return physical.NodeExcluded(ctx, nodeID)
 }
 
 func recordSelection(ctx context.Context, value Selection) {
-	trace := TraceFromContext(ctx)
-	if trace == nil {
-		return
+	if trace := TraceFromContext(ctx); trace != nil {
+		trace.Record(value)
 	}
-	trace.mu.Lock()
-	trace.selections[value.Scope] = value
-	trace.mu.Unlock()
 }

@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
@@ -57,7 +58,7 @@ func TestHTTPConsoleQuotaTimingBelongsToAccountOwner(t *testing.T) {
 						started := time.Now().UTC()
 						if entry == "full" {
 							router := gin.New()
-							accounthttp.NewHandler(f.accountService, nil).Register(router.Group("/api/admin/v1"))
+							accounthttp.NewHandler(accounthttp.Dependencies{Administration: f.accountService, Credentials: f.accountService, Maintenance: f.accountService, Onboarding: accountsyncapp.NewOnboarding(f.accountService, f.accountService, nil)}).Register(router.Group("/api/admin/v1"))
 							output := httptest.NewRecorder()
 							router.ServeHTTP(output, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/v1/accounts/%d/refresh-quota", f.accountID), nil))
 							if output.Code != 200 {

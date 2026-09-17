@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/admin"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -57,16 +58,18 @@ type Tokens struct {
 type Service struct {
 	admins            repository.AdminRepository
 	sessions          repository.AdminSessionRepository
-	tokens            *security.TokenService
+	tokens            portcrypto.AdminTokenManager
+	hasher            portcrypto.PasswordHasher
+	random            portcrypto.TokenSource
 	accessTTL         time.Duration
 	refreshTTL        time.Duration
 	loginLimiter      repository.RateLimiter
 	dummyPasswordHash string
 }
 
-func NewService(admins repository.AdminRepository, sessions repository.AdminSessionRepository, tokens *security.TokenService, accessTTL, refreshTTL time.Duration) *Service {
-	dummyHash, _ := security.HashPassword("grok2api-invalid-admin-password")
-	return &Service{admins: admins, sessions: sessions, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, dummyPasswordHash: dummyHash}
+func NewService(admins repository.AdminRepository, sessions repository.AdminSessionRepository, tokens portcrypto.AdminTokenManager, hasher portcrypto.PasswordHasher, random portcrypto.TokenSource, accessTTL, refreshTTL time.Duration) *Service {
+	dummyHash, _ := hasher.HashPassword("grok2api-invalid-admin-password")
+	return &Service{admins: admins, sessions: sessions, tokens: tokens, hasher: hasher, random: random, accessTTL: accessTTL, refreshTTL: refreshTTL, dummyPasswordHash: dummyHash}
 }
 
 func (s *Service) SetLoginRateLimiter(limiter repository.RateLimiter) { s.loginLimiter = limiter }
@@ -83,7 +86,7 @@ func (s *Service) Bootstrap(ctx context.Context, username, password string) erro
 	if strings.TrimSpace(username) == "" || !validPasswordLength(password) {
 		return ErrBootstrapRequired
 	}
-	hash, err := security.HashPassword(password)
+	hash, err := s.hasher.HashPassword(password)
 	if err != nil {
 		return err
 	}
@@ -99,13 +102,13 @@ func (s *Service) Login(ctx context.Context, username, password, remoteAddress s
 	}
 	value, err := s.admins.GetByUsername(ctx, username)
 	if err != nil {
-		_ = security.VerifyPassword(s.dummyPasswordHash, password)
+		_ = s.hasher.VerifyPassword(s.dummyPasswordHash, password)
 		if !errors.Is(err, repository.ErrNotFound) {
 			return admin.Admin{}, Tokens{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 		}
 		return admin.Admin{}, Tokens{}, ErrInvalidCredentials
 	}
-	if !security.VerifyPassword(value.PasswordHash, password) {
+	if !s.hasher.VerifyPassword(value.PasswordHash, password) {
 		return admin.Admin{}, Tokens{}, ErrInvalidCredentials
 	}
 	tokens, _, err := s.createSession(ctx, value.PasswordRef())
@@ -114,7 +117,7 @@ func (s *Service) Login(ctx context.Context, username, password, remoteAddress s
 
 // Refresh 轮换 refresh token，旧 token 立即失效。
 func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, error) {
-	hash := security.HashToken(rawRefreshToken)
+	hash := tokenhash.HashToken(rawRefreshToken)
 	session, err := s.sessions.GetByTokenHash(ctx, hash)
 	if err != nil {
 		if !errors.Is(err, repository.ErrNotFound) {
@@ -149,12 +152,12 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Tokens, 
 	if err != nil {
 		return Tokens{}, err
 	}
-	refreshToken, err := security.NewOpaqueToken(32)
+	refreshToken, err := s.random.NewOpaqueToken(32)
 	if err != nil {
 		return Tokens{}, err
 	}
 	refreshExpiresAt := time.Now().UTC().Add(s.refreshTTL)
-	if err := s.sessions.Rotate(ctx, session.ID, hash, security.HashToken(refreshToken), refreshExpiresAt); err != nil {
+	if err := s.sessions.Rotate(ctx, session.ID, hash, tokenhash.HashToken(refreshToken), refreshExpiresAt); err != nil {
 		if errors.Is(err, repository.ErrConflict) {
 			// 轮换冲突 = 并发竞争中另一方刚刚完成轮换（同 token 重复刷新
 			// 竞速）。session 变量是竞速前的旧快照——按 ID 重取最新行再判
@@ -196,7 +199,7 @@ func (s *Service) revokeSessionIfLateReuse(ctx context.Context, session admin.Se
 func (s *Service) Logout(ctx context.Context, rawRefreshToken string) error {
 	// A concurrent refresh may have committed before its new cookie reached
 	// the browser. Explicit logout also revokes its immediately previous token.
-	if err := s.sessions.RevokeByTokenHash(ctx, security.HashToken(rawRefreshToken)); err != nil && !errors.Is(err, repository.ErrNotFound) {
+	if err := s.sessions.RevokeByTokenHash(ctx, tokenhash.HashToken(rawRefreshToken)); err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	return nil
@@ -240,10 +243,10 @@ func (s *Service) ChangePassword(ctx context.Context, adminID uint64, currentPas
 		}
 		return ErrInvalidCredentials
 	}
-	if !security.VerifyPassword(value.PasswordHash, currentPassword) {
+	if !s.hasher.VerifyPassword(value.PasswordHash, currentPassword) {
 		return ErrInvalidCredentials
 	}
-	hash, err := security.HashPassword(newPassword)
+	hash, err := s.hasher.HashPassword(newPassword)
 	if err != nil {
 		return err
 	}
@@ -257,12 +260,12 @@ func (s *Service) ChangePassword(ctx context.Context, adminID uint64, currentPas
 }
 
 func (s *Service) createSession(ctx context.Context, expected admin.PasswordRef) (Tokens, admin.Session, error) {
-	refreshToken, err := security.NewOpaqueToken(32)
+	refreshToken, err := s.random.NewOpaqueToken(32)
 	if err != nil {
 		return Tokens{}, admin.Session{}, err
 	}
 	refreshExpiresAt := time.Now().UTC().Add(s.refreshTTL)
-	session, err := s.sessions.CreateForPassword(ctx, expected, security.HashToken(refreshToken), refreshExpiresAt)
+	session, err := s.sessions.CreateForPassword(ctx, expected, tokenhash.HashToken(refreshToken), refreshExpiresAt)
 	if err != nil {
 		if errors.Is(err, repository.ErrConflict) || errors.Is(err, repository.ErrNotFound) {
 			return Tokens{}, admin.Session{}, ErrInvalidCredentials
@@ -286,8 +289,8 @@ func (s *Service) checkLoginRate(ctx context.Context, username, remoteAddress st
 		key   string
 		limit int
 	}{
-		{key: "admin-login:ip:" + security.HashToken(strings.TrimSpace(remoteAddress)), limit: 30},
-		{key: "admin-login:user:" + security.HashToken(strings.ToLower(username)), limit: 12},
+		{key: "admin-login:ip:" + tokenhash.HashToken(strings.TrimSpace(remoteAddress)), limit: 30},
+		{key: "admin-login:user:" + tokenhash.HashToken(strings.ToLower(username)), limit: 12},
 	}
 	for _, item := range keys {
 		allowed, retryAfter, err := s.loginLimiter.Allow(ctx, item.key, item.limit, now)

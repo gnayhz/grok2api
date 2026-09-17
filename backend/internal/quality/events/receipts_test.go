@@ -9,6 +9,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 func TestReceiptPhasesRemainAtomicAndDistinct(t *testing.T) {
@@ -51,7 +52,7 @@ func TestReceiptPhasesRemainAtomicAndDistinct(t *testing.T) {
 					}
 					seen := map[string]string{}
 					for _, row := range rows {
-						var event journal.Event
+						var event qualitymodel.Event
 						if err := json.Unmarshal([]byte(row.Payload), &event); err != nil {
 							t.Fatal(err)
 						}

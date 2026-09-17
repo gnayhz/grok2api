@@ -134,27 +134,14 @@ func NormalizeHealthMarker(value string) string {
 // RiskStatusRSCDenied 标记 RSC 判定注册风控的账号：保持启用但调度永久跳过。
 const RiskStatusRSCDenied = "rsc_denied"
 
-// 风控触发来源：请求路径降智归因 / SSO 主动巡检 / 管理员手动标记。
+// 风控触发来源。当前唯一的生产写入方是管理员标记（RiskTriggerManual，
+// 见 application/account/admin.go:patch.Risk.Trigger）。曾产生 patrol 的
+// RSC 主动巡检子系统已整体移除，patrol/witness 不再有生产者，故一并删除。
+// degrade 保留：它仍被测试用于构造"请求路径归因"的历史状态。
 const (
 	RiskTriggerDegrade = "degrade"
-	RiskTriggerPatrol  = "patrol"
 	RiskTriggerManual  = "manual"
-	RiskTriggerWitness = "witness"
 )
-
-// EgressAssignmentMode 表示账号出口节点的维护方式。手工绑定绝不会被
-// 自动均衡任务迁移，自动绑定才允许在健康或容量变化时重新分配。
-// (上游账号-出口绑定体系;本分支的池路由之外,仓储层仍保留该绑定面。)
-type EgressAssignmentMode string
-
-const (
-	EgressAssignmentManual EgressAssignmentMode = "manual"
-	EgressAssignmentAuto   EgressAssignmentMode = "auto"
-)
-
-func (value EgressAssignmentMode) IsValid() bool {
-	return value == EgressAssignmentManual || value == EgressAssignmentAuto
-}
 
 // Credential 表示持久化的上游 OAuth 账号。
 type Credential struct {
@@ -205,7 +192,8 @@ type Credential struct {
 	// 调度必须跳过（与 Enabled 无关，保留账号真实可用状态），直到人工
 	// 清空或 DeniedTTL 后巡检复测 clean。
 	RiskStatus string
-	// RiskTrigger 记录打标来源：degrade / patrol / manual / witness。
+	// RiskTrigger 记录打标来源：manual（管理员标记）或 degrade（历史请求路径
+	// 归因）。patrol/witness 的生产者随 RSC 巡检子系统一并移除。
 	RiskTrigger string
 	// RiskOriginAccountID 触发判定的账号（SSO 巡检时为 Web 身份，Build 降智时为该 Build）。
 	RiskOriginAccountID uint64
@@ -221,9 +209,7 @@ type Credential struct {
 	EgressIdentity string
 	// EgressNodeID 是账号显式绑定的出口节点。0 表示沿用当前 scope 的
 	// 池选择逻辑；非零值必须优先使用该节点，不能悄悄回退到其他代理。
-	EgressNodeID         uint64
-	EgressAssignmentMode EgressAssignmentMode
-	EgressAssignedAt     *time.Time
+	EgressNodeID uint64
 	// WebNSFWEnabledAt 记录 Grok Web 上游首次确认 NSFW 已成功开启的时间。
 	// 普通导入、额度同步和凭据更新不得清除。
 	WebNSFWEnabledAt *time.Time
@@ -351,8 +337,11 @@ func IsWebImagineQuotaMode(mode string) bool {
 
 // QuotaWindow 表示 Provider 单个模式的额度窗口。
 type QuotaWindow struct {
-	AccountID       uint64
-	Mode            string
+	AccountID uint64
+	Mode      string
+	// Provider 是窗口所属账号的 Provider，跨账号加载窗口时由存储层随行返回；
+	// 单账号查询可以留空，此时按 Provider 判定的调用方必须显式传入已知值。
+	Provider        Provider
 	SnapshotVersion uint64
 	Revision        uint64
 	Remaining       int
@@ -376,13 +365,9 @@ type QuotaBreakdown struct {
 }
 
 const (
-	QuotaProductThirdParty = 0
-	QuotaProductAPI        = 1
-	QuotaProductBuild      = 2
-	QuotaProductPlugins    = 3
-	QuotaProductChat       = 4
-	QuotaProductImagine    = 5
-	QuotaProductVoice      = 6
+	QuotaProductBuild   = 2
+	QuotaProductChat    = 4
+	QuotaProductImagine = 5
 )
 
 type QuotaRecoveryEvent struct {
@@ -484,7 +469,6 @@ type RoutingCandidate struct {
 	Billing              *Billing
 	QuotaWindow          *QuotaWindow
 	QuotaRecovery        *QuotaRecovery
-	EgressLeaseBlock     *EgressLeaseBlock
 	ModelQuotaBlock      *ModelQuotaBlock
 	ModelCapabilityKnown bool
 	SupportsModel        bool
@@ -493,11 +477,10 @@ type RoutingCandidate struct {
 // RoutingAccountBase contains provider-level routing state reusable across
 // models. Credential material is hydrated only after an account is selected.
 type RoutingAccountBase struct {
-	Credential       Credential
-	Billing          *Billing
-	QuotaRecovery    *QuotaRecovery
-	QuotaWindow      *QuotaWindow
-	EgressLeaseBlock *EgressLeaseBlock
+	Credential    Credential
+	Billing       *Billing
+	QuotaRecovery *QuotaRecovery
+	QuotaWindow   *QuotaWindow
 }
 
 // RoutingAccountOverlay contains model-specific eligibility state.
@@ -521,26 +504,6 @@ type ModelQuotaBlock struct {
 	Reason        string
 	CooldownUntil time.Time
 	UpdatedAt     time.Time
-}
-
-// EgressLeaseBlock temporarily removes one account-bound proxy lease from
-// routing without changing the account's health or disabling the physical
-// egress node shared by other leases.
-type EgressLeaseBlock struct {
-	AccountID     uint64
-	NodeID        uint64
-	Reason        string
-	Version       string
-	CooldownUntil time.Time
-	UpdatedAt     time.Time
-}
-
-// EgressLeaseBlockCursor is the stable keyset position used to scan durable
-// lease state while rows may be renewed or removed concurrently.
-type EgressLeaseBlockCursor struct {
-	CooldownUntil time.Time
-	AccountID     uint64
-	NodeID        uint64
 }
 
 // DeviceSession 表示一次短期 Device OAuth 授权流程。
@@ -632,6 +595,19 @@ func IsBuildSuper(credential Credential, billing *Billing) bool {
 		return true
 	}
 	return billing != nil && billing.IsPaid()
+}
+
+// RoutingModelCapability 是"候选模型能力何时视为已知/支持"的唯一判定
+// (M06 选号资格语义):静态额度模式(Console 任一静态模式、Web 图像/视频
+// 模式)、绑定了客户端 Key、或共享 Super 的 Build Super 账号都视为
+// 已知且支持;否则沿用目录同步的 known/supported 事实。存储层
+// (relational 的候选/领取查询)调用本函数,不在 SQL 侧另写规则。
+func RoutingModelCapability(provider Provider, quotaMode string, keyBound, sharedSuper bool, credential Credential, billing *Billing, known, supported bool) (capabilityKnown, supportsModel bool) {
+	static := (provider == ProviderConsole && strings.TrimSpace(quotaMode) != "") || (provider == ProviderWeb && IsWebImagineQuotaMode(quotaMode))
+	if static || keyBound || (sharedSuper && IsBuildSuper(credential, billing)) {
+		return true, true
+	}
+	return known, supported
 }
 
 // IsKnownFreeBuild 判断候选是否是已确认的 Grok Build Free 账号。

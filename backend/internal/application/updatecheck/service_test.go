@@ -3,28 +3,18 @@ package updatecheck
 import (
 	"context"
 	"errors"
-	"io"
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 )
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
+type releaseSourceFunc func(context.Context) (Release, error)
 
-func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return function(request)
-}
+func (f releaseSourceFunc) LatestRelease(ctx context.Context) (Release, error) { return f(ctx) }
 
 func TestCheckFindsLatestRelease(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		// UA 刻意不带精确版本(发往第三方 api.github.com 的被动指纹), 只断言前缀。
-		if request.URL.String() != latestReleaseAPI || !strings.HasPrefix(request.Header.Get("User-Agent"), "grok2api/") {
-			t.Fatalf("request = %#v", request)
-		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Release notes"}`)), Header: make(http.Header)}, nil
-	})}
-	service := NewService("v3.0.0", client)
+	service := NewService("v3.0.0", releaseSourceFunc(func(context.Context) (Release, error) {
+		return Release{Tag: "v3.0.1", URL: "https://github.com/chenyme/grok2api/releases/tag/v3.0.1", Notes: "Release notes"}, nil
+	}))
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	snapshot := service.Check(context.Background())
@@ -38,13 +28,12 @@ func TestCheckFindsLatestRelease(t *testing.T) {
 
 func TestCheckFailureKeepsLastSuccessfulRelease(t *testing.T) {
 	fail := false
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	service := NewService("v3.0.0", releaseSourceFunc(func(context.Context) (Release, error) {
 		if fail {
-			return nil, errors.New("network down")
+			return Release{}, errors.New("network down")
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.0","body":"Stable"}`)), Header: make(http.Header)}, nil
-	})}
-	service := NewService("v3.0.0", client)
+		return Release{Tag: "v3.0.0", Notes: "Stable"}, nil
+	}))
 	first := service.Check(context.Background())
 	fail = true
 	second := service.Check(context.Background())
@@ -80,10 +69,9 @@ func TestSemanticVersionComparison(t *testing.T) {
 }
 
 func TestCheckFindsHotfixAfterStableRelease(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.8-hotfix.1"}`)), Header: make(http.Header)}, nil
-	})}
-	service := NewService("v3.0.8", client)
+	service := NewService("v3.0.8", releaseSourceFunc(func(context.Context) (Release, error) {
+		return Release{Tag: "v3.0.8-hotfix.1"}, nil
+	}))
 	snapshot := service.Check(context.Background())
 	if snapshot.Status != StatusUpdateAvailable || !snapshot.UpdateAvailable {
 		t.Fatalf("snapshot = %#v", snapshot)

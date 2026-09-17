@@ -649,7 +649,7 @@ func TestParseWebSearchCallBoundsUpstreamQuery(t *testing.T) {
 
 func TestStreamCapsWebSearchCallsBeforeEmission(t *testing.T) {
 	var output strings.Builder
-	converter := newStreamConverter(&output, OperationMessages, ResponseOptions{AnthropicWebSearch: true})
+	converter := newStreamConverterWithBudget(&output, OperationMessages, ResponseOptions{AnthropicWebSearch: true}, nil)
 	for index := 0; index < maxWebSearchCalls+10; index++ {
 		call := webSearchCall{
 			ID:    "srvtoolu_stream_" + strconv.Itoa(index),
@@ -669,7 +669,7 @@ func TestStreamCapsWebSearchCallsBeforeEmission(t *testing.T) {
 }
 
 func TestStreamRejectsOversizedDeferredSearchText(t *testing.T) {
-	converter := newStreamConverter(io.Discard, OperationMessages, ResponseOptions{AnthropicWebSearch: true})
+	converter := newStreamConverterWithBudget(io.Discard, OperationMessages, ResponseOptions{AnthropicWebSearch: true}, nil)
 	data, err := json.Marshal(map[string]any{
 		"type":  "response.output_text.delta",
 		"delta": strings.Repeat("x", (8<<20)+1),

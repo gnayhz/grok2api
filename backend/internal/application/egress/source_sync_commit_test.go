@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -169,6 +170,8 @@ func TestSourceSyncOlderCompletionPreservesNewerResult(t *testing.T) {
 		t.Fatal(bounded.Err())
 	}
 	peer := NewService(repo, service.cipher)
+	peer.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	peer.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	defer peer.Close(ctx)
 	if _, err := peer.SyncSource(bounded, source.ID); err != nil {
 		t.Fatal(err)

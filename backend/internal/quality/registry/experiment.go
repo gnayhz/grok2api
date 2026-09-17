@@ -2,7 +2,6 @@ package registry
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
@@ -49,7 +48,7 @@ func (r *Registry) OpenInvestigation(ctx context.Context, accountID uint64, exit
 			if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&state).Error; err != nil {
 				return err
 			}
-			next.accounts[accountID] = AccountEntry{State: model.AccountRemanded, StateSince: now, CurrentCaseID: id}
+			next.accounts[accountID] = model.AccountEntry{State: model.AccountRemanded, StateSince: now, CurrentCaseID: id}
 		}
 		if err := tx.Create(&party).Error; err != nil {
 			return err
@@ -68,7 +67,7 @@ func (r *Registry) OpenInvestigation(ctx context.Context, accountID uint64, exit
 			if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&state).Error; err != nil {
 				return err
 			}
-			next.exitStates[exit] = ExitEntry{State: model.ExitRemanded, StateSince: now, CurrentCaseID: id}
+			next.exitStates[exit] = model.ExitEntry{State: model.ExitRemanded, StateSince: now, CurrentCaseID: id}
 		}
 		return tx.Create(&exitParty).Error
 	})
@@ -88,15 +87,10 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 		})
 	}
 	manual := len(manualRelease) > 0 && manualRelease[0]
-	status := model.CaseDismissed
-	switch verdict {
-	case model.VerdictAccountGuilty:
-		status = model.CaseAccountGuilty
-	case model.VerdictExitGuilty:
-		status = model.CaseExitGuilty
-	case model.VerdictInsufficient:
-	default:
-		return fmt.Errorf("invalid experiment verdict %q", verdict)
+	// 判决到案件终态映射由领域纯规则唯一解释；事务在锁内调用。
+	status, statusErr := model.CaseStatusForVerdict(verdict)
+	if statusErr != nil {
+		return statusErr
 	}
 	select {
 	case r.transitionMu <- struct{}{}:
@@ -132,11 +126,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 						return err
 					}
 					entry := next.accounts[party.AccountID]
-					entry.State = model.AccountRemanded
-					if holder.CaseID != 0 {
-						entry.State = model.AccountSentenced
-						entry.CurrentCaseID = holder.CaseID
-					}
+					entry.State, entry.CurrentCaseID = model.ReviewReleaseAccount(holder.CaseID, entry.CurrentCaseID)
 					next.accounts[party.AccountID] = entry
 					if err := tx.Model(&qAccountStateModel{}).Where("account_id=?", party.AccountID).Updates(map[string]any{"state": string(entry.State), "current_case_id": entry.CurrentCaseID}).Error; err != nil {
 						return err
@@ -149,11 +139,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 						return err
 					}
 					entry := next.exitStates[key]
-					entry.State = model.ExitRemanded
-					if holder.CaseID != 0 {
-						entry.State = model.ExitBanned
-						entry.CurrentCaseID = holder.CaseID
-					}
+					entry.State, entry.CurrentCaseID = model.ReviewReleaseExit(holder.CaseID, entry.CurrentCaseID)
 					next.exitStates[key] = entry
 					if err := tx.Model(&qExitStateModel{}).Where("node_id=? AND epoch=?", party.NodeID, party.Epoch).Updates(map[string]any{"state": string(entry.State), "current_case_id": entry.CurrentCaseID}).Error; err != nil {
 						return err
@@ -187,7 +173,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 					if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
 						return err
 					}
-					next.accounts[party.AccountID] = AccountEntry{State: model.AccountSentenced, StateSince: now, CurrentCaseID: caseID}
+					next.accounts[party.AccountID] = model.AccountEntry{State: model.AccountSentenced, StateSince: now, CurrentCaseID: caseID}
 				} else if next.accounts[party.AccountID].State != model.AccountSentenced {
 					if err := releaseUnheldAccount(tx, next, party.AccountID); err != nil {
 						return err
@@ -203,7 +189,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 					if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
 						return err
 					}
-					next.exitStates[key] = ExitEntry{State: state, StateSince: now, CurrentCaseID: caseID}
+					next.exitStates[key] = model.ExitEntry{State: state, StateSince: now, CurrentCaseID: caseID}
 				} else if next.exitStates[key].State != model.ExitBanned {
 					if err := releaseUnheldExit(tx, next, key); err != nil {
 						return err

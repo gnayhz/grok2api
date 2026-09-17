@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/gin-gonic/gin"
@@ -49,10 +49,10 @@ func TestBillingResetConflictIsVisibleOverHTTP(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher)), cipher, nil)
+	service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher)), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+	newTestHandler(service, nil).Register(router.Group("/api/admin/v1"))
 	server := httptest.NewServer(router)
 	defer server.Close()
 	response, err := http.Post(fmt.Sprintf("%s/api/admin/v1/accounts/%d/refresh-billing", server.URL, v.ID), "application/json", strings.NewReader(`{}`))

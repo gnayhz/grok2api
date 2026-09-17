@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/sessionidentity"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // SyncAccountIdentity 从 Grok Web 会话读取非敏感身份元数据。
@@ -16,10 +16,6 @@ func (a *Adapter) SyncAccountIdentity(ctx context.Context, credential account.Cr
 		return provider.AccountIdentity{}, fmt.Errorf("仅 Grok Web SSO 账号支持身份同步")
 	}
 	return sessionidentity.Fetch(ctx, a.config().BaseURL, credential, a.egress, a.cipher)
-}
-
-func parseAccountIdentity(body []byte) (provider.AccountIdentity, error) {
-	return sessionidentity.Parse(body)
 }
 
 var _ provider.AccountIdentityAdapter = (*Adapter)(nil)

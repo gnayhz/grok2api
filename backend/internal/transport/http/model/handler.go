@@ -2,21 +2,19 @@ package model
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"log/slog"
-
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	httphelpers "github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,7 +22,6 @@ type Handler struct{ service *modelapp.Service }
 
 const (
 	modelSyncHeartbeatInterval = 15 * time.Second
-	modelSyncWriteTimeout      = 30 * time.Second
 )
 
 func NewHandler(service *modelapp.Service) *Handler { return &Handler{service: service} }
@@ -100,7 +97,7 @@ type accountOptionResponse struct {
 }
 
 func (h *Handler) list(c *gin.Context) {
-	page, pageSize := pagination(c)
+	page, pageSize := httphelpers.Pagination(c)
 	activeScope, ok := parseOptionalBool(c.Query("activeScope"))
 	if !ok {
 		response.Error(c, http.StatusBadRequest, "invalidFilter", "activeScope 必须是 true 或 false")
@@ -123,7 +120,7 @@ func (h *Handler) list(c *gin.Context) {
 }
 
 func (h *Handler) listGroups(c *gin.Context) {
-	page, pageSize := pagination(c)
+	page, pageSize := httphelpers.Pagination(c)
 	values, total, err := h.service.ListGroups(c.Request.Context(), page, pageSize, c.Query("search"), modelapp.ListFilter{
 		Provider: c.Query("provider"), Status: c.Query("status"),
 		Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))},
@@ -171,7 +168,7 @@ func parseOptionalBool(value string) (bool, bool) {
 }
 
 func (h *Handler) listAccounts(c *gin.Context) {
-	page, pageSize := pagination(c)
+	page, pageSize := httphelpers.Pagination(c)
 	values, total, err := h.service.ListBindableAccounts(c.Request.Context(), account.Provider(c.Query("provider")), page, pageSize, c.Query("search"))
 	if err != nil {
 		h.writeServiceError(c, "modelAccountListFailed", err)
@@ -192,7 +189,7 @@ func (h *Handler) create(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
 		return
 	}
-	accountIDs, err := parseIDs(request.AccountIDs)
+	accountIDs, err := httphelpers.ParseIDs(request.AccountIDs)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
@@ -214,14 +211,11 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
-	ids := make([]uint64, 0, len(request.IDs))
-	for _, value := range request.IDs {
-		id, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || id == 0 {
-			response.Error(c, http.StatusBadRequest, "invalidId", fmt.Sprintf("无效模型 ID: %s", value))
-			return
-		}
-		ids = append(ids, id)
+	ids, err := httphelpers.ParseIDs(request.IDs)
+	if err != nil {
+		// 批量开关沿用模型面历史文案（与 create/delete 的「无效 ID」不同）。
+		response.Error(c, http.StatusBadRequest, "invalidId", "无效模型 ID: "+httphelpers.InvalidIDValue(err))
+		return
 	}
 	updated, err := h.service.BatchSetEnabled(c.Request.Context(), ids, request.Enabled)
 	if err != nil {
@@ -237,7 +231,7 @@ func (h *Handler) batchDelete(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
-	ids, err := parseIDs(request.IDs)
+	ids, err := httphelpers.ParseIDs(request.IDs)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
@@ -251,9 +245,7 @@ func (h *Handler) batchDelete(c *gin.Context) {
 }
 
 func (h *Handler) sync(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream; charset=utf-8")
-	c.Header("Cache-Control", "no-cache, no-transform")
-	c.Header("X-Accel-Buffering", "no")
+	httphelpers.SSEHeaders(c)
 	if err := writeModelSyncComment(c, "connected"); err != nil {
 		return
 	}
@@ -328,43 +320,16 @@ func (h *Handler) syncProgress(c *gin.Context) {
 }
 
 func writeModelSyncEvent(c *gin.Context, event string, value any) error {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	if err := setModelSyncWriteDeadline(c.Writer); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, payload); err != nil {
-		return err
-	}
-	c.Writer.Flush()
-	return c.Request.Context().Err()
+	return httphelpers.SSEEvent(c, event, value)
 }
 
 func writeModelSyncComment(c *gin.Context, comment string) error {
-	if err := setModelSyncWriteDeadline(c.Writer); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(c.Writer, ": %s\n\n", comment); err != nil {
-		return err
-	}
-	c.Writer.Flush()
-	return c.Request.Context().Err()
-}
-
-func setModelSyncWriteDeadline(writer http.ResponseWriter) error {
-	err := http.NewResponseController(writer).SetWriteDeadline(time.Now().Add(modelSyncWriteTimeout))
-	if errors.Is(err, http.ErrNotSupported) {
-		return nil
-	}
-	return err
+	return httphelpers.SSEComment(c, comment)
 }
 
 func (h *Handler) update(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+	id, ok := httphelpers.PathID(c)
+	if !ok {
 		return
 	}
 	var request updateRequest
@@ -374,7 +339,7 @@ func (h *Handler) update(c *gin.Context) {
 	}
 	var accountIDs *[]uint64
 	if request.AccountIDs != nil {
-		parsed, parseErr := parseIDs(*request.AccountIDs)
+		parsed, parseErr := httphelpers.ParseIDs(*request.AccountIDs)
 		if parseErr != nil {
 			response.Error(c, http.StatusBadRequest, "invalidId", parseErr.Error())
 			return
@@ -390,9 +355,8 @@ func (h *Handler) update(c *gin.Context) {
 }
 
 func (h *Handler) delete(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+	id, ok := httphelpers.PathID(c)
+	if !ok {
 		return
 	}
 	if err := h.service.Delete(c.Request.Context(), id); err != nil {
@@ -439,22 +403,4 @@ func newModelGroupResponse(value modelapp.RouteGroup) modelGroupResponse {
 		ids = append(ids, strconv.FormatUint(route.ID, 10))
 	}
 	return modelGroupResponse{Key: strings.Join(ids, ":"), Routes: routes, EndpointCapabilities: append([]string(nil), value.EndpointCapabilities...)}
-}
-
-func parseIDs(values []string) ([]uint64, error) {
-	ids := make([]uint64, 0, len(values))
-	for _, value := range values {
-		id, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || id == 0 {
-			return nil, fmt.Errorf("无效 ID: %s", value)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
-func pagination(c *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	return repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
 }

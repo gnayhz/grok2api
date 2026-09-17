@@ -16,7 +16,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -80,7 +80,7 @@ func TestVideoJobAdmissionCannotAcceptAlreadyReleasedInput(t *testing.T) {
 				job.Seconds = -1
 				return nil
 			}}
-			fx.service.ConfigureMedia(jobs, 1)
+			fx.service.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 			response := postVideoInput(t, fx, input)
 			if attempted == "" {
 				t.Fatalf("fixture did not cross precheck/reservation: %d %s", response.Code, response.Body.String())
@@ -141,7 +141,7 @@ func TestVideoHTTPAcceptedInputReachesNativeWorkerAndIsReleased(t *testing.T) {
 	})
 	defer upstream.Close()
 	fx := newMediaCompletionFixture(t, upstream.URL, "grok-imagine-video", account.ProviderConsole, func(store provider.ImageAssetStore) provider.ImageAssetStore { return store })
-	fx.service.ConfigureMedia(fx.jobs, 1)
+	fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 	fx.service.ConfigureMediaAssets(fx.media)
 	fx.service.UpdateVideoMaxAttempts(1)
 	input, picture := saveVideoTestInput(t, fx)

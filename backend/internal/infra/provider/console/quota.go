@@ -11,7 +11,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	dialect "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const consoleQuotaTimeout = 30 * time.Second
@@ -67,10 +68,10 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if response.StatusCode == http.StatusUnauthorized ||
-			(response.StatusCode == http.StatusForbidden && provider.IsDefinitiveAccountBlockBody(data)) {
+			(response.StatusCode == http.StatusForbidden && dialect.IsDefinitiveAccountBlockBody(data)) {
 			return nil, time.Time{}, fmt.Errorf("%w: Console usage rejected", provider.ErrUnauthorized)
 		}
-		dpopRequired := response.StatusCode == http.StatusForbidden && provider.IsDPoPProofRequiredBody(data)
+		dpopRequired := response.StatusCode == http.StatusForbidden && dialect.IsDPoPProofRequiredBody(data)
 		if response.StatusCode == http.StatusForbidden && shouldInvalidateConsoleClearance(data) {
 			lease.InvalidateClearance()
 		}

@@ -29,6 +29,32 @@ func TestValidRequestID(t *testing.T) {
 	}
 }
 
+func TestRequestIDWithoutTokenSourceRejectsInvalidCallerID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, input := range []string{"", "contains space", "含中文", strings.Repeat("a", maxRequestIDLength+1), "trace:span.1"} {
+		t.Run(input, func(t *testing.T) {
+			router := gin.New()
+			router.Use(RequestID(nil))
+			var auditID string
+			router.GET("/", func(c *gin.Context) {
+				auditID = c.GetString(RequestIDKey)
+				c.Status(http.StatusNoContent)
+			})
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			request.Header.Set("X-Request-ID", input)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			got := response.Header().Get("X-Request-ID")
+			if !validRequestID(got) || got != auditID {
+				t.Fatalf("response ID %q and audit ID %q must be the same bounded ASCII identifier", got, auditID)
+			}
+			if validRequestID(input) && got != input {
+				t.Fatalf("valid caller ID %q changed to %q", input, got)
+			}
+		})
+	}
+}
+
 func TestClientIPIgnoresForwardedHeadersFromUntrustedPeers(t *testing.T) {
 	got := captureClientIP(t, nil, "198.51.100.10:1234", "203.0.113.20")
 	if got != "198.51.100.10" {

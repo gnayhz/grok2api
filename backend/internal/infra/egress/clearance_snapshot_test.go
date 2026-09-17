@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -41,7 +42,7 @@ func TestRefreshDueClearancesViaSnapshotCacheSemantics(t *testing.T) {
 		ClearanceRefreshedAt: clearanceTestPtrTime(time.Now().UTC().Add(-time.Minute)),
 		ClearanceFingerprint: "", // 指纹不匹配 → 持久状态不算新鲜 → 应触发求解
 	})
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: solver.URL, TargetURL: "https://x.example/"})
 

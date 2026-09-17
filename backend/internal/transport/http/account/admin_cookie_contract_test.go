@@ -35,7 +35,7 @@ func TestAdminCookieAndRiskHTTPContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewHandler(accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, cipher, nil), nil)
+	handler := newTestHandler(accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, cipher, security.RandomTokenSource{}, nil, nil, nil), nil)
 	patch := func(body string, status int) accountdomain.Credential {
 		t.Helper()
 		rec := httptest.NewRecorder()

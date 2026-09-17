@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"fmt"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"os"
 	"testing"
 	"time"
@@ -132,29 +133,29 @@ func TestQuotaRecoverySkipsParkedPagesAndRetainsQueueOverflow(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			service := NewService(nil, nil, nil, nil, nil, nil, nil)
+			service := NewService(nil, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 			service.SetQuotaRefreshCoordinator(pair.first)
-			service.quotaRefreshQueue = make(chan quotaRefreshRequest, 1)
+			service.quotaRefresh.queue = make(chan quotaRefreshRequest, 1)
 			service.recoverSharedQuotaRefreshes(ctx, now)
-			if len(service.quotaRefreshes) != 100 || len(service.quotaRefreshQueue) != 1 {
-				t.Fatalf("first full page not retained: states=%d queue=%d", len(service.quotaRefreshes), len(service.quotaRefreshQueue))
+			if len(service.quotaRefresh.obs) != 100 || len(service.quotaRefresh.queue) != 1 {
+				t.Fatalf("first full page not retained: states=%d queue=%d", len(service.quotaRefresh.obs), len(service.quotaRefresh.queue))
 			}
-			<-service.quotaRefreshQueue
-			for _, state := range service.quotaRefreshes {
+			<-service.quotaRefresh.queue
+			for _, state := range service.quotaRefresh.obs {
 				state.queued = false
 				state.failures = quotaRefreshFailureBudget
 			}
 			service.requeueQuotaRefreshes()
 			service.recoverSharedQuotaRefreshes(ctx, now)
-			if len(service.quotaRefreshes) != 120 || len(service.quotaRefreshQueue) != 1 {
-				t.Fatalf("parked page blocked later work: states=%d queue=%d", len(service.quotaRefreshes), len(service.quotaRefreshQueue))
+			if len(service.quotaRefresh.obs) != 120 || len(service.quotaRefresh.queue) != 1 {
+				t.Fatalf("parked page blocked later work: states=%d queue=%d", len(service.quotaRefresh.obs), len(service.quotaRefresh.queue))
 			}
-			first := <-service.quotaRefreshQueue
-			state := service.quotaRefreshes[first.key]
+			first := <-service.quotaRefresh.queue
+			state := service.quotaRefresh.obs[first.key]
 			state.queued = false
 			state.failures = quotaRefreshFailureBudget
 			service.requeueQuotaRefreshes()
-			if len(service.quotaRefreshQueue) != 1 {
+			if len(service.quotaRefresh.queue) != 1 {
 				t.Fatal("overflow demand was not recovered")
 			}
 		})

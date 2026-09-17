@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -18,14 +21,12 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
-	gatewayapp "github.com/chenyme/grok2api/backend/internal/application/gateway"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/gin-gonic/gin"
@@ -136,14 +137,6 @@ func TestNewAccountResponseExposesCredentialRefreshError(t *testing.T) {
 	}
 }
 
-type accountSynchronizerStub struct {
-	accountIDs []uint64
-}
-
-type accountProgressSynchronizerStub struct {
-	accountSynchronizerStub
-}
-
 func TestWriteServiceErrorUsesCredentialLimitCodes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
@@ -241,8 +234,8 @@ func TestLinkedDeleteMissingAccountReturnsNotFound(t *testing.T) {
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	service := accountapp.NewService(relational.NewAccountRepository(database), nil, nil, nil, nil, nil, nil)
-	handler := NewHandler(service, nil)
+	service := accountapp.NewService(relational.NewAccountRepository(database), nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
+	handler := newTestHandler(service, nil)
 	recorder := httptest.NewRecorder()
 	ginContext, _ := gin.CreateTestContext(recorder)
 	ginContext.Params = []gin.Param{{Key: "id", Value: "999999"}}
@@ -269,7 +262,7 @@ func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := relational.NewAccountRepository(database)
-	selector := gatewayapp.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	selector := selector.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 	repo.SetInvalidationObserver(func(_ context.Context, event repository.InvalidationEvent) {
 		selector.ApplyInvalidation(event)
 	})
@@ -290,12 +283,23 @@ func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
 	if err := seedHealthFixture(databasePath, ctx, created.ID, created.Provider, 3, &until, accountdomain.LastErrorMissingThinking, false); err != nil {
 		t.Fatal(err)
 	}
-	if lease, acquireErr := selector.Acquire(ctx, accountdomain.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, false); acquireErr == nil {
+	schedulable := func() error {
+		session, sessionErr := selector.BeginSelectionSessionForKey(ctx, accountdomain.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, false, clientkeydomain.AccountScope{})
+		if sessionErr != nil {
+			return sessionErr
+		}
+		lease, acquireErr := session.Acquire(ctx, map[uint64]bool{}, false)
+		if acquireErr != nil {
+			return acquireErr
+		}
 		lease.Release()
+		return nil
+	}
+	if acquireErr := schedulable(); acquireErr == nil {
 		t.Fatal("cooled account was schedulable before clear")
 	}
-	service := accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, nil)
-	handler := NewHandler(service, nil)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
+	handler := newTestHandler(service, nil)
 
 	recorder := httptest.NewRecorder()
 	ginContext, _ := gin.CreateTestContext(recorder)
@@ -325,7 +329,11 @@ func TestClearCooldownResetsHealthAndSelectorCache(t *testing.T) {
 	if stored.FailureCount != 0 || stored.CooldownUntil != nil || stored.LastError != accountdomain.LastErrorMissingThinking {
 		t.Fatalf("persisted health = failure=%d cooldown=%v last=%q", stored.FailureCount, stored.CooldownUntil, stored.LastError)
 	}
-	lease, err := selector.Acquire(ctx, accountdomain.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, false)
+	session, sessionErr := selector.BeginSelectionSessionForKey(ctx, accountdomain.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, false, clientkeydomain.AccountScope{})
+	if sessionErr != nil {
+		t.Fatalf("account remained unavailable in selector after clear: %v", sessionErr)
+	}
+	lease, err := session.Acquire(ctx, map[uint64]bool{}, false)
 	if err != nil {
 		t.Fatalf("account remained unavailable in selector after clear: %v", err)
 	}
@@ -369,7 +377,7 @@ func TestUpdateCooldownWarningRequiresEnabledChange(t *testing.T) {
 	if err := seedHealthFixture(databasePath, ctx, created.ID, created.Provider, 1, &until, "upstream status 504", false); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewHandler(accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, nil), nil)
+	handler := newTestHandler(accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil), nil)
 
 	update := func(body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
@@ -388,39 +396,6 @@ func TestUpdateCooldownWarningRequiresEnabledChange(t *testing.T) {
 	changed := update(`{"enabled":false}`)
 	if changed.Code != http.StatusOK || !strings.Contains(changed.Body.String(), `"enabledDoesNotClearCooldown":true`) {
 		t.Fatalf("changed enabled warning missing: status=%d body=%s", changed.Code, changed.Body.String())
-	}
-}
-
-func (s *accountSynchronizerStub) Sync(_ context.Context, accountIDs ...uint64) accountsyncapp.Result {
-	s.accountIDs = append(s.accountIDs, accountIDs...)
-	return accountsyncapp.Result{Succeeded: len(accountIDs)}
-}
-
-func (s *accountSynchronizerStub) SyncStream(_ context.Context, accountIDs <-chan uint64) accountsyncapp.Result {
-	for accountID := range accountIDs {
-		s.accountIDs = append(s.accountIDs, accountID)
-	}
-	return accountsyncapp.Result{Succeeded: len(s.accountIDs)}
-}
-
-func (s *accountProgressSynchronizerStub) SyncStreamObserved(_ context.Context, accountIDs <-chan uint64, observer func(completed, total int)) accountsyncapp.Result {
-	for accountID := range accountIDs {
-		s.accountIDs = append(s.accountIDs, accountID)
-	}
-	for completed := 1; completed <= len(s.accountIDs); completed++ {
-		observer(completed, completed)
-	}
-	return accountsyncapp.Result{Succeeded: len(s.accountIDs)}
-}
-
-func TestSyncInitialUsesOnlyChangedAccounts(t *testing.T) {
-	sync := &accountSynchronizerStub{}
-	handler := NewHandler(nil, sync)
-
-	result := handler.syncInitial(context.Background(), 3, 5)
-
-	if result.Succeeded != 2 || len(sync.accountIDs) != 2 || sync.accountIDs[0] != 3 || sync.accountIDs[1] != 5 {
-		t.Fatalf("account ids = %#v", sync.accountIDs)
 	}
 }
 
@@ -515,8 +490,8 @@ func TestRefreshTokenImportHTTPReturnsPartialResult(t *testing.T) {
 	}
 	repository := relational.NewAccountRepository(database)
 	adapter := refreshTokenImportHTTPAdapter{parser: cliprovider.NewAdapter(cliprovider.Config{}, cipher)}
-	service := accountapp.NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
-	handler := NewHandler(service, nil)
+	service := accountapp.NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
+	handler := newTestHandler(service, nil)
 	router := gin.New()
 	handler.Register(router.Group("/api/admin/v1"))
 	server := httptest.NewServer(router)
@@ -569,33 +544,5 @@ func TestRefreshTokenImportHTTPReturnsPartialResult(t *testing.T) {
 	}
 	if refreshToken != "rotated-rt" {
 		t.Fatalf("stored refresh token = %q", refreshToken)
-	}
-}
-
-func TestAccountSyncPipelineUsesFinalQueuedTotal(t *testing.T) {
-	syncer := &accountProgressSynchronizerStub{}
-	handler := NewHandler(nil, syncer)
-	progress := make([][2]int, 0, 5)
-	pipeline := handler.startSyncPipeline(context.Background(), func(completed, total int) {
-		progress = append(progress, [2]int{completed, total})
-	})
-
-	for _, accountID := range []uint64{11, 12, 13} {
-		if err := pipeline.Observe(accountID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result := pipeline.Finish(false)
-
-	if result.Succeeded != 3 {
-		t.Fatalf("result = %#v", result)
-	}
-	if len(progress) == 0 || progress[len(progress)-1] != [2]int{3, 3} {
-		t.Fatalf("progress = %#v", progress)
-	}
-	for _, value := range progress {
-		if value[1] != 3 {
-			t.Fatalf("progress contains changing total: %#v", progress)
-		}
 	}
 }

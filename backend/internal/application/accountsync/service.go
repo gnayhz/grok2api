@@ -11,8 +11,8 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const (
@@ -47,10 +47,28 @@ type identitySynchronizer interface {
 	SyncAccountIdentity(ctx context.Context, accountID uint64) error
 }
 
+type deviceLoginSource interface {
+	PollDeviceLogin(ctx context.Context, sessionID string) (accountapp.View, error)
+}
+
+type accountAdministrator interface {
+	Update(ctx context.Context, id uint64, input accountapp.UpdateInput) (accountapp.View, error)
+}
+
 // Service 对新接入账号执行一次性额度与模型补齐，并限制批量同步并发。
 type Service struct {
 	logger   *slog.Logger
 	accounts accountReader
+	// policy 是必需依赖：账号生命周期策略在构造时显式声明，
+	// 不再通过运行时类型断言发现。
+	policy providerPolicy
+	// identity 是可选能力：nil 表示组合根未装配身份同步；装配后
+	// 才会调用，Provider 支持与否不再静默影响同步行为。
+	identity identitySynchronizer
+	// device 完成 Device OAuth 轮询并返回已提交凭据视图。
+	device deviceLoginSource
+	// admin 提供账号管理更新命令（update-with-model-sync 用例）。
+	admin    accountAdministrator
 	billing  billingSynchronizer
 	quota    quotaSynchronizer
 	models   modelSynchronizer
@@ -59,8 +77,11 @@ type Service struct {
 	bulkPool *batch.Pool
 }
 
-func NewService(logger *slog.Logger, accounts accountReader, billing billingSynchronizer, quota quotaSynchronizer, models modelSynchronizer) *Service {
-	service := &Service{logger: logger, accounts: accounts, billing: billing, quota: quota, models: models, bulkPool: batch.NewPool(defaultWorkerCount)}
+func NewService(logger *slog.Logger, accounts accountReader, policy providerPolicy, identity identitySynchronizer, device deviceLoginSource, admin accountAdministrator, billing billingSynchronizer, quota quotaSynchronizer, models modelSynchronizer) *Service {
+	if policy == nil {
+		panic("accountsync: provider lifecycle policy 不能为空")
+	}
+	service := &Service{logger: logger, accounts: accounts, policy: policy, identity: identity, device: device, admin: admin, billing: billing, quota: quota, models: models, bulkPool: batch.NewPool(defaultWorkerCount)}
 	service.workers.Store(defaultWorkerCount)
 	return service
 }
@@ -198,18 +219,14 @@ func (s *Service) syncAccount(ctx context.Context, accountID uint64) error {
 	if err != nil {
 		return fmt.Errorf("读取账号: %w", err)
 	}
-	policy, ok := s.accounts.(providerPolicy)
-	if !ok {
-		return fmt.Errorf("账号读取器未提供 Provider 生命周期策略")
-	}
-	definition, ok := policy.ProviderDefinition(view.Credential.Provider)
+	definition, ok := s.policy.ProviderDefinition(view.Credential.Provider)
 	if !ok {
 		return fmt.Errorf("Provider %s 未注册生命周期策略", view.Credential.Provider)
 	}
 	if view.Credential.Provider == accountdomain.ProviderWeb || view.Credential.Provider == accountdomain.ProviderConsole {
-		if identity, ok := s.accounts.(identitySynchronizer); ok {
+		if s.identity != nil {
 			operationCtx, cancel := context.WithTimeout(ctx, operationTimeout)
-			identityErr := identity.SyncAccountIdentity(operationCtx, accountID)
+			identityErr := s.identity.SyncAccountIdentity(operationCtx, accountID)
 			if identityErr != nil {
 				s.logger.Warn("account_initial_identity_sync_failed", "account_id", accountID, "error", identityErr)
 			}
@@ -265,4 +282,47 @@ func (s *Service) syncAccount(ctx context.Context, accountID uint64) error {
 		syncErr = errors.Join(syncErr, fmt.Errorf("同步模型: %w", err))
 	}
 	return syncErr
+}
+
+// DeviceCompletion 是 Device 接入完成后的可观察结果：已提交账号与初始
+// 同步事实分开表达，同步部分失败不遮蔽已提交账号。
+type DeviceCompletion struct {
+	Account accountapp.View
+	Sync    Result
+}
+
+// CompleteDeviceLogin 完成 Device OAuth 的最后一步：轮询已发放凭据、为已
+// 提交账号执行初始额度/模型补齐并读回已提交视图。pending/slowdown/denied
+// 仍以原错误返回，由传输层映射状态；HTTP 不再编排跨用例步骤。
+func (s *Service) CompleteDeviceLogin(ctx context.Context, sessionID string) (DeviceCompletion, error) {
+	value, err := s.device.PollDeviceLogin(ctx, sessionID)
+	if err != nil {
+		return DeviceCompletion{}, err
+	}
+	sync := s.Sync(ctx, value.Credential.ID)
+	if refreshed, refreshErr := s.accounts.Get(ctx, value.Credential.ID); refreshErr == nil {
+		value = refreshed
+	}
+	return DeviceCompletion{Account: value, Sync: sync}, nil
+}
+
+// UpdateWithSyncResult 是账号更新带模型补齐的可观察结果：更新已提交的
+// 账号与模型同步失败事实分开，补齐失败不回滚也不遮蔽已提交更新。
+type UpdateWithSyncResult struct {
+	Account         accountapp.View
+	ModelSyncFailed bool
+}
+
+// UpdateWithModelSync 更新账号并在 Build 授权标记可能变化后补齐模型能力。
+// 是否需要补齐由本用例依据输入事实决定，HTTP 不再分支。
+func (s *Service) UpdateWithModelSync(ctx context.Context, id uint64, input accountapp.UpdateInput) (UpdateWithSyncResult, error) {
+	value, err := s.admin.Update(ctx, id, input)
+	if err != nil {
+		return UpdateWithSyncResult{}, err
+	}
+	result := UpdateWithSyncResult{Account: value}
+	if input.BuildSuperEntitled != nil {
+		result.ModelSyncFailed = s.SyncModels(ctx, id) != nil
+	}
+	return result, nil
 }

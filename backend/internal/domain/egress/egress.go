@@ -7,14 +7,6 @@ import (
 	"time"
 )
 
-type Mode string
-
-const (
-	ModeDirect Mode = "direct"
-	ModeSingle Mode = "single"
-	ModePool   Mode = "pool"
-)
-
 const LastErrorTransport = "transport error"
 
 // LastErrorExitIPQuality marks a node whose exit IP is quality-degraded
@@ -34,12 +26,6 @@ const (
 	ScopeWebAsset     Scope = "grok_web_asset"
 	ScopeConsoleAsset Scope = "grok_console_asset"
 )
-
-// RequestScopes lists the scopes that carry upstream traffic. Asset scopes are
-// auxiliary downloads of their parent family.
-func RequestScopes() []Scope {
-	return []Scope{ScopeBuild, ScopeWeb, ScopeConsole, ScopeWebAsset, ScopeConsoleAsset}
-}
 
 // RoutingScope maps a request scope onto its routing configuration key.
 // Asset downloads follow their parent family's exit so operators configure
@@ -68,6 +54,37 @@ type ExitAddresses struct {
 // Resolved reports whether at least one family address is known.
 func (e ExitAddresses) Resolved() bool {
 	return e.IPv4 != "" || e.IPv6 != ""
+}
+
+// KnownSameEgress answers the exclusion question: are these two nodes KNOWN
+// to share one real egress? It returns true only when at least one address
+// family is resolved on BOTH sides and every comparable family is equal.
+// Unknown never counts as "same": an unresolved family on either side, no
+// comparable family at all, or any differing family answers false.
+//
+// This mirrors the gateway's admissibility comparison (exitPathsDistinct)
+// with the opposite polarity: that check is conservative about admitting a
+// differential, so it treats "no comparable family" as distinct; this one is
+// conservative about dropping a candidate, so it excludes only on positive
+// equality of every observable family. A shared WARP-style CGNAT IPv4 with
+// distinct IPv6s is therefore not a known match. The answer is advisory —
+// it may come from a stale last-known snapshot, and the live per-node
+// verification remains the sole authority for admissibility.
+func KnownSameEgress(a, b ExitAddresses) bool {
+	comparable := false
+	if a.IPv4 != "" && b.IPv4 != "" {
+		comparable = true
+		if a.IPv4 != b.IPv4 {
+			return false
+		}
+	}
+	if a.IPv6 != "" && b.IPv6 != "" {
+		comparable = true
+		if a.IPv6 != b.IPv6 {
+			return false
+		}
+	}
+	return comparable
 }
 
 // Node is one proxy exit resource. It carries no scope: whether it serves
@@ -535,11 +552,6 @@ func (value TrafficClass) IsValid() bool {
 	}
 }
 
-// TrafficClasses lists every schedulable class in stable order.
-func TrafficClasses() []TrafficClass {
-	return []TrafficClass{TrafficClassInference, TrafficClassCredential, TrafficClassBilling, TrafficClassModelSync, TrafficClassVideo, TrafficClassProbe}
-}
-
 // MaxRoutingTargets caps each routing level so a degenerate payload fails
 // fast before any per-target lookups run.
 const MaxRoutingTargets = 16
@@ -573,10 +585,14 @@ func ValidateRoutingTargets(defaultTarget RoutingTarget, scopes map[Scope]Routin
 	return nil
 }
 
+// DefaultProbeIntervalSeconds 是节点探测/订阅刷新间隔的缺省秒数。
+// application/egress 与 persistence 的缺省值必须引用本常量，不得另写 900。
+const DefaultProbeIntervalSeconds = 900
+
 func DefaultOperationsConfig() OperationsConfig {
 	return OperationsConfig{
 		ProbeProvider:        ProbeProviderCloudflare,
-		ProbeIntervalSeconds: 900,
+		ProbeIntervalSeconds: DefaultProbeIntervalSeconds,
 		DefaultTarget:        RoutingTarget{Mode: RoutingTargetAuto},
 	}
 }
@@ -588,8 +604,11 @@ func DefaultOperationsConfig() OperationsConfig {
 // rejected separately at the application layer (they need decryption).
 //
 // 旋转出口(节点级代理池模式)可以被固定目标引用:固定的是"这条隧道",
-// 不是它的瞬时出口 IP。运行时对池模式节点豁免硬/软冷却(单个坏 IP 不
+// 不是它的瞬时出口 IP。运行时对池模式节点豁免普通冷却(单个坏 IP 不
 // 代表端点坏),所以旋转目标几乎不会被冷却卡死——这正是它的用法。
+// 唯一的例外是出口 IP 质量隔离(LastErrorExitIPQuality):它指向端点自身
+// 的降智问题,对池模式同样生效,固定目标也必须让路;判定统一走
+// CooldownBlocksScheduling,不得在此另行拼条件。
 func CanNodeServeFixedTarget(node Node) bool {
 	return node.Enabled && node.EncryptedProxyURL != ""
 }
@@ -605,13 +624,22 @@ func IsAccountTemplateProxy(proxyURL string) bool {
 	return strings.Contains(proxyURL, ProxyAccountPlaceholder)
 }
 
+// IsPoolMode 是"代理池模式"判定策略的唯一实现:节点级外部代理池标志,或
+// 代理 URL 是账号模板。已经解出明文代理 URL 的调用方用 Node.IsPoolModeNode;
+// 只持有"是否账号模板"布尔值(例如基础设施层记忆化解密的结果,或应用层
+// 已经过滤过的元数据)的调用方用本函数——策略仍然只有这一处定义,调用方
+// 不得自行拼 `proxyPool || ...`。参数顺序固定为(节点标志, 账号模板)。
+func IsPoolMode(proxyPool bool, accountTemplate bool) bool {
+	return proxyPool || accountTemplate
+}
+
 // IsPoolModeNode 是"代理池模式节点"的唯一判定:节点级代理池标志——外部
 // 代理池服务,出口 IP 由服务商自动更换(粘性窗口或每请求切换,不受本系统
 // 控制),或代理 URL 是账号模板（粘性出口每账号独立,共享健康惩罚无意义）。
 // 换 IP Webhook 与代理池互斥:Webhook 属于自建 WARP 出口(固定 IP+强制
 // 切换),由 RotationEnabled 单独表达,与本判定无关。
 func (value Node) IsPoolModeNode(decryptedProxyURL string) bool {
-	return value.ProxyPool || IsAccountTemplateProxy(decryptedProxyURL)
+	return IsPoolMode(value.ProxyPool, IsAccountTemplateProxy(decryptedProxyURL))
 }
 
 // FixedTargetValidator is the management policy for one current node. The

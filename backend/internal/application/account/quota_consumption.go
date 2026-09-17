@@ -49,12 +49,12 @@ func (s *Service) saveQuotaSnapshot(ctx context.Context, providerValue accountdo
 // does not reset a running retry episode or the failure budget on every scan.
 // A parked durable demand stays parked until an explicit new demand or restart.
 func (s *Service) recoverDurableQuotaRefreshes(parent context.Context, afterID uint64) uint64 {
-	s.quotaRefreshMu.Lock()
+	s.quotaRefresh.mu.Lock()
 	if afterID == 0 {
 		s.quotaDurableScan++
 	}
 	scan := s.quotaDurableScan
-	s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	values, err := s.accounts.ListPendingQuotaRefreshes(ctx, afterID, 100)
@@ -65,17 +65,17 @@ func (s *Service) recoverDurableQuotaRefreshes(parent context.Context, afterID u
 	if len(values) == 0 {
 		// Only a completed SQL pass can retire absent durable demand. Preserve
 		// an unexpired shared tombstone so retiring SQL does not restart it.
-		s.quotaRefreshMu.Lock()
-		for key, state := range s.quotaRefreshes {
+		s.quotaRefresh.mu.Lock()
+		for key, state := range s.quotaRefresh.obs {
 			if state == nil || !state.durable || state.durableSeenScan == scan || state.running || state.queued || state.failures < quotaRefreshFailureBudget {
 				continue
 			}
 			state.durable = false
 			if state.sharedVersion.Generation == 0 && (state.parkedUntil.IsZero() || !s.now().UTC().Before(state.parkedUntil)) {
-				delete(s.quotaRefreshes, key)
+				delete(s.quotaRefresh.obs, key)
 			}
 		}
-		s.quotaRefreshMu.Unlock()
+		s.quotaRefresh.mu.Unlock()
 		return 0
 	}
 	now := s.now().UTC()
@@ -87,11 +87,11 @@ func (s *Service) recoverDurableQuotaRefreshes(parent context.Context, afterID u
 			mode = accountdomain.QuotaGroupWebImagine
 		}
 		key := strconv.FormatUint(value.AccountID, 10) + ":" + mode
-		s.quotaRefreshMu.Lock()
-		if state := s.quotaRefreshes[key]; state != nil {
+		s.quotaRefresh.mu.Lock()
+		if state := s.quotaRefresh.obs[key]; state != nil {
 			state.durableSeenScan = scan
 		}
-		s.quotaRefreshMu.Unlock()
+		s.quotaRefresh.mu.Unlock()
 		if checkedID != value.AccountID {
 			checkedID = value.AccountID
 			_, err = s.accounts.GetQuotaRevision(ctx, value.AccountID)
@@ -104,11 +104,11 @@ func (s *Service) recoverDurableQuotaRefreshes(parent context.Context, afterID u
 		if err != nil {
 			continue
 		}
-		s.quotaRefreshMu.Lock()
-		state := s.quotaRefreshes[key]
+		s.quotaRefresh.mu.Lock()
+		state := s.quotaRefresh.obs[key]
 		if state == nil {
 			state = &quotaRefreshState{generation: 1, pending: true}
-			s.quotaRefreshes[key] = state
+			s.quotaRefresh.obs[key] = state
 		} else if !state.running && !state.queued && state.failures < quotaRefreshFailureBudget {
 			state.pending = true
 		}
@@ -117,7 +117,7 @@ func (s *Service) recoverDurableQuotaRefreshes(parent context.Context, afterID u
 		if state.ready(now) {
 			s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: value.AccountID, mode: mode}, state)
 		}
-		s.quotaRefreshMu.Unlock()
+		s.quotaRefresh.mu.Unlock()
 	}
 	return afterID
 }

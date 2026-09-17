@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func newPoolTestManager(t *testing.T) (*Manager, *poolStubRepo) {
 		t.Fatal(err)
 	}
 	repo := newPoolStubRepo()
-	return NewManager(repo, cipher), repo
+	return NewManagerWithLimits(repo, cipher, netbudget.Limits{}), repo
 }
 
 // affinity(默认,rendezvous):同账号稳定落同一节点;节点移除只扰动落在它上的账号。
@@ -292,7 +293,7 @@ func TestPoolRouteDirectFallbackHonorsAllowDirect(t *testing.T) {
 	repo.member = map[uint64][]domain.Node{}
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, FallbackMode: domain.PoolFallbackDirect}
 	// 池无成员,自动调度也无可用节点:唯一去向是回退决策。
-	manager := NewManager(repo, nil)
+	manager := NewManagerWithLimits(repo, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	lease, outcome, err := manager.AcquirePoolRouted(context.Background(), domain.ScopeBuild, "acct", 1, false, "")
@@ -336,7 +337,7 @@ func TestAcquirePoolRouteCanceledContextStopsBeforeAutoSchedule(t *testing.T) {
 	repo.pool = map[uint64]domain.Pool{}
 	repo.member = map[uint64][]domain.Node{}
 	repo.pool[1] = domain.Pool{ID: 1, Enabled: true, FallbackMode: domain.PoolFallbackNone}
-	manager := NewManager(repo, nil)
+	manager := NewManagerWithLimits(repo, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -530,33 +530,6 @@ func TokenUsageFrom(data []byte) TokenUsage {
 	return usage
 }
 
-// UnquotedBytes returns the first JSON string value for key after decoding
-// JSON escapes, without allocating when the value has no backslash escapes
-// (the common SSE delta case). The returned slice aliases data in that
-// case and must not be retained across a later write to the same buffer.
-func UnquotedBytes(data []byte, key string) []byte {
-	raw := RawValue(data, key)
-	if len(raw) < 2 || raw[0] != '"' {
-		return nil
-	}
-	inner := raw[1 : len(raw)-1]
-	if bytes.IndexByte(inner, '\\') < 0 {
-		return inner
-	}
-	s, err := strconv.Unquote(string(raw))
-	if err != nil {
-		return nil
-	}
-	return []byte(s)
-}
-
-// UnquotedStringField returns the first JSON string value for key after
-// decoding JSON escapes. StringField returns the raw inner bytes, so a
-// payload of "\n" would look like two visible runes instead of a newline.
-func UnquotedStringField(data []byte, key string) string {
-	return string(UnquotedBytes(data, key))
-}
-
 // RawValue returns the raw JSON value for the first object key, including
 // truncated buffers as long as that value itself is complete. Brace matching
 // ignores braces inside strings so a cut-off encrypted_content suffix does not

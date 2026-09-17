@@ -111,8 +111,13 @@ func TestIsPoolModeNode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.node.IsPoolModeNode(tc.proxyURL); got != tc.want {
-				t.Fatalf("IsPoolModeNode(%v, %q) = %v, want %v", tc.node.ProxyPool, tc.proxyURL, got, tc.want)
+			want := tc.want
+			if got := tc.node.IsPoolModeNode(tc.proxyURL); got != want {
+				t.Fatalf("IsPoolModeNode(%v, %q) = %v, want %v", tc.node.ProxyPool, tc.proxyURL, got, want)
+			}
+			// 只持有"账号模板"布尔的调用方走 IsPoolMode,两个入口必须同策。
+			if got := IsPoolMode(tc.node.ProxyPool, IsAccountTemplateProxy(tc.proxyURL)); got != want {
+				t.Fatalf("IsPoolMode(%v, %v) = %v, want %v", tc.node.ProxyPool, IsAccountTemplateProxy(tc.proxyURL), got, want)
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-import type { QualityCase } from "./quality-api";
+import type { QualityCase } from "@/entities/guard/quality-api";
 
 /** Case progress and resource eligibility are independent. Never infer both
  * holds from an open case, nor global eligibility from this case's release. */

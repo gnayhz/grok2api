@@ -38,7 +38,7 @@ func TestEgressBindingSurvivesSchemaReinit(t *testing.T) {
 	if err := db.db.WithContext(ctx).Raw("SELECT id FROM egress_nodes ORDER BY id DESC LIMIT 1").Row().Scan(&nodeIDValue); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.db.WithContext(ctx).Exec("UPDATE provider_accounts SET egress_node_id = ?, egress_assignment_mode = 'manual' WHERE id = ?", nodeIDValue, created.ID).Error; err != nil {
+	if err := db.db.WithContext(ctx).Exec("UPDATE provider_accounts SET egress_node_id = ? WHERE id = ?", nodeIDValue, created.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	// 升级路径：再次 InitializeSchema（真实进程重启即此语义）。
@@ -46,11 +46,10 @@ func TestEgressBindingSurvivesSchemaReinit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var nodeID *uint64
-	var mode string
-	if err := db.db.WithContext(ctx).Raw("SELECT egress_node_id, egress_assignment_mode FROM provider_accounts WHERE id = ?", created.ID).Row().Scan(&nodeID, &mode); err != nil {
+	if err := db.db.WithContext(ctx).Raw("SELECT egress_node_id FROM provider_accounts WHERE id = ?", created.ID).Row().Scan(&nodeID); err != nil {
 		t.Fatal(err)
 	}
-	if nodeID == nil || *nodeID != nodeIDValue || mode != "manual" {
-		t.Fatalf("egress binding lost across re-init: nodeID=%v mode=%q", nodeID, mode)
+	if nodeID == nil || *nodeID != nodeIDValue {
+		t.Fatalf("egress binding lost across re-init: nodeID=%v", nodeID)
 	}
 }

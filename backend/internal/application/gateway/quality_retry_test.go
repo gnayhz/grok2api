@@ -4,6 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	admpkg "github.com/chenyme/grok2api/backend/internal/application/admission"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -19,7 +25,6 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
@@ -55,20 +60,20 @@ func TestClassifyQualityHold(t *testing.T) {
 
 func TestDecideQualityRetry(t *testing.T) {
 	t.Parallel()
-	if got := decideQualityRetry(QualityDeliver, 0, 2); got != QualityActionDeliver {
+	if got := admpkg.DecideRetry(QualityDeliver, 0, 2); got != QualityActionDeliver {
 		t.Fatalf("deliver verdict: %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 0, 2); got != QualityActionRetry {
+	if got := admpkg.DecideRetry(QualityWithhold, 0, 2); got != QualityActionRetry {
 		t.Fatalf("first withhold: %s", got)
 	}
 	// G12:耗尽策略只剩 fail_closed——扣留预算耗尽即 Reject,绝无 DeliverLast。
-	if got := decideQualityRetry(QualityWithhold, 1, 2); got != QualityActionReject {
+	if got := admpkg.DecideRetry(QualityWithhold, 1, 2); got != QualityActionReject {
 		t.Fatalf("last withhold must reject (fail-closed only): %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 0, 1); got != QualityActionReject {
+	if got := admpkg.DecideRetry(QualityWithhold, 0, 1); got != QualityActionReject {
 		t.Fatalf("max 1 must reject: %s", got)
 	}
-	if got := decideQualityRetry(QualityWithhold, 5, 0); got != QualityActionReject {
+	if got := admpkg.DecideRetry(QualityWithhold, 5, 0); got != QualityActionReject {
 		t.Fatalf("zero-value config must fail closed: %s", got)
 	}
 }
@@ -77,11 +82,11 @@ func TestDecideQualityRetryLastWithholdIsMaxAttemptsMinusOne(t *testing.T) {
 	t.Parallel()
 	for _, maxAttempts := range []int{1, 2, 3, 6} {
 		last := maxAttempts - 1
-		if got := decideQualityRetry(QualityWithhold, last, maxAttempts); got != QualityActionReject {
+		if got := admpkg.DecideRetry(QualityWithhold, last, maxAttempts); got != QualityActionReject {
 			t.Fatalf("last withhold must reject max=%d index=%d got %s", maxAttempts, last, got)
 		}
 		if last > 0 {
-			if got := decideQualityRetry(QualityWithhold, last-1, maxAttempts); got != QualityActionRetry {
+			if got := admpkg.DecideRetry(QualityWithhold, last-1, maxAttempts); got != QualityActionRetry {
 				t.Fatalf("pre-last should retry max=%d index=%d got %s", maxAttempts, last-1, got)
 			}
 		}
@@ -147,55 +152,15 @@ func TestCommitQualityHold(t *testing.T) {
 
 func TestBoundQualityRetryWhenRoutingExhausted(t *testing.T) {
 	t.Parallel()
-	if got := boundQualityRetry(QualityActionRetry, true); got != QualityActionRetry {
+	if got := admpkg.BoundRetry(QualityActionRetry, true); got != QualityActionRetry {
 		t.Fatalf("has next: %s", got)
 	}
-	if got := boundQualityRetry(QualityActionRetry, false); got != QualityActionReject {
+	if got := admpkg.BoundRetry(QualityActionRetry, false); got != QualityActionReject {
 		t.Fatalf("no next must reject (fail-closed only): %s", got)
 	}
-	if got := boundQualityRetry(QualityActionDeliver, false); got != QualityActionDeliver {
+	if got := admpkg.BoundRetry(QualityActionDeliver, false); got != QualityActionDeliver {
 		t.Fatalf("non-retry passthrough: %s", got)
 	}
-}
-
-func TestSelectionSessionHasAvailableCandidate(t *testing.T) {
-	t.Parallel()
-	session := &selectionSession{
-		values: []accountdomain.RoutingCandidate{
-			{Credential: accountdomain.Credential{ID: 1}},
-			{Credential: accountdomain.Credential{ID: 2}},
-			{Credential: accountdomain.Credential{ID: 3}},
-		},
-		normalCandidates: []int{0, 1},
-		probeCandidates:  []int{2},
-		staleCandidates:  make(map[uint64]bool),
-	}
-	if !session.hasAvailableCandidate(map[uint64]bool{1: true}, false) {
-		t.Fatal("second normal account should be available")
-	}
-	if session.hasAvailableCandidate(map[uint64]bool{1: true, 2: true}, false) {
-		t.Fatal("routing attempt budget must not invent another normal account")
-	}
-	if !session.hasAvailableCandidate(map[uint64]bool{1: true, 2: true}, true) {
-		t.Fatal("quota probe should be available when allowed")
-	}
-	if session.hasAvailableCandidate(map[uint64]bool{1: true, 2: true, 3: true}, true) {
-		t.Fatal("fully excluded session should be exhausted")
-	}
-}
-
-func sse(frames ...string) string {
-	var b strings.Builder
-	for _, frame := range frames {
-		b.WriteString(frame)
-		if !strings.HasSuffix(frame, "\n") {
-			b.WriteByte('\n')
-		}
-		if !strings.HasSuffix(frame, "\n\n") {
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
 }
 
 func TestObserveQualityChunkThinkingChat(t *testing.T) {
@@ -353,7 +318,7 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 	if verdict != QualityWithhold {
 		t.Fatalf("first peek verdict=%s usage=%#v", verdict, usage)
 	}
-	if got := decideQualityRetry(verdict, 0, cfg.MaxAttempts); got != QualityActionRetry {
+	if got := admpkg.DecideRetry(verdict, 0, cfg.MaxAttempts); got != QualityActionRetry {
 		t.Fatalf("first withhold action=%s", got)
 	}
 
@@ -366,8 +331,8 @@ func TestPeekThenDecideQualityRetryBounded(t *testing.T) {
 		t.Fatalf("second peek verdict=%s", verdict2)
 	}
 	// G12:耗尽即 Reject——无下一跳时同样 Reject,绝无 DeliverLast 兜底。
-	action2 := decideQualityRetry(verdict2, 1, cfg.MaxAttempts)
-	action2 = boundQualityRetry(action2, false)
+	action2 := admpkg.DecideRetry(verdict2, 1, cfg.MaxAttempts)
+	action2 = admpkg.BoundRetry(action2, false)
 	if action2 != QualityActionReject {
 		t.Fatalf("second withhold exhausted action=%s", action2)
 	}
@@ -665,12 +630,12 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 		credentials[1].ID: {{status: http.StatusOK, body: noThink}},
 		credentials[2].ID: {{status: http.StatusOK, body: thinking}},
 	}}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailClosed})
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"}}))
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-hold", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
@@ -715,7 +680,7 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	if !noThinkingAccount.Enabled || noThinkingAccount.LastError != "" || noThinkingAccount.CooldownUntil != nil {
 		t.Fatalf("quality hold changed manual or health state: %#v", noThinkingAccount)
 	}
-	if selector.localQualityAllowed(noThinkingAccount.ID, time.Now()) {
+	if sel.LocalQualityAllowed(noThinkingAccount.ID, time.Now()) {
 		t.Fatal("rejected account missing temporary hold")
 	}
 
@@ -807,14 +772,14 @@ func TestAttemptLoopQualityHoldSingleAccountRejectsWhenExhausted(t *testing.T) {
 	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{
 		credential.ID: {{status: http.StatusOK, body: noThink}},
 	}}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
-	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailClosed,
-	})
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 999)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{
+		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"},
+	}))
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-single", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
@@ -838,7 +803,7 @@ func TestAttemptLoopQualityHoldSingleAccountRejectsWhenExhausted(t *testing.T) {
 	if !cooled.Enabled || cooled.LastError != "" || cooled.CooldownUntil != nil {
 		t.Fatalf("quality hold changed manual or health state: %#v", cooled)
 	}
-	if selector.localQualityAllowed(cooled.ID, time.Now()) {
+	if sel.LocalQualityAllowed(cooled.ID, time.Now()) {
 		t.Fatal("rejected account missing temporary hold")
 	}
 }
@@ -900,14 +865,14 @@ func TestAttemptLoopQualityRejectAndTotalAttemptCap(t *testing.T) {
 		responses[credential.ID] = []scriptedBuildResponse{{status: http.StatusInternalServerError, body: `{"error":"temporary"}`}}
 	}
 	adapter := &scriptedBuildAdapter{responses: responses}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
-	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailClosed,
-	})
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 999)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{
+		Enabled: true, MaxAttempts: 6, OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"},
+	}))
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-fallback", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,

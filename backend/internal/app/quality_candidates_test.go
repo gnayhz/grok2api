@@ -52,7 +52,7 @@ func TestCourtCandidatesUseFrozenModelEligibility(t *testing.T) {
 	dispatch := &captureCandidatePlan{}
 	cfg := court.DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
-	a.qualityCourt = court.New(cfg, a.quality, qualityEvidenceSource{store: a.qualityEvidence}, dispatch)
+	a.qualityCourt = court.New(cfg, a.quality, qualityEvidenceSource{store: a.qualityEvidence}, dispatch, registry.NewProbeTaskStore(a.quality))
 	a.qualityCourt.SetNodes(baseNodeSource{egress: a.egressOps})
 	a.qualityCourt.SetProbeAccounts(a.gateway)
 	obs := model.Observation{At: time.Now(), AccountID: ids[0], Exit: model.EpochKey{NodeID: 99}, Source: model.SourceTraffic, Outcome: model.OutcomeDegraded, EventID: "frozen-model", Attempt: attemptmeta.Identity{ID: "frozen-model", Provider: "grok_build", Model: "grok-4.6", RuleVersion: "reasoning-v1", Profile: attemptmeta.Profile{Known: true, Protocol: "responses"}}}

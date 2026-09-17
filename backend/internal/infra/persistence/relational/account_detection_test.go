@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"strings"
@@ -12,8 +13,8 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 )
@@ -103,7 +104,7 @@ func TestAccountDetectionCurrentCommitAcrossSQL(t *testing.T) {
 					if scenario == "known_refusal_cancel" {
 						adapter.before = cancel
 					}
-					service := accountapp.NewService(ra, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+					service := accountapp.NewService(ra, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 					var items []accountapp.BuildDetectItemResult
 					succeeded, failed, callErr := service.DetectBuildAccountsWithProgress(callCtx, []uint64{v.ID}, false, nil, func(item accountapp.BuildDetectItemResult) error { items = append(items, item); return nil })
 					if succeeded != 0 || failed != 1 || len(items) != 1 || !adapter.closed.Load() {

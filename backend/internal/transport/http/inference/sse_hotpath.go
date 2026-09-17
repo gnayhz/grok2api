@@ -68,30 +68,10 @@ func (i *responseInspector) observeHugeSSEPayload(value []byte) {
 		i.deltaScanDone = true
 	}
 	typ := sseEventType(value)
-	switch i.protocol {
-	case streamProtocolResponses:
-		switch typ {
-		case "response.completed":
+	if terminal, success := streamTerminalOutcome(i.protocol, typ); terminal {
+		if success {
 			i.terminalSuccess = true
-		case "response.failed", "response.incomplete", "response.error", "error":
-			i.terminalFailure = true
-		}
-	case streamProtocolChat:
-		if typ == "error" {
-			i.terminalFailure = true
-		}
-	case streamProtocolAnthropic:
-		switch typ {
-		case "message_stop":
-			i.terminalSuccess = true
-		case "error":
-			i.terminalFailure = true
-		}
-	case streamProtocolImage:
-		switch typ {
-		case "image_generation.completed":
-			i.terminalSuccess = true
-		case "image_generation.failed", "error":
+		} else {
 			i.terminalFailure = true
 		}
 	}

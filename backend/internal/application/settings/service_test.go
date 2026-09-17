@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	portprovider "github.com/chenyme/grok2api/backend/internal/port/provider"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,7 +56,7 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Server.MaxConcurrentRequests = 2048
 	input.ProviderBuild.ResponseHeaderTimeout = "7m"
@@ -105,7 +106,7 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	if len(snapshot.RestartRequired) != 1 || snapshot.RestartRequired[0] != "audit.bufferSize" {
 		t.Fatalf("restartRequired = %#v", snapshot.RestartRequired)
 	}
-	reloaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	reloaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestUpdateValidatesMaxAttemptsRange(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 
 	input := service.Get().Config
 	input.Routing.MaxAttempts = 65535
@@ -210,7 +211,7 @@ func TestUpdatePreservesBuildChatDeniedPolicyWhenFieldIsOmitted(t *testing.T) {
 	cfg.Routing.MarkBuildChatDeniedAsReauth = true
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Routing.MarkBuildChatDeniedAsReauth = false
 	input.Routing.MarkBuildChatDeniedAsReauthProvided = false
@@ -228,7 +229,7 @@ func TestUpdatePreservesAccountIsolationWhenFieldIsOmitted(t *testing.T) {
 	cfg.Routing.AccountIsolatedConnections = true
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Routing.AccountIsolatedConnections = false
 	input.Routing.AccountIsolatedConnectionsProvided = false
@@ -255,11 +256,11 @@ func TestUpdatePreservesAccountIsolationWhenFieldIsOmitted(t *testing.T) {
 func TestLoadPersistedKeepsAccountIsolationDefaultForOlderPayload(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Routing.AccountIsolatedConnections = true
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Routing.AccountIsolatedConnections = nil
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
 
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,12 +272,12 @@ func TestLoadPersistedKeepsAccountIsolationDefaultForOlderPayload(t *testing.T) 
 func TestLoadPersistedPreservesExplicitlyDisabledAccountIsolation(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Routing.AccountIsolatedConnections = true
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	disabled := false
 	value.Routing.AccountIsolatedConnections = &disabled
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
 
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,10 +291,10 @@ func TestLoadPersistedKeepsSegmentedSelectorDefaultsForOlderPayload(t *testing.T
 	cfg.Routing.SegmentedSelectorEnabled = true
 	cfg.Routing.SegmentedMinCandidates = 4321
 	cfg.Routing.SegmentedWindowSize = 72
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Routing.SegmentedSelector = nil
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,12 +306,12 @@ func TestLoadPersistedKeepsSegmentedSelectorDefaultsForOlderPayload(t *testing.T
 func TestLoadPersistedPreservesExplicitlyDisabledSegmentedSelector(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Routing.SegmentedSelectorEnabled = true
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Routing.SegmentedSelector = &settingsdomain.SegmentedSelectorConfig{
 		ActiveEnabled: false, MinCandidates: 6000, WindowSize: 128,
 	}
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,10 +333,10 @@ func TestLegacyShadowSettingCannotEnableSegmentedSelector(t *testing.T) {
 
 func TestLoadPersistedKeepsConsoleDefaultsWhenFieldIsMissing(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.ProviderConsole = settingsdomain.ProviderConsoleConfig{}
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,11 +347,11 @@ func TestLoadPersistedKeepsConsoleDefaultsWhenFieldIsMissing(t *testing.T) {
 
 func TestLoadPersistedBackfillsProviderStreamIdleTimeoutDefaults(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.ProviderWeb.StreamIdleTimeout = 0
 	value.ProviderConsole.StreamIdleTimeout = 0
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,13 +365,13 @@ func TestLoadPersistedBackfillsProviderStreamIdleTimeoutDefaults(t *testing.T) {
 
 func TestLoadPersistedKeepsClearanceDefaultsForOlderPayload(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.ProviderWeb.ClearanceMode = ""
 	value.ProviderWeb.FlareSolverrURL = ""
 	value.ProviderWeb.ClearanceTimeout = 0
 	value.ProviderWeb.ClearanceRefresh = 0
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +383,7 @@ func TestLoadPersistedKeepsClearanceDefaultsForOlderPayload(t *testing.T) {
 func TestSnapshotIncludesRecommendedBuildBaseline(t *testing.T) {
 	service := newTestService(testConfig(t), time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, nil)
 	recommended := service.Get().RecommendedProviderBuild
-	if recommended.ClientVersion != config.RecommendedBuildClientVersion || recommended.UserAgent != config.RecommendedBuildUserAgent {
+	if recommended.ClientVersion != portprovider.RecommendedBuildClientVersion || recommended.UserAgent != portprovider.RecommendedBuildUserAgent {
 		t.Fatalf("recommended build = %#v", recommended)
 	}
 }
@@ -413,7 +414,7 @@ func TestBatchRandomDelayCanBeDisabledAndPersisted(t *testing.T) {
 	if repository.value.Batch.RandomDelay == nil || *repository.value.Batch.RandomDelay != 0 {
 		t.Fatalf("persisted random delay = %#v", repository.value.Batch.RandomDelay)
 	}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,32 +477,32 @@ func TestStatsigManualValueIsWriteOnlyAndClearedByURLMode(t *testing.T) {
 
 func TestLoadPersistedRejectsIncompleteStatsigPayload(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.ProviderWeb.StatsigMode = ""
 	value.ProviderWeb.StatsigSignerURL = ""
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	if _, _, _, err := LoadPersisted(context.Background(), cfg, repository); err == nil {
+	if _, _, _, err := loadPersistedConfig(context.Background(), cfg, repository); err == nil {
 		t.Fatal("incomplete Statsig settings were accepted")
 	}
 }
 
 func TestLoadPersistedRejectsIncompleteBatchPayload(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Batch = settingsdomain.BatchConfig{}
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	if _, _, _, err := LoadPersisted(context.Background(), cfg, repository); err == nil {
+	if _, _, _, err := loadPersistedConfig(context.Background(), cfg, repository); err == nil {
 		t.Fatal("incomplete batch settings were accepted")
 	}
 }
 
 func TestLoadPersistedBackfillsMissingServerConcurrency(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Server = settingsdomain.ServerConfig{}
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
 
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +515,7 @@ func TestApplyDomainConfigPreservesExplicitCapacitySettings(t *testing.T) {
 	base := testConfig(t)
 	base.Audit.JournalDirectory = filepath.Join(t.TempDir(), "durable-audit")
 	base.Audit.JournalMaxBytes = 128 << 20
-	value := toDomainConfig(base)
+	value := config.ToRuntimeSettings(base)
 	value.Server.MaxConcurrentRequests = 1024
 	value.Routing.CapacityWait = 500 * time.Millisecond
 	value.ProviderWeb.ChatTimeout = 2 * time.Minute
@@ -541,11 +542,11 @@ func TestApplyDomainConfigPreservesExplicitCapacitySettings(t *testing.T) {
 
 func TestLoadPersistedBackfillsMissingConsoleSection(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.ProviderConsole = settingsdomain.ProviderConsoleConfig{}
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
 
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,11 +557,11 @@ func TestLoadPersistedBackfillsMissingConsoleSection(t *testing.T) {
 
 func TestLoadPersistedRejectsPartiallyInvalidConsoleSection(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.ProviderConsole.BaseURL = ""
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
 
-	if _, _, _, err := LoadPersisted(context.Background(), cfg, repository); err == nil {
+	if _, _, _, err := loadPersistedConfig(context.Background(), cfg, repository); err == nil {
 		t.Fatal("partially invalid Console settings were accepted")
 	}
 }
@@ -568,9 +569,9 @@ func TestLoadPersistedRejectsPartiallyInvalidConsoleSection(t *testing.T) {
 func TestReloadPersistedAppliesOnlyNewerVersion(t *testing.T) {
 	cfg := testConfig(t)
 	updatedAt := time.Now().UTC()
-	repository := &runtimeSettingsRepositoryStub{value: toDomainConfig(cfg), updatedAt: updatedAt, revision: 1, found: true}
+	repository := &runtimeSettingsRepositoryStub{value: config.ToRuntimeSettings(cfg), updatedAt: updatedAt, revision: 1, found: true}
 	applyCount := 0
-	service := newTestService(cfg, updatedAt, 1, repository, nil, func(config.Config) { applyCount++ })
+	service := newTestService(cfg, updatedAt, 1, repository, nil, func(settingsdomain.Config) { applyCount++ })
 
 	if err := service.ReloadPersisted(context.Background()); err != nil {
 		t.Fatal(err)
@@ -595,8 +596,8 @@ func TestReloadPersistedRevertsToBaselineOnDurableReset(t *testing.T) {
 	override.Frontend.PublicAPIBaseURL = "https://edge.example.test"
 	repository := &runtimeSettingsRepositoryStub{}
 	applyCount := 0
-	service := newTestService(override, time.Now().UTC(), 0, repository, nil, func(config.Config) { applyCount++ })
-	service.SetFileConfig(baseline)
+	service := newTestService(override, time.Now().UTC(), 0, repository, nil, func(settingsdomain.Config) { applyCount++ })
+	service.SetFileConfig(runtimeOf(baseline))
 
 	// 远端实例重置：覆盖已移除，持久时钟推进到 1。
 	if _, _, err := repository.Reset(context.Background(), 0); err != nil {
@@ -658,13 +659,13 @@ func testConfig(t *testing.T) config.Config {
 func TestLoadPersistedKeepsYAMLFrontendWhenUnset(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Frontend.PublicAPIBaseURL = "http://yaml.example.com"
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Frontend = settingsdomain.FrontendConfig{}
 	repository := &runtimeSettingsRepositoryStub{
 		value: value,
 		found: true, revision: 1, updatedAt: time.Now().UTC(),
 	}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,7 +680,7 @@ func TestUpdateEmptyFrontendOverrideFallsBackToYAML(t *testing.T) {
 	cfg.Frontend.PublicAPIBaseURLOverride = "http://runtime.example.com"
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Frontend.PublicAPIBaseURL = ""
 	if _, err := service.Update(context.Background(), 0, input); err != nil {
@@ -749,7 +750,7 @@ func TestUpdateAuditCommitDelayRoundTrip(t *testing.T) {
 	cfg := testConfig(t)
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Audit.CommitDelayMS = 12
 	snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
@@ -766,7 +767,7 @@ func TestUpdateAuditRetentionPreservesExplicitZero(t *testing.T) {
 	cfg.Audit.RetentionPeriod = config.Duration(7 * 24 * time.Hour)
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Audit.RetentionPeriodProvided = false
 	input.Audit.RetentionDays = 0
@@ -781,7 +782,7 @@ func TestUpdateAuditRetentionPreservesExplicitZero(t *testing.T) {
 	if repo.value.Audit.RetentionPeriod == nil || *repo.value.Audit.RetentionPeriod != 0 || repo.value.Audit.RetentionDays != nil {
 		t.Fatalf("persisted audit policy = %#v", repo.value.Audit)
 	}
-	reloaded, _, _, err := LoadPersisted(context.Background(), cfg, repo)
+	reloaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,12 +794,12 @@ func TestUpdateAuditRetentionPreservesExplicitZero(t *testing.T) {
 func TestLoadPersistedKeepsAuditDefaultsForOlderPayload(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Audit.RetentionPeriod = config.Duration(30 * 24 * time.Hour)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Audit.RetentionPeriod = nil
 	value.Audit.RetentionDays = nil
 	repo := &runtimeSettingsRepositoryStub{value: value, found: true}
 
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repo)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,7 +822,7 @@ func TestUpdateAccountsAutoCleanRoundTrip(t *testing.T) {
 	cfg := testConfig(t)
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Accounts = AccountsConfig{
 		MarkBuildForbiddenReauth: true, MarkBuildForbiddenReauthProvided: true,
@@ -857,7 +858,7 @@ func TestUpdateWithoutAccountsPreservesCurrentAutoCleanConfig(t *testing.T) {
 	cfg.Accounts.AutoCleanIncludeDisabled = true
 	repo := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Accounts = AccountsConfig{}
 	input.AccountsProvided = false
@@ -875,7 +876,7 @@ func TestUpdateWithoutBuildForbiddenFieldPreservesCurrentPolicy(t *testing.T) {
 	cfg.Accounts.MarkBuildForbiddenReauth = true
 	cfg.Accounts.BuildForbiddenReauthCodes = []string{"custom-denial"}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, &runtimeSettingsRepositoryStub{}, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 	input := service.Get().Config
 	input.Accounts.MarkBuildForbiddenReauth = false
 	input.Accounts.MarkBuildForbiddenReauthProvided = false
@@ -892,10 +893,10 @@ func TestUpdateWithoutBuildForbiddenFieldPreservesCurrentPolicy(t *testing.T) {
 
 func TestLoadPersistedKeepsDefaultBuildForbiddenCodesForOlderPayload(t *testing.T) {
 	cfg := testConfig(t)
-	value := toDomainConfig(cfg)
+	value := config.ToRuntimeSettings(cfg)
 	value.Accounts.BuildForbiddenReauthCodes = nil
 	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
-	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	loaded, _, _, err := loadPersistedConfig(context.Background(), cfg, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,7 +935,11 @@ func TestLegacyGuardSettingsAreReadOnlyProjection(t *testing.T) {
 	authority := cfg.RequestRetry
 	authority.Enabled = true
 	authority.MaxAttempts = 3
-	service.SetRequestRetryProjection(func() config.RequestRetryConfig { return authority })
+	service.SetRequestRetryProjection(func() settingsdomain.RequestRetryConfig {
+		tmp := cfg
+		tmp.RequestRetry = authority
+		return *config.ToRuntimeSettings(tmp).RequestRetry
+	})
 	input := service.Get().Config
 	input.RequestRetry.Enabled = false
 	input.RequestRetry.MaxAttempts = 9
@@ -982,7 +987,7 @@ func TestReloadPersistedRejectsLostClock(t *testing.T) {
 
 func mustApplyDomainConfig(t *testing.T, base config.Config, value settingsdomain.Config) config.Config {
 	t.Helper()
-	merged, err := applyDomainConfig(base, value)
+	merged, err := config.ApplyRuntimeSettings(base, value)
 	if err != nil {
 		t.Fatal(err)
 	}

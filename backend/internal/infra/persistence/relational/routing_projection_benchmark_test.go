@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func BenchmarkRoutingAccountBaseProjectionWithLargePayloads(b *testing.B) {
 			Enabled: true, AuthStatus: account.AuthStatusActive,
 		}
 	}
-	created, err := repository.UpsertManyByIdentity(ctx, credentials)
+	created, err := repository.ImportAccounts(ctx, testsupport.AccountImports(credentials))
 	if err != nil {
 		b.Fatal(err)
 	}

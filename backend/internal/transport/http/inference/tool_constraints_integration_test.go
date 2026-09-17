@@ -5,6 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +23,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -95,21 +98,21 @@ func TestHTTPGatewayBuildToolConstraints(t *testing.T) {
 	}))
 	defer upstream.Close()
 	build := cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher)
-	registry := provider.NewRegistry(build)
+	registry := providerimpl.NewRegistry(build)
 	sticky := memory.NewStickyStore()
 	concurrency := memory.NewConcurrencyLimiter()
-	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clientService := clientkeyapp.NewService("test-owner", keys, memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+	clientService := clientkeyapp.NewService("test-owner", keys, memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 	defer closeClientKeyService(t, clientService)
 	created, err := clientService.Create(ctx, clientkeyapp.CreateInput{Name: "contract", Enabled: true, RPMLimit: 120, MaxConcurrent: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
-	selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-	service := gateway.NewService(models, audits, accountService, clientService, registry, selector, relational.NewResponseRepository(db), 3)
+	selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+	service := gateway.NewService(models, audits, accountService, clientService, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.RequestID(), middleware.ClientAuth(clientService))
+	router.Use(middleware.RequestID(nil), middleware.ClientAuth(clientService))
 	NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 	server := httptest.NewServer(router)
 	defer server.Close()

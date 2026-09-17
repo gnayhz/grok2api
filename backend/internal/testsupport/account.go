@@ -70,3 +70,13 @@ func ModelRestriction(ctx context.Context, repo repository.AccountRepository, bl
 	_, err = repo.ApplyModelRestriction(ctx, value.QuotaRecoveryRef(), account.ModelRestrictionEvent{Kind: account.ModelRestrictionKind(block.Reason), UpstreamModel: block.UpstreamModel, RetryAfter: delay, OccurredAt: block.CooldownUntil.Add(-delay)})
 	return err
 }
+
+// AccountImports 把凭据切片转成 ImportAccounts 入参(替代已删除的
+// UpsertManyByIdentity 测试转发:生产导入统一走 ImportAccounts)。
+func AccountImports(values []account.Credential) []repository.AccountImport {
+	inputs := make([]repository.AccountImport, len(values))
+	for i, value := range values {
+		inputs[i].Credential = value
+	}
+	return inputs
+}

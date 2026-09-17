@@ -2,6 +2,8 @@ package egress
 
 import (
 	"context"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +25,7 @@ func (o *countedHTTPOwner) ManageHTTPTransport(ctx context.Context, tr *http.Tra
 }
 
 func TestControlHTTPUsesRuntimeAndPreservesSubscriptionDestinationGuard(t *testing.T) {
-	m := infraegress.NewManager(nil, nil)
+	m := infraegress.NewManagerWithLimits(nil, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	owner := &countedHTTPOwner{Manager: m}
 	var hits atomic.Int32
@@ -36,14 +38,13 @@ func TestControlHTTPUsesRuntimeAndPreservesSubscriptionDestinationGuard(t *testi
 	}))
 	defer server.Close()
 	s := NewService(nil, nil)
-	s.SetHTTPTransportOwner(owner)
+	s.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	s.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(owner))
 	if err := s.callRotationWebhook(context.Background(), server.URL, RotationConfig{WebhookTimeout: time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fetchProxySubscription(context.Background(), server.URL, "", owner); err == nil {
-		t.Fatal("managed subscription bypassed private-address guard")
-	}
-	if owner.calls.Load() != 2 || hits.Load() != 1 {
+	// 订阅拉取的传输所有权断言随实现移至 infra/egress(subfetch_transport_test.go)。
+	if owner.calls.Load() != 1 || hits.Load() != 1 {
 		t.Fatalf("control transport ownership=%d actual requests=%d", owner.calls.Load(), hits.Load())
 	}
 	if s := m.RuntimeStats(); s.Network.Clients != 0 || s.Network.Requests != 0 || s.Network.Connections != 0 {

@@ -2,13 +2,14 @@ package account
 
 import (
 	"context"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // tombstoneImportAdapter 单账号导入适配器(email 可控)。
@@ -57,10 +58,10 @@ func TestDeletedAccountNotResurrectedByImport(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := relational.NewAccountRepository(database)
-	service := NewService(repo, nil, nil, nil, provider.NewRegistry(tombstoneImportAdapter{email: "ghost@example.com"}), cipher, nil)
+	service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(tombstoneImportAdapter{email: "ghost@example.com"}), cipher, security.RandomTokenSource{}, nil, nil, nil)
 
 	// ① 首次导入:创建成功。
-	first, err := service.ImportCredentials(ctx, []byte("doc"))
+	first, err := service.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("doc")}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,7 @@ func TestDeletedAccountNotResurrectedByImport(t *testing.T) {
 	}
 
 	// ③ 再次导入同 email:被墓碑跳过,不复活。
-	second, err := service.ImportCredentials(ctx, []byte("doc"))
+	second, err := service.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("doc")}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,16 +92,4 @@ func TestDeletedAccountNotResurrectedByImport(t *testing.T) {
 		t.Fatalf("墓碑应拦截复活, got %#v", second)
 	}
 
-	// ④ 清墓碑:恢复导入通道。
-	cleared, err := repo.ClearTombstones(ctx, []string{"ghost@example.com"})
-	if err != nil || cleared != 1 {
-		t.Fatalf("清墓碑 = %d err=%v", cleared, err)
-	}
-	third, err := service.ImportCredentials(ctx, []byte("doc"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if third.Created != 1 {
-		t.Fatalf("清墓碑后应可再导入, got %#v", third)
-	}
 }

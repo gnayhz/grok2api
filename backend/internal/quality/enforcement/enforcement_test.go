@@ -69,6 +69,7 @@ func newBench(t *testing.T) (*registry.Registry, *Service) {
 	}
 	t.Cleanup(func() { _ = qualityRegistry.Close() })
 	service := New(DefaultConfig(), qualityRegistry, nil, nil, nil)
+	go service.Run(context.Background())
 	return qualityRegistry, service
 }
 
@@ -80,6 +81,7 @@ func TestPollEpochsEstablishesArchiveAndFlipsOnChange(t *testing.T) {
 	ipSource := memIPSource{current: map[uint64]string{5: "192.0.2.1"}}
 	nodes := memNodes{profiles: []proxy.NodeProfile{{ID: 5, Enabled: true, Name: "n5"}}}
 	service := New(DefaultConfig(), qualityRegistry, nil, nil, newMemRotator())
+	go service.Run(context.Background())
 	service.nodes, service.ipSource = nodes, ipSource
 	defer service.Close(context.Background())
 	if _, err := service.PollEpochs(ctx); err != nil {
@@ -89,7 +91,7 @@ func TestPollEpochsEstablishesArchiveAndFlipsOnChange(t *testing.T) {
 		t.Fatal("首见应建档 epoch 0")
 	}
 	// 质量羁押该节点(模拟 live 裁决后状态)。
-	if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 5, To: model.ExitRemanded, CaseID: 1}); err != nil {
+	if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 5, To: model.ExitRemanded, CaseID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	// IP 变化→翻篇→自动释放。
@@ -119,7 +121,7 @@ func TestPollEpochsReconcilesPersistedArchiveAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, state := range []model.ExitState{model.ExitRemanded, model.ExitBanned} {
-		if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{
+		if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{
 			NodeID: 5, Epoch: 0, To: state, CaseID: 11,
 		}); err != nil {
 			t.Fatal(err)
@@ -129,6 +131,7 @@ func TestPollEpochsReconcilesPersistedArchiveAfterRestart(t *testing.T) {
 	// 不传 nodes/ipSource 给 New，避免测试后台 goroutine；手动装配成
 	// “重启后首次轮询”的执行所实例。
 	service := New(DefaultConfig(), qualityRegistry, nil, nil, nil)
+	go service.Run(context.Background())
 	service.nodes = memNodes{profiles: []proxy.NodeProfile{{ID: 5, Enabled: true, Name: "n5"}}}
 	service.ipSource = memIPSource{current: map[uint64]string{5: "192.0.2.2"}}
 
@@ -152,7 +155,7 @@ func TestPollEpochsReconcilesPersistedArchiveAfterRestart(t *testing.T) {
 func TestManualUnban(t *testing.T) {
 	qualityRegistry, service := newBench(t)
 	ctx := context.Background()
-	if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 9, To: model.ExitRemanded, CaseID: 2}); err != nil {
+	if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 9, To: model.ExitRemanded, CaseID: 2}); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ManualUnban(ctx, 9); err != nil {
@@ -175,6 +178,7 @@ func TestRotateNodeGuardsAndRateLimit(t *testing.T) {
 	rotator := newMemRotator()
 	rotator.limit = 2
 	service := New(Config{PollInterval: time.Hour}, qualityRegistry, nil, nil, rotator)
+	go service.Run(context.Background())
 	service.nodes, service.ipSource = nodes, memIPSource{}
 	defer service.Close(context.Background())
 	if err := service.RotateNode(ctx, 1); err == nil {
@@ -206,6 +210,7 @@ func TestRotateNodesBatch(t *testing.T) {
 	rotator := newMemRotator()
 	rotator.limit = 2
 	service := New(Config{PollInterval: time.Hour}, qualityRegistry, nil, nil, rotator)
+	go service.Run(context.Background())
 	service.nodes, service.ipSource = nodes, memIPSource{}
 	defer service.Close(context.Background())
 	triggered, rateLimited, err := service.RotateNodes(ctx, []uint64{2, 3, 4})
@@ -242,14 +247,15 @@ func TestNoCanaryNoExpiryByConstruction(t *testing.T) {
 	ctx := context.Background()
 	nodes := memNodes{profiles: []proxy.NodeProfile{{ID: 6, Enabled: true, Name: "hook6", RotationWebhook: true}}}
 	service := New(Config{PollInterval: time.Hour}, qualityRegistry, nodes, memIPSource{current: map[uint64]string{6: "203.0.113.1"}}, newMemRotator())
+	go service.Run(context.Background())
 	defer service.Close(context.Background())
 	if _, err := service.PollEpochs(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 6, To: model.ExitRemanded, CaseID: 3}); err != nil {
+	if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 6, To: model.ExitRemanded, CaseID: 3}); err != nil {
 		t.Fatal(err)
 	}
-	if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 6, To: model.ExitBanned, CaseID: 3}); err != nil {
+	if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 6, To: model.ExitBanned, CaseID: 3}); err != nil {
 		t.Fatal(err)
 	}
 	// 先羁押再翻篇到 ban:直接对当前 epoch 建档+ban 已完成;
@@ -275,13 +281,14 @@ func TestAutoRotateBannedWebhookNodes(t *testing.T) {
 	rotator := newMemRotator()
 	rotator.limit = 1
 	service := New(Config{PollInterval: time.Hour}, qualityRegistry, nil, nil, rotator)
+	go service.Run(context.Background())
 	service.nodes, service.ipSource = nodes, memIPSource{}
 	defer service.Close(context.Background())
 	for _, id := range []uint64{1, 2, 3} {
-		if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: id, To: model.ExitRemanded, CaseID: 9}); err != nil {
+		if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: id, To: model.ExitRemanded, CaseID: 9}); err != nil {
 			t.Fatal(err)
 		}
-		if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: id, To: model.ExitBanned, CaseID: 9}); err != nil {
+		if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: id, To: model.ExitBanned, CaseID: 9}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -316,12 +323,13 @@ func TestAutoRotateBackoffPreventsHammering(t *testing.T) {
 	}}
 	rotator := newMemRotator()
 	service := New(Config{PollInterval: time.Hour}, qualityRegistry, nil, nil, rotator)
+	go service.Run(context.Background())
 	service.nodes, service.ipSource = nodes, memIPSource{}
 	defer service.Close(context.Background())
-	if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 2, To: model.ExitRemanded, CaseID: 9}); err != nil {
+	if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 2, To: model.ExitRemanded, CaseID: 9}); err != nil {
 		t.Fatal(err)
 	}
-	if err := qualityRegistry.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 2, To: model.ExitBanned, CaseID: 9}); err != nil {
+	if err := qualityRegistry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 2, To: model.ExitBanned, CaseID: 9}); err != nil {
 		t.Fatal(err)
 	}
 	if rotated := service.rotateBannedWebhooks(ctx); rotated != 1 {

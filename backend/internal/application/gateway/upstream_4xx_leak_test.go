@@ -2,6 +2,11 @@ package gateway
 
 import (
 	"context"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -14,7 +19,6 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
@@ -66,11 +70,11 @@ func TestNonRetryableUpstream4xxNeverLeaksRawBody(t *testing.T) {
 	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{
 		credential.ID: {{status: http.StatusBadRequest, body: `{"error":{"message":"invalid request trace-id=secret-internal-abc session-token-hint=xyz","type":"invalid_request_error"}}`}},
 	}}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-leak-4xx", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: false,

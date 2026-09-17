@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,11 +13,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-func modelManagementPair(t *testing.T) (*Service, *Service) {
+func modelManagementPair(t *testing.T) (*Service, *Service, repository.AccountRepository) {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "management.db")
@@ -33,16 +33,17 @@ func modelManagementPair(t *testing.T) (*Service, *Service) {
 		t.Fatal(err)
 	}
 	b := open()
-	registry := provider.NewRegistry(&modelRouteAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{}})
-	return NewService(relational.NewModelRepository(a), relational.NewAccountRepository(a), nil, registry), NewService(relational.NewModelRepository(b), relational.NewAccountRepository(b), nil, registry)
+	registry := providerimpl.NewRegistry(&modelRouteAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{}})
+	accounts := relational.NewAccountRepository(a)
+	return NewService(relational.NewModelRepository(a), accounts, nil, registry), NewService(relational.NewModelRepository(b), relational.NewAccountRepository(b), nil, registry), accounts
 }
 
 func TestModelBindingSelectsAccountsOutsideFirstPage(t *testing.T) {
-	s, _ := modelManagementPair(t)
+	s, _, repo := modelManagementPair(t)
 	ctx := context.Background()
 	var oldest uint64
 	for index := range 1001 {
-		v, _, err := s.accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: fmt.Sprintf("account-%04d", index), SourceKey: fmt.Sprintf("account-%04d", index), EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
+		v, _, err := repo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: fmt.Sprintf("account-%04d", index), SourceKey: fmt.Sprintf("account-%04d", index), EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +99,7 @@ func (r *heldModelRead) Get(ctx context.Context, id uint64) (modeldomain.Route, 
 func TestModelPartialUpdateKeepsConcurrentOmittedFields(t *testing.T) {
 	for _, lateRename := range []bool{true, false} {
 		t.Run(fmt.Sprintf("late_rename_%t", lateRename), func(t *testing.T) {
-			a, b := modelManagementPair(t)
+			a, b, _ := modelManagementPair(t)
 			ctx := context.Background()
 			created, err := a.Create(ctx, CreateInput{PublicID: "original", Provider: account.ProviderBuild, UpstreamModel: "upstream", Capability: modeldomain.CapabilityResponses, Enabled: true})
 			if err != nil {
@@ -144,13 +145,13 @@ func TestModelPartialUpdateKeepsConcurrentOmittedFields(t *testing.T) {
 }
 
 func TestModelBindingScopeValidationAndUnchangedFields(t *testing.T) {
-	s, _ := modelManagementPair(t)
+	s, _, repo := modelManagementPair(t)
 	ctx := context.Background()
-	build, _, err := s.accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: "build", SourceKey: "build", EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
+	build, _, err := repo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: "build", SourceKey: "build", EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
 	if err != nil {
 		t.Fatal(err)
 	}
-	web, _, err := s.accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, Name: "web", SourceKey: "web", EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
+	web, _, err := repo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, Name: "web", SourceKey: "web", EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
 	if err != nil {
 		t.Fatal(err)
 	}

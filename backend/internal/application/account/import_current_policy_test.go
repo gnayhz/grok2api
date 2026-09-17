@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -10,9 +11,9 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -31,7 +32,7 @@ func currentImportService(t *testing.T, adapters ...provider.Adapter) (*Service,
 		t.Fatal(err)
 	}
 	repo := relational.NewAccountRepository(db)
-	return NewService(repo, nil, memory.NewDeviceSessionStore(), nil, provider.NewRegistry(adapters...), cipher, memory.NewLockStore()), repo
+	return NewService(repo, nil, memory.NewDeviceSessionStore(), nil, providerimpl.NewRegistry(adapters...), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore()), repo
 }
 
 func currentImportCredential(t *testing.T, s *Service, p accountdomain.Provider, key, email string) accountdomain.Credential {
@@ -93,7 +94,7 @@ func TestPreparedImportChecksCurrentDeletionAfterExchange(t *testing.T) {
 			}
 			observed := 0
 			var progress [][2]int
-			out, err := s.ImportCredentialsWithProgress(ctx, []byte("synthetic"), func(uint64) error { observed++; return nil }, func(done, total int) error {
+			out, err := s.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("synthetic")}, func(uint64) error { observed++; return nil }, func(done, total int) error {
 				progress = append(progress, [2]int{done, total})
 				return nil
 			})
@@ -170,7 +171,7 @@ func TestWebSynchronizationChecksCurrentSource(t *testing.T) {
 						t.Fatalf("console sync: %+v, progress=%v, %v", out, progress, err)
 					}
 				} else {
-					out, err := s.ConvertWebAccountsToBuildWithObserver(ctx, []uint64{v.ID}, observer)
+					out, err := s.ConvertWebAccountsToBuildWithStrategy(ctx, []uint64{v.ID}, BuildConversionMissing, observer, nil)
 					if err != nil || out.Created != 0 || out.Linked != 0 || out.Skipped != 1 || out.Failed != 0 || len(out.BuildAccountIDs) != 0 {
 						t.Fatalf("build conversion: %+v, %v", out, err)
 					}

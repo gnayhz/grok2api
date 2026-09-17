@@ -73,7 +73,7 @@ func (m *routingRuntime) acquire(ctx context.Context, scope domain.Scope, affini
 		return nil, false, err
 	}
 	now := time.Now().UTC()
-	managedClearance := usesBrowserClearance(scope) && m.managedClearanceMode()
+	managedClearance := isGrokWebScope(scope) && m.managedClearanceMode()
 	// 质量验证(canary)钉住受检节点:绕过路由层, 且由 acquireFixedTarget 的
 	// verification 分支绕过冷却/排除守卫(见其注释)。验证属质量取证通道,
 	// 出口资格缝隙同样放行(B2 生产/探针双通道)。
@@ -220,15 +220,15 @@ func (m *routingRuntime) acquire(ctx context.Context, scope domain.Scope, affini
 		if !m.qualitySchedulable(ctx, node.ID) {
 			continue
 		}
-		if proxyPool && node.LastError == domain.LastErrorExitIPQuality && node.CooldownUntil != nil && now.Before(*node.CooldownUntil) {
+		// 冷却口径统一由 domain.CooldownBlocksScheduling 给出:池模式节点
+		// 豁免普通冷却,出口 IP 质量隔离对它们同样生效(不再在此另拼条件)。
+		if domain.CooldownBlocksScheduling(node.CooldownUntil, node.LastError, proxyPool, now) {
 			continue
 		}
-		if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) || proxyPool {
-			if proxyPool {
-				node.Health, node.FailureCount, node.CooldownUntil, node.LastError = 1, 0, nil, ""
-			}
-			available = append(available, node)
+		if proxyPool {
+			node = domain.RotatingEndpointHealth(node.HealthState()).ApplyTo(node)
 		}
+		available = append(available, node)
 	}
 	if len(available) == 0 {
 		if hasNodes {
@@ -279,7 +279,10 @@ func (m *routingRuntime) acquireFixedTarget(ctx context.Context, scope domain.Sc
 		if nodeExcluded(ctx, selected.ID) {
 			return nil, fmt.Errorf("%w: node %d excluded by degrade guard", ErrRoutingTargetUnavailable, nodeID)
 		}
-		if !m.isProxyPoolNode(selected) && selected.CooldownUntil != nil && time.Now().UTC().Before(*selected.CooldownUntil) {
+		// 冷却口径与自动调度/池成员过滤共用 domain 唯一判定:池模式节点豁免
+		// 普通冷却,但出口 IP 质量隔离同样阻断固定目标——固定的是隧道,不是
+		// 被隔离的降智出口。
+		if domain.CooldownBlocksScheduling(selected.CooldownUntil, selected.LastError, m.isProxyPoolNode(selected), time.Now().UTC()) {
 			if !waitedForProbe && selected.LastError == domain.LastErrorTransport {
 				completed, waitErr := m.waitForFailureProbe(ctx, nodeID)
 				if waitErr != nil {
@@ -523,12 +526,14 @@ func (m *routingRuntime) stickyFlagMemoized(nodeID uint64, ciphertext string) bo
 	return sticky
 }
 
+// isProxyPoolNode 判定节点的池模式状态:策略由 domain.IsPoolMode 唯一给出,
+// 这里只提供记忆化解密得到的"账号模板"输入(不重复解密)。
 func (m *routingRuntime) isProxyPoolNode(value domain.Node) bool {
-	return value.ProxyPool || m.isStickyProxyNode(value)
+	return domain.IsPoolMode(value.ProxyPool, m.isStickyProxyNode(value))
 }
 
 func (m *routingRuntime) isProxyPoolNodeDirect(value domain.Node) bool {
-	return value.ProxyPool || m.stickyFlagDirect(value)
+	return domain.IsPoolMode(value.ProxyPool, m.stickyFlagDirect(value))
 }
 
 func (m *routingRuntime) snapshotProxyPoolFlag(value domain.Node) bool {
@@ -548,9 +553,9 @@ func (m *routingRuntime) snapshotProxyPoolFlag(value domain.Node) bool {
 	entry, memoized := m.proxyFlagMemo[value.ID]
 	m.nodeMu.RUnlock()
 	if memoized && entry.ciphertext == value.EncryptedProxyURL {
-		return entry.sticky
+		return domain.IsPoolMode(value.ProxyPool, entry.sticky)
 	}
-	return m.stickyFlagMemoized(value.ID, value.EncryptedProxyURL)
+	return domain.IsPoolMode(value.ProxyPool, m.stickyFlagMemoized(value.ID, value.EncryptedProxyURL))
 }
 
 func (m *routingRuntime) cachedNodeIsHealthy(nodeID uint64) bool {

@@ -64,13 +64,13 @@ func qualityManagementPair(t *testing.T, dialect string) (*registry.Registry, *r
 
 func managementQueriesOn(t *testing.T, reg *registry.Registry, db *Database) (*management.Queries, *evidence.Store) {
 	t.Helper()
-	observations, err := evidence.New(context.Background(), reg.DB(), evidence.DefaultConfig())
+	observations, err := evidence.New(context.Background(), reg.DB(), qualitymodel.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := court.DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
-	service := court.New(cfg, reg, observations, nil)
+	service := court.New(cfg, reg, observations, nil, registry.NewProbeTaskStore(reg))
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	return management.NewQueries(management.QueryDependencies{Registry: reg, Evidence: observations, Court: service, Probes: registry.NewProbeTaskStore(reg), Guard: guard.New(guard.DefaultConfig(), nil), Nodes: managementNodeProfiles{db.db}}), observations
 }
@@ -119,7 +119,7 @@ func TestQualityManagementQueriesRefreshAcrossConnections(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := a.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 7, Epoch: second, To: qualitymodel.ExitRemanded, CaseID: 1}); err != nil {
+			if err := a.TransitionExit(ctx, qualitymodel.ExitTransitionRequest{NodeID: 7, Epoch: second, To: qualitymodel.ExitRemanded, CaseID: 1}); err != nil {
 				t.Fatal(err)
 			}
 			if err := observations.Record(ctx, qualitymodel.Observation{AccountID: 42, Exit: qualitymodel.EpochKey{NodeID: 7, Epoch: second}, At: time.Now().UTC(), Source: qualitymodel.SourceTraffic, Outcome: qualitymodel.OutcomeDelivered}); err != nil {

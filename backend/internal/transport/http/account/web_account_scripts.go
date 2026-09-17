@@ -5,11 +5,9 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
-
-const maxWebAccountScriptRequestIDs = 1000
 
 type webAccountScriptsRequest struct {
 	IDs     []string                       `json:"ids"`
@@ -49,7 +47,7 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "至少选择一个账号")
 		return
 	}
-	if len(request.IDs) > maxWebAccountScriptRequestIDs {
+	if len(request.IDs) > accountapp.MaxWebAccountScriptAccounts {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "单次最多处理 1000 个账号")
 		return
 	}
@@ -80,9 +78,9 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 		err       error
 	)
 	if request.All {
-		succeeded, failed, err = h.service.RunAllWebAccountScriptsWithProgress(c.Request.Context(), request.Actions.options(), stream.ProgressObserver())
+		succeeded, failed, err = h.maintenance.RunAllWebAccountScriptsWithProgress(c.Request.Context(), request.Actions.options(), stream.ProgressObserver())
 	} else {
-		succeeded, failed, err = h.service.RunWebAccountScriptsWithProgress(c.Request.Context(), ids, request.Actions.options(), stream.ProgressObserver())
+		succeeded, failed, err = h.maintenance.RunWebAccountScriptsWithProgress(c.Request.Context(), ids, request.Actions.options(), stream.ProgressObserver())
 	}
 	if err != nil {
 		stream.WriteError("webAccountScriptFailed", "执行 Grok Web 账号脚本失败")

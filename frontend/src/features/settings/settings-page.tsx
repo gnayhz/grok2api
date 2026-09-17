@@ -1,25 +1,26 @@
 import { RotateCcw, Sparkles } from "lucide-react";
 import { useRef, useState } from "react";
 import { Controller } from "react-hook-form";
+import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
-import { VersionUpdateSection } from "@/features/system/version-update";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { isByteSizeUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/features/settings/settings-model";
-import { useSettings } from "@/features/settings/use-settings";
-import { DurationInput, SettingsField, SettingsPane, SettingsSection } from "@/features/settings/settings-ui";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/shared/ui/alert-dialog";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
+import { Spinner } from "@/shared/ui/spinner";
+import { Switch } from "@/shared/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { Textarea } from "@/shared/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { isByteSizeUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/entities/settings/settings-form";
+import { useSettings } from "./use-settings";
+import { DurationInput } from "@/entities/settings/duration-input";
+import { SettingsField, SettingsPane, SettingsSection } from "./settings-ui";
 import { ErrorState } from "@/shared/components/data-state";
 
-export function SettingsPage() {
+export function SettingsPage({ versionSection }: { versionSection?: ReactNode }) {
   const { t } = useTranslation();
   const { form, settingsQuery, updateMutation, resetDefaultsMutation, reset } = useSettings();
   const [autoCleanConfirm, setAutoCleanConfirm] = useState<"enabled" | "includeDisabled" | null>(null);
@@ -598,7 +599,7 @@ export function SettingsPage() {
           </SettingsPane>
 
           <SettingsPane value="about">
-            <VersionUpdateSection />
+            {versionSection}
           </SettingsPane>
           </div>
         </Tabs>

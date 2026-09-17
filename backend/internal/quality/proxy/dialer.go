@@ -4,9 +4,9 @@ import (
 	"sync"
 )
 
-// DialerPolicy 拨号观测面:每次出口租约按作用域×节点计数(G10 选择
-// 分布数据面)。生产路由/池决策在底座 Manager——本包零底座 import
-// (D2),组合根把本观测包装到底座 Dialer 缝隙上。
+// DialerPolicy 拨号观测面:每次出口租约按作用域×节点计数。
+// 生产路由/池决策在 infra/egress.Manager;本包零底座 import,
+// 组合根把本观测包装到底座 Dialer 缝隙上。
 type DialerPolicy struct {
 	mu       sync.Mutex
 	perScope map[string]map[uint64]uint64
@@ -30,7 +30,7 @@ func (p *DialerPolicy) ObserveAcquisition(scope string, nodeID uint64) {
 	p.perScope[scope][nodeID]++
 }
 
-// SelectionDistribution 返回各作用域各节点的累计选择次数(G10 面板)。
+// SelectionDistribution 返回各作用域各节点的累计选择次数。
 func (p *DialerPolicy) SelectionDistribution() map[string]map[uint64]uint64 {
 	if p == nil {
 		return nil

@@ -179,7 +179,7 @@ func (m *Manager) invalidateObservedClients(r healthReport) {
 }
 
 func nodeIsHealthy(value domain.Node) bool {
-	return value.Health >= 1 && value.FailureCount == 0 && value.CooldownUntil == nil && value.LastError == ""
+	return healthStateHealthy(value.HealthState())
 }
 
 // ObserveWebSocketError is used only for errors returned directly by upstream

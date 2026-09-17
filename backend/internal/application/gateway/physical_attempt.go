@@ -3,18 +3,19 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"net/http"
 	"time"
 
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // runPhysicalAttempt is shared by production and controlled measurements. Its
 // caller owns account selection and policy; this boundary owns adapter dispatch,
 // the response body and physical identity, including synthetic adapter responses.
-func (s *Service) runPhysicalAttempt(ctx context.Context, request provider.ResponseResourceRequest, resources *attemptResources) (*provider.Response, error) {
+func (s *Service) runPhysicalAttempt(ctx context.Context, request provider.ResponseResourceRequest, resources *selector.AttemptResources) (*provider.Response, error) {
 	adapter, ok := s.providers.Responses(request.Credential.Provider)
 	if !ok {
 		return nil, errors.New("provider adapter unavailable")
@@ -33,7 +34,7 @@ func (s *Service) runPhysicalAttempt(ctx context.Context, request provider.Respo
 		err = nil
 	}
 	if response != nil {
-		response.Body = resources.own(response.Body)
+		response.Body = resources.Own(response.Body)
 		if response.Attempt.ID == "" && response.RequestValidation == nil {
 			response.Attempt = attemptmeta.FromContext(attemptmeta.Begin(ctx, attemptmeta.Path{}))
 			response.Attempt.StartedAt = started

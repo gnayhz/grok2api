@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ func TestSyncHygieneMissingTargetRemainsRemovable(t *testing.T) {
 		nodeErr: repository.ErrNotFound,
 	}
 	service := &Service{repository: stub}
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	if err := service.enforceRoutingHygieneAfterSync(context.Background(), stub); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +109,8 @@ func assertSyncHygieneReadFailure(t *testing.T, level string, failure error) {
 	}
 	fault := &hygieneReadFailureRepository{EgressRepository: repo, failure: failure, failID: node.ID}
 	service := NewService(fault, original.cipher)
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	defer service.Close(ctx)
 	result, err := service.SyncSource(ctx, source.ID)
 	if err != nil || result.Imported != 1 || fault.reads == 0 {

@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"fmt"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func BenchmarkClientKeyDeletion(b *testing.B) {
 				b.Fatal(err)
 			}
 			keys, jobs := NewClientKeyRepository(db), NewMediaJobRepository(db)
-			service := clientkeyapp.NewService("benchmark", keys, nil, nil, 0, 0, nil)
+			service := clientkeyapp.NewService("benchmark", keys, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 			b.Cleanup(func() { _ = service.Close(ctx) })
 			b.ReportAllocs()
 			b.ResetTimer()

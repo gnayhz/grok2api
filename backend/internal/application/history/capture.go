@@ -314,12 +314,3 @@ func patchCompletedOutput(event []byte, itemsByIndex map[int][]byte, fallbackIte
 	}
 	return patched
 }
-
-// StoreFromCompletedPayload 供已缓冲完整 JSON 的路径直接调用。
-func (r *ReasoningReplay) StoreFromCompletedPayload(ctx context.Context, model, sessionKey string, payload []byte, compact bool) {
-	if compact {
-		r.Clear(ctx, model, sessionKey)
-		return
-	}
-	r.StoreFromCompleted(ctx, model, sessionKey, payload)
-}

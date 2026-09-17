@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -27,13 +31,13 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -140,7 +144,7 @@ func TestHTTPCompletionProviderMatrix(t *testing.T) {
 						audits := relational.NewAuditRepository(db)
 						states := &completionFaultStore{ResponseRepository: relational.NewResponseRepository(db), failOwnership: stage == "ownership", failState: stage == "state"}
 						journal := &completionFaultJournal{ConversationJournal: relational.NewConversationJournal(db, cipher, 8<<20), fail: stage == "history"}
-						network := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+						network := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 						defer network.Close(ctx)
 						model := "grok-4.5"
 						if kind == account.ProviderWeb {
@@ -191,22 +195,22 @@ func TestHTTPCompletionProviderMatrix(t *testing.T) {
 						if err := testsupport.Capabilities(ctx, models, accounts, credential.ID, []string{model}, time.Now()); err != nil {
 							t.Fatal(err)
 						}
-						registry := provider.NewRegistry(adapter)
+						registry := providerimpl.NewRegistry(adapter)
 						sticky, concurrency := memory.NewStickyStore(), memory.NewConcurrencyLimiter()
-						accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-						clients := clientkeyapp.NewService("test-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+						accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+						clients := clientkeyapp.NewService("test-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 						defer closeClientKeyService(t, clients)
 						created, err := clients.Create(ctx, clientkeyapp.CreateInput{Name: "completion", Enabled: true, RPMLimit: 120, MaxConcurrent: 4})
 						if err != nil {
 							t.Fatal(err)
 						}
-						selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-						service := gateway.NewService(models, audits, accountService, clients, registry, selector, states, 3)
-						service.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2})
+						selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+						service := gateway.NewService(models, audits, accountService, clients, registry, selector, historyapp.NewResponseResources(states), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
+						service.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2, GuardedModels: []string{"grok-4.5", "grok-chat-fast"}}))
 						receipts := &completionReceiptSink{fail: stage == "receipt"}
 						service.SetQualityEventRecorder(receipts)
 						router := gin.New()
-						router.Use(middleware.RequestID(), middleware.ClientAuth(clients))
+						router.Use(middleware.RequestID(nil), middleware.ClientAuth(clients))
 						NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 						payload := map[string]any{"model": model, "stream": streaming}
 						if operation == "responses" {

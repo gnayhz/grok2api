@@ -11,8 +11,6 @@ import (
 	"strings"
 
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,7 +27,6 @@ type ttsRequest struct {
 }
 
 func (h *Handler) synthesizeSpeech(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "TTS 仅支持 application/json")
 		return
@@ -133,7 +130,6 @@ func (h *Handler) transcribeSpeech(c *gin.Context) {
 }
 
 func (h *Handler) transcribeSpeechRequest(c *gin.Context, openAICompatible bool) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
 	input := gateway.STTInput{
 		PublicModel: "grok-stt", Method: c.Request.Method, Path: c.Request.URL.Path, Headers: c.Request.Header.Clone(),
@@ -292,8 +288,8 @@ func bytesTrim(value json.RawMessage) []byte {
 	return []byte(strings.TrimSpace(string(value)))
 }
 
-func parseTTSOutputFormat(value json.RawMessage) (provider.TTSOutputFormat, error) {
-	format := provider.TTSOutputFormat{}
+func parseTTSOutputFormat(value json.RawMessage) (gateway.TTSOutputFormat, error) {
+	format := gateway.TTSOutputFormat{}
 	if len(bytesTrim(value)) == 0 {
 		return format, nil
 	}
@@ -308,13 +304,13 @@ func parseTTSOutputFormat(value json.RawMessage) (provider.TTSOutputFormat, erro
 	format.Codec = strings.ToLower(strings.TrimSpace(raw.Codec))
 	if raw.SampleRate != nil {
 		if *raw.SampleRate <= 0 {
-			return provider.TTSOutputFormat{}, errors.New("output_format.sample_rate 必须大于 0")
+			return gateway.TTSOutputFormat{}, errors.New("output_format.sample_rate 必须大于 0")
 		}
 		format.SampleRate = *raw.SampleRate
 	}
 	if raw.BitRate != nil {
 		if *raw.BitRate <= 0 {
-			return provider.TTSOutputFormat{}, errors.New("output_format.bit_rate 必须大于 0")
+			return gateway.TTSOutputFormat{}, errors.New("output_format.bit_rate 必须大于 0")
 		}
 		format.BitRate = *raw.BitRate
 	}
@@ -355,15 +351,3 @@ func parseOptimizeStreamingLatency(value json.RawMessage) (int, error) {
 	}
 	return result, nil
 }
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-// keep middleware import used for request identity compatibility in package docs.
-var _ = middleware.ClientKey

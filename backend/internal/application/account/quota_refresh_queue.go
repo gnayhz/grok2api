@@ -76,16 +76,16 @@ func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
 		return
 	}
 	key := strconv.FormatUint(id, 10) + ":" + mode
-	s.quotaRefreshMu.Lock()
-	state := s.quotaRefreshes[key]
+	s.quotaRefresh.mu.Lock()
+	state := s.quotaRefresh.obs[key]
 	now := s.now().UTC()
 	if state != nil && !state.pending && !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
-		delete(s.quotaRefreshes, key)
+		delete(s.quotaRefresh.obs, key)
 		state = nil
 	}
 	if state == nil {
 		state = &quotaRefreshState{}
-		s.quotaRefreshes[key] = state
+		s.quotaRefresh.obs[key] = state
 	}
 	// 显式入队代表新的刷新需求（429 核实 / 迁移任务 / 巡检扫描）：失败
 	// 计数归零、开启全新重试 episode，避免历史失败把新需求立即推进熔断停靠。
@@ -94,7 +94,7 @@ func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
 	state.generation++
 	state.pending = true
 	enqueued := state.queued || state.running || now.Before(state.nextAttemptAt) || s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: id, mode: mode}, state)
-	s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Unlock()
 	if !enqueued {
 		perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "enqueue", Outcome: "queue_full"}, 1)
 		s.logger.Warn("quota_refresh_queue_full", "account_id", id, "mode", mode)
@@ -107,7 +107,7 @@ func (s *Service) enqueueQuotaRefreshLocked(request quotaRefreshRequest, state *
 		return state != nil
 	}
 	select {
-	case s.quotaRefreshQueue <- request:
+	case s.quotaRefresh.queue <- request:
 		state.queued = true
 		return true
 	default:
@@ -117,7 +117,7 @@ func (s *Service) enqueueQuotaRefreshLocked(request quotaRefreshRequest, state *
 
 func (s *Service) wakeQuotaRefreshRecovery() {
 	select {
-	case s.quotaRefreshWake <- struct{}{}:
+	case s.quotaRefresh.wake <- struct{}{}:
 	default:
 	}
 }
@@ -133,23 +133,23 @@ func (s *Service) RunQuotaRefresh(ctx context.Context) {
 				select {
 				case <-ctx.Done():
 					return
-				case request := <-s.quotaRefreshQueue:
-					s.quotaRefreshMu.Lock()
-					state := s.quotaRefreshes[request.key]
+				case request := <-s.quotaRefresh.queue:
+					s.quotaRefresh.mu.Lock()
+					state := s.quotaRefresh.obs[request.key]
 					if state == nil || !state.queued {
-						s.quotaRefreshMu.Unlock()
+						s.quotaRefresh.mu.Unlock()
 						continue
 					}
 					state.queued = false
 					if !state.ready(s.now().UTC()) {
-						s.quotaRefreshMu.Unlock()
+						s.quotaRefresh.mu.Unlock()
 						continue
 					}
 					state.runningGeneration = state.generation
 					state.runningVersion = state.sharedVersion
 					state.running = true
 					state.pending = false
-					s.quotaRefreshMu.Unlock()
+					s.quotaRefresh.mu.Unlock()
 					if err := batch.Do(ctx, func(workCtx context.Context) error {
 						s.runQuotaRefresh(workCtx, request)
 						return nil
@@ -177,15 +177,15 @@ func (s *Service) RunQuotaRefresh(ctx context.Context) {
 
 func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRequest) {
 	for {
-		s.quotaRefreshMu.Lock()
-		state := s.quotaRefreshes[request.key]
+		s.quotaRefresh.mu.Lock()
+		state := s.quotaRefresh.obs[request.key]
 		if state == nil {
-			s.quotaRefreshMu.Unlock()
+			s.quotaRefresh.mu.Unlock()
 			return
 		}
 		if state.failures >= quotaRefreshFailureBudget {
 			state.running = false
-			s.quotaRefreshMu.Unlock()
+			s.quotaRefresh.mu.Unlock()
 			s.wakeQuotaRefreshRecovery()
 			return
 		}
@@ -195,7 +195,7 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 		state.runningGeneration = localGeneration
 		state.runningVersion = sharedVersion
 		state.pending = false
-		s.quotaRefreshMu.Unlock()
+		s.quotaRefresh.mu.Unlock()
 
 		ctx, cancel := context.WithTimeout(parent, quotaRefreshTimeout)
 		if s.quotaRefreshState != nil && publishedGeneration < localGeneration {
@@ -208,8 +208,8 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 				return
 			}
 			sharedVersion = version
-			s.quotaRefreshMu.Lock()
-			if current := s.quotaRefreshes[request.key]; current != nil && current.publishedGeneration < localGeneration {
+			s.quotaRefresh.mu.Lock()
+			if current := s.quotaRefresh.obs[request.key]; current != nil && current.publishedGeneration < localGeneration {
 				current.publishedGeneration = localGeneration
 				// Publishing our existing demand is not a fresh budget. A shared
 				// scan may also have observed a newer publication before this reply.
@@ -218,7 +218,7 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 				}
 				current.runningVersion = version
 			}
-			s.quotaRefreshMu.Unlock()
+			s.quotaRefresh.mu.Unlock()
 		}
 		if s.quotaRefreshState != nil && publishedGeneration >= localGeneration && sharedVersion.Generation > 0 {
 			version, dirty, err := s.quotaRefreshState.GetQuotaRefreshState(ctx, request.accountID, request.mode)
@@ -229,17 +229,17 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 			}
 			if !version.Equal(sharedVersion) {
 				sharedVersion = version
-				s.quotaRefreshMu.Lock()
-				if current := s.quotaRefreshes[request.key]; current != nil {
+				s.quotaRefresh.mu.Lock()
+				if current := s.quotaRefresh.obs[request.key]; current != nil {
 					current.observe(version, s.now().UTC())
 					current.runningVersion = version
 				}
-				s.quotaRefreshMu.Unlock()
+				s.quotaRefresh.mu.Unlock()
 			}
 			if !dirty {
 				cancel()
-				s.quotaRefreshMu.Lock()
-				if current := s.quotaRefreshes[request.key]; current != nil {
+				s.quotaRefresh.mu.Lock()
+				if current := s.quotaRefresh.obs[request.key]; current != nil {
 					newDemand := current.generation != localGeneration ||
 						(!current.sharedVersion.Equal(sharedVersion) && s.now().UTC().Before(current.sharedVersion.ExpiresAt))
 					switch {
@@ -251,10 +251,10 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 						current.publishedGeneration = 0
 						current.running, current.pending = false, true
 					default:
-						delete(s.quotaRefreshes, request.key)
+						delete(s.quotaRefresh.obs, request.key)
 					}
 				}
-				s.quotaRefreshMu.Unlock()
+				s.quotaRefresh.mu.Unlock()
 				s.wakeQuotaRefreshRecovery()
 				return
 			}
@@ -335,10 +335,10 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 				return
 			}
 		}
-		s.quotaRefreshMu.Lock()
-		state = s.quotaRefreshes[request.key]
+		s.quotaRefresh.mu.Lock()
+		state = s.quotaRefresh.obs[request.key]
 		localChanged := state != nil && state.generation != localGeneration
-		s.quotaRefreshMu.Unlock()
+		s.quotaRefresh.mu.Unlock()
 		if localChanged || (s.quotaRefreshState != nil && !currentShared.Equal(sharedVersion)) {
 			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "trailing"}, 1)
 			if consoleMode {
@@ -361,8 +361,8 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 				return
 			}
 		}
-		s.quotaRefreshMu.Lock()
-		state = s.quotaRefreshes[request.key]
+		s.quotaRefresh.mu.Lock()
+		state = s.quotaRefresh.obs[request.key]
 		if state != nil && state.generation == localGeneration && state.sharedVersion.Equal(sharedVersion) {
 			if consoleMode {
 				state.running = false
@@ -370,9 +370,9 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 				state.failures = 0
 				state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
 			} else {
-				delete(s.quotaRefreshes, request.key)
+				delete(s.quotaRefresh.obs, request.key)
 			}
-			s.quotaRefreshMu.Unlock()
+			s.quotaRefresh.mu.Unlock()
 			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "success"}, 1)
 			return
 		}
@@ -381,17 +381,17 @@ func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRe
 			state.pending = true
 			state.failures = 0
 			state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
-			s.quotaRefreshMu.Unlock()
+			s.quotaRefresh.mu.Unlock()
 			s.wakeQuotaRefreshRecovery()
 			return
 		}
-		s.quotaRefreshMu.Unlock()
+		s.quotaRefresh.mu.Unlock()
 	}
 }
 
 func (s *Service) deferQuotaRefresh(key string) {
-	s.quotaRefreshMu.Lock()
-	if state := s.quotaRefreshes[key]; state != nil {
+	s.quotaRefresh.mu.Lock()
+	if state := s.quotaRefresh.obs[key]; state != nil {
 		state.running = false
 		state.pending = true
 		if state.generation == state.runningGeneration && state.sharedVersion.Equal(state.runningVersion) {
@@ -399,19 +399,19 @@ func (s *Service) deferQuotaRefresh(key string) {
 			state.nextAttemptAt = s.now().UTC().Add(quotaRefreshRetryDelay(state.failures))
 		}
 	}
-	s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Unlock()
 	s.wakeQuotaRefreshRecovery()
 }
 
 func (s *Service) deferSuccessfulQuotaRefresh(key string, pending bool) {
-	s.quotaRefreshMu.Lock()
-	if state := s.quotaRefreshes[key]; state != nil {
+	s.quotaRefresh.mu.Lock()
+	if state := s.quotaRefresh.obs[key]; state != nil {
 		state.running = false
 		state.pending = pending
 		state.failures = 0
 		state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
 	}
-	s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Unlock()
 	s.wakeQuotaRefreshRecovery()
 }
 
@@ -447,7 +447,7 @@ func (s *Service) runQuotaRefreshRecovery(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.quotaRefreshWake:
+		case <-s.quotaRefresh.wake:
 			s.requeueQuotaRefreshes()
 		case <-retryTicker.C:
 			s.requeueQuotaRefreshes()
@@ -464,10 +464,10 @@ func (s *Service) runQuotaRefreshRecovery(ctx context.Context) {
 func (s *Service) requeueQuotaRefreshes() {
 	now := s.now().UTC()
 	var parked []string
-	s.quotaRefreshMu.Lock()
-	for key, state := range s.quotaRefreshes {
+	s.quotaRefresh.mu.Lock()
+	for key, state := range s.quotaRefresh.obs {
 		if state == nil {
-			delete(s.quotaRefreshes, key)
+			delete(s.quotaRefresh.obs, key)
 			continue
 		}
 		if state.failures >= quotaRefreshFailureBudget && !state.queued && !state.running {
@@ -484,14 +484,14 @@ func (s *Service) requeueQuotaRefreshes() {
 					state.sharedVersion = repository.QuotaRefreshVersion{}
 					state.parkedUntil = time.Time{}
 				} else {
-					delete(s.quotaRefreshes, key)
+					delete(s.quotaRefresh.obs, key)
 				}
 			}
 			continue
 		}
 		if !state.pending {
 			if !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
-				delete(s.quotaRefreshes, key)
+				delete(s.quotaRefresh.obs, key)
 			}
 			continue
 		}
@@ -510,7 +510,7 @@ func (s *Service) requeueQuotaRefreshes() {
 			break
 		}
 	}
-	s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Unlock()
 	for _, key := range parked {
 		accountID, mode := uint64(0), key
 		if separator := strings.IndexByte(key, ':'); separator > 0 && separator < len(key)-1 {
@@ -527,9 +527,9 @@ func (s *Service) recoverSharedQuotaRefreshes(parent context.Context, now time.T
 	if s.quotaRefreshState == nil {
 		return
 	}
-	s.quotaRefreshMu.Lock()
+	s.quotaRefresh.mu.Lock()
 	cursor := s.quotaRefreshCursor
-	s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	values, next, err := s.quotaRefreshState.ScanQuotaRefreshDirty(ctx, now, cursor, 100)
 	cancel()
@@ -537,15 +537,15 @@ func (s *Service) recoverSharedQuotaRefreshes(parent context.Context, now time.T
 		s.logger.Warn("quota_refresh_dirty_list_failed", "error", err)
 		return
 	}
-	s.quotaRefreshMu.Lock()
-	defer s.quotaRefreshMu.Unlock()
+	s.quotaRefresh.mu.Lock()
+	defer s.quotaRefresh.mu.Unlock()
 	s.quotaRefreshCursor = next
 	for _, value := range values {
 		key := strconv.FormatUint(value.AccountID, 10) + ":" + value.Mode
-		state := s.quotaRefreshes[key]
+		state := s.quotaRefresh.obs[key]
 		if state == nil {
 			state = &quotaRefreshState{generation: 1, publishedGeneration: 1}
-			s.quotaRefreshes[key] = state
+			s.quotaRefresh.obs[key] = state
 		}
 		state.observe(value.Version, now)
 		// Consume the whole bounded page even if the queue fills. Each demand

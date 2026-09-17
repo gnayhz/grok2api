@@ -9,12 +9,12 @@ import (
 	"testing"
 
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 )
 
 func TestHTTPReportsSavedPendingAndAuthoritativeReads(t *testing.T) {
 	fail := true
-	service, repo, router := settingsHTTPFixture(t, settingsapp.ApplyTarget{Name: "network", Apply: func(context.Context, config.Config) error {
+	service, repo, router := settingsHTTPFixture(t, settingsapp.ApplyTarget{Name: "network", Apply: func(context.Context, settingsdomain.Config) error {
 		if fail {
 			panic("private-token")
 		}

@@ -1,16 +1,17 @@
 package provider_test
 
 import (
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestReadDiagnosticBodyAppliesHardLimit(t *testing.T) {
@@ -22,7 +23,7 @@ func TestReadDiagnosticBodyAppliesHardLimit(t *testing.T) {
 }
 
 func TestProductionProviderDefinitionsMatchImplementedCapabilities(t *testing.T) {
-	registry := provider.NewRegistry(
+	registry := providerimpl.NewRegistry(
 		cliprovider.NewAdapter(cliprovider.Config{}, nil),
 		webprovider.NewAdapter(webprovider.Config{}, nil, nil, nil, nil),
 		consoleprovider.NewAdapter(consoleprovider.Config{}, nil, nil, nil),

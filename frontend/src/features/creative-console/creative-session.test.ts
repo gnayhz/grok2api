@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:http";
 import { endSession } from "@/shared/auth/session";
-import { createChatResponse, generateImage, synthesizeSpeech, transcribeSpeech } from "./creative-console-api.ts";
+import { createChatResponse, generateImage, synthesizeSpeech, transcribeSpeech } from "@/entities/creative-console/creative-console-api";
 const isAbort = (error: unknown) => error instanceof Error && error.name === "AbortError";
 test("workbench requests retain explicit client key and stop local transport on logout", async (t) => {
     const originalFetch = globalThis.fetch;
@@ -30,10 +30,18 @@ test("workbench requests retain explicit client key and stop local transport on 
             await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
             const address = server.address();
             assert.ok(address && typeof address !== "string");
-            globalThis.fetch = (input, options) => originalFetch(new URL(String(input), `http://127.0.0.1:${address.port}`), options);
+            let requested = "";
+            globalThis.fetch = (input, options) => {
+                requested = String(input instanceof Request ? input.url : input);
+                const url = new URL(requested, "http://127.0.0.1:3000");
+                return originalFetch(new URL(`${url.pathname}${url.search}`, `http://127.0.0.1:${address.port}`), options);
+            };
             try {
                 const result = run().catch(error => error);
                 await started;
+                // Public-key calls resolve runtimeConfig.publicApiBaseUrl instead
+                // of a relative /v1 path; the fixture server only sees the path.
+                assert.ok(requested.startsWith("http://127.0.0.1:3000/v1/"), `public call must use the configured public base URL: ${requested}`);
                 await new Promise(r => setTimeout(r, 5));
                 endSession();
                 assert.ok(isAbort(await result));

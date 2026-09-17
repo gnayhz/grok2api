@@ -24,16 +24,6 @@ type cachedPoolFallback struct {
 
 const poolCacheTTL = time.Second
 
-// poolCandidates 把池成员(全成员序,含首选顺序)过滤成当前可调度候选。
-// 节点无作用域:池服务路由送来的任何流量。请求内排除在此生效;固定节点
-// 受硬冷却(传输类)约束。代理池模式节点豁免传输类硬冷却(旋转端点的单次
-// 失败不代表端点坏), 但不豁免历史遗留的出口质量硬隔离行(旧质量链的
-// last_error=exit_ip_quality 冷却行仍按 cooldown_until 自然过期)。
-// 请求内排除(L1)对两类节点都生效。
-func (m *routingRuntime) poolCandidates(ctx context.Context, nodes []domain.Node, now time.Time) []domain.Node {
-	return m.appendPoolCandidates(make([]domain.Node, 0, len(nodes)), ctx, nodes, now)
-}
-
 func (m *routingRuntime) appendPoolCandidates(candidates []domain.Node, ctx context.Context, nodes []domain.Node, now time.Time) []domain.Node {
 	for _, node := range nodes {
 		node = m.health.overlay(node)
@@ -48,16 +38,12 @@ func (m *routingRuntime) appendPoolCandidates(candidates []domain.Node, ctx cont
 		if !m.qualitySchedulable(ctx, node.ID) {
 			continue
 		}
-		if m.snapshotProxyPoolFlag(node) {
-			if node.LastError == domain.LastErrorExitIPQuality && node.CooldownUntil != nil && now.Before(*node.CooldownUntil) {
-				continue
-			}
-			candidates = append(candidates, node)
+		// 冷却口径与自动调度/固定目标共用 domain 唯一判定:池模式成员豁免
+		// 普通冷却,出口 IP 质量隔离对它们同样剔除。
+		if domain.CooldownBlocksScheduling(node.CooldownUntil, node.LastError, m.snapshotProxyPoolFlag(node), now) {
 			continue
 		}
-		if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
-			candidates = append(candidates, node)
-		}
+		candidates = append(candidates, node)
 	}
 	return candidates
 }
@@ -158,7 +144,7 @@ func (m *routingRuntime) AcquirePoolRouted(ctx context.Context, scope domain.Sco
 	now := time.Now().UTC()
 	// 浏览器作用域走池时同样进入 Clearance 托管生命周期:池只是分组,
 	// Web/Console 流量对 FlareSolverr 刷新的需求不因经过池而消失。
-	managedClearance := usesBrowserClearance(scope) && m.managedClearanceMode()
+	managedClearance := isGrokWebScope(scope) && m.managedClearanceMode()
 	visited := map[uint64]struct{}{poolID: {}}
 	current := poolID
 	for {

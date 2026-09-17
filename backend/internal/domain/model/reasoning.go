@@ -122,18 +122,6 @@ func SupportsReasoningEffort(publicModel, effort string) bool {
 	return false
 }
 
-// SupportsReasoningEffortForProvider reports whether a Provider accepts an
-// explicit effort value for the selected model.
-func SupportsReasoningEffortForProvider(providerValue account.Provider, publicModel, effort string) bool {
-	effort = strings.ToLower(strings.TrimSpace(effort))
-	for _, level := range SupportedReasoningEffortsForProvider(providerValue, publicModel) {
-		if level == effort {
-			return true
-		}
-	}
-	return false
-}
-
 // SupportsReasoningForProvider reports whether a model produces reasoning even
 // when its Provider does not accept an explicit effort parameter.
 func SupportsReasoningForProvider(providerValue account.Provider, publicModel string) bool {
@@ -160,41 +148,8 @@ func IsFixedReasoningForProvider(providerValue account.Provider, publicModel str
 	return false
 }
 
-// DefaultReasoningEffort picks a stable default from supported levels (prefer medium).
-// For effort-suffixed aliases the pinned effort is the default.
-func DefaultReasoningEffort(publicModel string) string {
-	if _, effort, ok := ParseReasoningModelAlias(publicModel); ok {
-		return effort
-	}
-	levels := SupportedReasoningEfforts(publicModel)
-	for _, level := range levels {
-		if level == ReasoningEffortMedium {
-			return level
-		}
-	}
-	if len(levels) > 0 {
-		return levels[0]
-	}
-	return ReasoningEffortNone
-}
-
-// DefaultReasoningEffortForProvider returns a configurable Provider default.
-// Fixed-reasoning models return none because clients must not send an effort.
-func DefaultReasoningEffortForProvider(providerValue account.Provider, publicModel string) string {
-	if _, effort, ok := ParseReasoningModelAlias(publicModel); ok && SupportsReasoningEffortForProvider(providerValue, publicModel, effort) {
-		return effort
-	}
-	levels := SupportedReasoningEffortsForProvider(providerValue, publicModel)
-	for _, level := range levels {
-		if level == ReasoningEffortMedium {
-			return level
-		}
-	}
-	if len(levels) > 0 {
-		return levels[0]
-	}
-	return ReasoningEffortNone
-}
+// 各 Provider 的默认推理档位由其目录事实决定(如 Console catalog 的
+// DefaultReasoningEffort 字段);domain 不维护集中缺省规则。
 
 func reasoningEffortsForSlug(slug string) []string {
 	if levels, ok := grokReasoningCapabilities[slug]; ok {
@@ -203,43 +158,7 @@ func reasoningEffortsForSlug(slug string) []string {
 	return []string{ReasoningEffortNone}
 }
 
-// ReasoningAliasPublicIDs returns effort-suffixed aliases for a base public model ID.
-// Models with fewer than two controllable levels produce no aliases (base name is enough).
-// Only levels the model truly supports are included — never a blanket none/low/medium/high/xhigh/max template.
-func ReasoningAliasPublicIDs(publicModel string) []string {
-	providerValue, _ := splitProviderModel(publicModel)
-	if providerValue != "" {
-		return ReasoningAliasPublicIDsForProvider(providerValue, publicModel)
-	}
-	return reasoningAliasPublicIDs(publicModel, SupportedReasoningEfforts(publicModel))
-}
-
-// ReasoningAliasPublicIDsForProvider returns only aliases accepted by a concrete
-// Provider. It prevents fixed-reasoning Console models from advertising invalid
-// low/medium/high aliases while preserving Build capabilities for the same slug.
-func ReasoningAliasPublicIDsForProvider(providerValue account.Provider, publicModel string) []string {
-	return reasoningAliasPublicIDs(publicModel, SupportedReasoningEffortsForProvider(providerValue, publicModel))
-}
-
-func reasoningAliasPublicIDs(publicModel string, levels []string) []string {
-	base := strings.TrimSpace(publicModel)
-	if base == "" {
-		return nil
-	}
-	if len(levels) < 2 {
-		return nil
-	}
-	// Prefer the external (unprefixed) form so clients see "grok-4.5-low", not "Build/grok-4.5-low".
-	external := externalModelSlug(base)
-	if external == "" {
-		return nil
-	}
-	aliases := make([]string, 0, len(levels))
-	for _, level := range levels {
-		aliases = append(aliases, external+"-"+level)
-	}
-	return aliases
-}
+// 档位别名的唯一展开规则在 aliases.go 的 PublicReasoningAliasNames。
 
 // ParseReasoningModelAlias splits names like "grok-4.5-low" into base model + effort
 // when the model family defines that suffix. Provider-specific wire handling is
@@ -306,12 +225,6 @@ func levelsContain(levels []string, effort string) bool {
 		}
 	}
 	return false
-}
-
-// IsReasoningModelAlias reports whether value is a valid effort-suffixed model alias.
-func IsReasoningModelAlias(publicModel string) bool {
-	_, _, ok := ParseReasoningModelAlias(publicModel)
-	return ok
 }
 
 func externalModelSlug(publicModel string) string {

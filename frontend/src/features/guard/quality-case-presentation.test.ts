@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import type { QualityCase } from "./quality-api.ts";
+import type { QualityCase } from "@/entities/guard/quality-api";
 import {
 	caseDispositionKey,
 	caseEarlyRelease,

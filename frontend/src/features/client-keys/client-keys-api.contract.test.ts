@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 (globalThis as Record<string, unknown>).window = { ...globalThis, location: { origin: "http://test.local" } };
-const { listClientKeys, updateClientKey } = await import("./client-keys-api.ts");
+const { listClientKeys, updateClientKey } = await import("@/entities/client-key/client-key-api");
 const fixture = JSON.parse(readFileSync(new URL("./__fixtures__/reserved-budget.json", import.meta.url), "utf8"));
 
 // The archived F03 response predates explicit scope; retain its budget values.

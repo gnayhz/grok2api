@@ -32,7 +32,7 @@ func TestLiveShapeDBUpgradeRestoresBindingColumns(t *testing.T) {
 	if err := db.InitializeSchema(ctx); err != nil {
 		t.Fatalf("live-shape upgrade failed: %v", err)
 	}
-	for _, col := range []string{"egress_node_id", "egress_assignment_mode", "egress_assigned_at"} {
+	for _, col := range []string{"egress_node_id"} {
 		var count int
 		if err := db.db.WithContext(ctx).Raw("SELECT COUNT(*) FROM pragma_table_info('provider_accounts') WHERE name=?", col).Scan(&count).Error; err != nil {
 			t.Fatal(err)

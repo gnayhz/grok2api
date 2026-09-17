@@ -10,7 +10,7 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const (
@@ -127,9 +127,6 @@ func pendingWebAccountScriptOptions(credential accountdomain.Credential, options
 	}
 	if credential.WebNSFWEnabledAt != nil {
 		options.EnableNSFW = false
-	}
-	if options.EnableNSFW && !birthDateRecorded {
-		options.SetBirthDate = true
 	}
 	return options
 }

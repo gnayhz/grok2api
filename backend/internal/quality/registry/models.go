@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
 	"time"
 )
@@ -49,6 +50,7 @@ func (qIdentityGroupModel) TableName() string { return "q_identity_group" }
 
 // qCaseModel 案件(B1.3):单次降智事件链。证据链 JSON 只含规则指纹与
 // 键控引用(节点+epoch/账号 ID),不含 IP 明文、账号名、密钥(I24)。
+// verdict/status CHECK 中的 'dismissed' 仅兼容历史存量行,新写入路径不再产生该值。
 type qCaseModel struct {
 	ID           uint64    `gorm:"primaryKey;autoIncrement"`
 	Status       string    `gorm:"size:32;not null;check:chk_q_case_status,status IN ('investigating','account_guilty','exit_guilty','dismissed')"`
@@ -62,6 +64,7 @@ type qCaseModel struct {
 func (qCaseModel) TableName() string { return "q_case" }
 
 // qCasePartyModel 案件当事方(B1.3):账号/出口,角色与程序处置状态。
+// disposition CHECK 中的 'dismissed' 仅兼容历史存量行,新写入路径不再产生该值。
 type qCasePartyModel struct {
 	ReviewReleased bool      `gorm:"not null;default:false"`
 	ID             uint64    `gorm:"primaryKey;autoIncrement"`
@@ -76,24 +79,6 @@ type qCasePartyModel struct {
 }
 
 func (qCasePartyModel) TableName() string { return "q_case_party" }
-
-// qObservationModel 证据观测(B3):at/账号/出口(epoch 键控)/判定/规则/
-// 来源 traffic|probe。证据局原始数据;传输 error 不可采但留档(I10)。
-type qObservationModel struct {
-	EventID     *string   `gorm:"size:160;uniqueIndex:uidx_q_observation_event"`
-	AttemptID   string    `gorm:"size:128;not null;default:'';index:idx_q_observation_attempt"`
-	AttemptJSON string    `gorm:"type:text;not null;default:''"`
-	ID          uint64    `gorm:"primaryKey;autoIncrement"`
-	At          time.Time `gorm:"not null;index:idx_q_observation_at"`
-	AccountID   uint64    `gorm:"not null;index:idx_q_observation_account_at,priority:1"`
-	NodeID      uint64    `gorm:"not null;index:idx_q_observation_exit_at,priority:1"`
-	Epoch       uint64    `gorm:"not null;default:0;index:idx_q_observation_exit_at,priority:2"`
-	Outcome     string    `gorm:"size:16;not null;check:chk_q_observation_outcome,outcome IN ('delivered','degraded','error')"`
-	Rule        string    `gorm:"size:100;not null;default:'';check:chk_q_observation_rule,length(rule) <= 100"`
-	Source      string    `gorm:"size:16;not null;check:chk_q_observation_source,source IN ('traffic','probe')"`
-}
-
-func (qObservationModel) TableName() string { return "q_observation" }
 
 // qDegradeLedgerModel 节点降智台账(G8/B3 决议3:永久保留,
 // 流行病学管理数据,不影响调度资格)。节点看总数,历史看 IP 明细。
@@ -170,7 +155,6 @@ var qualitySchemaModels = append([]any{
 	&qIdentityGroupModel{},
 	&qCaseModel{},
 	&qCasePartyModel{},
-	&qObservationModel{},
 	&qDegradeLedgerModel{},
 	&qIPEpochModel{},
 	&qNodeEpochModel{},
@@ -179,4 +163,4 @@ var qualitySchemaModels = append([]any{
 	&qProbeProjectionModel{},
 	&qStateRevisionModel{},
 	&qCoordinationModel{},
-}, journal.Models()...)
+}, append(journal.Models(), evidence.Models()...)...)

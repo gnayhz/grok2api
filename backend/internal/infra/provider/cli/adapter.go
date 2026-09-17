@@ -10,6 +10,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
+	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
+	"github.com/google/uuid"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,25 +37,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
-	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
-	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
-	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
-	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
-	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
-	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
-	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -115,7 +114,7 @@ func NewAdapter(cfg Config, cipher security.Cryptor) *Adapter {
 			if userAgent := strings.TrimSpace(adapter.config().UserAgent); userAgent != "" {
 				return userAgent
 			}
-			return config.RecommendedBuildUserAgent
+			return provider.RecommendedBuildUserAgent
 		},
 	)
 	return adapter
@@ -189,11 +188,6 @@ func botFlagSourceClaim(claims map[string]any, key string) int {
 	default:
 		return 0
 	}
-}
-
-// buildBotFlaggedFromClaims reports whether JWT claims mark a Build account as bot-risked.
-func buildBotFlaggedFromClaims(claims map[string]any) bool {
-	return buildBotFlagSourceFromClaims(claims) != 0
 }
 
 func (a *Adapter) UpdateConfig(cfg Config) {
@@ -851,7 +845,7 @@ func (e buildModelCatalogEntry) modelIdentifier() string {
 	if e.Hidden || e.Meta.Hidden {
 		return ""
 	}
-	return firstNonEmpty(e.ID, e.Model, e.ModelID, e.Meta.Model, e.Meta.ModelID)
+	return texts.FirstNonEmptyTrimmed(e.ID, e.Model, e.ModelID, e.Meta.Model, e.Meta.ModelID)
 }
 
 func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credential, accessToken, base string) ([]string, int, error) {
@@ -1005,10 +999,10 @@ func (a *Adapter) PollDeviceAuthorization(ctx context.Context, deviceCode string
 	if err != nil {
 		return provider.CredentialSeed{}, err
 	}
-	claims := decodeJWTClaims(firstNonEmpty(tokens.IDToken, tokens.AccessToken))
+	claims := decodeJWTClaims(texts.FirstNonEmptyTrimmed(tokens.IDToken, tokens.AccessToken))
 	userID := stringClaim(claims, "sub")
 	email := stringClaim(claims, "email")
-	return provider.CredentialSeed{Name: firstNonEmpty(email, userID, "Grok Build account"), Email: email, UserID: userID, TeamID: stringClaim(claims, "team_id"), OIDCClientID: defaultOAuthClientID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, ExpiresAt: tokens.ExpiresAt}, nil
+	return provider.CredentialSeed{Name: texts.FirstNonEmptyTrimmed(email, userID, "Grok Build account"), Email: email, UserID: userID, TeamID: stringClaim(claims, "team_id"), OIDCClientID: defaultOAuthClientID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, ExpiresAt: tokens.ExpiresAt}, nil
 }
 
 func (a *Adapter) ParseImportedCredentials(data []byte) ([]provider.CredentialSeed, error) {
@@ -1027,18 +1021,18 @@ func (a *Adapter) PrepareImportedCredential(ctx context.Context, seed provider.C
 	if err != nil {
 		return provider.CredentialSeed{}, fmt.Errorf("验证 Grok Build refresh token: %w", err)
 	}
-	claims := decodeJWTClaims(firstNonEmpty(tokens.IDToken, tokens.AccessToken))
+	claims := decodeJWTClaims(texts.FirstNonEmptyTrimmed(tokens.IDToken, tokens.AccessToken))
 	seed.AccessToken = tokens.AccessToken
 	seed.RefreshToken = tokens.RefreshToken
 	seed.ExpiresAt = tokens.ExpiresAt
-	seed.OIDCClientID = firstNonEmpty(seed.OIDCClientID, defaultOAuthClientID)
-	seed.UserID = firstNonEmpty(seed.UserID, stringClaim(claims, "sub"))
-	seed.Email = firstNonEmpty(seed.Email, stringClaim(claims, "email"))
-	seed.TeamID = firstNonEmpty(seed.TeamID, stringClaim(claims, "team_id"))
+	seed.OIDCClientID = texts.FirstNonEmptyTrimmed(seed.OIDCClientID, defaultOAuthClientID)
+	seed.UserID = texts.FirstNonEmptyTrimmed(seed.UserID, stringClaim(claims, "sub"))
+	seed.Email = texts.FirstNonEmptyTrimmed(seed.Email, stringClaim(claims, "email"))
+	seed.TeamID = texts.FirstNonEmptyTrimmed(seed.TeamID, stringClaim(claims, "team_id"))
 	if seed.Name == "" || seed.Name == "Grok Build account" {
-		seed.Name = firstNonEmpty(seed.Email, seed.UserID, "Grok Build account")
+		seed.Name = texts.FirstNonEmptyTrimmed(seed.Email, seed.UserID, "Grok Build account")
 	}
-	identity := firstNonEmpty(seed.UserID, strings.ToLower(seed.Email), seed.TeamID, seed.RefreshToken, seed.AccessToken)
+	identity := texts.FirstNonEmptyTrimmed(seed.UserID, strings.ToLower(seed.Email), seed.TeamID, seed.RefreshToken, seed.AccessToken)
 	seed.SourceKey = "import:" + security.HashToken(strings.Join([]string{credentialImportProvider, seed.OIDCClientID, identity}, "|"))
 	return seed, nil
 }

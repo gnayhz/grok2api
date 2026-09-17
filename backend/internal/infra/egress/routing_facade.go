@@ -10,13 +10,13 @@ import (
 func (m *Manager) listNodes(ctx context.Context, now time.Time) ([]domain.Node, error) {
 	return m.routing.listNodes(ctx, now)
 }
-func (m *Manager) invalidateNodes()            { m.routing.invalidateNodes() }
-func (m *Manager) InvalidateNodeSnapshots()    { m.routing.invalidateNodes() }
+func (m *Manager) invalidateNodes() { m.routing.invalidateNodes(); m.invalidateKnownExitAddrs() }
+
+// InvalidateNodeSnapshots 丢弃调度快照与已知出口地址快照(后者服务于质量
+// 差分排除集)。探活/导入/管理改动后两者必须同时失效。
+func (m *Manager) InvalidateNodeSnapshots()    { m.invalidateNodes() }
 func (m *Manager) InvalidateOperationsConfig() { m.routing.InvalidateOperationsConfig() }
 func (m *Manager) InvalidatePoolCache()        { m.routing.InvalidatePoolCache() }
-func (m *Manager) cachedRoutingTargetNode(ctx context.Context, id uint64) (domain.Node, bool, error) {
-	return m.routing.cachedRoutingTargetNode(ctx, id)
-}
 func (m *Manager) AcquirePoolRouted(ctx context.Context, scope domain.Scope, affinity string, poolID uint64, allowDirect bool, cookies string) (*Lease, PoolRouteOutcome, error) {
 	for attempt := 0; attempt < clientCreationRetryLimit; attempt++ {
 		lease, outcome, err := m.routing.AcquirePoolRouted(ctx, scope, affinity, poolID, allowDirect, cookies)
@@ -28,11 +28,5 @@ func (m *Manager) AcquirePoolRouted(ctx context.Context, scope domain.Scope, aff
 }
 func (m *Manager) getRuntimeNode(ctx context.Context, id uint64) (domain.Node, error) {
 	return m.routing.getRuntimeNode(ctx, id)
-}
-func (m *Manager) listRuntimeNodes(ctx context.Context) ([]domain.Node, error) {
-	return m.routing.listRuntimeNodes(ctx)
-}
-func (m *Manager) poolCandidates(ctx context.Context, nodes []domain.Node, now time.Time) []domain.Node {
-	return m.routing.poolCandidates(ctx, nodes, now)
 }
 func (m *Manager) cachedNodeIsHealthy(id uint64) bool { return m.routing.cachedNodeIsHealthy(id) }

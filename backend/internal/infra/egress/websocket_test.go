@@ -3,6 +3,9 @@ package egress
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"io"
 	"net"
 	"net/http"
@@ -26,10 +29,10 @@ func webSocketLedgerContext(t *testing.T, limit int) (context.Context, *inferenc
 	t.Helper()
 	ctx := attemptmeta.WithRequest(context.Background(), "ws-request", 7, "rules", nil)
 	ctx = attemptmeta.WithAccount(ctx, 42, "grok_web", "grok-chat-fast")
-	ctx = WithPhysicalCallTrace(ctx, "grok_web", "responses")
+	ctx = physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_web", "responses")
 	budget := inferencedomain.NewAttemptBudget(limit)
 	t.Cleanup(budget.Close)
-	return WithPhysicalCallBudget(ctx, budget), budget
+	return physical.WithPhysicalCallBudget(ctx, budget), budget
 }
 
 func webSocketTestLease(t *testing.T, ctx context.Context) (*Lease, *Manager) {
@@ -38,7 +41,7 @@ func webSocketTestLease(t *testing.T, ctx context.Context) (*Lease, *Manager) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(&e2eRepo{}, cipher)
+	manager := NewManagerWithLimits(&e2eRepo{}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.Acquire(ctx, domainegress.ScopeWeb, "ws-test")
 	if err != nil {
@@ -91,7 +94,7 @@ func TestWebSocketPhysicalFactsAndCancellation(t *testing.T) {
 			}
 			// Closing the synthetic handshake body cannot finalize an active socket.
 			_ = response.Body.Close()
-			if facts := PhysicalFacts(ctx); len(facts) != 0 {
+			if facts := physical.PhysicalFacts(ctx); len(facts) != 0 {
 				t.Fatalf("101 fabricated a completed exchange: %+v", facts)
 			}
 			_, payload, err := conn.ReadMessage()
@@ -132,7 +135,7 @@ func TestWebSocketPhysicalFactsAndCancellation(t *testing.T) {
 				go func() { defer closes.Done(); _ = conn.Close() }()
 			}
 			closes.Wait()
-			facts := PhysicalFacts(ctx)
+			facts := physical.PhysicalFacts(ctx)
 			if len(facts) != 1 || facts[0].Attempt.ID != conn.Attempt().ID || facts[0].Status != 101 || facts[0].HeaderOutcome != "upgraded" || facts[0].BodyOutcome != wantOutcome || facts[0].BodyBytes != wantBytes || facts[0].Usage.Found {
 				t.Fatalf("physical outcome=%+v expected=%s/%d", facts, wantOutcome, wantBytes)
 			}
@@ -144,8 +147,8 @@ func TestWebSocketPhysicalFactsAndCancellation(t *testing.T) {
 					t.Fatal("budget checked after network submission")
 				}
 			}
-			ConfirmPhysicalFacts(ctx, facts)
-			if len(PhysicalFacts(ctx)) != 0 {
+			physical.ConfirmPhysicalFacts(ctx, facts)
+			if len(physical.PhysicalFacts(ctx)) != 0 {
 				t.Fatal("repeated physical acknowledgement")
 			}
 			if lease.clientHandle != nil {
@@ -172,7 +175,7 @@ func TestWebSocketRejectionBodyAndConnectionRetryConsumeBudget(t *testing.T) {
 		}
 		_, _ = io.Copy(io.Discard, response.Body)
 		_ = response.Body.Close()
-		facts := PhysicalFacts(ctx)
+		facts := physical.PhysicalFacts(ctx)
 		if len(facts) != 1 || facts[0].Status != 429 || facts[0].HeaderOutcome != "client_error" || facts[0].BodyBytes != 5 || facts[0].BodyOutcome != "eof" {
 			t.Fatalf("lost rejection: %+v", facts)
 		}
@@ -185,14 +188,14 @@ func TestWebSocketRejectionBodyAndConnectionRetryConsumeBudget(t *testing.T) {
 		}
 		address := listener.Addr().String()
 		_ = listener.Close()
-		browser, err := newBrowserClient("socks5://"+address, "")
+		browser, err := newBrowserClientWithBudget("socks5://"+address, "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer browser.CloseIdleConnections()
 		lease := &Lease{browser: browser, proxyPool: true, NodeID: 9}
 		_, _, err = lease.DialWebSocket(ctx, "ws://example.invalid", nil, time.Second)
-		facts := PhysicalFacts(ctx)
+		facts := physical.PhysicalFacts(ctx)
 		if !errors.Is(err, ErrPhysicalCallLimit) || len(facts) != 2 || budget.Remaining() != 0 {
 			t.Fatalf("internal retry bypassed total budget: err=%v facts=%+v remaining=%d", err, facts, budget.Remaining())
 		}

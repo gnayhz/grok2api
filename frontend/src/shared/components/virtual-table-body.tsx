@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-import { TableBody, TableCell, TableRow } from "@/components/ui/table";
+import { TableBody, TableCell, TableRow } from "@/shared/ui/table";
 
 const DEFAULT_OVERSCAN = 12;
 const MIN_VIRTUALIZED_ROWS = 20;

@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -124,7 +125,7 @@ func TestE2EPoolRouteRealProxyRoundTrip(t *testing.T) {
 		config:                   config,
 		pools:                    map[uint64]domain.Pool{1: {ID: 1, Enabled: true, Strategy: domain.PoolStrategyAffinity, FallbackMode: domain.PoolFallbackNone}},
 	}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	first, err := manager.Acquire(WithTrafficClass(context.Background(), domain.TrafficClassInference), domain.ScopeBuild, "e2e-account")

@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -82,20 +82,20 @@ func BenchmarkQuotaQueueCost(b *testing.B) {
 				b.Cleanup(server.Close)
 				adapter, closeNetwork := NewQuotaQueueWebFixture(db, cipher, server.URL)
 				b.Cleanup(func() { _ = closeNetwork(ctx) })
-				service := NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, lock)
+				service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, lock)
 				service.SetQuotaRefreshCoordinator(coordinator)
 				service.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 				b.ReportAllocs()
 				b.ResetTimer()
 				for b.Loop() {
 					service.QueueQuotaRefresh(v.ID, "fast")
-					request := <-service.quotaRefreshQueue
-					state := service.quotaRefreshes[request.key]
+					request := <-service.quotaRefresh.queue
+					state := service.quotaRefresh.obs[request.key]
 					state.queued = false
 					state.running = true
 					state.pending = false
 					service.runQuotaRefresh(ctx, request)
-					if len(service.quotaRefreshes) != 0 {
+					if len(service.quotaRefresh.obs) != 0 {
 						b.Fatalf("quota query did not complete: %+v", service.QuotaRefreshStats())
 					}
 				}

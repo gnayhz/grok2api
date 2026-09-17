@@ -3,6 +3,7 @@ package clientkey
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -54,7 +55,7 @@ func newHeldAuthService(t *testing.T) (*Service, *relational.ClientKeyRepository
 	held := &heldAuthRead{ClientKeyRepository: base, read: make(chan struct{}), resume: make(chan struct{})}
 	resume := sync.OnceFunc(func() { close(held.resume) })
 	t.Cleanup(resume)
-	service := NewService("auth-test", held, nil, nil, 0, 0, testCipher(t))
+	service := NewService("auth-test", held, nil, nil, 0, 0, testCipher(t), security.RandomTokenSource{})
 	t.Cleanup(func() { closeKeyService(t, service) })
 	return service, base, held, resume
 }
@@ -146,7 +147,7 @@ func TestAuthenticationCreateInvalidatesEarlierNegativeResult(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			prefix := "123456789abc"
-			raw := security.FormatClientKey(prefix, "synthetic-test-key")
+			raw := clientkeydomain.FormatClientKey(prefix, "synthetic-test-key")
 			oldDone := make(chan error, 1)
 			go func() { _, err := authResult(service, ctx, raw); oldDone <- err }()
 			awaitAuthRead(t, held)
@@ -156,7 +157,7 @@ func TestAuthenticationCreateInvalidatesEarlierNegativeResult(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := base.Create(ctx, clientkeydomain.Key{Name: "created", Prefix: prefix, SecretHash: security.HashToken(raw), EncryptedSecret: "test", Enabled: true}); err != nil {
+			if _, err := base.Create(ctx, clientkeydomain.Key{Name: "created", Prefix: prefix, SecretHash: tokenhash.HashToken(raw), EncryptedSecret: "test", Enabled: true}); err != nil {
 				t.Fatal(err)
 			}
 			if !oldReturned {
@@ -284,7 +285,7 @@ func TestCachedAuthenticationStillVerifiesCredentialExpiryAndLimits(t *testing.T
 			raw, want := created.Secret, ErrInvalidKey
 			switch rule {
 			case "secret":
-				raw = security.FormatClientKey(created.Key.Prefix, "wrong-secret")
+				raw = clientkeydomain.FormatClientKey(created.Key.Prefix, "wrong-secret")
 			case "expiry":
 				timer := time.NewTimer(time.Until(*input.ExpiresAt))
 				defer timer.Stop()

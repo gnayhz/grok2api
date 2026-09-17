@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	portprovider "github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
@@ -39,7 +41,7 @@ func DecodeCredentialJSONEntries[T any](data []byte, expectedProvider string, li
 			}
 			// 超限先于逐元素解析拦截，数组中混有非法元素时同样优先报告限额。
 			if limit > 0 && len(elements) > limit-len(entries) {
-				return nil, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrCredentialLimit, limit)
+				return nil, fmt.Errorf("%w: 单次最多导入 %d 个账号", portprovider.ErrCredentialLimit, limit)
 			}
 			for index, element := range elements {
 				// 结构预检：仅兼容对象与 null（null 归一为零值，交后续 normalize 报出带序号的明确错误）。
@@ -92,7 +94,7 @@ func DecodeCredentialJSONEntries[T any](data []byte, expectedProvider string, li
 
 func appendCredentialJSONEntries[T any](target *[]T, values []T, limit int) error {
 	if limit > 0 && len(values) > limit-len(*target) {
-		return fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrCredentialLimit, limit)
+		return fmt.Errorf("%w: 单次最多导入 %d 个账号", portprovider.ErrCredentialLimit, limit)
 	}
 	*target = append(*target, values...)
 	return nil

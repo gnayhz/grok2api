@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -158,11 +161,11 @@ func TestETagRefreshFinishesBeforeApplicationClosesSQL(t *testing.T) {
 						// deterministic rather than depending on network timing.
 						a.models = modelapp.NewService(&etagClosingModelRepository{ModelRepository: a.modelRepo, application: a, finished: finished, entered: entered, release: release}, a.accountRepo, a.accounts, a.providers)
 						a.models.SetLogger(a.logger)
-						selector := gateway.NewSelector(a.accountRepo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), a.providers, time.Hour, time.Second, time.Minute)
-						a.gateway = gateway.NewService(a.models, a.audits, a.accounts, a.clientKeys, a.providers, selector, relational.NewResponseRepository(a.database), 1)
+						selector := selector.NewSelector(a.accountRepo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), a.providers, time.Hour, time.Second, time.Minute)
+						a.gateway = gateway.NewService(a.models, a.audits, a.accounts, a.clientKeys, a.providers, selector, historyapp.NewResponseResources(relational.NewResponseRepository(a.database)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 1)
 						a.gateway.SetLogger(a.logger)
 						router := gin.New()
-						router.Use(middleware.RequestID(), middleware.ClientAuth(a.clientKeys))
+						router.Use(middleware.RequestID(nil), middleware.ClientAuth(a.clientKeys))
 						inference.NewHandler(a.gateway, nil, 1<<20).Register(router.Group("/v1"))
 						a.server.Handler = router
 						key, err := a.clientKeys.Create(ctx, clientkeyapp.CreateInput{Name: "etag", Enabled: true})

@@ -8,12 +8,8 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
-
-func videoGenerated(job media.Job) bool {
-	return job.Execution.Phase == media.VideoExecutionGenerated || job.Execution.Phase == "" && job.Status == media.StatusCompleted
-}
 
 func (s *Service) finishVideoQuota(ctx context.Context, job *media.Job) error {
 	if !videoGenerated(*job) || job.Quota.RecordedAt != nil {
@@ -57,26 +53,30 @@ func (s *Service) finishVideoQuota(ctx context.Context, job *media.Job) error {
 }
 
 func (s *Service) reconcileVideoQuotas(ctx context.Context) error {
-	if !s.mediaQuotaRecoveryMu.TryLock() {
+	if s.background == nil {
 		return nil
 	}
-	defer s.mediaQuotaRecoveryMu.Unlock()
+	cursor, advance, reset, finish := s.background.beginQuotaReconcile()
+	if finish == nil {
+		return nil
+	}
+	defer finish()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var result error
-	jobs, err := s.mediaJobs.ListUnrecordedMediaJobQuotas(ctx, s.mediaQuotaRecoveryCursor, 200)
+	jobs, err := s.mediaJobs.ListUnrecordedMediaJobQuotas(ctx, cursor, 200)
 	if err != nil {
 		return err
 	}
 	if len(jobs) == 0 {
-		s.mediaQuotaRecoveryCursor = ""
+		reset()
 		return nil
 	}
 	for _, job := range jobs {
 		if ctx.Err() != nil {
 			return errors.Join(result, ctx.Err())
 		}
-		s.mediaQuotaRecoveryCursor = job.ID
+		advance(job.ID)
 		if err := s.finishVideoQuota(ctx, &job); err != nil {
 			result = firstError(result, err)
 		}

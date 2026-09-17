@@ -11,8 +11,8 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type Config struct {
@@ -33,7 +33,7 @@ type Adapter struct {
 	mu              sync.RWMutex
 	cfg             Config
 	accountsBaseURL string
-	egress          *infraegress.Manager
+	egress          infraegress.CredentialLeaser
 	cipher          security.Cryptor
 	states          historydomain.NativeResponseState
 	assets          provider.ImageAssetStore
@@ -41,7 +41,7 @@ type Adapter struct {
 	logger          *slog.Logger
 }
 
-func NewAdapter(cfg Config, egress *infraegress.Manager, cipher security.Cryptor, states historydomain.NativeResponseState, assets provider.ImageAssetStore) *Adapter {
+func NewAdapter(cfg Config, egress infraegress.CredentialLeaser, cipher security.Cryptor, states historydomain.NativeResponseState, assets provider.ImageAssetStore) *Adapter {
 	cfg = normalizedConfig(cfg)
 	return &Adapter{cfg: cfg, accountsBaseURL: officialAccountsBaseURL, egress: egress, cipher: cipher, states: states, assets: assets, statsig: newStatsigSigner(), logger: slog.Default()}
 }

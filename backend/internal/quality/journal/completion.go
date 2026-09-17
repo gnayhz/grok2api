@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -40,7 +41,7 @@ type admissionWrite struct {
 }
 
 type completionRetry struct {
-	event     Event
+	event     qualitymodel.Event
 	expiresAt time.Time
 }
 
@@ -48,7 +49,7 @@ func newCompletionTracker() *completionTracker {
 	return &completionTracker{owner: uuid.NewString(), active: make(map[string]struct{}), pending: make(map[string]completionRetry), writing: make(map[string]*admissionWrite)}
 }
 
-func (s *Store) recordCompletionObligation(tx *gorm.DB, e Event, payload string) error {
+func (s *Store) recordCompletionObligation(tx *gorm.DB, e qualitymodel.Event, payload string) error {
 	if e.Stage == "admission" && e.Outcome == "delivered" {
 		reservation := tx.Model(&CapacityRow{}).Where("id = 1 AND in_flight < capacity_limit").Update("in_flight", gorm.Expr("in_flight + 1"))
 		if reservation.Error != nil {
@@ -71,7 +72,7 @@ func (s *Store) recordCompletionObligation(tx *gorm.DB, e Event, payload string)
 	return nil
 }
 
-func (s *Store) beginCompletions(events []Event) {
+func (s *Store) beginCompletions(events []qualitymodel.Event) {
 	s.completions.mu.Lock()
 	defer s.completions.mu.Unlock()
 	for _, e := range events {
@@ -87,7 +88,7 @@ func (s *Store) beginCompletions(events []Event) {
 	}
 }
 
-func (s *Store) trackCompletions(events, inserted []Event, err error) {
+func (s *Store) trackCompletions(events, inserted []qualitymodel.Event, err error) {
 	s.completions.mu.Lock()
 	defer s.completions.mu.Unlock()
 	if err == nil {
@@ -133,7 +134,7 @@ func (s *Store) trackCompletions(events, inserted []Event, err error) {
 // crash or prolonged failure, recovery still records uncertainty explicitly.
 func (s *Store) RetryCompletions(ctx context.Context, now time.Time) error {
 	s.completions.mu.Lock()
-	var retries []Event
+	var retries []qualitymodel.Event
 	for id, retry := range s.completions.pending {
 		if !retry.expiresAt.After(now) {
 			delete(s.completions.pending, id)
@@ -193,7 +194,7 @@ func (s *Store) RecoverCompletions(ctx context.Context, now time.Time) error {
 				if removed.RowsAffected == 0 {
 					return nil
 				}
-				var e Event
+				var e qualitymodel.Event
 				if err := json.Unmarshal([]byte(row.Payload), &e); err != nil {
 					return err
 				}

@@ -2,6 +2,7 @@ package clientkey
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"testing"
 	"time"
 
@@ -22,10 +23,10 @@ func (r benchmarkTouchRepository) Touch(context.Context, uint64) error {
 
 func BenchmarkAuthenticateCachedUnlimitedKey(b *testing.B) {
 	ctx := context.Background()
-	raw := security.FormatClientKey("benchmark", "synthetic")
-	value := clientkeydomain.Key{ID: 1, Prefix: "benchmark", SecretHash: security.HashToken(raw), Enabled: true}
+	raw := clientkeydomain.FormatClientKey("benchmark", "synthetic")
+	value := clientkeydomain.Key{ID: 1, Prefix: "benchmark", SecretHash: tokenhash.HashToken(raw), Enabled: true}
 	repo := benchmarkTouchRepository{finished: make(chan struct{}, 1)}
-	service := NewService("benchmark-owner", repo, nil, nil, 0, 0, nil)
+	service := NewService("benchmark-owner", repo, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 	defer service.Close(ctx)
 	service.authCache.byPrefix[value.Prefix] = cachedAuthKey{value: value, expiresAt: time.Now().Add(time.Hour)}
 	_, release, err := service.Authenticate(ctx, raw)

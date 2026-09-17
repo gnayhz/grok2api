@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,8 +13,8 @@ import (
 	"testing"
 
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type auxiliaryReadBody struct {
@@ -32,8 +33,8 @@ func (b *auxiliaryReadBody) Read(p []byte) (int, error) {
 }
 
 func TestPhysicalBudgetLivesUntilDeliveryFinalization(t *testing.T) {
-	s, records := completionService(t, nil)
-	s.UpdateQualityRetry(QualityRetryRuntime{Enabled: false})
+	s, records, _ := completionService(t, nil)
+	s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: false}))
 	var auxiliaryCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auxiliaryCalls.Add(1)
@@ -41,7 +42,7 @@ func TestPhysicalBudgetLivesUntilDeliveryFinalization(t *testing.T) {
 	}))
 	defer upstream.Close()
 	var executionCtx context.Context
-	s.providers = provider.NewRegistry(resourceTestAdapter{&scriptedBuildAdapter{}, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	s.providers = providerimpl.NewRegistry(resourceTestAdapter{&scriptedBuildAdapter{}, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 		executionCtx = ctx
 		primary := attemptmeta.Begin(ctx, attemptmeta.Path{})
 		if err := infraegress.BeginDirectPhysicalCall(primary); err != nil {

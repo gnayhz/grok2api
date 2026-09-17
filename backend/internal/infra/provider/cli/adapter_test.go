@@ -19,10 +19,10 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/google/uuid"
 )
 
@@ -163,10 +163,10 @@ func TestBuildBotFlagSourceFromClaims(t *testing.T) {
 	if source := buildBotFlagSourceFromClaims(map[string]any{"bot_flag_source": float64(2)}); source != 2 {
 		t.Fatalf("bot_flag_source=2 source = %d", source)
 	}
-	if !buildBotFlaggedFromClaims(map[string]any{"bfs": float64(2)}) {
+	if buildBotFlagSourceFromClaims(map[string]any{"bfs": float64(2)}) == 0 {
 		t.Fatal("bfs=2 must flag")
 	}
-	if buildBotFlaggedFromClaims(map[string]any{"bfs": "1", "bot_flag_source": "2"}) {
+	if buildBotFlagSourceFromClaims(map[string]any{"bfs": "1", "bot_flag_source": "2"}) != 0 {
 		t.Fatal("string values must not flag")
 	}
 }

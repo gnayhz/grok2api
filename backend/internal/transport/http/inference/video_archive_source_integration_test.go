@@ -106,7 +106,7 @@ func TestVideoHTTPArchiveSurvivesCleanupBeforeResultHandoff(t *testing.T) {
 				w.Header().Set("Content-Type", "video/mp4")
 				_, _ = w.Write(payload)
 			}))
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			fx.service.ConfigureMediaAssets(local)
 			fx.service.UpdateVideoMaxAttempts(1)
 			job := createVideoAuthorizationJob(t, fx)

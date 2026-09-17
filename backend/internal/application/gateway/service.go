@@ -24,6 +24,7 @@ import (
 	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
@@ -31,9 +32,6 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
@@ -41,6 +39,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -78,15 +79,6 @@ func newRoutingAttemptPolicy(configured int) routingAttemptPolicy {
 		configured = 3
 	}
 	return routingAttemptPolicy{limit: configured}
-}
-
-// newRequestRoutingAttemptPolicy 是请求级入口:pinned 请求(已有 ownership/
-// 预选会话)恒允许恰好一次尝试,无视配置上限——重试会破坏响应状态所有权。
-func newRequestRoutingAttemptPolicy(configured int, pinned bool) routingAttemptPolicy {
-	if pinned {
-		return routingAttemptPolicy{limit: 1}
-	}
-	return newRoutingAttemptPolicy(configured)
 }
 
 func (p routingAttemptPolicy) allows(attempt int) bool {
@@ -236,98 +228,57 @@ type accountModelSyncer interface {
 }
 
 // Service handles model routing, account selection, failover, and audit finalization.
+// RateLimitInterpreter 把上游 429 事实解释为 RateLimitMetadata;
+// 方言级文本/正则解析在 Provider 边界,经组合根注入。
+type RateLimitInterpreter interface {
+	ParseRateLimitMetadata(body []byte) *provider.RateLimitMetadata
+}
+
+// keyBillingAuthorizer 是逻辑执行所需的客户端 Key 能力：模型授权检查、
+// 密钥读取、费用预留与取消。管理、创建与撤销不在执行合同内。
+type keyBillingAuthorizer interface {
+	CanUseModel(value clientkey.Key, modelID uint64) bool
+	Get(ctx context.Context, id uint64) (clientkey.Key, error)
+	ReserveBilling(ctx context.Context, key clientkey.Key, eventID string, amount int64, ttl time.Duration) (bool, error)
+	CancelBilling(ctx context.Context, eventID string) error
+}
+
 type Service struct {
-	identities                  historyapp.IdentityResolver
-	models                      routeResolver
-	audits                      auditRecorder
-	accounts                    *accountapp.Service
-	clientKeys                  *clientkeyapp.Service
-	providers                   *provider.Registry
-	selector                    *Selector
-	responses                   responseHistory
-	maxAttempts                 atomic.Int64
-	videoMaxAttempts            atomic.Int64
-	buildForbiddenReauth        atomic.Pointer[buildForbiddenReauthPolicy]
-	requestTimeout              atomic.Int64
-	mediaJobs                   repository.MediaJobRepository
-	videoResources              *mediaapp.VideoResources
-	mediaAssets                 videoAssetStore
-	mediaQueue                  chan string
-	mediaMu                     sync.Mutex
-	mediaQuotaRecoveryMu        sync.Mutex
-	mediaQuotaRecoveryCursor    string
-	mediaQueued                 map[string]struct{}
-	mediaWorker                 int
-	mediaInputSlots             chan struct{}
-	mediaQueueFull              atomic.Uint64
+	identities           historyapp.IdentityResolver
+	models               routeResolver
+	audits               auditRecorder
+	accounts             accountapp.Execution
+	clientKeys           keyBillingAuthorizer
+	providers            provider.Registry
+	selector             *selector.Selector
+	responses            responseHistory
+	tokens               portcrypto.TokenSource
+	physicalJournals     portphysical.JournalFactory
+	rateLimits           RateLimitInterpreter
+	maxAttempts          atomic.Int64
+	videoMaxAttempts     atomic.Int64
+	buildForbiddenReauth atomic.Pointer[buildForbiddenReauthPolicy]
+	requestTimeout       atomic.Int64
+	mediaJobs            JobExecutionStore
+	videoResources       *mediaapp.VideoResources
+	mediaAssets          videoAssetStore
+	// background 持有媒体后台执行的全部可变状态（队列/去重集合/worker/
+	// 输入槽位/额度恢复游标）；本服务只经组件方法访问。
+	background                  *mediaBackground
 	logger                      *slog.Logger
 	markBuildChatDeniedAsReauth atomic.Bool
-	qualityRetry                atomic.Pointer[QualityRetryRuntime]
 	guardSource                 atomic.Pointer[guardSnapshotSource]
-	// qualityObserver 流观察点缝隙(D3-3a):守卫判决旁路进新证据局;
-	// nil disables. RecordQualityObservation 必须非阻塞(I19)。
-	qualityObserver atomic.Value // QualityObserver
-	qualityEvents   atomic.Pointer[qualityEventRecorder]
-	// qualityRetryPolicy 重试原语策略缝隙(D3-3b);nil=内建策略。
-	qualityRetryPolicy atomic.Value // QualityRetryPolicy
+	// qualityEvents 是权威质量回执落盘点(必须持久成功);与可丢弃的
+	// 观测遥测不同,这里的失败要按 hold 处理。
+	qualityEvents atomic.Pointer[qualityEventRecorder]
 	// nodeExitIPResolver 出口 IP 取证面(批6 第4步:调查局差分探针的
 	// 重摇 IP 验证,I8);nil=重摇差分一律不可采。
 	nodeExitIPResolver atomic.Pointer[nodeExitIPResolverValue]
-	// modelJurisdiction 管辖判定缝隙(G13):质量层守卫勾选清单;
-	// nil=沿用文件白名单 requestRetry.guardedModels。
-	modelJurisdiction atomic.Value // QualityJurisdiction
-}
-
-// SetModelJurisdiction 安装管辖判定缝隙(G13);nil 保持未设。
-func (s *Service) SetModelJurisdiction(jurisdiction QualityJurisdiction) {
-	if jurisdiction == nil {
-		return
-	}
-	s.modelJurisdiction.Store(jurisdiction)
-}
-
-func (s *Service) modelJurisdictionObserver() QualityJurisdiction {
-	if value, ok := s.modelJurisdiction.Load().(QualityJurisdiction); ok {
-		return value
-	}
-	return nil
-}
-
-// SetQualityObserver installs the quality-layer stream-observation seam
-// (D3-3a). Nil is ignored (seam stays off).
-func (s *Service) SetQualityObserver(observer QualityObserver) {
-	if observer == nil {
-		return
-	}
-	s.qualityObserver.Store(observer)
-}
-
-func (s *Service) qualityObservationObserver() QualityObserver {
-	if value, ok := s.qualityObserver.Load().(QualityObserver); ok {
-		return value
-	}
-	return nil
-}
-
-// SetQualityRetryPolicy installs the quality-layer retry-policy seam
-// (D3-3b). Nil is ignored: the base keeps its built-in policy.
-func (s *Service) SetQualityRetryPolicy(policy QualityRetryPolicy) {
-	if policy == nil {
-		return
-	}
-	s.qualityRetryPolicy.Store(policy)
-}
-
-func (s *Service) qualityPolicyObserver() QualityRetryPolicy {
-	if value, ok := s.qualityRetryPolicy.Load().(QualityRetryPolicy); ok {
-		return value
-	}
-	return nil
 }
 
 // SetAccountQualityEligibility forwards the account eligibility seam onto
 // the routing selector (composition-root convenience; nil is ignored).
-func (s *Service) SetAccountQualityEligibility(eligibility AccountEligibility) {
+func (s *Service) SetAccountQualityEligibility(eligibility selector.AccountEligibility) {
 	s.selector.SetQualityEligibility(eligibility)
 }
 
@@ -336,34 +287,64 @@ type buildForbiddenReauthPolicy struct {
 	codes   map[string]struct{}
 }
 
-func (s *Service) ConfigureMedia(repository repository.MediaJobRepository, concurrency int) {
-	if concurrency <= 0 {
-		concurrency = 4
+func (s *Service) ConfigureMedia(store JobExecutionStore, resources *mediaapp.VideoResources, concurrency int) {
+	s.mediaJobs = store
+	if resources != nil {
+		// Preserves the historical wiring where assets set before media
+		// configuration participate in the resource bundle.
+		if s.mediaAssets != nil {
+			resources = resources.WithAssetReader(s.mediaAssets)
+		}
+		s.videoResources = resources
 	}
-	s.mediaJobs = repository
-	s.videoResources = mediaapp.NewVideoResources(repository, s.mediaAssets)
-	s.mediaWorker = concurrency
-	s.mediaQueue = make(chan string, min(2048, max(64, concurrency*32)))
-	s.mediaInputSlots = make(chan struct{}, min(concurrency, videoInputMaterializeConcurrency))
-	s.mediaQueued = make(map[string]struct{})
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s.background = newMediaBackground(concurrency, logger, logger)
+	s.background.SetProcessor(func(ctx context.Context, id string) { s.processVideoJob(ctx, id) })
 }
 
 // ConfigureMediaAssets injects optional local video asset archival and reading.
+// 生产组合根不注入(资源读取经 videoResources 装配);本入口供集成测试
+// 替换资产存储,是显式测试缝。
 func (s *Service) ConfigureMediaAssets(store videoAssetStore) {
 	s.mediaAssets = store
-	s.videoResources = mediaapp.NewVideoResources(s.mediaJobs, store)
+	if s.videoResources != nil {
+		s.videoResources = s.videoResources.WithAssetReader(store)
+	}
 }
 
-func NewService(models routeResolver, audits auditRecorder, accounts *accountapp.Service, clientKeys *clientkeyapp.Service, providers *provider.Registry, selector *Selector, responses repository.ResponseRepository, maxAttempts int) *Service {
+func NewService(models routeResolver, audits auditRecorder, accounts accountapp.Execution, clientKeys keyBillingAuthorizer, providers provider.Registry, selector *selector.Selector, responses *historyapp.ResponseResources, tokens portcrypto.TokenSource, journals portphysical.JournalFactory, rateLimits RateLimitInterpreter, maxAttempts int) *Service {
+	if journals == nil {
+		panic("gateway: physical journal factory 不能为空")
+	}
 	service := &Service{
 		models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers,
-		selector: selector, responses: historyapp.NewResponseResources(responses), logger: slog.Default(),
+		selector: selector, responses: responses, tokens: tokens, physicalJournals: journals, rateLimits: rateLimits, logger: slog.Default(),
 	}
 	service.UpdateMaxAttempts(maxAttempts)
 	return service
 }
 
 // UpdateBuildForbiddenReauthPolicy atomically replaces the Build account invalidation policy.
+// parseRateLimit 经注入的解释器读取 429 元数据;未装配时保留包级规则
+// (测试/剥离形态行为不变)。
+func (s *Service) parseRateLimit(body []byte) *provider.RateLimitMetadata {
+	if s.rateLimits != nil {
+		return s.rateLimits.ParseRateLimitMetadata(body)
+	}
+	return provider.ParseRateLimitMetadata(body)
+}
+
+// startPhysicalTrace installs a fresh execution-owned journal for one logical
+// execution; the context only carries the accounting contract. The factory is
+// injected by the composition root and NewService refuses a nil one, so there
+// is exactly one wiring path and no gateway-local default ledger.
+func (s *Service) startPhysicalTrace(ctx context.Context, provider, operation string) context.Context {
+	return portphysical.WithPhysicalCallTrace(ctx, s.physicalJournals.NewPhysicalJournal(), provider, operation)
+}
+
 func (s *Service) UpdateBuildForbiddenReauthPolicy(enabled bool, codes []string) {
 	policy := &buildForbiddenReauthPolicy{enabled: enabled, codes: make(map[string]struct{}, len(codes))}
 	for _, value := range codes {
@@ -571,7 +552,7 @@ func (s *Service) eligibleConversationRoutes(routes []modeldomain.Route, key cli
 		return nil, fallback, ErrResponseAccountUnavailable
 	}
 	if !scopeMatched {
-		return nil, fallback, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: accountScope}
+		return nil, fallback, &selector.SelectionUnavailableError{Reason: selector.SelectionNoAccounts, Scope: accountScope}
 	}
 	if !allowed {
 		return nil, fallback, clientkeyapp.ErrModelNotAllowed
@@ -678,7 +659,7 @@ func (s *Service) eligibleMediaRoutes(routes []modeldomain.Route, key clientkey.
 		return nil, fallback, ErrModelNotFound
 	}
 	if !scopeMatched {
-		return nil, fallback, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: accountScope}
+		return nil, fallback, &selector.SelectionUnavailableError{Reason: selector.SelectionNoAccounts, Scope: accountScope}
 	}
 	if !allowed {
 		return nil, fallback, clientkeyapp.ErrModelNotAllowed
@@ -689,11 +670,11 @@ func (s *Service) eligibleMediaRoutes(routes []modeldomain.Route, key clientkey.
 // selectSchedulableMediaRoute resolves a concrete same-name media target and
 // its immutable account plan together. A cooling or exhausted first target
 // therefore cannot hide a healthy target from another Provider.
-func (s *Service) selectSchedulableMediaRoute(ctx context.Context, routes []modeldomain.Route, key clientkey.Key, capability modeldomain.Capability, consumesQuota bool, providerSupported func(accountdomain.Provider) bool) (modeldomain.Route, *selectionSession, error) {
+func (s *Service) selectSchedulableMediaRoute(ctx context.Context, routes []modeldomain.Route, key clientkey.Key, capability modeldomain.Capability, consumesQuota bool, providerSupported func(accountdomain.Provider) bool) (modeldomain.Route, *selector.SelectionSession, error) {
 	return s.selectSchedulableMediaRouteWithQuotaMode(ctx, routes, key, capability, consumesQuota, providerSupported, nil)
 }
 
-func (s *Service) selectSchedulableMediaRouteWithQuotaMode(ctx context.Context, routes []modeldomain.Route, key clientkey.Key, capability modeldomain.Capability, consumesQuota bool, providerSupported func(accountdomain.Provider) bool, resolveQuotaMode func(modeldomain.Route) string) (modeldomain.Route, *selectionSession, error) {
+func (s *Service) selectSchedulableMediaRouteWithQuotaMode(ctx context.Context, routes []modeldomain.Route, key clientkey.Key, capability modeldomain.Capability, consumesQuota bool, providerSupported func(accountdomain.Provider) bool, resolveQuotaMode func(modeldomain.Route) string) (modeldomain.Route, *selector.SelectionSession, error) {
 	eligible, fallback, err := s.eligibleMediaRoutes(routes, key, capability, providerSupported)
 	if err != nil {
 		return fallback, nil, err
@@ -705,7 +686,7 @@ func (s *Service) selectSchedulableMediaRouteWithQuotaMode(ctx context.Context, 
 // from routes that already passed capability, client-key, and Provider support
 // checks. Callers may apply request-specific route constraints between the
 // eligibility and scheduling phases without evaluating disallowed routes.
-func (s *Service) selectSchedulableEligibleMediaRouteWithQuotaMode(ctx context.Context, eligible []modeldomain.Route, key clientkey.Key, consumesQuota bool, resolveQuotaMode func(modeldomain.Route) string) (modeldomain.Route, *selectionSession, error) {
+func (s *Service) selectSchedulableEligibleMediaRouteWithQuotaMode(ctx context.Context, eligible []modeldomain.Route, key clientkey.Key, consumesQuota bool, resolveQuotaMode func(modeldomain.Route) string) (modeldomain.Route, *selector.SelectionSession, error) {
 	if len(eligible) == 0 {
 		return modeldomain.Route{}, nil, ErrNoAvailableAccount
 	}
@@ -719,7 +700,7 @@ func (s *Service) selectSchedulableEligibleMediaRouteWithQuotaMode(ctx context.C
 				quotaMode = s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 			}
 		}
-		session, selectionErr := s.selector.beginSelectionSessionForKey(
+		session, selectionErr := s.selector.BeginSelectionSessionForKey(
 			ctx,
 			route.Provider,
 			route.ID,
@@ -753,7 +734,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	}()
 
 	holdCfg, snapshotScope := s.requestGuardSnapshot()
-	ctx, egressTrace := infraegress.WithTrace(ctx)
+	ctx, egressTrace := portphysical.WithTrace(ctx)
 	startedAt := time.Now()
 	// The admission deadline stays unarmed until jurisdiction and exemptions
 	// are settled below: arming here would let model and candidate lookups
@@ -761,7 +742,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// still measures from request start, and client cancellation keeps
 	// propagating through the parent context.
 	admission := newAdmission(ctx, startedAt, 0)
-	ctx = responsebuffer.WithContext(admission.ctx, responsebuffer.FromContext(ctx))
+	ctx = responsebuffer.WithContext(admission.Context(), responsebuffer.FromContext(ctx))
 	defer func() {
 		if err := admission.failure(); err != nil {
 			if result != nil {
@@ -778,8 +759,8 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if input.Streaming {
 		firstToken = newFirstTokenTimer(startedAt)
 	}
-	eventID := newAuditEventID()
-	ctx = attemptmeta.WithRequest(ctx, eventID, holdCfg.Revision, holdCfg.RuleVersion, holdCfg.pathResolver)
+	eventID := s.newAuditEventID()
+	ctx = attemptmeta.WithRequest(ctx, eventID, holdCfg.Revision, holdCfg.RuleVersion, holdCfg.PathResolver())
 	// Use a server-generated scope so repeated or absent client request IDs
 	// cannot accidentally join independent Composer conversations.
 	requestSessionScope := eventID
@@ -838,7 +819,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		route = orderedRoutes[0]
 	}
 	accountScope := input.ClientKey.AccountScope()
-	var preselectedSession *selectionSession
+	var preselectedSession *selector.SelectionSession
 	// Skip targets whose account pool is already known to be unavailable. This
 	// gives same-name targets failover before any physical upstream request while
 	// preserving pinned Responses.
@@ -852,7 +833,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				}, historyapp.Identity{})
 				affinityKey = identity.AffinityKey
 			}
-			candidateSession, selectionErr := s.selector.beginSelectionSessionForKey(
+			candidateSession, selectionErr := s.selector.BeginSelectionSessionForKey(
 				ctx,
 				candidate.Provider,
 				candidate.ID,
@@ -948,7 +929,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if !ok {
 		return nil, ErrNoAvailableAccount
 	}
-	physicalCallCtx := infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
+	physicalCallCtx := s.startPhysicalTrace(ctx, string(route.Provider), string(operation))
 	var handoffPhysicalID string
 	defer func() {
 		if err := s.recordPhysicalEvents(physicalCallCtx, handoffPhysicalID); err != nil {
@@ -973,7 +954,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		}
 		if _, exists := degradedNodes[nodeID]; !exists {
 			degradedNodes[nodeID] = struct{}{}
-			physicalCallCtx = infraegress.WithNodeExclusions(physicalCallCtx, degradedNodes)
+			physicalCallCtx = portphysical.WithNodeExclusions(physicalCallCtx, degradedNodes)
 		}
 		return nodeID
 	}
@@ -982,13 +963,13 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return nil, ErrResponseStateUnsupported
 	}
 	attemptPolicy := newRoutingAttemptPolicy(int(s.maxAttempts.Load()))
-	idempotencyID, _ := security.NewOpaqueToken(18)
+	idempotencyID, _ := s.tokens.NewOpaqueToken(18)
 	if ownership != nil {
 		attemptPolicy = newRoutingAttemptPolicy(1)
 	}
 	physicalLimit := attemptPolicy.limit
-	if route.Provider != accountdomain.ProviderBuild || attemptPolicy.unlimited || physicalLimit > infraegress.MaxPhysicalCalls {
-		physicalLimit = infraegress.MaxPhysicalCalls
+	if route.Provider != accountdomain.ProviderBuild || attemptPolicy.unlimited || physicalLimit > portphysical.MaxPhysicalCalls {
+		physicalLimit = portphysical.MaxPhysicalCalls
 	}
 	requestBudget := inferencedomain.NewAttemptBudget(physicalLimit)
 	budgetHandedOff := false
@@ -997,7 +978,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			requestBudget.Close()
 		}
 	}()
-	physicalCallCtx = infraegress.WithPhysicalCallBudget(physicalCallCtx, requestBudget)
+	physicalCallCtx = portphysical.WithPhysicalCallBudget(physicalCallCtx, requestBudget)
 	recoveryMode := historydomain.AllowLossyRecovery
 	if input.HistoryRecoveryPolicy != nil {
 		recoveryMode = *input.HistoryRecoveryPolicy
@@ -1022,8 +1003,8 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	failureFingerprints := make(map[string]int)
 	authRecoveryAttempted := make(map[uint64]bool)
 	exemptReason := qualityHoldExemptReason(input, ownership, route, operation, holdCfg, snapshotScope)
-	if holdCfg.unavailable != nil {
-		return nil, &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "quality_guard_unavailable", PublicMessage: "响应守卫暂不可用", Cause: holdCfg.unavailable}
+	if holdCfg.Unavailable() != nil {
+		return nil, &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "quality_guard_unavailable", PublicMessage: "响应守卫暂不可用", Cause: holdCfg.Unavailable()}
 	}
 	qualityHoldEnabled := exemptReason == ""
 	if qualityHoldEnabled && operation == audit.OperationChat {
@@ -1097,7 +1078,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	}
 	defer discardPendingOutput()
 	toolCompatibilityPolicy := inferencedomain.AllowDisabledCacheTools
-	forwardResponse := func(lease *accountLease, credential accountdomain.Credential, billing *accountdomain.Billing) (*provider.Response, error) {
+	forwardResponse := func(lease *selector.Lease, credential accountdomain.Credential, billing *accountdomain.Billing) (*provider.Response, error) {
 		discardPendingOutput()
 		started := time.Now()
 		responseStartedAt = started
@@ -1110,7 +1091,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			imageFacts = &imageGeneration{}
 		}
 		textFacts.begin(credential, lease.QuotaMode, lease.QuotaSnapshotVersion)
-		lease.markSelectorUpstreamStarted()
+		lease.MarkSelectorUpstreamStarted()
 		request := provider.ResponseResourceRequest{Credential: credential, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, PriorReasoningReplayKey: priorReasoningReplayKey, ToolCompatibilityPolicy: toolCompatibilityPolicy, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata, DeferOutputCommit: true, DisableAutomaticReplay: !replaySafety.Safe, HistoryControl: recoverHistory,
 			OnNormalized: func(metadata provider.NormalizedRequestMetadata) error {
 				if metadata.ImageOutputCount > 0 && !reserved {
@@ -1140,8 +1121,8 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		if imageFacts != nil {
 			request.ObserveImage = imageFacts.observe
 		}
-		attemptCtx, resources := newAttemptResources(physicalCallCtx)
-		lease.replaceResources(resources)
+		attemptCtx, resources := selector.NewAttemptResources(physicalCallCtx)
+		lease.ReplaceResources(resources)
 		attemptCtx = attemptmeta.WithAccount(attemptCtx, credential.ID, string(route.Provider), route.UpstreamModel)
 		response, err := s.runPhysicalAttempt(attemptCtx, request, resources)
 		recoverHistory.annotate(response)
@@ -1162,7 +1143,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			}
 		}
 		if response != nil {
-			response.Body = resources.own(response.Body)
+			response.Body = resources.Own(response.Body)
 		}
 		pendingOutput = response
 		timing.markUpstream(time.Since(started))
@@ -1175,7 +1156,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		timing.markCredential(time.Since(started))
 		return result, err
 	}
-	handoffResponse := func(response *provider.Response, lease *accountLease, credential accountdomain.Credential, upstreamStartedAt time.Time) *Result {
+	handoffResponse := func(response *provider.Response, lease *selector.Lease, credential accountdomain.Credential, upstreamStartedAt time.Time) *Result {
 		handoffPhysicalID = response.Attempt.ID
 		if pendingOutput == response {
 			pendingOutput = nil
@@ -1193,7 +1174,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		budgetHandedOff = true
 		return session.result(upstreamStartedAt)
 	}
-	var lease *accountLease
+	var lease *selector.Lease
 	defer func() {
 		if !budgetHandedOff {
 			lease.Release()
@@ -1228,7 +1209,10 @@ attemptLoop:
 			lastErr = err
 			break
 		}
-		if qualityHoldEnabled && qualityAccountAttempts >= holdCfg.MaxAttempts {
+		// 账号切换预算唯一由 admission 收口：本闸门与 DecideRetry 共用
+		// BudgetExhausted，覆盖本循环所有换号路径（传输失败、空输出、扣留
+		// 重试），受守卫管辖的请求不会比守卫预算多耗上游账号。
+		if qualityHoldEnabled && qualityBudgetExhausted(qualityAccountAttempts, holdCfg.MaxAttempts) {
 			break
 		}
 		var err error
@@ -1237,7 +1221,7 @@ attemptLoop:
 			lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, ownership.AccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
 		} else {
 			if selection == nil {
-				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, affinityKey, excluded, !quotaProbeAttempted, accountScope)
+				selection, err = s.selector.BeginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, affinityKey, excluded, !quotaProbeAttempted, accountScope)
 			}
 			if err == nil {
 				lease, err = selection.Acquire(ctx, excluded, !quotaProbeAttempted)
@@ -1302,13 +1286,13 @@ attemptLoop:
 		response, err := forwardResponse(lease, credential, lease.Billing)
 		if err != nil {
 			if errors.Is(err, clientkeyapp.ErrBillingLimit) || errors.Is(err, clientkeyapp.ErrRuntimeUnavailable) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 				lease.Release()
 				return nil, err
 			}
 			lease.Release()
 			lastErr = err
-			if errors.Is(err, infraegress.ErrPhysicalCallLimit) {
+			if errors.Is(err, portphysical.ErrPhysicalCallLimit) {
 				lastFailure = &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "physical_attempt_limit", PublicMessage: "上游尝试次数达到安全上限", Cause: err}
 				break
 			}
@@ -1342,7 +1326,7 @@ attemptLoop:
 		}
 		if response.RequestValidation != nil {
 			_ = response.Body.Close()
-			lease.skipSelectorObservation()
+			lease.SkipSelectorObservation()
 			lease.Release()
 			record := auditBase
 			record.StatusCode = http.StatusBadRequest
@@ -1432,7 +1416,7 @@ attemptLoop:
 				// Deterministic request-scoped 403: restore the original body and return it
 				// without OAuth refresh, account rotation, cooldown, or invalidation.
 				response.Body = io.NopCloser(bytes.NewReader(body))
-				lease.completeSelectorObservation(false)
+				lease.CompleteSelectorObservation(false)
 				lease.Release()
 				if lastFailure.SafetyRejection {
 					s.logger.Warn("upstream_safety_rejection", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "upstream_code", lastFailure.UpstreamCode)
@@ -1474,7 +1458,7 @@ attemptLoop:
 			body, _ := readRetryableBody(response.Body)
 			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 			_ = response.Body.Close()
-			lease.completeSelectorObservation(false)
+			lease.CompleteSelectorObservation(false)
 			lease.Release()
 			break attemptLoop
 		} else if response.StatusCode >= 400 && !isRetryableResponse(response, route.Provider) {
@@ -1485,7 +1469,7 @@ attemptLoop:
 			body, _ := readRetryableBody(response.Body)
 			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 			_ = response.Body.Close()
-			lease.completeSelectorObservation(false)
+			lease.CompleteSelectorObservation(false)
 			lease.Release()
 			break attemptLoop
 		} else if isRetryableResponse(response, route.Provider) && !finalEgressForbidden {
@@ -1493,7 +1477,7 @@ attemptLoop:
 			body, _ := readRetryableBody(response.Body)
 			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 			if response.StatusCode == http.StatusTooManyRequests && response.RateLimit == nil {
-				if metadata := provider.ParseRateLimitMetadata(body); metadata != nil {
+				if metadata := s.parseRateLimit(body); metadata != nil {
 					response.RateLimit = metadata
 					if retryAfter <= 0 && metadata.RetryAfter > 0 {
 						retryAfter = metadata.RetryAfter
@@ -1569,7 +1553,7 @@ attemptLoop:
 				s.selector.MarkFreeQuotaExhausted(ctx, credential, 0, 0)
 				failureHandled = true
 			} else if lastFailure.SpendingLimitBlocked || lastFailure.QuotaExhausted {
-				err := s.selector.MarkPaymentQuotaExhausted(ctx, credential, quotaRecoveryHints{Billing: lease.Billing})
+				err := s.selector.MarkPaymentQuotaExhausted(ctx, credential, selector.QuotaRecoveryHints{Billing: lease.Billing})
 				failureHandled = err == nil
 				if err != nil {
 					s.logger.Error("account_quota_recovery_write_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "error", err)
@@ -1606,7 +1590,7 @@ attemptLoop:
 				// Provider 级 5xx:本请求换号,跨请求短暂隔离该账号,但不累积持久
 				// 失败计数(#999 防瞬态 5xx 级联成 exponential 冷却)。保留真实状态码
 				// 用于诊断,应用显式软失败策略。
-				if markErr := s.selector.markSoftFailure(ctx, credential, response.StatusCode, retryAfter); markErr != nil {
+				if markErr := s.selector.MarkSoftFailure(ctx, credential, response.StatusCode, retryAfter); markErr != nil {
 					s.logger.Warn("soft_failure_mark_failed", "account_id", credential.ID, "status", response.StatusCode, "error", markErr.Error())
 				}
 			}
@@ -1619,7 +1603,7 @@ attemptLoop:
 			continue
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			credential = s.selector.markSuccess(ctx, credential, lease.QuotaRecoveryRef)
+			credential = s.selector.MarkSuccessWithRecovery(ctx, credential, lease.QuotaRecoveryRef)
 			// 注：曾在此处记录上游响应头全量用于降智早期信号研究；
 			// 直连矩阵证实 clean/降智头部完全一致（零判别力），已移除该噪声日志。
 			if qualityHoldEnabled {
@@ -1646,7 +1630,7 @@ attemptLoop:
 					// 非流式：完整 body 判决（零扣留延迟），证据规则与流式一致。
 					replay, verdict, peekUsage, peekFingerprint, peekErr = peekQualityBodyReportWithBudget(response.Body, peekCfg, responsebuffer.FromContext(ctx))
 				}
-				response.Body = lease.ownBody(replay)
+				response.Body = lease.OwnBody(replay)
 				if data, release, ok := responsebuffer.Borrow(response.Body); ok {
 					textFacts.observeJSON(response, data)
 					release()
@@ -1751,9 +1735,11 @@ attemptLoop:
 					continue
 				}
 				response.Body = replay
-				hasNextAccount := verdict == QualityWithhold && attemptPolicy.hasNext(attempt) && selection.hasAvailableCandidate(excluded, !quotaProbeAttempted)
-				hasNextAccount = hasNextAccount && replaySafety.Safe && qualityAccountAttempts < holdCfg.MaxAttempts
-				commit := s.decideQualityCommit(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
+				// 调用方只报告真实可用性（路由候选 + 可安全重放）；账号切换
+				// 预算由 commitQualityHold→admission.DecideRetry 独自判定。
+				hasNextAccount := verdict == QualityWithhold && attemptPolicy.hasNext(attempt) && selection.HasAvailableCandidate(excluded, !quotaProbeAttempted)
+				hasNextAccount = hasNextAccount && replaySafety.Safe
+				commit := commitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount)
 				if commit.KeepBody {
 					// 交付尝试的判决规则落审计主行：rule=thinking 表示流内观察到
 					// 可见思考增量；其余规则的 200 交付为 fail-open 形态（配合
@@ -1906,7 +1892,7 @@ attemptLoop:
 	record.StatusCode = http.StatusServiceUnavailable
 	record.DurationMS = time.Since(startedAt).Milliseconds()
 	record.ErrorCode = "upstream_unavailable"
-	var selectionFailure *SelectionUnavailableError
+	var selectionFailure *selector.SelectionUnavailableError
 	if errors.As(lastErr, &selectionFailure) {
 		record.StatusCode = selectionFailure.HTTPStatus()
 		record.ErrorCode = selectionFailure.Code()
@@ -2042,12 +2028,16 @@ func (s *Service) cancelBillingReservation(eventID string) {
 	}
 }
 
-func newAuditEventID() string {
-	value, err := security.NewOpaqueToken(18)
-	if err != nil || value == "" {
-		return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+func (s *Service) newAuditEventID() string {
+	// Test-constructed services may omit the token source; the timestamp
+	// fallback below preserves the original package-level behavior.
+	if s.tokens != nil {
+		value, err := s.tokens.NewOpaqueToken(18)
+		if err == nil && value != "" {
+			return "evt_" + value
+		}
 	}
-	return "evt_" + value
+	return fmt.Sprintf("evt_%d", time.Now().UnixNano())
 }
 
 // markPermanentlyUnrefreshableCredentialRejected removes an account from the pool after a real upstream request confirms its access token is invalid.
@@ -2204,7 +2194,7 @@ func (s *Service) applyRateLimitReconciliation(ctx context.Context, credential a
 		// A Console 429 with available quota, an in-progress cross-instance probe,
 		// or an inconclusive /usage request is transient. Isolate the account for
 		// this Retry-After window without growing its durable failure count.
-		if err := s.selector.markSoftFailure(ctx, credential, status, retryAfter); err != nil {
+		if err := s.selector.MarkSoftFailure(ctx, credential, status, retryAfter); err != nil {
 			s.logger.Warn("console_rate_limit_soft_cooldown_failed", "account_id", credential.ID, "state", state, "error", err)
 		}
 		return

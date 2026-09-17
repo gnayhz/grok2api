@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,8 @@ func TestSourceSyncHTTPRetiresOldDownloadAndPreservesPublicResult(t *testing.T) 
 			}
 			repo := relational.NewEgressRepository(db)
 			service := egressapp.NewService(repo, cipher)
+			// 订阅拉取经注入传输端口(R09):HTTP 端到端用例显式接线。
+			service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, egressapp.NormalizeSubscriptionURL))
 			defer service.Close(ctx)
 			gin.SetMode(gin.TestMode)
 			router := gin.New()

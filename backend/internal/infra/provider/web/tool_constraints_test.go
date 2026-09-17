@@ -13,8 +13,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestWebSearchConstraintsRejectedBeforeNetwork(t *testing.T) {
@@ -23,7 +24,7 @@ func TestWebSearchConstraintsRejectedBeforeNetwork(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(500) }))
 	defer server.Close()
-	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
 	defer manager.Close(context.Background())
 	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual"}, manager, cipher, nil, nil)
 	for _, operation := range []string{"responses", "chat", "messages"} {

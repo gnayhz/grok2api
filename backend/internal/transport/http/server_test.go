@@ -72,6 +72,29 @@ func TestInferenceTrafficIsRejectedWhileReconciling(t *testing.T) {
 	}
 }
 
+func TestPublicMediaTrafficIsRejectedWhileReconciling(t *testing.T) {
+	deps := testDependencies()
+	deps.TrafficReady = func() bool { return false }
+	router := New(deps)
+	// 公开媒体面不走 ClientAuth(票据/资源 ID 即授权), 因此曾经在 v1 分组
+	// 之前挂载并完全绕过就绪门:恢复期间仍可读取与上传媒体资产。
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/v1/media/images/fictional-asset"},
+		{method: http.MethodHead, path: "/v1/media/videos/fictional-asset"},
+		{method: http.MethodPut, path: "/v1/media/uploads/fictional-ticket"},
+	} {
+		request := httptest.NewRequest(route.method, route.path, nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"service_reconciling"`) {
+			t.Fatalf("%s %s: status=%d body=%s", route.method, route.path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func TestSystemEndpointsRequireAdminAuthentication(t *testing.T) {
 	deps := testDependencies()
 	deps.PublicAPIBaseURL = "https://api.example.com"

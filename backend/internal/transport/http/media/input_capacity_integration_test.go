@@ -68,12 +68,12 @@ func TestHTTPConcurrentInputUploadsShareCapacity(t *testing.T) {
 				routers := make([]*gin.Engine, 0, 2)
 				for _, database := range databases {
 					source := &inputHTTPObservedAssets{relational.NewMediaAssetRepository(database), observed, proceed}
-					service := mediaapp.NewService(source, relational.NewMediaJobRepository(database), objects, nil, cfg)
+					service := mediaapp.NewServiceWithTickets(source, relational.NewMediaJobRepository(database), nil, objects, nil, cfg)
 					services = append(services, service)
 					router := gin.New()
 					handler := NewHandler(service, nil)
 					handler.RegisterAdmin(router.Group("/api/admin/v1"))
-					handler.RegisterPublic(router)
+					handler.RegisterPublic(router.Group("/v1/media"))
 					routers = append(routers, router)
 				}
 				results := make(chan *httptest.ResponseRecorder, 2)

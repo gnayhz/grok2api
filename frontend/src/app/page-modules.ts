@@ -18,7 +18,7 @@ export const DashboardPageModule = preloadableNamed(() => import("@/features/das
 export const ApiDocsPageModule = preloadableNamed(() => import("@/features/docs/api-docs-page"), "ApiDocsPage");
 export const GalleryPageModule = preloadableNamed(() => import("@/features/media/gallery-page"), "GalleryPage");
 export const QualityConsoleModule = preloadableNamed(() => import("@/features/guard/quality-console"), "QualityConsole");
-export const QualitySettingsPageModule = preloadableNamed(() => import("@/features/guard/quality-settings-page"), "QualitySettingsPage");
+export const QualitySettingsPageModule = preloadableNamed(() => import("@/app/quality-settings-route"), "QualitySettingsRoute");
 export const VideoGalleryPageModule = preloadableNamed(() => import("@/features/media/video-gallery-page"), "VideoGalleryPage");
 export const ModelsPageModule = preloadableNamed(() => import("@/features/models/models-page"), "ModelsPage");
 export const ProxiesPageModule = preloadableNamed(() => import("@/features/proxies/proxies-page"), "ProxiesPage");

@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"runtime"
 	"sync"
 	"testing"
@@ -30,7 +31,7 @@ func TestLeaseLifecycleUnderCancellationStorm(t *testing.T) {
 		}
 		repo.nodes = append(repo.nodes, domain.Node{ID: i, Name: fmt.Sprintf("node-%d", i), Enabled: true, Health: 1, EncryptedProxyURL: encrypted})
 	}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	const workers = 32
@@ -58,7 +59,7 @@ func TestLeaseLifecycleUnderCancellationStorm(t *testing.T) {
 	// inflight 守恒:所有节点计数归零。
 	manager.routing.nodeMu.RLock()
 	for _, node := range repo.nodes {
-		if value := manager.inflightCount(node.ID); value != 0 {
+		if value := manager.routing.inflightCount(node.ID); value != 0 {
 			manager.routing.nodeMu.RUnlock()
 			t.Fatalf("node %d inflight = %d after storm, want 0", node.ID, value)
 		}

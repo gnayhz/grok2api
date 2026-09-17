@@ -1,4 +1,4 @@
-import type { SettingsConfigDTO } from "./settings-api.ts";
+import type { SettingsConfigDTO } from "@/entities/settings/settings-api";
 
 export function settingsTestConfig(): SettingsConfigDTO {
   const cfg: SettingsConfigDTO = {

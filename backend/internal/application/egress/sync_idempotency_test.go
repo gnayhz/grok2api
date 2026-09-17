@@ -2,7 +2,9 @@ package egress
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -69,6 +71,8 @@ func TestSubscriptionSyncIdempotencyUnderFaultInjection(t *testing.T) {
 	}
 
 	service := NewService(repo, cipher)
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	countNodes := func() (total, enabled int) {
 		nodes, listErr := repo.ListEgressNodes(ctx, repository.SortQuery{})
 		if listErr != nil {
@@ -207,6 +211,8 @@ func TestImportTextInputBoundaries(t *testing.T) {
 	}
 	repo := relational.NewEgressRepository(database)
 	service := NewService(repo, newRotationCipher(t))
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 
 	countNodes := func() int {
 		nodes, listErr := repo.ListEgressNodes(ctx, repository.SortQuery{})
@@ -256,11 +262,11 @@ func TestImportTextInputBoundaries(t *testing.T) {
 	}
 }
 
-// RunMaintenance 编排函数(到期源同步 + 到期节点探测, errors.Join 聚合)此前
-// 跨全部测试包零覆盖——组件各自有测试但编排层无。真实 SQLite + 真实 feed:
-// 一次 RunMaintenance 应同时驱动到期源的同步与到期节点的探测; 源失败不
-// 阻断节点探测(错误聚合), 反之亦然。
-func TestRunMaintenanceOrchestratesSyncAndProbe(t *testing.T) {
+// 两条维护 pass(到期源同步 RunSubscriptionMaintenance + 到期节点探测
+// RunProbeMaintenance)此前跨全部测试包零覆盖——组件各自有测试但 pass 层无。
+// 真实 SQLite + 真实 feed:组合根按 app/application.go 的编排方式分别驱动两条
+// pass;源失败不阻断节点探测(各自独立返回错误), 反之亦然。
+func TestMaintenancePassesOrchestrateSyncAndProbe(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "maintenance.db"))
 	if err != nil {
@@ -292,10 +298,12 @@ func TestRunMaintenanceOrchestratesSyncAndProbe(t *testing.T) {
 	}
 
 	service := NewService(repo, cipher)
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	probeCalls := 0
 	service.SetNodeProber(&maintenanceProber{calls: &probeCalls, result: domain.ProbeResult{Status: domain.ProbeStatusHealthy, ExitIP: "198.51.100.1"}})
 
-	maintErr := service.RunMaintenance(ctx)
+	maintErr := errors.Join(service.RunSubscriptionMaintenance(ctx), service.RunProbeMaintenance(ctx))
 	// 源失败必须被聚合上报(不静默吞掉), 但探测照常执行。
 	if maintErr == nil {
 		t.Fatal("failing source sync should surface an aggregated error")
@@ -347,7 +355,7 @@ func TestRunMaintenanceOrchestratesSyncAndProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 到期 healthy 源 + 未到期节点(刚探测过)。
-	if err := service.RunMaintenance(ctx); err != nil {
+	if err := errors.Join(service.RunSubscriptionMaintenance(ctx), service.RunProbeMaintenance(ctx)); err != nil {
 		t.Fatalf("all-healthy maintenance should succeed: %v", err)
 	}
 	synced, err := repo.GetEgressSource(ctx, 2)

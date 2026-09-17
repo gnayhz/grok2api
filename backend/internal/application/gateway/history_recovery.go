@@ -7,10 +7,12 @@ import (
 	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
+// NewHistoryController 构造跨包可用的历史恢复控制器(恢复/回放测试与
+// provider 侧测试的公共入口);进程内主路径由 service 直接构造同一状态。
 // NewHistoryController freezes the logical request's downgrade policy
 // and budget. Providers supply rejection facts and a same-scope sender only.
 func NewHistoryController(mode historydomain.RecoveryMode, budget *inferencedomain.AttemptBudget) provider.HistoryController {
@@ -79,7 +81,7 @@ func (h *historyRecoveryState) Recover(ctx context.Context, request provider.His
 			permit.Release()
 			return fail("history_transition_failed")
 		}
-		next, err := request.Retry(infraegress.WithPhysicalCallPermit(ctx, permit), step)
+		next, err := request.Retry(portphysical.WithPhysicalCallPermit(ctx, permit), step)
 		permit.Release()
 		result.Outcome.Actions = append(result.Outcome.Actions, step.Action)
 		result.Outcome.RemovedOpaque += step.RemovedOpaque

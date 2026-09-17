@@ -23,7 +23,7 @@ func TestRefreshTokenRotationAndLogout(t *testing.T) {
 	if err := database.InitializeSchema(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(relational.NewAdminRepository(database), relational.NewAdminSessionRepository(database), security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+	service := NewService(relational.NewAdminRepository(database), relational.NewAdminSessionRepository(database), security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	ctx := context.Background()
 	if err := service.Bootstrap(ctx, "admin", "password123"); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestChangePasswordRevokesAllSessions(t *testing.T) {
 	if err := database.InitializeSchema(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(relational.NewAdminRepository(database), relational.NewAdminSessionRepository(database), security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+	service := NewService(relational.NewAdminRepository(database), relational.NewAdminSessionRepository(database), security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	ctx := context.Background()
 	if err := service.Bootstrap(ctx, "admin", "password123"); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestChangePasswordRevokesAllSessions(t *testing.T) {
 }
 
 func TestLoginRateLimiterFailureIsEnforced(t *testing.T) {
-	service := NewService(nil, nil, security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+	service := NewService(nil, nil, security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	service.SetLoginRateLimiter(rejectingRateLimiter{})
 	if _, _, err := service.Login(context.Background(), "admin", "password123", "127.0.0.1"); !errors.Is(err, ErrLoginRateLimited) {
 		t.Fatalf("login rate limit error = %v", err)
@@ -94,7 +94,7 @@ func TestLoginRateLimiterFailureIsEnforced(t *testing.T) {
 }
 
 func TestLoginDistinguishesPersistenceFailure(t *testing.T) {
-	service := NewService(failingAdminRepository{}, nil, security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+	service := NewService(failingAdminRepository{}, nil, security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	if _, _, err := service.Login(context.Background(), "admin", "password123", "127.0.0.1"); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("login persistence error = %v", err)
 	}
@@ -112,13 +112,7 @@ func TestConcurrentRefreshAllowsExactlyOneRotation(t *testing.T) {
 
 	baseSessions := relational.NewAdminSessionRepository(database)
 	sessions := newCoordinatedSessionRepository(baseSessions, 2)
-	service := NewService(
-		relational.NewAdminRepository(database),
-		sessions,
-		security.NewTokenService("12345678901234567890123456789012"),
-		time.Minute,
-		time.Hour,
-	)
+	service := NewService(relational.NewAdminRepository(database), sessions, security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	ctx := context.Background()
 	if err := service.Bootstrap(ctx, "admin", "password123"); err != nil {
 		t.Fatal(err)

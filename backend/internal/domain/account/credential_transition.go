@@ -168,6 +168,13 @@ func CredentialRefreshBackoff(accountID uint64, failureCount int, retryAfter tim
 // IsPermanentCredentialRefreshErrorCode reports credential-specific terminal
 // failures. HTTP status alone is intentionally insufficient: OAuth gateways
 // also use 400/401 for temporary policy, client, and infrastructure errors.
+// IsRecoverableCredentialRefreshErrorCode reports local or temporary refresh
+// failures that may be stored as RefreshPermanent but must not block a later
+// successful refresh from clearing that mark.
+func IsRecoverableCredentialRefreshErrorCode(code string) bool {
+	return !IsPermanentCredentialRefreshErrorCode(code)
+}
+
 func IsPermanentCredentialRefreshErrorCode(code string) bool {
 	switch normalizeCredentialRefreshErrorCode(code) {
 	case "invalid_grant",

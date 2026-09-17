@@ -12,7 +12,7 @@ func BenchmarkConvertTextDeltas(b *testing.B) {
 				[]byte(`{"type":"response.output_text.delta","item_id":"msg_1","delta":"hello 世界","sequence_number":123}`),
 				[]byte(`{"type":"response.output_text.delta","item_id":"msg_1","delta":" next","sequence_number":124}`),
 			}
-			c := newStreamConverter(io.Discard, operation, ResponseOptions{})
+			c := newStreamConverterWithBudget(io.Discard, operation, ResponseOptions{}, nil)
 			defer c.releaseResources()
 			b.ReportAllocs()
 			i := 0

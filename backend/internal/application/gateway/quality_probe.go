@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"strings"
 	"time"
@@ -16,11 +17,11 @@ import (
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
@@ -85,7 +86,7 @@ func (s *Service) ProbeAccountDifferentialOnPath(ctx context.Context, accountID,
 
 // probeAccountDifferential 是有限案件中单个 comparison 任务的执行器。
 func (s *Service) probeAccountDifferential(ctx context.Context, accountID, baselineNodeID, comparisonNodeID uint64) qualitymodel.ProbeMeasurement {
-	probeCtx, cancel := context.WithTimeout(ctx, qualityMeasurementTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, selector.QualityMeasurementTimeout)
 	defer cancel()
 	if baselineNodeID == 0 || comparisonNodeID == 0 {
 		return qualitymodel.ProbeMeasurement{Outcome: qualitymodel.MeasurementError, Failure: qualitymodel.ProbeFailurePath, Reason: "explicit differential path is incomplete", Detail: "comparison-path-incomplete"}
@@ -116,8 +117,8 @@ type qualityProbeAttemptFunc func(context.Context, provider.ResponseResourceRequ
 // Keeping the attempt function injectable makes the one-request invariant
 // testable without contacting an upstream provider.
 func (s *Service) probeAccountComparison(ctx context.Context, request provider.ResponseResourceRequest, hold QualityRetryRuntime, baselineNodeID, comparisonNodeID uint64, attempt qualityProbeAttemptFunc) qualitymodel.ProbeMeasurement {
-	comparisonCtx := infraegress.WithQualityVerificationNode(ctx, comparisonNodeID)
-	traceCtx, trace := infraegress.WithTrace(comparisonCtx)
+	comparisonCtx := portphysical.WithQualityVerificationNode(ctx, comparisonNodeID)
+	traceCtx, trace := portphysical.WithTrace(comparisonCtx)
 	result := attempt(traceCtx, request, hold)
 	if result.Outcome == qualitymodel.MeasurementError {
 		// Transport/provider failures do not require an observed egress
@@ -179,7 +180,7 @@ func (s *Service) probeAccountComparison(ctx context.Context, request provider.R
 // 按族判等(任一共有族不同 → 真换路;所有可比族相同 → 同路)。直连
 // 落点/无 trace/解析失败/两族皆未知一律不采(宁可弃权不可误采)。
 // note 是稳定审计词汇,永不包含地址本身(I24)。
-func (s *Service) verifyExcludeRoutePathChange(ctx context.Context, baseNode uint64, secondTrace *infraegress.Trace) (note string, verified bool) {
+func (s *Service) verifyExcludeRoutePathChange(ctx context.Context, baseNode uint64, secondTrace *portphysical.Trace) (note string, verified bool) {
 	selection, traced := secondTrace.Selection(domainegress.ScopeBuild)
 	if !traced {
 		return "no-second-attempt-trace", false
@@ -217,9 +218,9 @@ func (s *Service) ProbeExitJury(ctx context.Context, jurorAccountID, defendantNo
 	defer release()
 	juryCtx := probeCtx
 	if defendantNodeID != 0 {
-		juryCtx = infraegress.WithQualityVerificationNode(probeCtx, defendantNodeID)
+		juryCtx = portphysical.WithQualityVerificationNode(probeCtx, defendantNodeID)
 	}
-	traceCtx, trace := infraegress.WithTrace(juryCtx)
+	traceCtx, trace := portphysical.WithTrace(juryCtx)
 	result := s.qualityProbeMeasurement(traceCtx, request, QualityRetryRuntime{CreatedTimeout: 10 * time.Second, EvidenceTimeout: 15 * time.Second})
 	if result.Outcome != qualitymodel.MeasurementError && defendantNodeID != 0 {
 		selection, observed := trace.Selection(domainegress.ScopeBuild)
@@ -259,14 +260,6 @@ func comparedFamilies(a, b domainegress.ExitAddresses) string {
 	return strings.Join(families, "+")
 }
 
-// New probes stop as soon as the stream establishes thinking presence. This
-// measurement is independent of generation completion; legacy v1 probes retain
-// their frozen completion requirement.
-func (s *Service) qualityProbeAttempt(ctx context.Context, request provider.ResponseResourceRequest, hold QualityRetryRuntime) (qualitymodel.MeasurementOutcome, string) {
-	result := s.qualityProbeMeasurement(ctx, request, hold)
-	return result.Outcome, result.Reason
-}
-
 func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.ResponseResourceRequest, limits QualityRetryRuntime) (result qualitymodel.ProbeMeasurement) {
 	fail := func(kind qualitymodel.ProbeFailure, reason string) qualitymodel.ProbeMeasurement {
 		result.Outcome, result.Failure, result.Reason = qualitymodel.MeasurementError, kind, reason
@@ -275,7 +268,7 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 	// Each physical measurement freezes the same policy authority as traffic.
 	// Probes use shorter transport deadlines, without losing policy identity.
 	hold, _ := s.requestGuardSnapshot()
-	if hold.unavailable != nil {
+	if hold.Unavailable() != nil {
 		return fail(qualitymodel.ProbeFailurePolicy, "guard policy unavailable")
 	}
 	spec, frozen := qualitymodel.ProbeExperimentFromContext(ctx)
@@ -289,24 +282,24 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 		hold.EvidenceTimeout = limits.EvidenceTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, qualityMeasurementTimeout)
+	ctx, cancel := context.WithTimeout(ctx, selector.QualityMeasurementTimeout)
 	defer cancel()
 	ctx = responsebuffer.WithContext(ctx, responsebuffer.NewLimitedRequest(8<<20))
-	ctx, resources := newAttemptResources(ctx)
-	defer resources.close()
-	ctx = attemptmeta.WithRequest(ctx, newAuditEventID(), hold.Revision, hold.RuleVersion, hold.pathResolver)
+	ctx, resources := selector.NewAttemptResources(ctx)
+	defer resources.Close()
+	ctx = attemptmeta.WithRequest(ctx, s.newAuditEventID(), hold.Revision, hold.RuleVersion, hold.PathResolver())
 	ctx = attemptmeta.WithAccount(ctx, request.Credential.ID, string(request.Credential.Provider), request.Model)
 	if frozen {
 		ctx = attemptmeta.WithProfile(ctx, spec.Profile())
 	}
-	ctx = infraegress.WithPhysicalCallTrace(ctx, string(request.Credential.Provider), "responses")
+	ctx = s.startPhysicalTrace(ctx, string(request.Credential.Provider), "responses")
 	requestBudget := inferencedomain.NewAttemptBudget(1)
 	defer requestBudget.Close()
-	ctx = infraegress.WithPhysicalCallBudget(ctx, requestBudget)
+	ctx = portphysical.WithPhysicalCallBudget(ctx, requestBudget)
 	defer func() {
-		resources.close()
+		resources.Close()
 		if result.Attempt.ID == "" {
-			facts := infraegress.PhysicalFacts(ctx)
+			facts := portphysical.PhysicalFacts(ctx)
 			if len(facts) > 0 {
 				result.Attempt = facts[len(facts)-1].Attempt
 			}
@@ -325,7 +318,7 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 	}
 	if response != nil {
 		result.Attempt = response.Attempt
-		response.Body = resources.own(response.Body)
+		response.Body = resources.Own(response.Body)
 	}
 	if err != nil {
 		return fail(probeOperationFailure(ctx, err, qualitymodel.ProbeFailureForward), "forward: "+err.Error())
@@ -345,10 +338,10 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 		return fail(kind, fmt.Sprintf("upstream HTTP %d", response.StatusCode))
 	}
 	if responseflow.FromReader(response.Body) == nil {
-		response.Body = resources.own(responseflow.New(response.Body, responsebuffer.FromContext(ctx)))
+		response.Body = resources.Own(responseflow.New(response.Body, responsebuffer.FromContext(ctx)))
 	}
 	replay, verdict, _, fingerprint, peekErr := peekQualityStreamReport(ctx, response.Body, qualityProtocolResponses, hold)
-	replay = resources.own(replay)
+	replay = resources.Own(replay)
 	switch {
 	case peekErr != nil:
 		// A probe can only produce quality evidence from a classified stream.
@@ -372,7 +365,7 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 			}
 			// Close and join the physical reader before persisting its facts.
 			// Do not synthesize response.completed or read the remaining answer.
-			resources.close()
+			resources.Close()
 			result.Reason = "thinking evidence observed"
 		}
 		result.Outcome = qualitymodel.MeasurementClean
@@ -386,10 +379,10 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 const qualityProbeCompletionBytes = 1 << 20
 const qualityProbeCompletionTimeout = 15 * time.Second
 
-func finishQualityProbe(ctx context.Context, body io.ReadCloser, resources *attemptResources) error {
+func finishQualityProbe(ctx context.Context, body io.ReadCloser, resources *selector.AttemptResources) error {
 	completionCtx, cancel := context.WithTimeout(ctx, qualityProbeCompletionTimeout)
 	defer cancel()
-	stop := context.AfterFunc(completionCtx, resources.close)
+	stop := context.AfterFunc(completionCtx, resources.Close)
 	defer stop()
 	state := qualityScanState{protocol: qualityProtocolResponses}
 	stream := responseflow.FromReader(body)

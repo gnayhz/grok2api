@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -11,9 +12,9 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type deviceCompletionAdapter struct {
@@ -67,12 +68,12 @@ func deviceCompletionService(t *testing.T, a *deviceCompletionAdapter) (*Service
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewService(repo, relational.NewAuditRepository(db), store, nil, provider.NewRegistry(a), cipher, nil), repo, store
+	return NewService(repo, relational.NewAuditRepository(db), store, nil, providerimpl.NewRegistry(a), cipher, security.RandomTokenSource{}, nil, nil, nil), repo, store
 }
 func TestDevicePollingOwnsOneGrant(t *testing.T) {
 	adapter := &deviceCompletionAdapter{entered: make(chan struct{}, 2), release: make(chan struct{}), pending: true}
 	first, repo, store := deviceCompletionService(t, adapter)
-	second := NewService(repo, nil, store, nil, provider.NewRegistry(adapter), first.cipher, nil)
+	second := NewService(repo, nil, store, nil, providerimpl.NewRegistry(adapter), first.cipher, security.RandomTokenSource{}, nil, nil, nil)
 	var once sync.Once
 	release := func() { once.Do(func() { close(adapter.release) }) }
 	defer release()
@@ -137,7 +138,7 @@ func TestConversionKnownGrantSurvivesClientCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	service.providers = provider.NewRegistry(&conversionCompletionAdapter{after: cancel})
+	service.providers = providerimpl.NewRegistry(&conversionCompletionAdapter{after: cancel})
 	service.refreshLock = memory.NewLockStore()
 	_, _, _, callErr := service.convertWebAccountToBuild(ctx, v.ID, BuildConversionAll)
 	values, err := repo.ListEnabled(context.Background(), accountdomain.ProviderBuild)

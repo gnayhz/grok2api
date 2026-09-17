@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +18,12 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
@@ -114,12 +116,12 @@ func TestWebFullQuotaHTTPRejectsIncompleteBasicSnapshot(t *testing.T) {
 							_ = json.NewEncoder(w).Encode(map[string]int{"remainingQueries": 3, "totalQueries": total, "windowSizeSeconds": 7200})
 						}))
 						defer upstream.Close()
-						manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+						manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 						defer manager.Close(ctx)
 						adapter := NewAdapter(Config{BaseURL: upstream.URL, QuotaTimeout: 250 * time.Millisecond, StatsigMode: "manual", StatsigManualValue: base64.RawStdEncoding.EncodeToString(make([]byte, 70))}, manager, cipher, nil, nil)
-						service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+						service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 						router := gin.New()
-						accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+						accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, nil)}).Register(router.Group("/api/admin/v1"))
 						response := httptest.NewRecorder()
 						router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/v1/accounts/%d/refresh-quota", value.ID), nil))
 						after, err := repo.GetQuotaWindows(ctx, []uint64{value.ID})

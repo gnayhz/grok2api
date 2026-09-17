@@ -3,6 +3,9 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"io"
 	"net/http"
 	"strings"
@@ -11,19 +14,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestAdmissionCoversHeadersAndAllRetries(t *testing.T) {
 	for _, retry := range []bool{false, true} {
 		t.Run(map[bool]string{false: "headers", true: "shared_retry_budget"}[retry], func(t *testing.T) {
 			adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
-			s, accounts := newGuardLoopService(t, adapter, "deadline-first", "deadline-second")
+			s, accounts, limiter := newGuardLoopServiceWithLimiter(t, adapter, "deadline-first", "deadline-second")
 			// Leave room for both real SQL selections under -race. The first
 			// response consumes over half the budget, so restarting the timer
 			// for its retry would exceed the assertion below.
 			const budget = time.Second
-			s.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, AdmissionTimeout: budget})
+			s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, GuardedModels: []string{"grok-4.6"}, MaxAttempts: 2, AdmissionTimeout: budget}))
 			for _, account := range accounts {
 				adapter.responses[account.ID] = []scriptedBuildResponse{{status: 200, headerDelay: 5 * budget}}
 			}
@@ -48,7 +51,7 @@ func TestAdmissionCoversHeadersAndAllRetries(t *testing.T) {
 				t.Fatalf("attempts=%v", adapter.Attempts())
 			}
 			for _, account := range accounts {
-				if n, _ := s.selector.concurrency.Current(context.Background(), accountConcurrencyKey(account.ID)); n != 0 {
+				if n, _ := limiter.Current(context.Background(), repository.AccountConcurrencyKey(account.ID)); n != 0 {
 					t.Fatalf("timeout leaked lease: %d", n)
 				}
 			}
@@ -67,7 +70,7 @@ func (blockingAdmissionAuthority) CheckAccountAdmission(ctx context.Context, _ u
 func TestAdmissionCoversAccountSelection(t *testing.T) {
 	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 	s, _ := newGuardLoopService(t, adapter, "selection-deadline")
-	s.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, AdmissionTimeout: 40 * time.Millisecond})
+	s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, GuardedModels: []string{"grok-4.6"}, MaxAttempts: 2, AdmissionTimeout: 40 * time.Millisecond}))
 	s.selector.SetQualityEligibility(blockingAdmissionAuthority{})
 	result, err := s.CreateChatCompletion(context.Background(), guardLoopInput("selection", true))
 	var failure *UpstreamFailure
@@ -84,12 +87,12 @@ func TestAdmissionCommitDisarmsOnlyAdmissionTimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-a.ctx.Done():
+	case <-a.Context().Done():
 		t.Fatal("admitted stream canceled by admission")
 	case <-time.After(45 * time.Millisecond):
 	}
 	cancel()
-	<-a.ctx.Done()
+	<-a.Context().Done()
 	if !errors.Is(a.failure(), context.Canceled) {
 		t.Fatal("parent cancellation lost")
 	}
@@ -126,7 +129,7 @@ func TestAttemptOwnsBodyReturnedAlongsideError(t *testing.T) {
 	s, _ := newGuardLoopService(t, base, "body-error")
 	body := &countedBody{Reader: strings.NewReader("diagnostic")}
 	var physical context.Context
-	s.providers = provider.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 		physical = ctx
 		return &provider.Response{StatusCode: 502, Header: make(http.Header), Body: body}, errors.New("transport failure with response")
 	}})
@@ -138,19 +141,12 @@ func TestAttemptOwnsBodyReturnedAlongsideError(t *testing.T) {
 
 func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 	base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
-	s, accounts := newGuardLoopService(t, base, "unclaimed-result")
-	// The admission budget spans the whole governed pipeline: selection, the
-	// physical send and the quality peek must all finish before delivery, and
-	// the same absolute deadline later expires the unclaimed result. An 80ms
-	// budget lost the pre-delivery race on a shared CI runner (observed while
-	// go test kept the long-running inference package busy): the peek never
-	// read the first SSE chunk before the deadline canceled it, so
-	// CreateChatCompletion surfaced quality_admission_timeout. Stay in the
-	// seconds-scale regime the other hold tests use and derive every
-	// post-delivery wait from the budget: expiry fires at start+budget, which
-	// is at most one budget after CreateChatCompletion returns.
+	s, accounts, limiter := newGuardLoopServiceWithLimiter(t, base, "unclaimed-result")
+	// Selection, the physical send and the quality peek share this deadline.
+	// Leave enough time to reach delivery on loaded runners before asserting
+	// that the unclaimed result expires and releases every owned resource.
 	const admissionBudget = 5 * time.Second
-	s.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, AdmissionTimeout: admissionBudget})
+	s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, GuardedModels: []string{"grok-4.6"}, MaxAttempts: 2, AdmissionTimeout: admissionBudget}))
 	completed := make(chan QualityObservation, 1)
 	s.SetQualityEventRecorder(eventRecorderFunc(func(_ context.Context, obs QualityObservation, _ time.Duration) error {
 		if obs.Outcome != QualityObservedAdmitted {
@@ -160,7 +156,7 @@ func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 	}))
 	body := &countedBody{Reader: strings.NewReader("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n")}
 	var physical context.Context
-	s.providers = provider.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 		physical = ctx
 		return &provider.Response{StatusCode: 200, Header: make(http.Header), Body: body}, nil
 	}})
@@ -182,7 +178,7 @@ func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * admissionBudget)
 	for {
-		n, _ := s.selector.concurrency.Current(context.Background(), accountConcurrencyKey(accounts[0].ID))
+		n, _ := limiter.Current(context.Background(), repository.AccountConcurrencyKey(accounts[0].ID))
 		if n == 0 && body.closed.Load() == 1 {
 			break
 		}
@@ -203,15 +199,15 @@ func TestUndeliveredResultExpiresAndReleasesResources(t *testing.T) {
 
 func TestAttemptResourceCloseRacesReplacement(t *testing.T) {
 	for i := 0; i < 100; i++ {
-		ctx, resources := newAttemptResources(context.Background())
+		ctx, resources := selector.NewAttemptResources(context.Background())
 		first := &countedBody{Reader: strings.NewReader("one")}
-		inner := resources.own(first)
+		inner := resources.Own(first)
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); resources.close() }()
-		go func() { defer wg.Done(); resources.own(inner) }()
+		go func() { defer wg.Done(); resources.Close() }()
+		go func() { defer wg.Done(); resources.Own(inner) }()
 		wg.Wait()
-		resources.close()
+		resources.Close()
 		if first.closed.Load() != 1 || ctx.Err() == nil {
 			t.Fatalf("closes=%d ctx=%v", first.closed.Load(), ctx.Err())
 		}
@@ -223,7 +219,7 @@ func TestOutputAcceptanceRequiresSuccessfulDelivery(t *testing.T) {
 		for _, code := range []string{"", "upstream_stream_interrupted", "client_disconnected", "response_too_large"} {
 			adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 			s, accounts := newGuardLoopService(t, adapter, "output-commit")
-			s.UpdateQualityRetry(QualityRetryRuntime{Enabled: enabled})
+			s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: enabled, GuardedModels: []string{"grok-4.6"}, MaxAttempts: 2}))
 			var accepted atomic.Int32
 			adapter.responses[accounts[0].ID] = []scriptedBuildResponse{{status: 200,
 				body: "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n", acceptOutput: func() { accepted.Add(1) }}}

@@ -1,12 +1,11 @@
 import { createContext, useContext } from "react";
-import { toast } from "sonner";
 
 import {
 	type EgressNodeDTO,
 	type EgressOperationsConfigDTO,
 	type EgressRoutingScope,
 	type EgressTrafficClass,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 
 /**
  * 出口运营配置的非组件共享面：路由枚举、i18n 键表、表单构造与纯谓词。
@@ -60,14 +59,6 @@ export function operationsFormFrom(value?: EgressOperationsConfigDTO): EgressOpe
 // 承接固定路由, 过滤掉会把活路由误显示为"目标已不可用"。
 export function fixedTargetCandidates(nodes: EgressNodeDTO[]): EgressNodeDTO[] {
 	return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.accountBoundProxy);
-}
-
-export function nodeCooling(node: EgressNodeDTO): boolean {
-	return node.cooldownUntil !== undefined && Date.parse(node.cooldownUntil) > Date.now();
-}
-
-export function showError(error: unknown) {
-	toast.error(error instanceof Error ? error.message : "Operation failed");
 }
 
 /**

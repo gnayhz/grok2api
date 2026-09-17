@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"gorm.io/gorm"
 )
@@ -79,7 +80,7 @@ func (s *ProbeTaskStore) BackfillProbeProjections(ctx context.Context, limit int
 			result := model.ProbeTaskResult{Attempt: probeAttemptIdentity(row.AttemptJSON), Outcome: model.ProbeResult(row.Result), Detail: row.Detail}
 			obs := model.ProbeObservation(probeTaskFromRow(row), result, *row.FinishedAt)
 			var count int64
-			query := tx.Model(&qObservationModel{}).Where("source = ?", "probe")
+			query := tx.Model(&evidence.ObservationModel{}).Where("source = ?", "probe")
 			if obs.Attempt.ID != "" {
 				query = query.Where("attempt_id = ?", obs.Attempt.ID)
 			} else {

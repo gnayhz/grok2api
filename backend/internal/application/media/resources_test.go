@@ -167,7 +167,7 @@ func TestVideoResourceObjectHandoffFailureIsClosed(t *testing.T) {
 	for _, fault := range []error{errors.New("object failure"), mediadomain.ErrAssetNotFound} {
 		t.Run(fault.Error(), func(t *testing.T) {
 			body := &resourceBody{}
-			service := NewService(resourceAssetRow{}, nil, resourceObjectOpen{body: body, err: fault}, nil, Config{})
+			service := NewServiceWithTickets(resourceAssetRow{}, nil, nil, resourceObjectOpen{body: body, err: fault}, nil, Config{})
 			resources := NewVideoResources(resourceJobRead(func(context.Context, string, uint64) (mediadomain.Job, error) {
 				return mediadomain.Job{ID: "video", ClientKeyID: 7, Status: mediadomain.StatusCompleted, ResultAssetID: "asset"}, nil
 			}), service)

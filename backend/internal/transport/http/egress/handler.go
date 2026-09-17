@@ -3,6 +3,7 @@ package egress
 import (
 	"errors"
 	"fmt"
+	httphelpers "github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,17 +12,16 @@ import (
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
-	runtimeStats func() infraegress.RuntimeStats
-	service      *egressapp.Service
-	logger       *slog.Logger
+	liveStats egressapp.LiveStats
+	service   *egressapp.Service
+	logger    *slog.Logger
 	// qualityStates 质量轴状态注入缝隙(依赖倒置,B4 决议2 同款):
 	// 组合根注入质量层读函数;nil=质量层剥离态,节点响应不含质量字段。
 	qualityStates func() map[uint64]NodeQualityState
@@ -99,26 +99,28 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 // routingStats reports process-local routing outcome counters for the admin
 // UI. Counts reset on restart and are read-only.
 func (h *Handler) routingStats(c *gin.Context) {
-	response.Success(c, http.StatusOK, gin.H{"items": infraegress.RoutingStatsSnapshot()})
+	items := []egressapp.RoutingStat{}
+	if h.liveStats.Routing != nil {
+		items = h.liveStats.Routing()
+	}
+	response.Success(c, http.StatusOK, gin.H{"items": items})
 }
 
 // setPoolMemberPriority 设置池内成员首选顺序（小者先）。
 func (h *Handler) setPoolMemberPriority(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pool id"})
+	id, ok := httphelpers.PathParamID(c, "id", "invalid pool id")
+	if !ok {
 		return
 	}
-	nodeID, err := strconv.ParseUint(c.Param("nodeId"), 10, 64)
-	if err != nil || nodeID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node id"})
+	nodeID, ok := httphelpers.PathParamID(c, "nodeId", "invalid node id")
+	if !ok {
 		return
 	}
 	var body struct {
 		Priority *int64 `json:"priority"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Priority == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "priority is required"})
+		response.Error(c, http.StatusBadRequest, "invalidEgressNode", "priority is required")
 		return
 	}
 	if err := h.service.SetPoolMemberPriority(c.Request.Context(), id, nodeID, *body.Priority); err != nil {
@@ -131,22 +133,26 @@ func (h *Handler) setPoolMemberPriority(c *gin.Context) {
 // poolStats 报告一个池内每个节点的进程内存调度统计（选中/失败），
 // 供管理界面验证调度策略是否生效。重启归零，可用 DELETE 清零。
 func (h *Handler) poolStats(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pool id"})
+	id, ok := httphelpers.PathParamID(c, "id", "invalid pool id")
+	if !ok {
 		return
 	}
-	items, since := infraegress.PoolStatsSnapshot(id)
+	var items []egressapp.PoolNodeStat
+	var since time.Time
+	if h.liveStats.Pool != nil {
+		items, since = h.liveStats.Pool(id)
+	}
 	response.Success(c, http.StatusOK, gin.H{"items": items, "since": since})
 }
 
 func (h *Handler) resetPoolStats(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pool id"})
+	id, ok := httphelpers.PathParamID(c, "id", "invalid pool id")
+	if !ok {
 		return
 	}
-	infraegress.ResetPoolStats(id)
+	if h.liveStats.ResetPool != nil {
+		h.liveStats.ResetPool(id)
+	}
 	response.Success(c, http.StatusOK, gin.H{"reset": true})
 }
 
@@ -171,7 +177,7 @@ func (h *Handler) cleanup(c *gin.Context) {
 }
 
 func (h *Handler) refreshClearance(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -312,7 +318,7 @@ func (h *Handler) list(c *gin.Context) {
 		response.Success(c, http.StatusOK, gin.H{"items": items, "page": 1, "pageSize": pageSize, "total": len(items)})
 		return
 	}
-	page, pageSize := nodePagination(c)
+	page, pageSize := httphelpers.Pagination(c)
 	values, total, err := h.service.List(c.Request.Context(), page, pageSize, c.Query("search"), egressapp.ListFilter{
 		Enabled: c.Query("enabled"), ProbeStatus: c.Query("probe"),
 		Sort: sort,
@@ -352,12 +358,6 @@ func (h *Handler) writeListError(c *gin.Context, err error) bool {
 	return true
 }
 
-func nodePagination(c *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	return repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
-}
-
 func (h *Handler) create(c *gin.Context) {
 	var request nodeRequest
 	if bindErr := c.ShouldBindJSON(&request); bindErr != nil {
@@ -373,7 +373,7 @@ func (h *Handler) create(c *gin.Context) {
 }
 
 func (h *Handler) update(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -393,7 +393,7 @@ func (h *Handler) update(c *gin.Context) {
 func (h *Handler) proxyURL(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-store")
 	c.Header("Pragma", "no-cache")
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -408,7 +408,7 @@ func (h *Handler) proxyURL(c *gin.Context) {
 func (h *Handler) rotationURL(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-store")
 	c.Header("Pragma", "no-cache")
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -516,7 +516,7 @@ func parseBoundedEgressNodeIDs(values []string, limit int) ([]uint64, error) {
 }
 
 func (h *Handler) delete(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -701,7 +701,7 @@ func newSourceResponse(value egressdomain.PublicSubscriptionSource) sourceRespon
 
 func (h *Handler) listSources(c *gin.Context) {
 	if !legacyEgressSourceListRequest(c) {
-		page, pageSize := nodePagination(c)
+		page, pageSize := httphelpers.Pagination(c)
 		values, total, err := h.service.ListSourcePage(c.Request.Context(), page, pageSize, c.Query("search"))
 		if h.writeSourceListError(c, err) {
 			return
@@ -762,7 +762,7 @@ func (h *Handler) createSource(c *gin.Context) {
 }
 
 func (h *Handler) updateSource(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -782,7 +782,7 @@ func (h *Handler) updateSource(c *gin.Context) {
 func (h *Handler) sourceURL(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-store")
 	c.Header("Pragma", "no-cache")
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -797,7 +797,7 @@ func (h *Handler) sourceURL(c *gin.Context) {
 func (h *Handler) sourceProxyURL(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-store")
 	c.Header("Pragma", "no-cache")
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -810,7 +810,7 @@ func (h *Handler) sourceProxyURL(c *gin.Context) {
 }
 
 func (h *Handler) deleteSource(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -822,7 +822,7 @@ func (h *Handler) deleteSource(c *gin.Context) {
 }
 
 func (h *Handler) syncSource(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -951,7 +951,7 @@ type poolMembersRequest struct {
 // setPoolMembers replaces the full membership of one pool. Pool-side
 // selection is the only membership write path (a node may join many pools).
 func (h *Handler) setPoolMembers(c *gin.Context) {
-	poolID, ok := pathID(c)
+	poolID, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -1003,8 +1003,12 @@ func (h *Handler) listPools(c *gin.Context) {
 	for _, value := range values {
 		item := newPoolResponse(value)
 		// 最近使用:池统计里 lastSelectedAt 最新的节点,任何策略都适用。
-		if stats, _ := infraegress.PoolStatsSnapshot(value.ID); len(stats) > 0 {
-			var latest *infraegress.PoolNodeStat
+		var stats []egressapp.PoolNodeStat
+		if h.liveStats.Pool != nil {
+			stats, _ = h.liveStats.Pool(value.ID)
+		}
+		if len(stats) > 0 {
+			var latest *egressapp.PoolNodeStat
 			for index := range stats {
 				if stats[index].LastSelectedAt.IsZero() {
 					continue
@@ -1042,7 +1046,7 @@ func (h *Handler) createPool(c *gin.Context) {
 }
 
 func (h *Handler) updatePool(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -1065,7 +1069,7 @@ func (h *Handler) updatePool(c *gin.Context) {
 }
 
 func (h *Handler) deletePool(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -1078,7 +1082,7 @@ func (h *Handler) deletePool(c *gin.Context) {
 
 // rotateNode 触发一次手动出口 IP 轮换（排入自动轮换队列）。
 func (h *Handler) rotateNode(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -1090,7 +1094,7 @@ func (h *Handler) rotateNode(c *gin.Context) {
 }
 
 func (h *Handler) testNode(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -1179,7 +1183,7 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		response.Error(c, http.StatusBadGateway, "egressSubscriptionSyncFailed", "代理订阅同步失败")
 	case errors.Is(err, egressapp.ErrClearanceUnavailable):
 		response.Error(c, http.StatusConflict, "clearanceRefreshUnavailable", err.Error())
-	case strings.Contains(err.Error(), "FlareSolverr") || strings.Contains(err.Error(), "Clearance"):
+	case errors.Is(err, egressapp.ErrClearanceRefresh):
 		// 固定文案:底层错误可能含 FlareSolverr URL/超时细节/内部地址, 细节
 		// 在服务端日志留档（round 96 修复：此前承诺"详情见服务端日志"但
 		// RefreshClearance 全链路无任何日志输出，承诺落空）, 不透传给管理端响应体。
@@ -1193,22 +1197,13 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 	}
 }
 
-func pathID(c *gin.Context) (uint64, bool) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
-		return 0, false
-	}
-	return id, true
-}
-
-func (h *Handler) SetRuntimeStats(provider func() infraegress.RuntimeStats) {
-	h.runtimeStats = provider
+func (h *Handler) SetLiveStats(stats egressapp.LiveStats) {
+	h.liveStats = stats
 }
 func (h *Handler) runtimeStatus(c *gin.Context) {
-	if h.runtimeStats == nil {
-		response.Success(c, http.StatusOK, infraegress.RuntimeStats{})
+	if h.liveStats.Runtime == nil {
+		response.Success(c, http.StatusOK, egressapp.RuntimeStats{})
 		return
 	}
-	response.Success(c, http.StatusOK, h.runtimeStats())
+	response.Success(c, http.StatusOK, h.liveStats.Runtime())
 }

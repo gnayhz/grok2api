@@ -10,12 +10,12 @@ import {
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useOperationsNodes, useOperationsPools } from "@/features/operations/operations-queries";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Label } from "@/shared/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
+
 import {
 	getEgressRoutingStats,
 	type EgressNodeDTO,
@@ -23,9 +23,10 @@ import {
 	type EgressRoutingScope,
 	type EgressRoutingTarget,
 	type EgressTrafficClass,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 
 import { ProxyRouteSimulator } from "./proxy-route-simulator";
+import { useEgressNodes, useEgressPools } from "@/entities/egress/egress-queries";
 import {
 	fixedTargetCandidates,
 	routingScopes,
@@ -44,8 +45,8 @@ export function ProxyRoutingView({
 }) {
 	const { t } = useTranslation();
 	const operations = useEgressOperations();
-	const nodesQuery = useOperationsNodes();
-	const poolsQuery = useOperationsPools();
+	const nodesQuery = useEgressNodes();
+	const poolsQuery = useEgressPools();
 
 	const statsQuery = useQuery({
 		queryKey: ["egress-routing-stats"],

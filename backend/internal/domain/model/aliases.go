@@ -46,11 +46,6 @@ func consoleAlias(alias, publicModel, upstreamModel, effort string) Compatibilit
 	}
 }
 
-// CompatibilityAliases returns isolated M05 publication declarations.
-func CompatibilityAliases() []CompatibilityAlias {
-	return append([]CompatibilityAlias(nil), aliases...)
-}
-
 func ResolveCompatibilityAlias(name string) (CompatibilityAlias, bool) {
 	for _, value := range aliases {
 		if value.Alias == name {

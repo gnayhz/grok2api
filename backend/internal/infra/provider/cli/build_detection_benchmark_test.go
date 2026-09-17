@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
@@ -70,7 +70,7 @@ func BenchmarkBuildDetectionCost(b *testing.B) {
 			b.Cleanup(server.Close)
 			adapter := NewAdapter(Config{BaseURL: server.URL}, cipher)
 			adapter.http = server.Client()
-			service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			service.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 			ids := []uint64{value.ID}
 			b.ReportAllocs()

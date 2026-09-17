@@ -33,7 +33,7 @@ func TestClientKeyListsReservedUsageSeparatelyFromSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := keyapp.NewService("contract-owner", relational.NewClientKeyRepository(db), nil, nil, 120, 8, cipher)
+	service := keyapp.NewService("contract-owner", relational.NewClientKeyRepository(db), nil, nil, 120, 8, cipher, security.RandomTokenSource{})
 	created, err := service.Create(ctx, keyapp.CreateInput{Name: "pending-budget", Enabled: true, BillingLimitUSDTicks: 10000000000})
 	if err != nil {
 		t.Fatal(err)

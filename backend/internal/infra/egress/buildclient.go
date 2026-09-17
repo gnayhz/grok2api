@@ -15,39 +15,24 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
 )
 
-// newBuildClient keeps Grok Build on the standard Go HTTP/TLS stack used by
-// the official CLI-facing transport. Browser TLS impersonation is reserved for
-// Grok Web, where the browser fingerprint and User-Agent belong together.
-func newBuildClient(proxyURL string, responseHeaderTimeout time.Duration) (*http.Client, error) {
-	return newBuildClientWithOptions(proxyURL, responseHeaderTimeout, false)
-}
-
-// newBuildEnvironmentClient preserves the process-wide Build direct
-// transport's HTTP_PROXY/HTTPS_PROXY behavior while giving the caller an
-// independent connection pool.
-func newBuildEnvironmentClient(responseHeaderTimeout time.Duration) (*http.Client, error) {
-	return newBuildClientWithOptions("", responseHeaderTimeout, true)
-}
-
-// newSessionBuildClient limits an allowed session pool to one connection per
-// host, with HTTP/2 multiplexing when supported. The registry owns account
-// partitioning and policy retirement; fresh policy cannot use this pool.
-// Reuse helps upstream affinity but cannot guarantee a cache hit.
-func newSessionBuildClient(proxyURL string, responseHeaderTimeout time.Duration, onDial func(), budget ...*netbudget.Runtime) (*http.Client, error) {
-	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, buildConnectionOptions{sessionPinned: true, onDial: onDial}, budget...)
-}
-
-func newBuildClientWithOptions(proxyURL string, responseHeaderTimeout time.Duration, environmentProxy bool) (*http.Client, error) {
-	return newBuildClientConfigured(proxyURL, responseHeaderTimeout, buildConnectionOptions{environmentProxy: environmentProxy})
-}
-
 type buildConnectionOptions struct {
+	// environmentProxy preserves the process-wide Build direct transport's
+	// HTTP_PROXY/HTTPS_PROXY behavior while giving the caller an independent
+	// connection pool.
 	environmentProxy bool
-	sessionPinned    bool
-	freshConnection  bool
-	onDial           func()
+	// sessionPinned limits an allowed session pool to one connection per host,
+	// with HTTP/2 multiplexing when supported. The registry owns account
+	// partitioning and policy retirement; fresh policy cannot use this pool.
+	// Reuse helps upstream affinity but cannot guarantee a cache hit.
+	sessionPinned   bool
+	freshConnection bool
+	onDial          func()
 }
 
+// newBuildClientConfigured keeps Grok Build on the standard Go HTTP/TLS stack
+// used by the official CLI-facing transport. Browser TLS impersonation is
+// reserved for Grok Web, where the browser fingerprint and User-Agent belong
+// together.
 func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Duration, options buildConnectionOptions, budget ...*netbudget.Runtime) (*http.Client, error) {
 	maxConnsPerHost, maxIdleConnsPerHost := 256, 128
 	if options.sessionPinned && !options.freshConnection {

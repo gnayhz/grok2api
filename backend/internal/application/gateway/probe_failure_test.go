@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"strings"
@@ -10,9 +12,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
@@ -51,8 +53,8 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 		{name: "empty stream", want: model.ProbeFailureEmptyStream},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			s := &Service{}
-			s.providers = provider.NewRegistry(resourceTestAdapter{&scriptedBuildAdapter{}, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
+			s := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
+			s.providers = providerimpl.NewRegistry(resourceTestAdapter{&scriptedBuildAdapter{}, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
 				if test.forward != nil {
 					return nil, test.forward
 				}

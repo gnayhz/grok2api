@@ -43,10 +43,6 @@ func (r *AccountRepository) ApplyCredential(ctx context.Context, ref account.Cre
 		}).Error; err != nil {
 			return err
 		}
-		row.AuthStatus = string(next.AuthStatus)
-		if _, err := deleteInvalidEgressLeaseBlocksForAccount(tx, row); err != nil {
-			return err
-		}
 		if event.Kind == account.CredentialRejected {
 			return nil
 		}

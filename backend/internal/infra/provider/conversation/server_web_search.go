@@ -5,10 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
 	"net/url"
 	"strings"
-
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
 )
 
 // webSearchHit is the minimal Claude Code WebSearchTool success payload.
@@ -78,7 +78,7 @@ func parseWebSearchCallItem(item responseItem) (webSearchCall, bool) {
 		return call, true
 	}
 	if q, _ := action["query"].(string); strings.TrimSpace(q) != "" {
-		call.Query = truncateRunes(strings.TrimSpace(q), 4096)
+		call.Query = texts.TruncateRunes(strings.TrimSpace(q), 4096)
 	}
 	// Prefer action.sources[].url
 	if rawSources, ok := action["sources"].([]any); ok {

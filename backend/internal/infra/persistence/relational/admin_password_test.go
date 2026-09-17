@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/admin"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 )
@@ -27,7 +27,7 @@ func TestAdminPasswordAndSessionsAtomicAcrossConnections(t *testing.T) {
 			}
 			ref := current.PasswordRef()
 			create := func(s *AdminSessionRepository, i int) (admin.Session, error) {
-				return s.CreateForPassword(ctx, ref, security.HashToken(fmt.Sprintf("fixture-%d", i)), time.Now().UTC().Add(time.Hour))
+				return s.CreateForPassword(ctx, ref, tokenhash.HashToken(fmt.Sprintf("fixture-%d", i)), time.Now().UTC().Add(time.Hour))
 			}
 			// Seed the bound, then exercise concurrent creators on both pools.
 			for i := range admin.MaxSessions {
@@ -90,7 +90,7 @@ func TestAdminPasswordAndSessionsAtomicAcrossConnections(t *testing.T) {
 			}
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
-			if _, err := sb.CreateForPassword(cancelled, ref, security.HashToken("cancelled"), time.Now().UTC().Add(time.Hour)); err == nil {
+			if _, err := sb.CreateForPassword(cancelled, ref, tokenhash.HashToken("cancelled"), time.Now().UTC().Add(time.Hour)); err == nil {
 				t.Fatal("cancelled creation accepted")
 			}
 			if count() != admin.MaxSessions {
@@ -112,7 +112,7 @@ func TestAdminPasswordAndSessionsAtomicAcrossConnections(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := sa.CreateForPassword(ctx, fresh.PasswordRef(), security.HashToken("fresh"), time.Now().UTC().Add(time.Hour)); err != nil {
+			if _, err := sa.CreateForPassword(ctx, fresh.PasswordRef(), tokenhash.HashToken("fresh"), time.Now().UTC().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			if count() != 1 {
@@ -120,20 +120,20 @@ func TestAdminPasswordAndSessionsAtomicAcrossConnections(t *testing.T) {
 			}
 			// A committed refresh whose cookie has not arrived must remain
 			// revocable by the browser's immediately previous token.
-			freshSession, err := sb.GetByTokenHash(ctx, security.HashToken("fresh"))
+			freshSession, err := sb.GetByTokenHash(ctx, tokenhash.HashToken("fresh"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := sa.Rotate(ctx, freshSession.ID, security.HashToken("fresh"), security.HashToken("rotated"), time.Now().UTC().Add(time.Hour)); err != nil {
+			if err := sa.Rotate(ctx, freshSession.ID, tokenhash.HashToken("fresh"), tokenhash.HashToken("rotated"), time.Now().UTC().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			if err := sb.RevokeByTokenHash(ctx, ""); err != nil || count() != 1 {
 				t.Fatal("empty token matched unset previous hashes")
 			}
-			if err := sb.RevokeByTokenHash(ctx, security.HashToken("unrelated")); err != nil || count() != 1 {
+			if err := sb.RevokeByTokenHash(ctx, tokenhash.HashToken("unrelated")); err != nil || count() != 1 {
 				t.Fatal("unrelated token revoked a session")
 			}
-			if err := sb.RevokeByTokenHash(ctx, security.HashToken("fresh")); err != nil || count() != 0 {
+			if err := sb.RevokeByTokenHash(ctx, tokenhash.HashToken("fresh")); err != nil || count() != 0 {
 				t.Fatalf("previous-token logout failed: %v", err)
 			}
 

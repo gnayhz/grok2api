@@ -2,8 +2,8 @@ import type { TFunction } from "i18next";
 import { Info } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { AccountDTO, BillingDTO, QuotaDTO } from "@/features/accounts/accounts-api";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { AccountDTO, BillingDTO, QuotaDTO } from "@/entities/account/account-api";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber, formatTokenMillions } from "@/shared/lib/format";
 

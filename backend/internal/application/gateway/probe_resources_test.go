@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"testing"
 	"time"
 
@@ -19,14 +22,14 @@ func TestQualityProbeUsesProductionAccountCapacity(t *testing.T) {
 	repo := newLayeredRepositoryFixture()
 	repo.bases = []account.RoutingAccountBase{{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1}}}
 	limiter := memory.NewConcurrencyLimiter()
-	selector := NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	release, ok, err := limiter.Acquire(context.Background(), accountConcurrencyKey(1), 1)
+	sel := selector.NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	release, ok, err := limiter.Acquire(context.Background(), repository.AccountConcurrencyKey(1), 1)
 	if err != nil || !ok {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	lease, err := selector.AcquirePinnedForQualityProbe(ctx, account.ProviderBuild, 1, 0, "model-a", "", clientkey.AccountScope{})
+	lease, err := sel.AcquirePinnedForQualityProbe(ctx, account.ProviderBuild, 1, 0, "model-a", "", clientkey.AccountScope{})
 	if lease != nil {
 		lease.Release()
 		t.Fatal("probe exceeded active production capacity")
@@ -35,12 +38,12 @@ func TestQualityProbeUsesProductionAccountCapacity(t *testing.T) {
 		t.Fatal("probe capacity failure invisible")
 	}
 	release()
-	lease, err = selector.AcquirePinnedForQualityProbe(context.Background(), account.ProviderBuild, 1, 0, "model-a", "", clientkey.AccountScope{})
+	lease, err = sel.AcquirePinnedForQualityProbe(context.Background(), account.ProviderBuild, 1, 0, "model-a", "", clientkey.AccountScope{})
 	if err != nil || lease == nil {
 		t.Fatalf("released production slot unavailable: %v", err)
 	}
 	defer lease.Release()
-	if release, ok, err := limiter.Acquire(context.Background(), accountConcurrencyKey(1), 1); err != nil || ok {
+	if release, ok, err := limiter.Acquire(context.Background(), repository.AccountConcurrencyKey(1), 1); err != nil || ok {
 		if ok {
 			release()
 		}
@@ -50,30 +53,30 @@ func TestQualityProbeUsesProductionAccountCapacity(t *testing.T) {
 
 func TestProbeBudgetAndIdentityAreSharedAcrossSelectors(t *testing.T) {
 	limiter := memory.NewConcurrencyLimiter()
-	first, second := &Selector{concurrency: limiter}, &Selector{concurrency: limiter}
+	first, second := selector.NewSelector(nil, limiter, nil, nil, 0, 0, 0), selector.NewSelector(nil, limiter, nil, nil, 0, 0, 0)
 	ctx := context.Background()
-	release, err := first.acquireProbeResources(qualitymodel.WithProbeIdentity(ctx, 9, true), 1)
+	release, err := first.AcquireProbeResources(qualitymodel.WithProbeIdentity(ctx, 9, true), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer release()
 	deadline, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	if foreignRelease, err := second.acquireProbeResources(qualitymodel.WithProbeIdentity(deadline, 9, true), 2); err == nil {
+	if foreignRelease, err := second.AcquireProbeResources(qualitymodel.WithProbeIdentity(deadline, 9, true), 2); err == nil {
 		foreignRelease()
 		t.Fatal("aliases overlapped across instances")
 	}
 	if count, _ := limiter.Current(ctx, "quality:identity/account/2"); count != 0 {
 		t.Fatal("failed group acquisition leaked stable account slot")
 	}
-	otherRelease, err := second.acquireProbeResources(ctx, 3)
+	otherRelease, err := second.AcquireProbeResources(ctx, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer otherRelease()
 	deadline2, cancel2 := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel2()
-	if extraRelease, err := second.acquireProbeResources(deadline2, 4); !errors.Is(err, context.DeadlineExceeded) {
+	if extraRelease, err := second.AcquireProbeResources(deadline2, 4); !errors.Is(err, context.DeadlineExceeded) {
 		if extraRelease != nil {
 			extraRelease()
 		}
@@ -93,7 +96,7 @@ func TestFrozenProbeSelectsOriginalModelAndStandardProfile(t *testing.T) {
 		{ID: 1, Provider: account.ProviderBuild, PublicID: "grok-4.5", UpstreamModel: "grok-4.5"},
 		{ID: 2, Provider: account.ProviderBuild, PublicID: "grok-4.6", UpstreamModel: "grok-4.6"},
 	}}
-	svc := &Service{models: resolver}
+	svc := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), models: resolver}
 	route, reason := svc.qualityProbeRoute(ctx)
 	if reason != nil || route.ID != 2 {
 		t.Fatalf("wrong model selected: %+v %q", route, reason)

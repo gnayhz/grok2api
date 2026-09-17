@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
 // FallbackMarker 记录 Build 请求因当次 403 成功回退到 XAI。
@@ -59,7 +59,7 @@ func (a *Adapter) primaryBaseURL() string {
 }
 
 func (a *Adapter) fallbackBaseURL() string {
-	return strings.TrimRight(config.NormalizeBuildFallbackBaseURL(a.config().FallbackBaseURL), "/")
+	return strings.TrimRight(settingsdomain.NormalizeBuildFallbackBaseURL(a.config().FallbackBaseURL), "/")
 }
 
 // isXAIInferenceFallbackCapable 判断该 Build API 操作是否可走 XAI 推理回退。
@@ -171,10 +171,10 @@ func isDefinitiveAccountBlockBody(body []byte) bool {
 		return false
 	}
 	code := fallbackStringField(payload, "code")
-	message := firstNonEmpty(fallbackStringField(payload, "error"), fallbackStringField(payload, "message"))
+	message := texts.FirstNonEmptyTrimmed(fallbackStringField(payload, "error"), fallbackStringField(payload, "message"))
 	if nested, ok := payload["error"].(map[string]any); ok {
-		code = firstNonEmpty(fallbackStringField(nested, "code"), code)
-		message = firstNonEmpty(fallbackStringField(nested, "message"), message)
+		code = texts.FirstNonEmptyTrimmed(fallbackStringField(nested, "code"), code)
+		message = texts.FirstNonEmptyTrimmed(fallbackStringField(nested, "message"), message)
 	}
 	code = strings.ToLower(strings.TrimSpace(code))
 	message = strings.ToLower(strings.Trim(strings.TrimSpace(message), " .!\t\r\n"))

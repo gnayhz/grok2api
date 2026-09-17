@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 // LiveCaseView is the read-only projection of a pending finite investigation
@@ -29,19 +27,12 @@ type LiveCaseView struct {
 	ExitDegraded  int `json:"exit_degraded"`
 	ExitNeedK     int `json:"exit_need_k"`
 
-	AccountScore                float64 `json:"account_score,omitempty"`
-	ExitScore                   float64 `json:"exit_score,omitempty"`
-	AccountTransportSupport     float64 `json:"account_transport_support,omitempty"`
-	AccountConfidence           float64 `json:"account_confidence,omitempty"`
-	ExitConfidence              float64 `json:"exit_confidence,omitempty"`
-	ConfidenceThreshold         float64 `json:"confidence_threshold,omitempty"`
-	UncertaintyPenalty          float64 `json:"uncertainty_penalty,omitempty"`
-	DifferentialValid           int     `json:"differential_valid"`
-	DifferentialFailed          int     `json:"differential_failed"`
-	DifferentialTransportFailed int     `json:"differential_transport_failed"`
-	DifferentialAttempts        int     `json:"differential_attempts"`
-	DifferentialAttemptLimit    int     `json:"differential_attempt_limit"`
-	JuryFailed                  int     `json:"jury_failed"`
+	DifferentialValid           int `json:"differential_valid"`
+	DifferentialFailed          int `json:"differential_failed"`
+	DifferentialTransportFailed int `json:"differential_transport_failed"`
+	DifferentialAttempts        int `json:"differential_attempts"`
+	DifferentialAttemptLimit    int `json:"differential_attempt_limit"`
+	JuryFailed                  int `json:"jury_failed"`
 
 	PendingProbes int `json:"pending_probes"`
 	// WaitingReason is a human-readable line kept for backward compatibility;
@@ -61,12 +52,17 @@ func (s *Service) LiveCaseViews(ctx context.Context, now time.Time) ([]LiveCaseV
 	if s == nil || s.registry == nil {
 		return nil, nil
 	}
+	if s.probes == nil {
+		// 与 registry/evidence 的惰性关闭约定一致:裸构造(仅测试)
+		// 没有任务读取面时返回空视图,而不是 nil deref。
+		return nil, nil
+	}
 	cases, err := s.registry.ListOpenCases(ctx)
 	if err != nil {
 		return nil, err
 	}
 	cfg := s.Config()
-	taskStore := registry.NewProbeTaskStore(s.registry)
+	taskStore := s.probes
 	views := make([]LiveCaseView, 0, len(cases))
 	for _, record := range cases {
 		parties, err := s.registry.ListParties(ctx, record.ID)
@@ -176,11 +172,11 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (EvalStats, error
 
 // openCasesForDegraded consumes only traffic-source degradation. Probe
 // observations are evidence about a defendant, never new incidents.
-func (s *Service) openCasesForDegraded(ctx context.Context, snapshot evidence.Snapshot, estimate evidence.Estimate, now time.Time) (opened int, err error) {
+func (s *Service) openCasesForDegraded(ctx context.Context, snapshot model.Snapshot, estimate model.Estimate, now time.Time) (opened int, err error) {
 	pairs := snapshot.TrafficDegradedPairs()
-	incidents := make([]registry.IncidentKey, 0, len(pairs))
+	incidents := make([]model.IncidentKey, 0, len(pairs))
 	for _, traffic := range pairs {
-		incidents = append(incidents, registry.IncidentKey{AccountID: traffic.AccountID, Exit: traffic.Exit})
+		incidents = append(incidents, model.IncidentKey{AccountID: traffic.AccountID, Exit: traffic.Exit})
 	}
 	lastClosed, err := s.registry.LastClosedAtForIncidents(ctx, incidents)
 	if err != nil {
@@ -191,7 +187,7 @@ func (s *Service) openCasesForDegraded(ctx context.Context, snapshot evidence.Sn
 		if exit.NodeID != 0 && s.registry.CurrentEpoch(exit.NodeID) != exit.Epoch {
 			continue
 		}
-		if closedAt, found := lastClosed[registry.IncidentKey{AccountID: accountID, Exit: exit}]; found && !traffic.LastAt.After(closedAt) {
+		if closedAt, found := lastClosed[model.IncidentKey{AccountID: accountID, Exit: exit}]; found && !traffic.LastAt.After(closedAt) {
 			continue
 		}
 		if s.accountExists != nil && !s.accountExists(ctx, accountID) {
@@ -221,7 +217,7 @@ func (s *Service) openCasesForDegraded(ctx context.Context, snapshot evidence.Sn
 // openCase creates the case, freezes both parties, and dispatches the finite
 // jury/differential core round. The court may later append bounded replacements
 // for terminal paths that produced no admissible evidence.
-func (s *Service) openCase(ctx context.Context, defendant uint64, exit model.EpochKey, estimate evidence.Estimate, now time.Time, observations ...model.Observation) (uint64, error) {
+func (s *Service) openCase(ctx context.Context, defendant uint64, exit model.EpochKey, estimate model.Estimate, now time.Time, observations ...model.Observation) (uint64, error) {
 	evidenceJSON, err := marshalOpeningEvidence(defendant, exit, estimate)
 	if err != nil {
 		return 0, err

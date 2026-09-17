@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +29,7 @@ func TestOAuthRefreshPreservesLongRetryAfter(t *testing.T) {
 			defer server.Close()
 			client := newOAuthClient(server.Client(), nil, nil)
 			client.tokenURL = server.URL
-			_, err := client.refresh(context.Background(), "refresh")
+			_, err := client.refreshWithClientID(context.Background(), "refresh", "")
 			var refreshErr *provider.CredentialRefreshError
 			if !errors.As(err, &refreshErr) || refreshErr.Status != 429 || refreshErr.Permanent || refreshErr.Code != "temporarily_unavailable" || calls.Load() != 1 {
 				t.Fatalf("calls=%d error=%v", calls.Load(), err)

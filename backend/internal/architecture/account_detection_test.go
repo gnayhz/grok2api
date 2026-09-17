@@ -38,7 +38,10 @@ func TestAccountDetectionConsumesProviderCompletionFacts(t *testing.T) {
 			}
 			if selector.Sel.Name == "InspectResponsesProbe" {
 				inspections++
-				if path != "../application/account/build_detect.go" {
+				// R03: dialect interpretation is delegated in infra/provider; the
+				// detection use case consumes via its injected contract with a
+				// package-level fallback. No other call sites may appear.
+				if path != "../application/account/build_detect.go" && path != "../infra/provider/probeinspect.go" {
 					t.Errorf("%s bypasses account detection use case", path)
 				}
 			}
@@ -55,7 +58,9 @@ func TestAccountDetectionConsumesProviderCompletionFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inspections != 1 {
+	if inspections != 3 {
+		// injected interface call + package fallback in build_detect.go,
+		// plus the infra/provider dialect delegation.
 		t.Fatalf("detector completion consumers=%d", inspections)
 	}
 }

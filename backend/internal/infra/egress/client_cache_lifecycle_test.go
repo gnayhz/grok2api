@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -94,7 +95,7 @@ func TestClientCacheLifecycleUnderProxyURLEditAndHotUpdates(t *testing.T) {
 	repo := &poolStubRepo{pool: map[uint64]domain.Pool{}, member: map[uint64][]domain.Node{}}
 	node := domain.Node{ID: 7, Name: "edit-lifecycle", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, cipher, proxyA.server.URL)}
 	repo.nodes = []domain.Node{node}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	roundTrip := func() {
@@ -134,7 +135,7 @@ func TestClientCacheLifecycleUnderProxyURLEditAndHotUpdates(t *testing.T) {
 	}
 
 	// 2. 旧客户端逐出时真实关闭旧代理连接:把旧键的 lastUsed 回拨超过
-	//    idle TTL, 再触发一次 clientFor(任意获取)。
+	//    idle TTL, 再触发一次 clientForContext(任意获取)。
 	manager.transport.clientMu.Lock()
 	aged := time.Now().UTC().Add(-clientCacheIdleTTL - time.Minute)
 	for key, cached := range manager.transport.clients {

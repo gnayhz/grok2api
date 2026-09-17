@@ -3,18 +3,23 @@ package management
 import (
 	"context"
 	"fmt"
-	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
-	qualityevidence "github.com/chenyme/grok2api/backend/internal/quality/evidence"
-	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
 	"time"
+
+	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
+	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 // Runtime applies evidence first because expanding its window can fail. Case
 // policy already captured when opening a case remains unchanged.
 type Runtime struct {
-	Court        *qualitycourt.Service
-	Investigator *qualityinvestigator.Service
-	Evidence     *qualityevidence.Store
+	Court        interface{ SetConfig(qualitycourt.Config) }
+	Investigator interface {
+		SetConfig(qualityinvestigator.Config)
+	}
+	Evidence interface {
+		SetConfigContext(context.Context, qualitymodel.EvidenceConfig) error
+	}
 }
 
 func (s Runtime) Apply(ctx context.Context, t Config) error {
@@ -25,7 +30,7 @@ func (s Runtime) Apply(ctx context.Context, t Config) error {
 		return err
 	}
 	if s.Evidence != nil {
-		if err := s.Evidence.SetConfigContext(ctx, qualityevidence.Config{
+		if err := s.Evidence.SetConfigContext(ctx, qualitymodel.EvidenceConfig{
 			Window: d.evidenceWindow, Retention: d.retention, MinWitnessObs: 1,
 		}); err != nil {
 			return fmt.Errorf("apply evidence settings: %w", err)

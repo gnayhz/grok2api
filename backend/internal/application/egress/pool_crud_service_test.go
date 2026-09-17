@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"path/filepath"
 	"testing"
 
@@ -29,7 +30,9 @@ func newPoolServiceFixture(t *testing.T) (context.Context, *Service, *relational
 		t.Fatal(err)
 	}
 	repo := relational.NewEgressRepository(database)
-	return ctx, NewService(repo, newRotationCipher(t)), repo
+	service := NewService(repo, newRotationCipher(t))
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+	return ctx, service, repo
 }
 
 func TestPoolCRUDServiceInvariants(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
 	"os"
 	"strings"
 	"sync"
@@ -14,27 +13,41 @@ import (
 	"time"
 
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/quality/court"
 	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/investigator"
 	"github.com/chenyme/grok2api/backend/internal/quality/management"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"gorm.io/gorm"
 )
 
-func qualityServiceOn(t *testing.T, db *Database) (*management.Service, management.Runtime) {
+type qualityRuntimeFixture struct {
+	Court        *court.Service
+	Investigator *investigator.Service
+	Evidence     *evidence.Store
+}
+
+func qualityServiceOn(t *testing.T, db *Database) (*management.Service, qualityRuntimeFixture) {
 	t.Helper()
-	ev, err := evidence.New(context.Background(), db.db, evidence.DefaultConfig())
+	// 建表走 registry 的统一迁移语义(生产由 registry.New 完成;evidence.New
+	// 不再自跑 AutoMigrate)。
+	if err := db.db.AutoMigrate(evidence.Models()...); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := evidence.New(context.Background(), db.db, qualitymodel.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := management.Runtime{
-		Court:        court.New(court.DefaultConfig(), nil, ev, nil),
+	runtime := qualityRuntimeFixture{
+		Court:        court.New(court.DefaultConfig(), nil, ev, nil, nil),
 		Investigator: investigator.New(investigator.DefaultConfig(), nil, nil), Evidence: ev,
 	}
 	t.Cleanup(func() { _ = runtime.Court.Close(context.Background()) })
-	service := management.New(NewSettingsDocumentRepository(db, management.SettingsKey), runtime.Apply, nil)
+	service := management.New(NewSettingsDocumentRepository(db, management.SettingsKey), (management.Runtime{Court: runtime.Court, Investigator: runtime.Investigator, Evidence: runtime.Evidence}).Apply, nil)
 	if err := service.ReloadPersisted(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +107,7 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 			if err != nil || peer.ApplyPending || peer.Revision != 3 {
 				t.Fatalf("peer=%+v err=%v", peer, err)
 			}
-			if _, err := evidence.New(ctx, dbA.db, evidence.DefaultConfig()); err != nil {
+			if err := dbA.db.AutoMigrate(evidence.Models()...); err != nil {
 				t.Fatal(err)
 			}
 			if err := a.ReloadPersisted(ctx); err != nil {
@@ -114,7 +127,7 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 			if err != nil || !pending.ApplyPending {
 				t.Fatalf("pending=%+v err=%v", pending, err)
 			}
-			if _, err := evidence.New(ctx, dbA.db, evidence.DefaultConfig()); err != nil {
+			if err := dbA.db.AutoMigrate(evidence.Models()...); err != nil {
 				t.Fatal(err)
 			}
 			if err := a.ReloadPersisted(ctx); err != nil {
@@ -248,7 +261,10 @@ func TestQualityRotationCapacityMigrationIntegration(t *testing.T) {
 				repoA, repoB := NewRuntimeSettingsRepository(dbA, cipher), NewRuntimeSettingsRepository(dbB, cipher)
 				start, results := make(chan struct{}), make(chan error, 2)
 				for _, repo := range []*RuntimeSettingsRepository{repoA, repoB} {
-					go func() { <-start; results <- settingsapp.MigrateLegacyQualityRotation(ctx, base, repo) }()
+					go func() {
+						<-start
+						results <- settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), repo)
+					}()
 				}
 				close(start)
 				for range 2 {
@@ -282,7 +298,7 @@ func TestQualityRotationCapacityMigrationIntegration(t *testing.T) {
 				if _, err := loaded.Update(ctx, input.Revision, input.Config); err != nil {
 					t.Fatal(err)
 				}
-				if err := settingsapp.MigrateLegacyQualityRotation(ctx, base, repoA); err != nil {
+				if err := settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), repoA); err != nil {
 					t.Fatal(err)
 				}
 				if settingsServiceOn(t, dbA, base, nil, nil).Get().Config.EgressRotation.MaxGlobalPerHour != 9 {
@@ -291,7 +307,7 @@ func TestQualityRotationCapacityMigrationIntegration(t *testing.T) {
 				if _, err := loaded.ResetToDefaults(ctx, loaded.Get().Revision); err != nil {
 					t.Fatal(err)
 				}
-				if err := settingsapp.MigrateLegacyQualityRotation(ctx, base, repoB); err != nil {
+				if err := settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), repoB); err != nil {
 					t.Fatal(err)
 				}
 				if settingsServiceOn(t, dbB, base, nil, nil).Get().Config.EgressRotation.MaxGlobalPerHour != base.Egress.Rotation.MaxGlobalPerHour {
@@ -409,7 +425,7 @@ func TestQualityRotationMigrationLegacyDefaultsAndNewDocuments(t *testing.T) {
 			if _, err := NewSettingsDocumentRepository(db, management.SettingsKey).Save(ctx, []byte(payload), 0); err != nil {
 				t.Fatal(err)
 			}
-			if err := settingsapp.MigrateLegacyQualityRotation(ctx, base, repo); err != nil {
+			if err := settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), repo); err != nil {
 				t.Fatal(err)
 			}
 			if settingsServiceOn(t, db, base, nil, nil).Get().Config.EgressRotation.MaxGlobalPerHour != 6 {
@@ -430,7 +446,7 @@ func TestQualityRotationMigrationLegacyDefaultsAndNewDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	cipher, _ := security.NewCipher(base.Secrets.CredentialEncryptionKey)
-	if err := settingsapp.MigrateLegacyQualityRotation(ctx, base, NewRuntimeSettingsRepository(db, cipher)); err != nil {
+	if err := settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), NewRuntimeSettingsRepository(db, cipher)); err != nil {
 		t.Fatal(err)
 	}
 	if got := settingsServiceOn(t, db, base, nil, nil).Get(); got.Revision != 0 || got.Config.EgressRotation.MaxGlobalPerHour != 20 {
@@ -460,7 +476,7 @@ func TestQualityRotationMigrationRollsBackBothDocuments(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			err = settingsapp.MigrateLegacyQualityRotation(ctx, base, repo)
+			err = settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), repo)
 			_ = db.db.Callback().Update().Remove(callback)
 			if err == nil {
 				t.Fatal("migration unexpectedly succeeded")
@@ -473,7 +489,7 @@ func TestQualityRotationMigrationRollsBackBothDocuments(t *testing.T) {
 			if err != nil || document.Revision != original.Revision || string(document.Payload) != string(original.Payload) {
 				t.Fatal("quality half changed during failed migration")
 			}
-			if err := settingsapp.MigrateLegacyQualityRotation(ctx, base, repo); err != nil {
+			if err := settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(base), repo); err != nil {
 				t.Fatal(err)
 			}
 		})

@@ -5,6 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"math"
 	"net/http"
 	"net/url"
@@ -12,12 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
 )
 
 const (
@@ -89,12 +89,8 @@ func (c *oauthClient) pollDevice(ctx context.Context, deviceCode string) (tokenP
 	return c.exchange(ctx, form, "", true)
 }
 
-func (c *oauthClient) refresh(ctx context.Context, refreshToken string) (tokenPayload, error) {
-	return c.refreshWithClientID(ctx, refreshToken, "")
-}
-
 func (c *oauthClient) refreshWithClientID(ctx context.Context, refreshToken, clientID string) (tokenPayload, error) {
-	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {firstNonEmpty(clientID, c.clientID)}, "refresh_token": {refreshToken}}
+	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {texts.FirstNonEmptyTrimmed(clientID, c.clientID)}, "refresh_token": {refreshToken}}
 	value, err := c.exchange(ctx, form, refreshToken, false)
 	if errors.Is(err, provider.ErrAuthorizationDenied) {
 		return tokenPayload{}, &provider.CredentialRefreshError{Code: "refresh_denied", Message: "OAuth authorization was denied", Cause: err}
@@ -172,7 +168,7 @@ func (c *oauthClient) exchange(ctx context.Context, form url.Values, fallbackRef
 		value.ExpiresIn = 3600
 	}
 	rotated := strings.TrimSpace(value.RefreshToken) != "" && strings.TrimSpace(value.RefreshToken) != strings.TrimSpace(fallbackRefresh)
-	return tokenPayload{AccessToken: value.AccessToken, RefreshToken: firstNonEmpty(value.RefreshToken, fallbackRefresh), ExpiresAt: time.Now().UTC().Add(boundedOAuthSeconds(value.ExpiresIn)), IDToken: value.IDToken, RefreshTokenRotated: rotated}, nil
+	return tokenPayload{AccessToken: value.AccessToken, RefreshToken: texts.FirstNonEmptyTrimmed(value.RefreshToken, fallbackRefresh), ExpiresAt: time.Now().UTC().Add(boundedOAuthSeconds(value.ExpiresIn)), IDToken: value.IDToken, RefreshTokenRotated: rotated}, nil
 }
 
 type oauthErrorDetails struct {
@@ -191,7 +187,7 @@ func parseOAuthErrorResponse(body []byte, status int) oauthErrorDetails {
 		return result
 	}
 
-	result.Code = firstNonEmpty(
+	result.Code = texts.FirstNonEmptyTrimmed(
 		jsonStringAt(payload, "error"),
 		jsonStringAt(payload, "error", "code"),
 		jsonStringAt(payload, "error_code"),
@@ -411,13 +407,4 @@ func (c *oauthClient) applyDeviceHeaders(req *http.Request) {
 	}
 	// The management UI presents the verification URL and code to a human.
 	req.Header.Set("x-grok-client-surface", deviceClientSurface)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

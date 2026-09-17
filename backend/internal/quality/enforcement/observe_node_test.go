@@ -14,7 +14,7 @@ import (
 // 下一个检测节拍;停用/缺失节点与 PollEpochs 同口径跳过;迟到版本
 // (revision 水位以下)不得翻篇。
 func TestObserveNodeExitAdvancesSingleIdentity(t *testing.T) {
-	r, _ := newBench(t)
+	r, s := newBench(t)
 	ctx := context.Background()
 	if _, _, _, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentity{IPv4: "192.0.2.1"}, 1); err != nil {
 		t.Fatal(err)
@@ -34,7 +34,9 @@ func TestObserveNodeExitAdvancesSingleIdentity(t *testing.T) {
 		{ID: 5, Enabled: true},
 		{ID: 6, Enabled: false},
 	}}
-	s := New(DefaultConfig(), r, nodes, memIPSource{current: map[uint64]string{5: "192.0.2.2"}, revision: 2}, &memRotator{})
+	// 手动驱动观测，不启动会消费同一版本的后台首次轮询。
+	s.nodes = nodes
+	s.ipSource = memIPSource{current: map[uint64]string{5: "192.0.2.2"}, revision: 2}
 
 	change, changed, err := s.ObserveNodeExit(ctx, 5)
 	if err != nil || !changed {
@@ -61,16 +63,16 @@ func TestObserveNodeExitAdvancesSingleIdentity(t *testing.T) {
 // TestObserveNodeExitIPv6OnlyChangeAdvances 固定双族口径:IPv4 稳定、
 // 仅 IPv6 变化同样翻篇(与轮换验证同一把尺子)。
 func TestObserveNodeExitIPv6OnlyChangeAdvances(t *testing.T) {
-	r, _ := newBench(t)
+	r, s := newBench(t)
 	ctx := context.Background()
 	if _, _, _, err := r.ObserveExitIdentity(ctx, 5, model.ExitIdentity{IPv4: "192.0.2.1", IPv6: "2001:db8::1"}, 1); err != nil {
 		t.Fatal(err)
 	}
 	nodes := memNodes{profiles: []proxy.NodeProfile{{ID: 5, Enabled: true}}}
-	s := New(DefaultConfig(), r, nodes,
-		failingIPObservation(func(context.Context, uint64) (model.ExitIdentity, uint64, bool, error) {
-			return model.ExitIdentity{IPv4: "192.0.2.1", IPv6: "2001:db8::2"}, 2, true, nil
-		}), &memRotator{})
+	s.nodes = nodes
+	s.ipSource = failingIPObservation(func(context.Context, uint64) (model.ExitIdentity, uint64, bool, error) {
+		return model.ExitIdentity{IPv4: "192.0.2.1", IPv6: "2001:db8::2"}, 2, true, nil
+	})
 	change, changed, err := s.ObserveNodeExit(ctx, 5)
 	if err != nil || !changed || change.NewEpoch != 1 {
 		t.Fatalf("ipv6-only change must advance: %+v changed=%v err=%v", change, changed, err)

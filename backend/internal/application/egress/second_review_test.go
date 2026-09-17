@@ -16,6 +16,16 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
+// size 报告观察表当前大小(仅本测试断言使用);nil 接收者返回 0。
+func (t *probeDeadTracker) size() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.obs)
+}
+
 func TestSecondReviewCapacityDoesNotCooldownUncontactedNode(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -114,9 +124,7 @@ func assertProbeCapacityPreservesHealth(t *testing.T, limits netbudget.Limits) {
 	if !reflect.DeepEqual(before.HealthState(), stored.HealthState()) || stored.ProbeStatus != before.ProbeStatus || !reflect.DeepEqual(stored.IPv4Probe, before.IPv4Probe) || !reflect.DeepEqual(stored.IPv6Probe, before.IPv6Probe) {
 		t.Fatalf("local capacity changed node health: before=%+v after=%+v", before, stored)
 	}
-	service.probeDeadMu.Lock()
-	observations := len(service.probeDead)
-	service.probeDeadMu.Unlock()
+	observations := service.probeDead.size()
 	if observations != 0 || proxyCalls.Load() != 0 {
 		t.Fatalf("false probe evidence: observations=%d proxyCalls=%d", observations, proxyCalls.Load())
 	}

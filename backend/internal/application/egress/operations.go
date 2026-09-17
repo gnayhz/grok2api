@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultProbeIntervalSeconds = 900
+	defaultProbeIntervalSeconds = domain.DefaultProbeIntervalSeconds
 	maxManualProbeNodes         = 200
 	maxConcurrentProbes         = 8
 )
@@ -533,7 +533,7 @@ func (s *Service) applySourceInput(value domain.SubscriptionSource, input Subscr
 	if input.ClearURL {
 		value.EncryptedURL = ""
 	} else if input.URL != nil {
-		urlValue, err := normalizeSubscriptionURL(*input.URL)
+		urlValue, err := NormalizeSubscriptionURL(*input.URL)
 		if err != nil {
 			return domain.SubscriptionSource{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}

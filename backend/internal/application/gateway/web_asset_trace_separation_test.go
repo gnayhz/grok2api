@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	relational "github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 // TestWebAssetEgressDoesNotOverwriteInferenceTrace 锁定 trace.go 的文档化
@@ -88,9 +90,9 @@ func TestWebAssetEgressDoesNotOverwriteInferenceTrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
-	traceCtx, trace := infraegress.WithTrace(ctx)
+	traceCtx, trace := physical.WithTrace(ctx)
 
 	acquireAndDo := func(scope egressdomain.Scope, affinity string) uint64 {
 		lease, acquireErr := manager.Acquire(traceCtx, scope, affinity)

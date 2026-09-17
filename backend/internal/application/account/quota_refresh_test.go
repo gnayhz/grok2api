@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -13,13 +15,13 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 func TestWebQuotaRefreshDeduplicatesPerMode(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, nil, nil, nil)
+	service := NewService(nil, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.QueueQuotaRefresh(42, "fast")
 	service.QueueQuotaRefresh(42, "expert")
 	service.QueueQuotaRefresh(42, "fast")
@@ -29,30 +31,30 @@ func TestWebQuotaRefreshDeduplicatesPerMode(t *testing.T) {
 	service.QueueQuotaRefresh(44, accountdomain.QuotaModeWebImagePro)
 	service.QueueQuotaRefresh(44, accountdomain.QuotaModeWebVideo720p)
 
-	service.quotaRefreshMu.Lock()
-	defer service.quotaRefreshMu.Unlock()
-	if len(service.quotaRefreshes) != 6 {
-		t.Fatalf("refresh states = %#v", service.quotaRefreshes)
+	service.quotaRefresh.mu.Lock()
+	defer service.quotaRefresh.mu.Unlock()
+	if len(service.quotaRefresh.obs) != 6 {
+		t.Fatalf("refresh states = %#v", service.quotaRefresh.obs)
 	}
-	if service.quotaRefreshes["42:fast"].generation != 2 || !service.quotaRefreshes["42:fast"].queued {
+	if service.quotaRefresh.obs["42:fast"].generation != 2 || !service.quotaRefresh.obs["42:fast"].queued {
 		t.Fatal("duplicate fast refresh was not coalesced into the queued generation")
 	}
-	if service.quotaRefreshes["42:expert"].generation != 1 || !service.quotaRefreshes["42:expert"].queued {
+	if service.quotaRefresh.obs["42:expert"].generation != 1 || !service.quotaRefresh.obs["42:expert"].queued {
 		t.Fatal("independent expert refresh state is invalid")
 	}
-	if service.quotaRefreshes["43:console"].generation != 1 || !service.quotaRefreshes["43:console"].queued {
+	if service.quotaRefresh.obs["43:console"].generation != 1 || !service.quotaRefresh.obs["43:console"].queued {
 		t.Fatal("Console refresh state is invalid")
 	}
 	for _, mode := range []string{"console_image", "console_video"} {
-		if state := service.quotaRefreshes["43:"+mode]; state == nil || state.generation != 1 || !state.queued {
+		if state := service.quotaRefresh.obs["43:"+mode]; state == nil || state.generation != 1 || !state.queued {
 			t.Fatalf("Console %s refresh state is invalid: %#v", mode, state)
 		}
 	}
-	if state := service.quotaRefreshes["44:"+accountdomain.QuotaGroupWebImagine]; state == nil || state.generation != 2 || !state.queued {
+	if state := service.quotaRefresh.obs["44:"+accountdomain.QuotaGroupWebImagine]; state == nil || state.generation != 2 || !state.queued {
 		t.Fatalf("Imagine group refresh state is invalid: %#v", state)
 	}
-	if len(service.quotaRefreshQueue) != 6 {
-		t.Fatalf("queued refreshes = %d", len(service.quotaRefreshQueue))
+	if len(service.quotaRefresh.queue) != 6 {
+		t.Fatalf("queued refreshes = %d", len(service.quotaRefresh.queue))
 	}
 }
 
@@ -79,10 +81,10 @@ func TestWeeklyQuotaRefreshPreservesTrailingSnapshot(t *testing.T) {
 		modeStarted: make(chan struct{}, 2),
 		modeRelease: make(chan struct{}, 2),
 	}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 
 	service.QueueQuotaRefresh(credential.ID, "weekly")
-	request := <-service.quotaRefreshQueue
+	request := <-service.quotaRefresh.queue
 	done := make(chan struct{})
 	go func() {
 		service.runQuotaRefresh(ctx, request)
@@ -112,53 +114,53 @@ func TestWeeklyQuotaRefreshPreservesTrailingSnapshot(t *testing.T) {
 	if adapter.modeCalls.Load() != 2 {
 		t.Fatalf("weekly refresh calls = %d, want 2", adapter.modeCalls.Load())
 	}
-	service.quotaRefreshMu.Lock()
-	_, exists := service.quotaRefreshes[request.key]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	_, exists := service.quotaRefresh.obs[request.key]
+	service.quotaRefresh.mu.Unlock()
 	if exists {
 		t.Fatal("completed weekly refresh retained queue state")
 	}
 }
 
 func TestQuotaRefreshQueueOverflowRetainsDirtyState(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, nil, nil, nil)
-	service.quotaRefreshQueue = make(chan quotaRefreshRequest, 1)
+	service := NewService(nil, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
+	service.quotaRefresh.queue = make(chan quotaRefreshRequest, 1)
 	service.QueueQuotaRefresh(1, "fast")
 	service.QueueQuotaRefresh(2, "fast")
 
-	service.quotaRefreshMu.Lock()
-	state := service.quotaRefreshes["2:fast"]
+	service.quotaRefresh.mu.Lock()
+	state := service.quotaRefresh.obs["2:fast"]
 	if state == nil || state.generation != 1 || state.queued || state.running {
-		service.quotaRefreshMu.Unlock()
+		service.quotaRefresh.mu.Unlock()
 		t.Fatalf("overflow state = %#v", state)
 	}
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Unlock()
 
-	first := <-service.quotaRefreshQueue
+	first := <-service.quotaRefresh.queue
 	if first.accountID != 1 {
 		t.Fatalf("first queued account = %d", first.accountID)
 	}
 	service.requeueQuotaRefreshes()
-	second := <-service.quotaRefreshQueue
+	second := <-service.quotaRefresh.queue
 	if second.accountID != 2 || second.mode != "fast" {
 		t.Fatalf("recovered request = %#v", second)
 	}
-	service.quotaRefreshMu.Lock()
-	recovered := service.quotaRefreshes["2:fast"]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	recovered := service.quotaRefresh.obs["2:fast"]
+	service.quotaRefresh.mu.Unlock()
 	if recovered == nil || !recovered.queued || recovered.running {
 		t.Fatalf("recovered state = %#v", recovered)
 	}
 }
 
 func TestQuotaRefreshFailureUsesBoundedExponentialBackoff(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, nil, nil, nil)
+	service := NewService(nil, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	service.quotaRefreshes["1:console"] = &quotaRefreshState{running: true}
+	service.quotaRefresh.obs["1:console"] = &quotaRefreshState{running: true}
 	for failure := 1; failure <= 13; failure++ {
 		service.deferQuotaRefresh("1:console")
-		state := service.quotaRefreshes["1:console"]
+		state := service.quotaRefresh.obs["1:console"]
 		maximum := quotaRefreshBackoffBase * time.Duration(1<<min(failure-1, 11))
 		if maximum > quotaRefreshBackoffMax {
 			maximum = quotaRefreshBackoffMax
@@ -181,36 +183,36 @@ func TestQuotaRefreshFailureUsesBoundedExponentialBackoff(t *testing.T) {
 // (account,mode) 在 requeue 扫描中保留停靠记忆且不再自动入队（历史线上
 // 重试风暴对策）；预算内的失败仍按退避正常重排。
 func TestQuotaRefreshParksAfterFailureBudget(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, nil, nil, nil)
+	service := NewService(nil, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 
 	// 预算外：连续失败到预算值 → requeue 必须停靠（保留状态、队列为空）。
-	service.quotaRefreshes["7:console"] = &quotaRefreshState{running: true}
+	service.quotaRefresh.obs["7:console"] = &quotaRefreshState{running: true}
 	for range quotaRefreshFailureBudget {
 		service.deferQuotaRefresh("7:console")
 	}
 	service.requeueQuotaRefreshes()
-	service.quotaRefreshMu.Lock()
-	_, parkedExists := service.quotaRefreshes["7:console"]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	_, parkedExists := service.quotaRefresh.obs["7:console"]
+	service.quotaRefresh.mu.Unlock()
 	if !parkedExists {
 		t.Fatal("state at failure budget must retain its parked demand")
 	}
-	if drained := len(service.quotaRefreshQueue); drained != 0 {
+	if drained := len(service.quotaRefresh.queue); drained != 0 {
 		t.Fatalf("parked state must not be re-enqueued, queue length = %d", drained)
 	}
 
 	// 预算内（budget-1 次）：时钟推进过退避窗口后必须正常重排。
-	service.quotaRefreshes["8:console"] = &quotaRefreshState{running: true}
+	service.quotaRefresh.obs["8:console"] = &quotaRefreshState{running: true}
 	for range quotaRefreshFailureBudget - 1 {
 		service.deferQuotaRefresh("8:console")
 	}
 	now = now.Add(quotaRefreshBackoffMax + time.Minute)
 	service.requeueQuotaRefreshes()
-	service.quotaRefreshMu.Lock()
-	below := service.quotaRefreshes["8:console"]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	below := service.quotaRefresh.obs["8:console"]
+	service.quotaRefresh.mu.Unlock()
 	if below == nil || !below.queued {
 		t.Fatalf("below-budget failure must be requeued: %#v", below)
 	}
@@ -219,17 +221,17 @@ func TestQuotaRefreshParksAfterFailureBudget(t *testing.T) {
 // TestQueueQuotaRefreshResetsFailureEpisode：显式入队开启全新重试 episode
 // （失败计数归零）——熔断不阻断外部新需求，只终止无人认领的自动重试。
 func TestQueueQuotaRefreshResetsFailureEpisode(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, nil, nil, nil)
+	service := NewService(nil, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	service.quotaRefreshes["9:console"] = &quotaRefreshState{
+	service.quotaRefresh.obs["9:console"] = &quotaRefreshState{
 		pending: true, failures: quotaRefreshFailureBudget - 1,
 		nextAttemptAt: now.Add(-time.Minute), // 退避窗口已过：显式入队应立即排入队列
 	}
 	service.QueueQuotaRefresh(9, "console")
-	service.quotaRefreshMu.Lock()
-	state := service.quotaRefreshes["9:console"]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	state := service.quotaRefresh.obs["9:console"]
+	service.quotaRefresh.mu.Unlock()
 	if state == nil || state.failures != 0 || !state.queued {
 		t.Fatalf("explicit enqueue must reset the failure episode: %#v", state)
 	}
@@ -264,22 +266,22 @@ func TestRecentConsoleUsageSnapshotSuppressesDuplicateUpstreamRefresh(t *testing
 		t.Fatal(err)
 	}
 	adapter := &consoleQuotaSnapshotAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.now = func() time.Time { return now.Add(10 * time.Second) }
 	service.QueueQuotaRefresh(credential.ID, "console")
-	request := <-service.quotaRefreshQueue
-	service.quotaRefreshMu.Lock()
-	state := service.quotaRefreshes[request.key]
+	request := <-service.quotaRefresh.queue
+	service.quotaRefresh.mu.Lock()
+	state := service.quotaRefresh.obs[request.key]
 	state.queued = false
 	state.running = true
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Unlock()
 	service.runQuotaRefresh(ctx, request)
 	if adapter.fullCalls.Load() != 0 {
 		t.Fatalf("recent Console snapshot triggered %d upstream refreshes", adapter.fullCalls.Load())
 	}
-	service.quotaRefreshMu.Lock()
-	state = service.quotaRefreshes[request.key]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	state = service.quotaRefresh.obs[request.key]
+	service.quotaRefresh.mu.Unlock()
 	if state == nil || state.running || state.pending || !state.nextAttemptAt.Equal(now.Add(10*time.Second+consoleQuotaRefreshMinInterval)) {
 		t.Fatalf("Console cooldown state = %#v", state)
 	}
@@ -305,11 +307,11 @@ func TestQuotaRefreshCrossInstanceGenerationTriggersSingleTrailingRefresh(t *tes
 		t.Fatal(err)
 	}
 	adapter := &quotaCountingAdapter{modeStarted: make(chan struct{}, 4), modeRelease: make(chan struct{}, 4)}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	coordinator := memory.NewQuotaRefreshCoordinator()
 	lock := memory.NewLockStore()
-	first := NewService(accounts, nil, nil, nil, registry, nil, lock)
-	second := NewService(accounts, nil, nil, nil, registry, nil, lock)
+	first := NewService(accounts, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lock)
+	second := NewService(accounts, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lock)
 	first.SetQuotaRefreshCoordinator(coordinator)
 	second.SetQuotaRefreshCoordinator(coordinator)
 	runCtx, cancel := context.WithCancel(ctx)
@@ -387,7 +389,7 @@ func TestRefreshQuotaModeDoesNotTriggerFullProviderSyncForAutoTier(t *testing.T)
 		t.Fatal(err)
 	}
 	adapter := &quotaCountingAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	window, err := service.RefreshQuotaMode(ctx, credential.ID, "fast")
 	if err != nil {
 		t.Fatal(err)
@@ -405,21 +407,21 @@ func TestRefreshQuotaModeDoesNotTriggerFullProviderSyncForAutoTier(t *testing.T)
 
 	service.QueueQuotaRefresh(credential.ID, "fast")
 	service.QueueQuotaRefresh(credential.ID, "fast")
-	request := <-service.quotaRefreshQueue
+	request := <-service.quotaRefresh.queue
 	service.runQuotaRefresh(ctx, request)
 	if adapter.modeCalls.Load() != 2 || adapter.fullCalls.Load() != 0 {
 		t.Fatalf("coalesced mode calls = %d, full calls = %d", adapter.modeCalls.Load(), adapter.fullCalls.Load())
 	}
-	service.quotaRefreshMu.Lock()
-	_, queued := service.quotaRefreshes[request.key]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	_, queued := service.quotaRefresh.obs[request.key]
+	service.quotaRefresh.mu.Unlock()
 	if queued {
 		t.Fatal("completed coalesced refresh retained queue state")
 	}
 
 	service.refreshLock = deniedQuotaRefreshLock{}
 	service.QueueQuotaRefresh(credential.ID, "fast")
-	request = <-service.quotaRefreshQueue
+	request = <-service.quotaRefresh.queue
 	service.runQuotaRefresh(ctx, request)
 	if adapter.modeCalls.Load() != 2 {
 		t.Fatalf("worker without distributed lease made %d mode calls", adapter.modeCalls.Load())
@@ -464,7 +466,7 @@ func TestReconcileConsoleRateLimitVerifiesUsageBeforeExhausting(t *testing.T) {
 				t.Fatal(err)
 			}
 			adapter := &rateLimitConsoleQuotaAdapter{remaining: test.remaining}
-			service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+			service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 			service.SetQuotaRecoveryQueue(memory.NewQuotaRecoveryQueue())
 
 			state, err := service.ReconcileRateLimit(ctx, credential.ID, "console", 0)
@@ -514,7 +516,7 @@ func TestReconcileConsoleRateLimitQueuesRetryWhenUsageProbeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &rateLimitConsoleQuotaAdapter{err: errors.New("usage temporarily rate limited")}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	if state, err := service.ReconcileRateLimit(ctx, credential.ID, "console", 0); err == nil || state != RateLimitReconcileInconclusive {
 		t.Fatalf("state=%s err=%v", state, err)
 	}
@@ -526,9 +528,9 @@ func TestReconcileConsoleRateLimitQueuesRetryWhenUsageProbeFails(t *testing.T) {
 	if !ok || window.Remaining != 9 {
 		t.Fatalf("failed probe overwrote last snapshot: %#v", window)
 	}
-	service.quotaRefreshMu.Lock()
-	state := service.quotaRefreshes[strconv.FormatUint(credential.ID, 10)+":console"]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	state := service.quotaRefresh.obs[strconv.FormatUint(credential.ID, 10)+":console"]
+	service.quotaRefresh.mu.Unlock()
 	if state == nil || !state.pending {
 		t.Fatalf("retry state = %#v", state)
 	}
@@ -554,7 +556,7 @@ func TestReconcileConsoleRateLimitDoesNotQueueWhenAnotherReplicaIsRefreshing(t *
 		t.Fatal(err)
 	}
 	adapter := &rateLimitConsoleQuotaAdapter{remaining: 9}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.refreshLock = deniedQuotaRefreshLock{}
 
 	state, err := service.ReconcileRateLimit(ctx, credential.ID, "console", 0)
@@ -564,9 +566,9 @@ func TestReconcileConsoleRateLimitDoesNotQueueWhenAnotherReplicaIsRefreshing(t *
 	if adapter.calls.Load() != 0 {
 		t.Fatalf("busy refresh made %d upstream calls", adapter.calls.Load())
 	}
-	service.quotaRefreshMu.Lock()
-	queued := service.quotaRefreshes[strconv.FormatUint(credential.ID, 10)+":console"]
-	service.quotaRefreshMu.Unlock()
+	service.quotaRefresh.mu.Lock()
+	queued := service.quotaRefresh.obs[strconv.FormatUint(credential.ID, 10)+":console"]
+	service.quotaRefresh.mu.Unlock()
 	if queued != nil {
 		t.Fatalf("busy refresh queued duplicate work: %#v", queued)
 	}
@@ -601,13 +603,13 @@ func TestConsoleImmediateAndQueuedRefreshUseSameDistributedLock(t *testing.T) {
 	}
 	adapter := &rateLimitConsoleQuotaAdapter{err: errors.New("usage temporarily unavailable")}
 	refreshLock := &recordingQuotaRefreshLock{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.refreshLock = refreshLock
 
 	if state, err := service.ReconcileRateLimit(ctx, credential.ID, "console", 0); err == nil || state != RateLimitReconcileInconclusive {
 		t.Fatalf("state=%s err=%v", state, err)
 	}
-	request := <-service.quotaRefreshQueue
+	request := <-service.quotaRefresh.queue
 	service.runQuotaRefresh(ctx, request)
 
 	keys := refreshLock.snapshot()
@@ -650,7 +652,7 @@ func TestRefreshWebImagineQuotaModeAtomicallyReplacesGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &imagineQuotaGroupAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	window, err := service.RefreshQuotaMode(ctx, credential.ID, accountdomain.QuotaModeWebImagePro)
 	if err != nil {
 		t.Fatal(err)
@@ -701,7 +703,7 @@ func TestRefreshPaidWebImagineFallsBackToSharedWeeklyQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &sharedWeeklyImagineAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	window, err := service.RefreshQuotaMode(ctx, credential.ID, accountdomain.QuotaModeWebImagePro)
 	if err != nil {
 		t.Fatal(err)
@@ -752,7 +754,7 @@ func TestRefreshConsoleQuotaModePersistsCompleteUsageSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &consoleQuotaSnapshotAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	queue := memory.NewQuotaRecoveryQueue()
 	service.SetQuotaRecoveryQueue(queue)
 	if err := queue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: credential.ID, Mode: "console", DueAt: now.Add(24 * time.Hour)}); err != nil {
@@ -797,7 +799,7 @@ func TestConsoleFullAndModeQuotaRefreshShareOneSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &consoleQuotaSnapshotAdapter{fullStarted: make(chan struct{}, 1), fullRelease: make(chan struct{})}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 
 	fullDone := make(chan error, 1)
 	go func() {
@@ -871,7 +873,7 @@ func TestSyncIncompleteConsoleQuotasMigratesOnlyLegacySnapshot(t *testing.T) {
 	}
 	completeID := create("complete-console", completeWindows)
 	adapter := &consoleQuotaSnapshotAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	succeeded, failed, err := service.SyncIncompleteConsoleQuotas(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -944,7 +946,7 @@ func TestSyncStaleConsoleQuotasRefreshesOnlyOldCompleteSnapshots(t *testing.T) {
 	}
 
 	adapter := &consoleQuotaSnapshotAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	succeeded, failed, nextAfterID, err := service.SyncStaleConsoleQuotas(ctx, now.Add(-6*time.Hour), 0, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -1006,7 +1008,7 @@ func TestObserveResponseModelCoalescesUnchangedValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts := &observedModelCountingRepository{AccountRepository: base}
-	service := NewService(accounts, nil, nil, nil, nil, nil, nil)
+	service := NewService(accounts, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	now := time.Now().UTC()
 	service.now = func() time.Time { return now }
 
@@ -1057,7 +1059,7 @@ func TestObserveResponseModelRefreshesAfterCrossInstanceStateChange(t *testing.T
 	}
 	accounts := &observedModelCountingRepository{AccountRepository: base}
 	shared := &observedModelTestStore{values: make(map[uint64]repository.ObservedModelState)}
-	service := NewService(accounts, nil, nil, nil, nil, nil, nil)
+	service := NewService(accounts, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.SetObservedModelStore(shared)
 	now := time.Now().UTC()
 	service.now = func() time.Time { return now }
@@ -1081,7 +1083,7 @@ func TestObserveResponseModelCoalescesConcurrentFirstWrite(t *testing.T) {
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	service := NewService(accounts, nil, nil, nil, nil, nil, nil)
+	service := NewService(accounts, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	const workers = 32
 	start := make(chan struct{})
 	var launched sync.WaitGroup
@@ -1119,7 +1121,7 @@ func TestObserveResponseModelKeepsNewerLocalStateAfterOutOfOrderCompletion(t *te
 		olderStarted: make(chan struct{}),
 		olderRelease: make(chan struct{}),
 	}
-	service := NewService(accounts, nil, nil, nil, nil, nil, nil)
+	service := NewService(accounts, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	current := time.Now().UTC()
 	var nowMu sync.RWMutex
 	service.now = func() time.Time {
@@ -1230,7 +1232,7 @@ func TestRefreshQuotaFetchesWebIdentityOnlyUntilDataExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &quotaCountingAdapter{}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	for range 2 {
 		if _, err := service.RefreshQuota(ctx, credential.ID); err != nil {
 			t.Fatal(err)
@@ -1271,7 +1273,7 @@ func TestRefreshQuotaUnauthorizedMarksWebAccountInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &quotaCountingAdapter{fullErr: provider.ErrUnauthorized}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	if _, err := service.RefreshQuota(ctx, credential.ID); !errors.Is(err, provider.ErrUnauthorized) {
 		t.Fatalf("err = %v", err)
 	}

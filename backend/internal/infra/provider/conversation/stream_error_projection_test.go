@@ -22,7 +22,7 @@ func TestStreamFailureProjectionIgnoresUnrelatedOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 				var output bytes.Buffer
-				c := newStreamConverter(&output, operation, ResponseOptions{})
+				c := newStreamConverterWithBudget(&output, operation, ResponseOptions{}, nil)
 				defer c.releaseResources()
 				if err := c.handle("response.failed", data); err != nil {
 					t.Fatal(err)

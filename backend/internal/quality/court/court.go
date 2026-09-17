@@ -15,10 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 // Config contains the decision thresholds for one finite investigation
@@ -119,6 +117,7 @@ type Dispatcher interface {
 }
 
 // DispatchSpec describes the two probe groups for one case.
+// 与 investigator.DispatchSpec 保持字段同步,组合根 quality_judicial.go 逐字段复制。
 type DispatchSpec struct {
 	ControlAccounts []uint64
 	ControlExits    []model.EpochKey
@@ -141,8 +140,8 @@ type DispatchSpec struct {
 // discovery and for selecting unimplicated probe targets. Probe conclusions
 // are evaluated from the finite task rows, not from a rolling window.
 type EvidenceSource interface {
-	SnapshotWindow(now time.Time) evidence.Snapshot
-	CrossValidate(snapshot evidence.Snapshot) evidence.Estimate
+	SnapshotWindow(now time.Time) model.Snapshot
+	CrossValidate(snapshot model.Snapshot) model.Estimate
 }
 
 // LedgerSink records a classified degradation against the observed epoch.
@@ -153,16 +152,18 @@ type LedgerSink interface {
 // Service is the single direct attribution loop.
 type Service struct {
 	cfg      Config
-	registry *registry.Registry
+	registry StateStore
+	probes   ProbeReader
 	evidence EvidenceSource
 
-	probeAccounts ProbeAccounts
-	nodes         proxy.NodeSource
-	dispatcher    Dispatcher
-	ledgerSink    LedgerSink
-	accountExists AccountExists
-	releaseHook   AccountReleaseHook
-	logger        *slog.Logger
+	probeAccounts   ProbeAccounts
+	nodes           proxy.NodeSource
+	dispatcher      Dispatcher
+	ledgerSink      LedgerSink
+	accountExists   AccountExists
+	sameExit        SameExit
+	accountReleased AccountReleased
+	logger          *slog.Logger
 
 	mu sync.RWMutex
 	// evaluateMu serializes incident opening and settlement. Without this
@@ -172,6 +173,7 @@ type Service struct {
 	evaluateMu evaluationLock
 
 	cancel context.CancelFunc
+	closed bool
 	done   chan struct{}
 }
 
@@ -207,14 +209,68 @@ func (s *Service) SetAccountExists(check AccountExists) {
 	s.mu.Unlock()
 }
 
-// AccountReleaseHook clears request-path cooldown after an exit verdict has
-// exonerated the account.
-type AccountReleaseHook func(ctx context.Context, accountID uint64)
+// AccountReleased is called once after a court action actually transitioned an
+// account out of this court's investigation hold. The court reports only the
+// fact; what the account axis does with it belongs to the account application
+// layer, which the composition root installs here. A failure is logged and must
+// never invalidate a verdict that is already committed.
+type AccountReleased func(ctx context.Context, accountID uint64) error
 
-func (s *Service) SetAccountReleaseHook(hook AccountReleaseHook) {
+// SetAccountReleased installs the release notification. nil disables it.
+func (s *Service) SetAccountReleased(notify AccountReleased) {
 	s.mu.Lock()
-	s.releaseHook = hook
+	s.accountReleased = notify
 	s.mu.Unlock()
+}
+
+// notifyAccountReleased reports one released account. Callers must already have
+// established that this court action moved the account from held to eligible:
+// an account still detained by a second case must not be reported, or releasing
+// one case would lift a hold the other case still owns.
+func (s *Service) notifyAccountReleased(ctx context.Context, accountID uint64) {
+	if accountID == 0 {
+		return
+	}
+	s.mu.RLock()
+	notify := s.accountReleased
+	s.mu.RUnlock()
+	if notify == nil {
+		return
+	}
+	if err := notify(ctx, accountID); err != nil && s.logger != nil {
+		s.logger.Warn("court_account_release_notify_failed", "account", accountID, "error", err.Error())
+	}
+}
+
+// SameExit answers the advisory exclusion question for comparison-exit
+// selection: are these two nodes KNOWN to share one real egress? true means
+// "do not spend a differential probe here" — never "the paths are
+// admissible". The court layer holds no egress-address knowledge itself; the
+// composition root adapts the egress snapshot into this seam. nil means "no
+// information" and must never exclude anything, and the live per-node path
+// verification remains the sole authority for admissibility.
+type SameExit func(ctx context.Context, nodeIDa, nodeIDb uint64) bool
+
+// SetSameExit installs the advisory same-exit exclusion set. nil restores the
+// "no information" state, which excludes nothing.
+func (s *Service) SetSameExit(check SameExit) {
+	s.mu.Lock()
+	s.sameExit = check
+	s.mu.Unlock()
+}
+
+// excludesKnownSameExit consults the seam for one candidate against the
+// baseline exit. A nil seam, a zero node ID, or any "unknown" answer from the
+// seam keeps today's behaviour (the candidate stays). The baseline node is
+// never excluded here: it is already filtered as a comparison target.
+func (s *Service) excludesKnownSameExit(ctx context.Context, baselineNodeID, candidateNodeID uint64) bool {
+	if baselineNodeID == 0 || candidateNodeID == 0 {
+		return false
+	}
+	s.mu.RLock()
+	check := s.sameExit
+	s.mu.RUnlock()
+	return check != nil && check(ctx, baselineNodeID, candidateNodeID)
 }
 
 // ReportDegraded is the synchronous case-opening boundary behind the
@@ -276,8 +332,8 @@ func (s *Service) reportDegraded(ctx context.Context, accountID uint64, exit mod
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
-	incident := registry.IncidentKey{AccountID: accountID, Exit: exit}
-	lastClosed, err := registryStore.LastClosedAtForIncidents(ctx, []registry.IncidentKey{incident})
+	incident := model.IncidentKey{AccountID: accountID, Exit: exit}
+	lastClosed, err := registryStore.LastClosedAtForIncidents(ctx, []model.IncidentKey{incident})
 	if err != nil {
 		return err
 	}
@@ -303,24 +359,44 @@ func (s *Service) SetLedgerSink(sink LedgerSink) {
 	s.mu.Unlock()
 }
 
-// New constructs the direct loop and starts its periodic fallback evaluator.
-func New(cfg Config, qualityRegistry *registry.Registry, source EvidenceSource, dispatcher Dispatcher) *Service {
+// New constructs the service without starting any loop. Composition roots
+// must call Run explicitly; constructing never launches background work.
+func New(cfg Config, qualityRegistry StateStore, source EvidenceSource, dispatcher Dispatcher, probes ProbeReader) *Service {
 	cfg = cfg.normalized()
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	service := &Service{
-		cfg: cfg, registry: qualityRegistry, evidence: source,
-		dispatcher: dispatcher, logger: logger, cancel: cancel, done: make(chan struct{}),
+		cfg: cfg, registry: qualityRegistry, evidence: source, probes: probes,
+		dispatcher: dispatcher, logger: logger, done: make(chan struct{}),
 	}
-	if service.evidence != nil && service.registry != nil {
-		go service.run(ctx)
-	} else {
+	if service.evidence == nil || service.registry == nil {
 		close(service.done)
 	}
 	return service
+}
+
+// Run starts the periodic evaluator and returns immediately. The first
+// evaluation happens after EvaluateEvery. Repeated Run calls are ignored;
+// Close prevents subsequent starts and joins the owned loop.
+func (s *Service) Run(ctx context.Context) {
+	s.mu.Lock()
+	if s.cancel != nil || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	// Inert construction (missing evidence/registry) never runs a loop.
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	s.mu.Unlock()
+	go s.run(runCtx)
 }
 
 // ReviewNow forces the same finite evaluator used by the background loop.
@@ -330,10 +406,27 @@ func (s *Service) ReviewNow(ctx context.Context) (EvalStats, error) {
 }
 
 func (s *Service) Close(ctx context.Context) error {
-	if s == nil || s.cancel == nil {
+	if s == nil {
 		return nil
 	}
-	s.cancel()
+	s.mu.Lock()
+	cancel := s.cancel
+	if !s.closed {
+		s.closed = true
+		if cancel == nil {
+			// Serialize close-before-start with Run and other Close calls.
+			select {
+			case <-s.done:
+			default:
+				close(s.done)
+			}
+		}
+	}
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	// Every caller joins the same loop, including retries after a timeout.
 	select {
 	case <-s.done:
 		return nil

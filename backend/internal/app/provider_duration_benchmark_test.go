@@ -16,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 func BenchmarkProviderDurationQuota(b *testing.B) {
@@ -48,7 +49,7 @@ func BenchmarkProviderDurationQuota(b *testing.B) {
 	cfg.Provider.Web.BaseURL = server.URL
 	cfg.Provider.Web.QuotaTimeout = config.Duration(30 * time.Second)
 	cfg.Provider.Web.StatsigMode, cfg.Provider.Web.StatsigManualValue = "manual", "synthetic-signature"
-	manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+	manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 	defer manager.Close(ctx)
 	adapter := webprovider.NewAdapter(webProviderConfig(cfg), manager, cipher, nil, nil)
 	credential := account.Credential{ID: 1, Provider: account.ProviderWeb, EncryptedAccessToken: token}

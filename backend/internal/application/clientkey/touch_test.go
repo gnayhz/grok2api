@@ -3,6 +3,7 @@ package clientkey
 import (
 	"context"
 	"errors"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -39,7 +40,7 @@ func newTouchService(t *testing.T, touch func(context.Context, uint64) error) (*
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService("touch-owner", touchRepository{ClientKeyRepository: relational.NewClientKeyRepository(database), touch: touch}, nil, nil, 0, 0, testCipher(t))
+	service := NewService("touch-owner", touchRepository{ClientKeyRepository: relational.NewClientKeyRepository(database), touch: touch}, nil, nil, 0, 0, testCipher(t), security.RandomTokenSource{})
 	t.Cleanup(func() { closeKeyService(t, service) })
 	created, err := service.Create(ctx, CreateInput{Name: "touch", Enabled: true, RPMUnlimited: true, ConcurrencyUnlimited: true, BillingLimitUSDTicks: 100})
 	if err != nil {

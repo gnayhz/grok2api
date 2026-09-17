@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // prepareBuildClientConversion never reads the upstream body. The raw protocol

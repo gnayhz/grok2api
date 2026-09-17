@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"path/filepath"
 	"strings"
@@ -156,7 +157,7 @@ func TestClearCooldownPreservesStrikeMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := relational.NewAccountRepository(database)
-	service := accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, nil)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(database), nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	created, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "strike", SourceKey: "strike",
 		EncryptedAccessToken: "enc", Enabled: true, AuthStatus: accountdomain.AuthStatusActive,

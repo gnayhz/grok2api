@@ -3,6 +3,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -15,7 +20,6 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
@@ -26,7 +30,7 @@ import (
 // 不同模型路由隔离账号池,避免选号顺序/账号冷却互相污染;计数为包级单例,
 // 断言取前后差值。
 func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
-	before := GuardStatsSnapshotForAPI()
+	before := processGuardStatsSnapshot()
 	signalBefore := findGuardSignalStat(t, before, GuardSignalWithhold)
 	retrialBefore := before.Retrial
 
@@ -90,15 +94,15 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 
 	newService := func(responses map[uint64][]scriptedBuildResponse, maxAttempts int) *Service {
 		adapter := &scriptedBuildAdapter{responses: responses}
-		registry := provider.NewRegistry(adapter)
+		registry := providerimpl.NewRegistry(adapter)
 		sticky := memory.NewStickyStore()
-		accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-		selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-		service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
-		service.UpdateQualityRetry(QualityRetryRuntime{
+		accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+		sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+		service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 999)
+		service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{
 			Enabled: true, MaxAttempts: maxAttempts,
-			OnExhausted: qualityRetryFailClosed,
-		})
+			OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"},
+		}))
 		return service
 	}
 	chatInput := func(requestID, model string) Input {
@@ -127,7 +131,7 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 		degradedAccount.ID: {{status: http.StatusOK, body: degraded}},
 		cleanAccount.ID:    {{status: http.StatusOK, body: clean}},
 	}, 3)
-	rescuedService.selector.holdLocalQuality(failClosedAccount.ID, "previous-scenario", time.Now().Add(time.Minute))
+	rescuedService.selector.HoldLocalQuality(failClosedAccount.ID, "previous-scenario", time.Now().Add(time.Minute))
 	result, err := rescuedService.CreateChatCompletion(ctx, chatInput("req-guard-stats-rescued", "grok-4.6"))
 	if err != nil {
 		t.Fatalf("rescued scenario must deliver: %v", err)
@@ -136,7 +140,7 @@ func TestGuardStatsCountRescuedAndFailedWithhold(t *testing.T) {
 	finishTestResult(t, result, Usage{}, "", "")
 	_ = result.Body.Close()
 
-	after := GuardStatsSnapshotForAPI()
+	after := processGuardStatsSnapshot()
 	signalAfter := findGuardSignalStat(t, after, GuardSignalWithhold)
 	if signalAfter.Triggered-signalBefore.Triggered != 2 {
 		t.Fatalf("triggered delta = %d, want exactly 2 (both scenarios withhold)", signalAfter.Triggered-signalBefore.Triggered)

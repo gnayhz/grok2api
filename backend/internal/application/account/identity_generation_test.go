@@ -3,13 +3,14 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type identityContextAdapter struct {
@@ -27,7 +28,7 @@ func identityAccountFixture(t *testing.T, service *Service, adapter *webAccountS
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.providers = provider.NewRegistry(identityContextAdapter{webAccountSettingsAdapterStub: adapter, observe: observe})
+	service.providers = providerimpl.NewRegistry(identityContextAdapter{webAccountSettingsAdapterStub: adapter, observe: observe})
 	return value
 }
 
@@ -169,7 +170,7 @@ func TestIdentityCompletionCannotOverwriteNewMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.providers = provider.NewRegistry(identityGenerationAdapter{webAccountSettingsAdapterStub: adapter, complete: func(observed accountdomain.Credential) provider.AccountIdentity {
+	service.providers = providerimpl.NewRegistry(identityGenerationAdapter{webAccountSettingsAdapterStub: adapter, complete: func(observed accountdomain.Credential) provider.AccountIdentity {
 		if observed.CredentialGeneration != web.CredentialGeneration {
 			t.Fatal("unexpected observed material")
 		}

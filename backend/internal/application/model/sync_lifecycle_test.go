@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -13,7 +14,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -60,8 +60,8 @@ func TestFullSyncCloseRetainsOwnershipUntilFinalWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &modelCapabilityAdapter{models: map[uint64][]string{credential.ID: {"grok-close"}}, entered: make(chan struct{}), release: make(chan struct{})}
-	providers := provider.NewRegistry(adapter)
-	accountService := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), providers, cipher, nil)
+	providers := providerimpl.NewRegistry(adapter)
+	accountService := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), providers, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	finalizer := blockedSyncFinalizer{ModelRepository: relational.NewModelRepository(db), entered: make(chan struct{}), release: make(chan struct{}), result: make(chan error, 1)}
 	service := NewService(finalizer, accounts, accountService, providers)
 	t.Cleanup(func() { _ = service.Close(context.Background()) })

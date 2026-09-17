@@ -25,13 +25,13 @@ func TestMatrixOwnsBoundsOrderingAndEvidenceQualification(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
-	observations, err := evidence.New(ctx, reg.DB(), evidence.DefaultConfig())
+	observations, err := evidence.New(ctx, reg.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := court.DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
-	service := court.New(cfg, reg, observations, nil)
+	service := court.New(cfg, reg, observations, nil, registry.NewProbeTaskStore(reg))
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	query := NewQueries(QueryDependencies{Registry: reg, Evidence: observations, Court: service, Probes: registry.NewProbeTaskStore(reg), Guard: guard.New(guard.DefaultConfig(), nil), Nodes: noNodeProfiles{}})
 	empty, err := query.Matrix(ctx)
@@ -49,10 +49,10 @@ func TestMatrixOwnsBoundsOrderingAndEvidenceQualification(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := reg.TransitionAccount(ctx, registry.AccountTransitionRequest{AccountID: 45, To: model.AccountRemanded, CaseID: 1}); err != nil {
+	if err := reg.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 45, To: model.AccountRemanded, CaseID: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 1, To: model.ExitRemanded, CaseID: 1}); err != nil {
+	if err := reg.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 1, To: model.ExitRemanded, CaseID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	matrix, err := query.Matrix(ctx)

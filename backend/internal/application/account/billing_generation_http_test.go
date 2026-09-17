@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,7 +16,6 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -105,7 +105,7 @@ func TestBillingHTTPCompletionUsesObservedRecoveryGeneration(t *testing.T) {
 			}))
 			defer upstream.Close()
 			adapter := cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher)
-			s := NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			s := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			callCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			type completion struct {

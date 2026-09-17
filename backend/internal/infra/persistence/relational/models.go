@@ -80,14 +80,12 @@ type accountModel struct {
 	BuildSuperEntitled bool `gorm:"not null;default:false"`
 	// EgressNodeID is nullable so existing accounts retain the legacy pool
 	// routing behavior until an administrator explicitly assigns a node.
-	EgressNodeID         *uint64 `gorm:"index:idx_accounts_egress_node"`
-	EgressAssignmentMode string  `gorm:"size:16;not null;default:'';check:chk_accounts_egress_assignment_mode,egress_assignment_mode IN ('','manual','auto')"`
-	EgressAssignedAt     *time.Time
-	CreatedAt            time.Time               `gorm:"not null"`
-	UpdatedAt            time.Time               `gorm:"not null"`
-	Credential           *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	WebProfile           *webAccountProfileModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	EgressNode           *egressNodeModel        `gorm:"foreignKey:EgressNodeID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
+	EgressNodeID *uint64                 `gorm:"index:idx_accounts_egress_node"`
+	CreatedAt    time.Time               `gorm:"not null"`
+	UpdatedAt    time.Time               `gorm:"not null"`
+	Credential   *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	WebProfile   *webAccountProfileModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	EgressNode   *egressNodeModel        `gorm:"foreignKey:EgressNodeID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
 }
 
 func (accountModel) TableName() string { return "provider_accounts" }
@@ -285,21 +283,6 @@ type accountModelQuotaBlockModel struct {
 }
 
 func (accountModelQuotaBlockModel) TableName() string { return "account_model_quota_blocks" }
-
-// accountEgressLeaseBlockModel 是账号-节点对的租约级质量隔离(上游 {account}
-// 租约节点体系):一个账号租约的被动异常只隔离该账号-节点对,不殃及共享节点。
-type accountEgressLeaseBlockModel struct {
-	AccountID     uint64           `gorm:"primaryKey"`
-	NodeID        uint64           `gorm:"primaryKey"`
-	Reason        string           `gorm:"size:100;not null;check:chk_account_egress_lease_blocks_reason,length(trim(reason)) BETWEEN 1 AND 100"`
-	Version       string           `gorm:"size:64;not null;check:chk_account_egress_lease_blocks_version,length(trim(version)) BETWEEN 16 AND 64"`
-	CooldownUntil time.Time        `gorm:"not null"`
-	UpdatedAt     time.Time        `gorm:"not null"`
-	Account       *accountModel    `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	Node          *egressNodeModel `gorm:"foreignKey:NodeID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-}
-
-func (accountEgressLeaseBlockModel) TableName() string { return "account_egress_lease_blocks" }
 
 type clientKeyModel struct {
 	ID                    uint64  `gorm:"primaryKey;autoIncrement"`
@@ -556,14 +539,12 @@ type mediaJobModel struct {
 
 func (mediaJobModel) TableName() string { return "media_jobs" }
 
-// MaxVideoAssetBytes 是本地视频对象与上传接收的安全体积上限（256 MiB）。
-const MaxVideoAssetBytes = 256 << 20
-
 type mediaAssetModel struct {
-	ID          string `gorm:"size:64;primaryKey;check:chk_media_assets_id,length(trim(id)) BETWEEN 16 AND 64"`
-	Kind        string `gorm:"size:16;not null;check:chk_media_assets_kind,kind IN ('image','video')"`
-	StorageKey  string `gorm:"size:512;not null;uniqueIndex;check:chk_media_assets_storage_key,length(trim(storage_key)) BETWEEN 1 AND 512"`
-	MIMEType    string `gorm:"size:64;not null;check:chk_media_assets_mime,mime_type IN ('image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime')"`
+	ID         string `gorm:"size:64;primaryKey;check:chk_media_assets_id,length(trim(id)) BETWEEN 16 AND 64"`
+	Kind       string `gorm:"size:16;not null;check:chk_media_assets_kind,kind IN ('image','video')"`
+	StorageKey string `gorm:"size:512;not null;uniqueIndex;check:chk_media_assets_storage_key,length(trim(storage_key)) BETWEEN 1 AND 512"`
+	MIMEType   string `gorm:"size:64;not null;check:chk_media_assets_mime,mime_type IN ('image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime')"`
+	// 268435456 = 256 MiB, same cap as application/media.DefaultMaxVideoBytes.
 	SizeBytes   int64  `gorm:"not null;check:chk_media_assets_size,size_bytes > 0 AND size_bytes <= 268435456"`
 	SHA256      string `gorm:"size:64;not null;check:chk_media_assets_sha,length(sha256) = 64"`
 	SourceJobID string `gorm:"size:64;not null;default:'';index;check:chk_media_assets_source,source_job_id = '' OR (length(trim(source_job_id)) BETWEEN 16 AND 64 AND source_job_id = trim(source_job_id) AND kind = 'video' AND expires_at IS NULL)"`
@@ -713,30 +694,3 @@ type egressOperationsConfigModel struct {
 }
 
 func (egressOperationsConfigModel) TableName() string { return "egress_operations_config" }
-
-// accountRiskVerdictModel persists one RSC risk verdict for a Web SSO
-// identity. Confirmed denied/flagged stay fresh for DeniedTTL then become
-// patrol-due so a clean re-read can unflag; clean verdicts are re-checked
-// on the patrol cadence.
-type accountRiskVerdictModel struct {
-	AccountID  uint64    `gorm:"primaryKey"`
-	Verdict    string    `gorm:"size:16;not null;check:chk_account_risk_verdicts_verdict,verdict IN ('clean','denied','flagged','error')"`
-	BotFlagDtl string    `gorm:"size:512;not null;default:''"`
-	HTTPStatus int       `gorm:"not null;default:0"`
-	Error      string    `gorm:"size:512;not null;default:''"`
-	Source     string    `gorm:"size:32;not null;default:''"`
-	CheckedAt  time.Time `gorm:"not null"`
-	// OriginAccountID 记录触发本次判定的账号(通道隔离重放目标):Build 通道
-	// 降智产生的 verdict 重放后果时只打到该 Build,不连坐 Web 身份本身。
-	// 0 = 旧数据,重放退回 webID。
-	OriginAccountID uint64 `gorm:"not null;default:0"`
-	// Trigger 记录判定入口：degrade / patrol / manual。空=升级前旧行。
-	Trigger string `gorm:"size:16;not null;default:''"`
-	// DeniedStreak 连续 denied 次数（0=旧数据/单次）：达到运行时设置的
-	// DeniedConfirmations 才处置。AutoMigrate 对既有表补列，旧行默认 0
-	// = 未确认，重启对账不会重放它们的处置（误判批次因此
-	// 不会被 reconcile 重新打标）。
-	DeniedStreak int `gorm:"not null;default:0"`
-}
-
-func (accountRiskVerdictModel) TableName() string { return "account_risk_verdicts" }

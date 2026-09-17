@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,10 +15,10 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -115,9 +116,9 @@ func newControlDocumentFixture(t testing.TB, driver, operation string) *controlD
 	f.adapter = NewAdapter(Config{BaseURL: server.URL + "/v1"}, cipher)
 	t.Cleanup(f.adapter.base.current.Load().CloseIdleConnections)
 	f.adapter.oauth.tokenURL, f.adapter.oauth.deviceURL = server.URL+"/token", server.URL+"/device"
-	registry := provider.NewRegistry(f.adapter)
+	registry := providerimpl.NewRegistry(f.adapter)
 	f.sessions = &controlDocumentSessions{DeviceSessionRepository: memory.NewDeviceSessionStore()}
-	f.service = accountapp.NewService(f.accounts, relational.NewAuditRepository(db), f.sessions, memory.NewStickyStore(), registry, cipher, nil)
+	f.service = accountapp.NewService(f.accounts, relational.NewAuditRepository(db), f.sessions, memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	f.catalog = modelapp.NewService(f.models, f.accounts, f.service, registry)
 	t.Cleanup(func() { _ = f.catalog.Close(context.Background()) })
 	credential, _, err := f.accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "control", SourceKey: "control", Enabled: true, AuthStatus: account.AuthStatusActive, EncryptedAccessToken: encrypted, EncryptedRefreshToken: encrypted, ExpiresAt: time.Now().Add(time.Hour)})
@@ -127,7 +128,8 @@ func newControlDocumentFixture(t testing.TB, driver, operation string) *controlD
 	f.accountID = credential.ID
 	gin.SetMode(gin.TestMode)
 	f.router = gin.New()
-	accounthttp.NewHandler(f.service, nil).Register(f.router.Group("/api/admin/v1"))
+	syncService := accountsyncapp.NewService(nil, f.service, f.service, f.service, f.service, f.service, f.service, f.service, f.catalog)
+	accounthttp.NewHandler(accounthttp.Dependencies{Administration: f.service, Credentials: f.service, Maintenance: f.service, Onboarding: accountsyncapp.NewOnboarding(f.service, f.service, syncService), DeviceOnboarding: syncService}).Register(f.router.Group("/api/admin/v1"))
 	modelhttp.NewHandler(f.catalog).Register(f.router.Group("/api/admin/v1"))
 	return f
 }

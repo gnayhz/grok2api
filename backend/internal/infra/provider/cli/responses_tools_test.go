@@ -21,7 +21,7 @@ func TestNormalizeResponsesRequestFlattensNamespaceAndRestoresResponse(t *testin
 		"tool_choice":{"type":"function","name":"list","namespace":"mcp__calendar__"}
 	}`)
 
-	normalized, compatibility, err := normalizeResponsesRequest(body, "grok-4.5")
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestNormalizeResponsesRequestLoadsClientToolSearchOutput(t *testing.T) {
 		]
 	}`)
 
-	normalized, compatibility, err := normalizeResponsesRequest(body, "grok-4.5")
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestNormalizeResponsesRequestLoadsClientToolSearchOutput(t *testing.T) {
 }
 
 func TestNormalizeResponsesRequestLoadsServerToolSearchHistory(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public",
 		"input":[
 			{"type":"tool_search_call","execution":"server","call_id":"search_1","arguments":{"goal":"shipping"}},
@@ -139,7 +139,7 @@ func TestNormalizeResponsesRequestLoadsServerToolSearchHistory(t *testing.T) {
 				{"type":"function","name":"get_eta","defer_loading":true,"parameters":{"type":"object"}}
 			]}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestNormalizeResponsesRequestLoadsServerToolSearchHistory(t *testing.T) {
 }
 
 func TestNormalizeResponsesRequestEagerLoadsOptionalServerToolSearch(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{"input":"hello","tools":[{"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object"}},{"type":"tool_search"}],"tool_choice":"auto"}`), "grok-4.5")
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{"input":"hello","tools":[{"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object"}},{"type":"tool_search"}],"tool_choice":"auto"}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestNormalizeResponsesRequestEagerLoadsOptionalServerToolSearch(t *testing.
 
 func TestNormalizeResponsesRequestRejectsForcedServerToolSearch(t *testing.T) {
 	for _, tools := range []string{`[{"type":"tool_search"}]`, `[{"type":"tool_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]`} {
-		_, _, err := normalizeResponsesRequest([]byte(`{"input":"hello","tools":`+tools+`,"tool_choice":{"type":"tool_search"},"parallel_tool_calls":true}`), "grok-4.5")
+		_, _, err := normalizeResponsesRequestWithMetadata([]byte(`{"input":"hello","tools":`+tools+`,"tool_choice":{"type":"tool_search"},"parallel_tool_calls":true}`), "grok-4.5", nil)
 		if err == nil {
 			t.Fatal("forced server search must not become auto or disappear")
 		}
@@ -188,10 +188,10 @@ func TestNormalizeResponsesRequestRejectsForcedServerToolSearch(t *testing.T) {
 }
 
 func TestNormalizeResponsesRequestSerializesParallelClientToolSearch(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello","parallel_tool_calls":true,
 		"tools":[{"type":"tool_search","execution":"client"}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,10 +205,10 @@ func TestNormalizeResponsesRequestSerializesParallelClientToolSearch(t *testing.
 }
 
 func TestNormalizeResponsesRequestLoadsDeferredToolWithoutSearch(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object"}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,10 +223,10 @@ func TestNormalizeResponsesRequestLoadsDeferredToolWithoutSearch(t *testing.T) {
 }
 
 func TestNormalizeResponsesRequestKeepsOrdinaryFunctionsOnNativePath(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"function","name":"lookup","description":"Lookup","parameters":{"type":"object"}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestNormalizeResponsesRequestKeepsOrdinaryFunctionsOnNativePath(t *testing.
 }
 
 func TestNormalizeResponsesRequestRemovesNullableFunctionParameterRoot(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"function","name":"automation_update","parameters":{
 			"anyOf":[
@@ -252,7 +252,7 @@ func TestNormalizeResponsesRequestRemovesNullableFunctionParameterRoot(t *testin
 				{"type":"null"}
 			]
 		}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,12 +278,12 @@ func TestNormalizeResponsesRequestRemovesNullableFunctionParameterRoot(t *testin
 }
 
 func TestNormalizeResponsesRequestRejectsNullableNonObjectFunctionRoot(t *testing.T) {
-	_, _, err := normalizeResponsesRequest([]byte(`{
+	_, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"function","name":"invalid","parameters":{
 			"anyOf":[{"type":"object"},{"type":"string"},{"type":"null"}]
 		}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	requestErr, ok := err.(*responsesRequestError)
 	if !ok || requestErr.Param != "tools[0].parameters" || requestErr.Code != "invalid_parameter" {
 		t.Fatalf("error = %#v", err)
@@ -291,7 +291,7 @@ func TestNormalizeResponsesRequestRejectsNullableNonObjectFunctionRoot(t *testin
 }
 
 func TestNormalizeResponsesRequestRemovesNullableLocalRefFunctionRoot(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"function","name":"lookup","parameters":{
 			"$defs":{"Args":{
@@ -301,7 +301,7 @@ func TestNormalizeResponsesRequestRemovesNullableLocalRefFunctionRoot(t *testing
 			}},
 			"anyOf":[{"$ref":"#/$defs/Args"},{"type":"null"}]
 		}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestNormalizeResponsesRequestRemovesNullableLocalRefFunctionRoot(t *testing
 }
 
 func TestNormalizeResponsesRequestRejectsNullableExternalRefFunctionRoot(t *testing.T) {
-	_, _, err := normalizeResponsesRequest([]byte(`{
+	_, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"function","name":"lookup","parameters":{
 			"anyOf":[
@@ -336,7 +336,7 @@ func TestNormalizeResponsesRequestRejectsNullableExternalRefFunctionRoot(t *test
 				{"type":"null"}
 			]
 		}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	requestErr, ok := err.(*responsesRequestError)
 	if !ok || requestErr.Param != "tools[0].parameters" || requestErr.Code != "invalid_parameter" {
 		t.Fatalf("error = %#v", err)
@@ -399,13 +399,13 @@ func TestNormalizeBuildFunctionParametersRootVariants(t *testing.T) {
 }
 
 func TestResponsesCompatibilityRestoresNamespaceAndToolSearchStream(t *testing.T) {
-	_, compatibility, err := normalizeResponsesRequest([]byte(`{
+	_, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[
 			{"type":"namespace","name":"crm","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
 			{"type":"tool_search","execution":"client","parameters":{"type":"object"}}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

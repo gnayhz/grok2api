@@ -2,6 +2,7 @@ package egress
 
 import (
 	"errors"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"net/http"
 	"testing"
 
@@ -11,12 +12,12 @@ import (
 
 func TestLogicalBudgetIncludesConnectionRetriesAndReservedRecovery(t *testing.T) {
 	budget := inferencedomain.NewAttemptBudget(2)
-	ctx := WithPhysicalCallBudget(ledgerContext(), budget)
+	ctx := physical.WithPhysicalCallBudget(ledgerContext(), budget)
 	permit, err := budget.Reserve(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx = WithPhysicalCallPermit(ctx, permit)
+	ctx = physical.WithPhysicalCallPermit(ctx, permit)
 	client := &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) {
 		return nil, errors.New("proxyconnect tcp: connection refused")
 	}}
@@ -24,8 +25,8 @@ func TestLogicalBudgetIncludesConnectionRetriesAndReservedRecovery(t *testing.T)
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.test/responses", http.NoBody)
 	_, err = lease.Do(request)
 	permit.Release()
-	if !errors.Is(err, inferencedomain.ErrAttemptBudget) || client.calls != 2 || len(PhysicalFacts(ctx)) != 2 || budget.Remaining() != 0 {
-		t.Fatalf("err=%v calls=%d facts=%d remaining=%d", err, client.calls, len(PhysicalFacts(ctx)), budget.Remaining())
+	if !errors.Is(err, inferencedomain.ErrAttemptBudget) || client.calls != 2 || len(physical.PhysicalFacts(ctx)) != 2 || budget.Remaining() != 0 {
+		t.Fatalf("err=%v calls=%d facts=%d remaining=%d", err, client.calls, len(physical.PhysicalFacts(ctx)), budget.Remaining())
 	}
 	if _, ok := feedbackKind(domainegress.ScopeBuild, 0, err); ok {
 		t.Fatal("budget rejection degraded network health")
@@ -40,8 +41,8 @@ func TestTransportCannotUseAnotherLogicalRequestsReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer permit.Release()
-	ctx := WithPhysicalCallPermit(WithPhysicalCallBudget(ledgerContext(), budget), permit)
-	if err = acquirePhysicalCallBudget(ctx); !errors.Is(err, inferencedomain.ErrAttemptBudget) {
+	ctx := physical.WithPhysicalCallPermit(physical.WithPhysicalCallBudget(ledgerContext(), budget), permit)
+	if err = physical.AcquirePhysicalCallBudget(ctx); !errors.Is(err, inferencedomain.ErrAttemptBudget) {
 		t.Fatalf("foreign permit consumed: %v", err)
 	}
 	if budget.Remaining() != 1 {

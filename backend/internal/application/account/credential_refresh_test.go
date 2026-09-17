@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -12,8 +15,8 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -164,10 +167,10 @@ func TestEnsureCredentialCollapsesRefreshAcrossServiceInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &credentialRefreshAdapter{delay: 40 * time.Millisecond}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	lock := memory.NewLockStore()
-	first := NewService(repository, nil, nil, nil, registry, nil, lock)
-	second := NewService(repository, nil, nil, nil, registry, nil, lock)
+	first := NewService(repository, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lock)
+	second := NewService(repository, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lock)
 	start := make(chan struct{})
 	errors := make(chan error, 2)
 	for _, service := range []*Service{first, second} {
@@ -345,7 +348,7 @@ func TestCredentialRefreshDueQueryStaysBoundedForLargePool(t *testing.T) {
 			Enabled: true, AuthStatus: accountdomain.AuthStatusActive, MaxConcurrent: 1,
 		})
 	}
-	if _, err := service.accounts.UpsertManyByIdentity(ctx, values); err != nil {
+	if _, err := service.accounts.ImportAccounts(ctx, testsupport.AccountImports(values)); err != nil {
 		t.Fatal(err)
 	}
 	ids, err := service.accounts.ListDueCredentialRefreshIDs(ctx, now, credentialRefreshBatchSize)
@@ -829,7 +832,7 @@ func newCredentialRefreshTestService(t *testing.T, now time.Time) (*Service, acc
 		t.Fatal(err)
 	}
 	adapter := &credentialRefreshAdapter{}
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	return service, credential, adapter
 }
 

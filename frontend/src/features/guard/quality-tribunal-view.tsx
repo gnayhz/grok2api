@@ -20,26 +20,22 @@ import { memo, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
 	Dialog,
 	DialogHeader,
 	DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Spinner } from "@/components/ui/spinner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-	useOperationsAccounts,
-	useOperationsCases,
-	useOperationsNodes,
-} from "@/features/operations/operations-queries";
+} from "@/shared/ui/dialog";
+import { Input } from "@/shared/ui/input";
+import { Spinner } from "@/shared/ui/spinner";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+
 import {
 	OperationsDialogContent as DialogContent,
 	OperationsError,
 	StatusPill,
-} from "@/features/operations/operations-ui";
+} from "@/shared/ui/operations";
 import { Pagination } from "@/shared/components/pagination";
 import { cn } from "@/shared/lib/cn";
 
@@ -50,10 +46,13 @@ import {
 	triggerQualityReview,
 	type ExperimentReport,
 	type QualityCase,
-} from "./quality-api";
+} from "@/entities/guard/quality-api";
 import { caseDispositionKey } from "./quality-case-presentation";
 import { QualityAccountReference, QualityExitReference } from "./quality-identity";
 import { getProbeFinding } from "./quality-view";
+import { useAccountDirectory } from "@/entities/account/account-queries";
+import { useEgressNodes } from "@/entities/egress/egress-queries";
+import { useQualityCases } from "@/entities/guard/guard-queries";
 import {
 	buildQualityExitIPIndex,
 	qualityAccountDisplay,
@@ -115,9 +114,9 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 	const [search, setSearch] = useState("");
 	const [page, setPage] = useState(1);
 
-	const cases = useOperationsCases();
-	const accounts = useOperationsAccounts();
-	const nodes = useOperationsNodes();
+	const cases = useQualityCases();
+	const accounts = useAccountDirectory();
+	const nodes = useEgressNodes();
 
 	const ips = useQuery({
 		queryKey: ["quality", "nodes"],

@@ -83,7 +83,7 @@ func TestOrphanCandidatesAreBoundedAndFailuresStopDeletion(t *testing.T) {
 			if scenario == "delete-failed" {
 				objects.deleteErr = cause
 			}
-			service := NewService(assets, nil, objects, nil, Config{})
+			service := NewServiceWithTickets(assets, nil, nil, objects, nil, Config{})
 			n, err := service.sweepOrphanObjects(ctx, now)
 			if scenario == "success" {
 				if err != nil || n != 402 || queries != 3 || len(queried) != 401 {
@@ -111,7 +111,7 @@ func TestOrphanCandidatesAreBoundedAndFailuresStopDeletion(t *testing.T) {
 		})
 	}
 	objects := &sweepObjects{objects: map[string]time.Time{"fresh": now}}
-	service := NewService(nil, nil, objects, nil, Config{})
+	service := NewServiceWithTickets(nil, nil, nil, objects, nil, Config{})
 	if n, err := service.sweepOrphanObjects(context.Background(), now); n != 0 || err != nil {
 		t.Fatalf("fresh-only needs no SQL: %d %v", n, err)
 	}
@@ -139,14 +139,14 @@ func TestOrphanSQLCloseRetainsObjectsAndRebuildRetries(t *testing.T) {
 			if err = db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			subject := NewService(relational.NewMediaAssetRepository(db), nil, disk, nil, Config{})
+			subject := NewServiceWithTickets(relational.NewMediaAssetRepository(db), nil, nil, disk, nil, Config{})
 			if n, err := subject.sweepOrphanObjects(ctx, time.Now().UTC()); err == nil || n != 0 {
 				t.Fatalf("closed SQL permitted deletion: n=%d err=%v", n, err)
 			}
 			if _, err = os.Stat(path); err != nil {
 				t.Fatalf("unverified orphan lost: %v", err)
 			}
-			fresh := NewService(relational.NewMediaAssetRepository(peer), nil, disk, nil, Config{})
+			fresh := NewServiceWithTickets(relational.NewMediaAssetRepository(peer), nil, nil, disk, nil, Config{})
 			if n, err := fresh.sweepOrphanObjects(ctx, time.Now().UTC()); err != nil || n != 1 {
 				t.Fatalf("rebuild did not reclaim orphan: n=%d err=%v", n, err)
 			}

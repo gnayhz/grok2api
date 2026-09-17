@@ -47,7 +47,14 @@ func (s *Service) syncSource(ctx context.Context, operations OperationsRepositor
 		recordFailure()
 		return ImportResult{}, ErrSubscriptionSync
 	}
-	content, err := fetchProxySubscription(ctx, urlValue, fetchProxy, s.httpTransportOwner())
+	s.mu.RLock()
+	fetcher := s.subscriptionFetcher
+	s.mu.RUnlock()
+	if fetcher == nil {
+		recordFailure()
+		return ImportResult{}, ErrSubscriptionSync
+	}
+	content, err := fetcher.FetchProxySubscription(ctx, urlValue, fetchProxy)
 	if err != nil {
 		recordFailure()
 		return ImportResult{}, ErrSubscriptionSync

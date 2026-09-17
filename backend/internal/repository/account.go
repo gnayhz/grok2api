@@ -135,8 +135,6 @@ type AccountRepository interface {
 	List(ctx context.Context, query AccountListQuery) ([]account.Credential, int64, error)
 	// TombstonedEmails 报告给定 email 集中已墓碑(手动删除)的子集。
 	TombstonedEmails(ctx context.Context, emails []string) (map[string]struct{}, error)
-	// ClearTombstones 清除墓碑(恢复重新导入通道)。
-	ClearTombstones(ctx context.Context, emails []string) (int64, error)
 	// ListProviderAccountBatch 以 ID 游标取一批账号；total 仅在 afterID 为 0 时返回。
 	ListProviderAccountBatch(ctx context.Context, provider account.Provider, afterID uint64, limit int) ([]account.Credential, int64, error)
 	Summarize(ctx context.Context, now time.Time) ([]AccountSummary, error)
@@ -158,7 +156,6 @@ type AccountRepository interface {
 	ListMissingConsoleSyncAccounts(ctx context.Context, ids []uint64) ([]account.Credential, error)
 	// ListMissingConsoleSyncBatch 以 ID 游标取缺少 Console 账号的 Web 账号；total/skipped 仅在 afterID 为 0 时返回。
 	ListMissingConsoleSyncBatch(ctx context.Context, afterID uint64, limit int) ([]account.Credential, int64, int64, error)
-	HasActive(ctx context.Context, provider account.Provider) (bool, error)
 	ListRoutingCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string) ([]account.RoutingCandidate, error)
 	// GetRoutingCandidate returns current secret-free facts for one physical
 	// claim from a consistent read snapshot; no provider cache or stale fallback.
@@ -168,6 +165,9 @@ type AccountRepository interface {
 	LinkWebToBuild(ctx context.Context, web, build account.CredentialRef) error
 	GetBillings(ctx context.Context, accountIDs []uint64) (map[uint64]account.Billing, error)
 	GetQuotaRecoveries(ctx context.Context, accountIDs []uint64) (map[uint64]account.QuotaRecovery, error)
+	// UpsertByIdentity is the declared cross-package test-seeding seam: it
+	// installs material unconditionally (no deletion-policy gate). Production
+	// imports go through ImportAccounts; only _test.go files may call this.
 	UpsertByIdentity(ctx context.Context, value account.Credential) (account.Credential, bool, error)
 	// ImportAccounts atomically checks current deletion policy and optional
 	// source references, then installs eligible material. One result per input,
@@ -200,9 +200,6 @@ type AccountRepository interface {
 	NextCredentialRefreshDueAt(ctx context.Context) (*time.Time, error)
 	UpdateObservedModel(ctx context.Context, id uint64, model string, observedAt time.Time) error
 	ApplyHealth(ctx context.Context, id uint64, provider account.Provider, event account.HealthEvent) (account.HealthResult, error)
-	// UpdateRiskAttribution 写入风控标记及来源元数据（巡检/降智/人工）。
-	UpdateRiskAttribution(ctx context.Context, id uint64, attr RiskAttribution) error
-
 	// TouchLastUsed persists request activity without changing routing health or
 	// invalidating candidate snapshots.
 	TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error
@@ -222,9 +219,22 @@ type AccountRepository interface {
 	ConsumeQuota(ctx context.Context, value account.QuotaConsumption, now time.Time) (account.QuotaConsumptionReceipt, error)
 	ListPendingQuotaRefreshes(ctx context.Context, afterID uint64, limit int) ([]account.PendingQuotaRefresh, error)
 	ResolveDeletedQuotaConsumptions(ctx context.Context, accountID uint64, now time.Time) error
-	UpsertManyByIdentity(ctx context.Context, values []account.Credential) ([]AccountUpsertResult, error)
 	ExhaustQuotaWindow(ctx context.Context, accountID uint64, mode string, resetAt *time.Time, now time.Time) error
-	ListDueQuotaWindows(ctx context.Context, now time.Time, limit int) ([]account.QuotaWindow, error)
+	ListDueQuotaWindows(ctx context.Context, now time.Time, query DueQuotaWindowQuery) ([]account.QuotaWindow, error)
 	ListQuotaRecoveryWindows(ctx context.Context, limit int) ([]account.QuotaWindow, error)
 	ListStaleWebQuotaAccountIDs(ctx context.Context, before time.Time, limit int) ([]uint64, error)
+}
+
+// QuotaWindowCursor orders due candidates without offset scans. Mode breaks
+// ties when an account has multiple windows with the same reset timestamp.
+type QuotaWindowCursor struct {
+	ResetAt   time.Time
+	AccountID uint64
+	Mode      string
+}
+
+type DueQuotaWindowQuery struct {
+	Limit    int
+	Provider account.Provider
+	After    *QuotaWindowCursor
 }

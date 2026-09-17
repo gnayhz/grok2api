@@ -97,13 +97,3 @@ func unsupportedBuildToolError(kind, param string) error {
 		Param:   param + ".type", Code: "unsupported_parameter",
 	}
 }
-
-func hasToolType(tools []any, kind string) bool {
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if ok && stringField(tool, "type") == kind {
-			return true
-		}
-	}
-	return false
-}

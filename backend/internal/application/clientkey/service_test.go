@@ -25,7 +25,7 @@ func TestCreateUsesG2AClientKeyFormat(t *testing.T) {
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService("test-owner", relational.NewClientKeyRepository(database), nil, nil, 60, 5, testCipher(t))
+	service := NewService("test-owner", relational.NewClientKeyRepository(database), nil, nil, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	created, err := service.Create(ctx, CreateInput{Name: "test", Enabled: true})
 	if err != nil {
@@ -34,7 +34,7 @@ func TestCreateUsesG2AClientKeyFormat(t *testing.T) {
 	if !strings.HasPrefix(created.Secret, "g2a_") {
 		t.Fatalf("client key = %q", created.Secret)
 	}
-	prefix, ok := security.SplitClientKey(created.Secret)
+	prefix, ok := clientkeydomain.SplitClientKey(created.Secret)
 	if !ok || prefix != created.Key.Prefix {
 		t.Fatalf("parsed prefix = %q, key prefix = %q, ok = %v", prefix, created.Key.Prefix, ok)
 	}
@@ -70,7 +70,7 @@ func TestUnlimitedRuntimeLimitsBypassLimiterStores(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := relational.NewClientKeyRepository(database)
-	service := NewService("test-owner", repo, failingRateLimiter{}, failingConcurrencyLimiter{}, 60, 5, testCipher(t))
+	service := NewService("test-owner", repo, failingRateLimiter{}, failingConcurrencyLimiter{}, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	created, err := service.Create(ctx, CreateInput{
 		Name: "unlimited", Enabled: true,
@@ -104,22 +104,22 @@ func TestAuthenticateDistinguishesRuntimeStoreFailures(t *testing.T) {
 	}
 	repo := relational.NewClientKeyRepository(database)
 	cipher := testCipher(t)
-	created, err := NewService("test-owner", repo, nil, nil, 60, 5, cipher).Create(ctx, CreateInput{Name: "test", Enabled: true})
+	created, err := NewService("test-owner", repo, nil, nil, 60, 5, cipher, security.RandomTokenSource{}).Create(ctx, CreateInput{Name: "test", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rateFailure := NewService("test-owner", repo, failingRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, cipher)
+	rateFailure := NewService("test-owner", repo, failingRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, cipher, security.RandomTokenSource{})
 	defer closeKeyService(t, rateFailure)
 	if _, _, err := rateFailure.Authenticate(ctx, created.Secret); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("rate limiter error = %v", err)
 	}
-	concurrencyFailure := NewService("test-owner", repo, successfulRateLimiter{}, failingConcurrencyLimiter{}, 60, 5, cipher)
+	concurrencyFailure := NewService("test-owner", repo, successfulRateLimiter{}, failingConcurrencyLimiter{}, 60, 5, cipher, security.RandomTokenSource{})
 	defer closeKeyService(t, concurrencyFailure)
 	if _, _, err := concurrencyFailure.Authenticate(ctx, created.Secret); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("concurrency limiter error = %v", err)
 	}
-	persistenceFailure := NewService("test-owner", failingClientKeyRepository{ClientKeyRepository: repo}, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, cipher)
+	persistenceFailure := NewService("test-owner", failingClientKeyRepository{ClientKeyRepository: repo}, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, cipher, security.RandomTokenSource{})
 	defer closeKeyService(t, persistenceFailure)
 	if _, _, err := persistenceFailure.Authenticate(ctx, created.Secret); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("client key repository error = %v", err)
@@ -137,7 +137,7 @@ func TestBillingLimitUsesAtomicReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := relational.NewClientKeyRepository(database)
-	service := NewService("test-owner", keys, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t))
+	service := NewService("test-owner", keys, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	created, err := service.Create(ctx, CreateInput{Name: "limited", Enabled: true, BillingLimitUSDTicks: 6_000_000_000})
 	if err != nil {
@@ -192,7 +192,7 @@ func TestCleanupExpiredBillingProtectsActiveRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := relational.NewClientKeyRepository(database)
-	service := NewService("test-owner", repository, nil, nil, 60, 5, testCipher(t))
+	service := NewService("test-owner", repository, nil, nil, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	created, err := service.Create(ctx, CreateInput{Name: "active", Enabled: true, BillingLimitUSDTicks: 100})
 	if err != nil {
@@ -223,12 +223,12 @@ func TestAuthenticateCachesUnlimitedKeyAndInvalidatesOnDisable(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := relational.NewClientKeyRepository(database)
-	created, err := NewService("test-owner", base, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t)).Create(ctx, CreateInput{Name: "cached", Enabled: true})
+	created, err := NewService("test-owner", base, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t), security.RandomTokenSource{}).Create(ctx, CreateInput{Name: "cached", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	repository := &countingClientKeyRepository{ClientKeyRepository: base}
-	service := NewService("test-owner", repository, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t))
+	service := NewService("test-owner", repository, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	for range 2 {
 		_, release, err := service.Authenticate(ctx, created.Secret)
@@ -262,7 +262,7 @@ func TestAccountScopePersistsAndAuthCacheInvalidatesOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := relational.NewClientKeyRepository(database)
-	service := NewService("test-owner", base, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t))
+	service := NewService("test-owner", base, successfulRateLimiter{}, successfulConcurrencyLimiter{}, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	created, err := service.Create(ctx, CreateInput{Name: "scoped", Enabled: true, ProviderScope: clientkeydomain.ProviderScopeBuild | clientkeydomain.ProviderScopeWeb, TierScope: clientkeydomain.TierScopeFree})
 	if err != nil {
@@ -396,7 +396,7 @@ func TestAuthenticateCachesUnknownPrefixNegatively(t *testing.T) {
 		t.Fatal(err)
 	}
 	counting := &countingClientKeyRepository{ClientKeyRepository: relational.NewClientKeyRepository(database)}
-	service := NewService("test-owner", counting, nil, nil, 60, 5, testCipher(t))
+	service := NewService("test-owner", counting, nil, nil, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	for range 3 {
 		// Key 形如 g2a_<prefix>_<secret>:格式合法但前缀不存在, 才会走到 DB 查询。
@@ -420,7 +420,7 @@ func TestAuthenticateNegativeCacheClearedOnBatchInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	counting := &countingClientKeyRepository{ClientKeyRepository: relational.NewClientKeyRepository(database)}
-	service := NewService("test-owner", counting, nil, nil, 60, 5, testCipher(t))
+	service := NewService("test-owner", counting, nil, nil, 60, 5, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	unknown := "g2a_deadbeefcafe_" + strings.Repeat("ab", 24)
 	if _, _, err := service.Authenticate(ctx, unknown); err != ErrInvalidKey {
@@ -470,7 +470,7 @@ func TestBillingRequiresStableOwnerBeforeReservingOrExpiring(t *testing.T) {
 	if err := db.InitializeSchema(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService("", relational.NewClientKeyRepository(db), nil, nil, 120, 8, testCipher(t))
+	service := NewService("", relational.NewClientKeyRepository(db), nil, nil, 120, 8, testCipher(t), security.RandomTokenSource{})
 	defer closeKeyService(t, service)
 	key := clientkeydomain.Key{ID: 1, BillingLimitUSDTicks: 100}
 	if ok, err := service.ReserveBilling(context.Background(), key, "evt_missing_owner", 80, time.Hour); ok || !errors.Is(err, ErrRuntimeUnavailable) {

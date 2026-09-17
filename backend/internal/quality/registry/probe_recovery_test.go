@@ -92,7 +92,7 @@ func TestProbeProjectionAtomicIntentAndRestartRetry(t *testing.T) {
 	if err := store.CompleteProbeTask(ctx, id, model.ProbeDone, result, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	archive, err := evidence.New(ctx, r.DB(), evidence.DefaultConfig())
+	archive, err := evidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestUpgradeRepairsMissingProjectionWithoutDuplicatingLegacyObservation(t *t
 	r := newReconcileRegistry(t)
 	ctx := context.Background()
 	store := NewProbeTaskStore(r)
-	archive, err := evidence.New(ctx, r.DB(), evidence.DefaultConfig())
+	archive, err := evidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

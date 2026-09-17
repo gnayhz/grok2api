@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"strings"
 	"sync"
 	"testing"
@@ -55,7 +56,7 @@ func TestClientKeyPartialManagementPreservesConcurrentDisable(t *testing.T) {
 			defer cancel()
 			key := seedKeyConsistency(t, a)
 			gate := &keyReadGate{ClientKeyRepository: NewClientKeyRepository(a), read: make(chan struct{}), resume: make(chan struct{})}
-			service := clientkeyapp.NewService("fixture", gate, nil, nil, 0, 0, nil)
+			service := clientkeyapp.NewService("fixture", gate, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 			defer service.Close(context.Background())
 			done := make(chan error, 1)
 			go func() {
@@ -170,7 +171,7 @@ func TestClientKeyRenameDoesNotRestoreConcurrentlyDeletedGrant(t *testing.T) {
 			defer cancel()
 			key := seedKeyConsistency(t, a)
 			gate := &keyReadGate{ClientKeyRepository: NewClientKeyRepository(a), read: make(chan struct{}), resume: make(chan struct{})}
-			service := clientkeyapp.NewService("fixture", gate, nil, nil, 0, 0, nil)
+			service := clientkeyapp.NewService("fixture", gate, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 			defer service.Close(context.Background())
 			done := make(chan error, 1)
 			go func() {

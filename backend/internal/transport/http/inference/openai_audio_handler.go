@@ -3,6 +3,7 @@ package inference
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
 	"io"
 	"net/http"
 	"strings"
@@ -40,7 +41,6 @@ func (h *Handler) synthesizeOpenAIAudioTask(c *gin.Context) {
 }
 
 func (h *Handler) handleOpenAISpeech(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "audio speech 仅支持 application/json")
 		return
@@ -70,7 +70,7 @@ func (h *Handler) handleOpenAISpeech(c *gin.Context) {
 	if model == "" {
 		model = "grok-voice-latest"
 	}
-	voiceID := firstNonEmpty(strings.TrimSpace(request.VoiceID), strings.TrimSpace(request.Voice))
+	voiceID := texts.FirstNonEmptyTrimmed(strings.TrimSpace(request.VoiceID), strings.TrimSpace(request.Voice))
 	if mapped := mapOpenAIVoiceID(voiceID); mapped != "" {
 		voiceID = mapped
 	}

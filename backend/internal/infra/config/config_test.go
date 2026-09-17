@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 )
 
@@ -458,7 +459,7 @@ func TestValidateRejectsUnsafeRuntimeLimits(t *testing.T) {
 		"request body": func(cfg *Config) { cfg.Server.MaxBodyBytes = maxServerBodyBytes + 1 },
 		"audit buffer": func(cfg *Config) { cfg.Audit.BufferSize = maxAuditBufferSize + 1 },
 		"audit commit delay": func(cfg *Config) {
-			cfg.Audit.CommitDelay = Duration(maxAuditCommitDelay + time.Millisecond)
+			cfg.Audit.CommitDelay = Duration(auditdomain.MaxCommitDelay + time.Millisecond)
 		},
 		"client rpm":   func(cfg *Config) { cfg.ClientKeyDefaults.RPMLimit = clientkeydomain.MaxRPMLimit + 1 },
 		"image size":   func(cfg *Config) { cfg.Media.MaxImageBytes = 33 << 20 },

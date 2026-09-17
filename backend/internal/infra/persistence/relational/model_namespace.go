@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	"gorm.io/gorm"
 )
 
@@ -41,14 +40,6 @@ func modelRouteProviders(rows []modelRouteModel) []account.Provider {
 	providers := make([]account.Provider, 0, len(rows))
 	for _, row := range rows {
 		providers = append(providers, account.Provider(row.Provider))
-	}
-	return providers
-}
-
-func modelRouteProvidersForValues(rows []model.Route) []account.Provider {
-	providers := make([]account.Provider, 0, len(rows))
-	for _, row := range rows {
-		providers = append(providers, row.Provider)
 	}
 	return providers
 }

@@ -8,15 +8,11 @@ import (
 
 	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
-// normalizeResponsesRequest 改写路由字段和兼容别名，并为上游不支持的新工具协议建立请求级映射。
-func normalizeResponsesRequest(body []byte, model string) ([]byte, *responsesToolCompatibility, error) {
-	return normalizeResponsesRequestWithMetadata(body, model, nil)
-}
-
+// normalizeResponsesRequestWithMetadata 改写路由字段和兼容别名，并为上游不支持的新工具协议建立请求级映射。
 func normalizeResponsesRequestWithMetadata(body []byte, model string, metadata *provider.NormalizedRequestMetadata) ([]byte, *responsesToolCompatibility, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -65,12 +61,8 @@ func normalizeResponsesRequestWithMetadata(body []byte, model string, metadata *
 	return normalized, compatibility, nil
 }
 
-// normalizeBuildRequest applies the stable compatibility boundary shared by Responses,
+// normalizeBuildRequestWithMetadata applies the stable compatibility boundary shared by Responses,
 // Chat Completions, and Anthropic Messages before the request reaches Grok Build.
-func normalizeBuildRequest(body []byte, model, operation string) ([]byte, error) {
-	return normalizeBuildRequestWithMetadata(body, model, operation, nil)
-}
-
 func normalizeBuildRequestWithMetadata(body []byte, model, operation string, metadata *provider.NormalizedRequestMetadata) ([]byte, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {

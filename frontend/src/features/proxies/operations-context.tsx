@@ -3,21 +3,19 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { OperationsHelp } from "@/features/operations/operations-ui";
+import { Input } from "@/shared/ui/input";
+import { OperationsHelp } from "@/shared/ui/operations";
 import {
 	getEgressOperationsConfig,
 	updateEgressOperationsConfig,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 import {
 	EgressOperationsContext,
-	showError,
 	operationsFormFrom,
 	type EgressOperationsDraft,
 	type EgressOperationsValue,
-} from "@/features/proxies/operations-shared";
+} from "./operations-shared";
+import { showErrorToast } from "@/shared/lib/show-error";
 
 /**
  * Shared draft state for the unified routing configuration (总出口 / 作用域
@@ -66,7 +64,7 @@ export function EgressOperationsProvider({ children }: { children: ReactNode }) 
 			toast.success(t("proxies.routing.saved"));
 			return true;
 		} catch (error) {
-			if (!owner.signal.aborted) showError(error);
+			if (!owner.signal.aborted) showErrorToast(error, t);
 			return false;
 		} finally {
 			setSaving(false);
@@ -149,31 +147,5 @@ export function IntervalInput({
 			}}
 			onChange={(event) => onChange(event.target.value)}
 		/>
-	);
-}
-
-export function Control({ label, children }: { label: string; children: ReactNode }) {
-	return (
-		<div className="space-y-2">
-			<Label className="text-xs font-medium">{label}</Label>
-			{children}
-		</div>
-	);
-}
-
-export function ToggleControl({
-	label,
-	checked,
-	onChange,
-}: {
-	label: string;
-	checked: boolean;
-	onChange: (value: boolean) => void;
-}) {
-	return (
-		<div className="flex min-h-10 items-center justify-between gap-4 rounded-md bg-muted/45 px-3">
-			<Label className="text-xs font-medium">{label}</Label>
-			<Switch checked={checked} onCheckedChange={onChange} />
-		</div>
 	);
 }

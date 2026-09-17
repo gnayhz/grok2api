@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resetSettings } from "./settings-api.ts";
+import { resetSettings } from "@/entities/settings/settings-api";
 import { ApiError } from "@/shared/api/client";
 
 test("reset sends the exact observed revision and surfaces CAS conflict", async (t) => {

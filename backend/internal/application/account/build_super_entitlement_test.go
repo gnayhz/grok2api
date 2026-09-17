@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -11,8 +12,8 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func openAccountService(t *testing.T) (*Service, *relational.AccountRepository) {
@@ -32,7 +33,7 @@ func openAccountService(t *testing.T) (*Service, *relational.AccountRepository) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(accounts, audits, nil, nil, nil, cipher, nil)
+	service := NewService(accounts, audits, nil, nil, nil, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	return service, accounts
 }
 
@@ -58,7 +59,7 @@ func TestBuildBotFlagIndexIsRebuiltOnceAndReadWithoutTokenInspection(t *testing.
 	ctx := context.Background()
 	service, accounts := openAccountService(t)
 	var calls atomic.Int32
-	service.providers = provider.NewRegistry(credentialMetadataAdapterStub{calls: &calls})
+	service.providers = providerimpl.NewRegistry(credentialMetadataAdapterStub{calls: &calls})
 	if _, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "flagged", SourceKey: "cached-build-bot-flag",
 		EncryptedAccessToken: "enc", AuthStatus: accountdomain.AuthStatusActive, Enabled: true,
@@ -104,7 +105,7 @@ func (unknownCredentialMetadataAdapterStub) CredentialMetadata(accountdomain.Cre
 func TestBuildBotFlagIndexPreservesStoredSourceWhenInspectionFails(t *testing.T) {
 	ctx := context.Background()
 	service, accounts := openAccountService(t)
-	service.providers = provider.NewRegistry(unknownCredentialMetadataAdapterStub{})
+	service.providers = providerimpl.NewRegistry(unknownCredentialMetadataAdapterStub{})
 	created, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "unknown", SourceKey: "unknown-build-bot-flag",
 		EncryptedAccessToken: "invalid", AuthStatus: accountdomain.AuthStatusActive, Enabled: true,
@@ -129,7 +130,7 @@ func TestBuildBotFlagIndexPreservesStoredSourceWhenInspectionFails(t *testing.T)
 func TestAccountViewsIncludeBuildBotFlagMetadata(t *testing.T) {
 	ctx := context.Background()
 	service, accounts := openAccountService(t)
-	service.providers = provider.NewRegistry(credentialMetadataAdapterStub{})
+	service.providers = providerimpl.NewRegistry(credentialMetadataAdapterStub{})
 	build, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "flagged", SourceKey: "build-bot-flag",
 		EncryptedAccessToken: "enc", AuthStatus: accountdomain.AuthStatusActive, Enabled: true,

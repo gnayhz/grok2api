@@ -5,11 +5,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -17,12 +17,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
-	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const (
@@ -45,7 +43,7 @@ type VideoInput struct {
 	ClientKey   clientkey.Key
 	PublicModel string
 	// Operation defaults to generate when empty.
-	Operation   provider.VideoOperation
+	Operation   media.VideoOperation
 	Prompt      string
 	Duration    int
 	AspectRatio string
@@ -61,7 +59,7 @@ type VideoInput struct {
 }
 
 func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job, error) {
-	if s.mediaJobs == nil || s.mediaQueue == nil {
+	if s.mediaJobs == nil || s.background == nil {
 		return media.Job{}, fmt.Errorf("视频任务服务未配置")
 	}
 	operation := input.Operation
@@ -77,27 +75,13 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		return media.Job{}, fmt.Errorf("prompt 过长")
 	}
 	if operation == provider.VideoOperationGenerate {
-		hasImage := strings.TrimSpace(input.ImageURL) != ""
-		hasRefs := len(input.ReferenceURLs) > 0
-		hasRefAudio := len(input.ReferenceAudios) > 0
-		if hasImage && (hasRefs || hasRefAudio) {
-			return media.Job{}, fmt.Errorf("image 不能与 reference_images/reference_audios 同时使用")
-		}
-		if hasRefs || hasRefAudio {
-			if len(input.Prompt) == 0 {
-				return media.Job{}, fmt.Errorf("参考图/参考音频视频必须提供 prompt")
-			}
-			if resolution := strings.ToLower(strings.TrimSpace(input.Resolution)); resolution == "1080p" {
-				return media.Job{}, fmt.Errorf("参考图视频 resolution 最高 720p")
-			}
-		}
-		if len(input.Prompt) == 0 && !hasImage && !hasRefs && !hasRefAudio {
-			return media.Job{}, fmt.Errorf("文本生视频必须提供 prompt；图片生视频可以省略 prompt")
-		}
 		if strings.TrimSpace(input.VideoURL) != "" {
 			return media.Job{}, fmt.Errorf("视频生成不支持 video 输入")
 		}
-		if err := validateVideoReferenceAudios(input.ReferenceAudios); err != nil {
+		if err := media.ValidateVideoGenerationInput(strings.TrimSpace(input.ImageURL) != "", len(input.ReferenceURLs), len(input.ReferenceAudios), len(input.Prompt) > 0, input.Resolution); err != nil {
+			return media.Job{}, err
+		}
+		if err := media.ValidateVideoReferenceAudios(input.ReferenceAudios); err != nil {
 			return media.Job{}, err
 		}
 	} else {
@@ -178,7 +162,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	accountID := lease.Credential.ID
 	lease.Release()
-	token, err := security.NewOpaqueToken(18)
+	token, err := s.tokens.NewOpaqueToken(18)
 	if err != nil {
 		return media.Job{}, err
 	}
@@ -207,7 +191,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		}
 		return media.Job{}, err
 	}
-	if !s.enqueueVideoJob(job.ID) {
+	if !s.background.Enqueue(job.ID) {
 		s.logger.Warn("video_job_queue_full", "job_id", job.ID)
 	}
 	return job, nil
@@ -329,10 +313,10 @@ func (s *Service) OpenVideoContent(ctx context.Context, id string, key clientkey
 		return nil, "", 0, ErrResponseAccountUnavailable
 	}
 	downloader, ok := adapter.(provider.VideoContentDownloader)
-	if !ok || s.selector == nil || s.selector.accounts == nil || s.accounts == nil {
+	if !ok || s.selector == nil || !s.selector.HasAccountStore() || s.accounts == nil {
 		return nil, "", 0, ErrResponseAccountUnavailable
 	}
-	credential, err := s.selector.accounts.Get(ctx, job.AccountID)
+	credential, err := s.selector.Account(ctx, job.AccountID)
 	if err != nil {
 		return nil, "", 0, ErrResponseAccountUnavailable
 	}
@@ -354,7 +338,7 @@ func (s *Service) RecoverVideoJobs(ctx context.Context) error {
 		return errors.Join(usageErr, err)
 	}
 	for _, job := range values {
-		if !s.enqueueVideoJob(job.ID) {
+		if !s.background.Enqueue(job.ID) {
 			break
 		}
 	}
@@ -362,65 +346,13 @@ func (s *Service) RecoverVideoJobs(ctx context.Context) error {
 }
 
 // RunVideoWorkers 使用固定 Worker 处理持久化任务，避免突发请求按任务创建无界 goroutine。
+// RunVideoWorkers 启动媒体后台 worker 池（组件持有状态与生命周期；
+// 重复启动被拒绝，ctx 取消后 worker 排空退出）。
 func (s *Service) RunVideoWorkers(ctx context.Context) {
-	if s.mediaQueue == nil || s.mediaWorker <= 0 {
+	if s.background == nil {
 		return
 	}
-	var workers sync.WaitGroup
-	workers.Add(s.mediaWorker)
-	for range s.mediaWorker {
-		go func() {
-			defer workers.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case id := <-s.mediaQueue:
-					err := batch.Do(ctx, func(workCtx context.Context) error {
-						s.processVideoJob(workCtx, id)
-						return nil
-					})
-					s.mediaMu.Lock()
-					delete(s.mediaQueued, id)
-					s.mediaMu.Unlock()
-					if err != nil && ctx.Err() == nil {
-						if panicErr, ok := err.(*batch.PanicError); ok {
-							s.logger.Error("video_worker_panicked", "job_id", id, "error", panicErr, "stack", string(panicErr.Stack))
-						} else {
-							s.logger.Error("video_worker_failed", "job_id", id, "error", err)
-						}
-					}
-				}
-			}
-		}()
-	}
-	workers.Wait()
-}
-
-func (s *Service) enqueueVideoJob(id string) bool {
-	if id == "" || s.mediaQueue == nil {
-		return false
-	}
-	s.mediaMu.Lock()
-	if _, exists := s.mediaQueued[id]; exists {
-		s.mediaMu.Unlock()
-		return true
-	}
-	s.mediaQueued[id] = struct{}{}
-	s.mediaMu.Unlock()
-	select {
-	case s.mediaQueue <- id:
-		return true
-	default:
-		s.mediaMu.Lock()
-		delete(s.mediaQueued, id)
-		s.mediaMu.Unlock()
-		full := s.mediaQueueFull.Add(1)
-		if s.logger != nil && (full == 1 || full%100 == 0) {
-			s.logger.Warn("video_queue_full", "count", full, "queued", len(s.mediaQueue), "capacity", cap(s.mediaQueue))
-		}
-		return false
-	}
+	s.background.Run(ctx)
 }
 
 func (s *Service) processVideoJob(ctx context.Context, id string) {
@@ -463,7 +395,7 @@ func (s *Service) RunVideoRecovery(ctx context.Context) {
 
 func (s *Service) claimVideoJob(ctx context.Context, id string) (media.Job, bool, error) {
 	now := time.Now().UTC()
-	claimToken, err := security.NewOpaqueToken(18)
+	claimToken, err := s.tokens.NewOpaqueToken(18)
 	if err != nil {
 		return media.Job{}, false, err
 	}
@@ -490,7 +422,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		return
 	}
-	ctx, egressTrace := infraegress.WithTrace(ctx)
+	ctx, egressTrace := portphysical.WithTrace(ctx)
 	startedAt := time.Now()
 	if err := s.initializeVideoExecution(ctx, &job); err != nil {
 		s.failVideoJob(parent, job, "execution_unavailable", err, 0, nil)
@@ -573,8 +505,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	forbiddenEgressRetried := make(map[uint64]bool)
 	var retryPinnedAccountID uint64
 	failureAttempts := newFailureAttemptRecorder(http.MethodPost, "/videos/generations")
-	var selection *selectionSession
-	var lease *accountLease
+	var selection *selector.SelectionSession
+	var lease *selector.Lease
 	// The worker owns the current account from acquisition through every exit,
 	// including cancellation and panic before a result is available. Replacing
 	// an attempt releases its previous lease below; Release is idempotent.
@@ -609,7 +541,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		if lease == nil {
 			if selection == nil {
-				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, accountScope)
+				selection, err = s.selector.BeginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, accountScope)
 			}
 			if err == nil {
 				lease, err = selection.Acquire(ctx, excluded, false)
@@ -628,7 +560,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		excluded[lease.Credential.ID] = true
 		attemptCtx := attemptmeta.WithAccount(ctx, lease.Credential.ID, string(route.Provider), route.UpstreamModel)
-		credential, credErr := s.accounts.EnsureCredential(infraegress.WithPhysicalCallStage(attemptCtx, "credential_prepare"), lease.Credential, false)
+		credential, credErr := s.accounts.EnsureCredential(portphysical.WithPhysicalCallStage(attemptCtx, "credential_prepare"), lease.Credential, false)
 		if credErr != nil {
 			if parent.Err() != nil {
 				s.deferVideoJob(parent, job)
@@ -865,16 +797,12 @@ func (s *Service) acquireVideoInputSlot(ctx context.Context, references []string
 			break
 		}
 	}
-	if !hasLocalInput || s.mediaInputSlots == nil {
+	if !hasLocalInput {
 		return func() {}, nil
 	}
-	select {
-	case s.mediaInputSlots <- struct{}{}:
-		var once sync.Once
-		return func() { once.Do(func() { <-s.mediaInputSlots }) }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	// 槽位的占用/释放统一经 mediaBackground 组件方法(可重入释放保护
+	// 由组件提供),gateway 不直接触碰 inputSlots channel。
+	return s.background.AcquireInputSlot(ctx)
 }
 
 func (s *Service) validateVideoInputReferences(ctx context.Context, references []string, expectedKind string) error {
@@ -1036,8 +964,7 @@ func (s *Service) persistRemoteVideo(ctx context.Context, jobID string, adapter 
 }
 
 func waitVideoOutputRetry(ctx context.Context, attempt int) error {
-	delays := [...]time.Duration{200 * time.Millisecond, 750 * time.Millisecond}
-	timer := time.NewTimer(delays[min(attempt, len(delays)-1)])
+	timer := time.NewTimer(media.OutputPollDelay(attempt))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -1087,7 +1014,7 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 		DurationMS:       durationMS, AttemptCount: len(attempts), Attempts: append([]audit.Attempt(nil), attempts...), CreatedAt: createdAt,
 		RequestMethod: http.MethodPost, RequestPath: "/v1/videos/generations",
 	}
-	generated := job.Execution.Phase == media.VideoExecutionGenerated || (job.Execution.Phase == "" && job.Status == media.StatusCompleted)
+	generated := videoGenerated(job)
 	record.AdmissionOutcome = "admitted"
 	record.UpstreamStatusCode = upstreamStatus
 	if generated || job.Execution.Phase == media.VideoExecutionFailed {
@@ -1155,18 +1082,6 @@ func (s *Service) resolveVideoJobInputs(ctx context.Context, operation provider.
 		return "", nil, nil, "", ErrVideoInputUnavailable
 	}
 	return resolvedImage, resolvedRefs, referenceAudios, resolvedVideos[0], nil
-}
-
-func validateVideoReferenceAudios(values []string) error {
-	if len(values) > 3 {
-		return fmt.Errorf("reference_audios 最多 3 个")
-	}
-	for _, raw := range values {
-		if strings.TrimSpace(raw) == "" {
-			return fmt.Errorf("reference_audios.voice_id 不能为空")
-		}
-	}
-	return nil
 }
 
 func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, err error, upstreamStatus int, attempts []audit.Attempt) {

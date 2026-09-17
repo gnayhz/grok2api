@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -41,6 +42,71 @@ type probeDeadObservation struct {
 	confirming bool
 }
 
+// probeDeadTracker 持有死出口确认的可变状态: 观察表、互斥与容量上限。
+// Service 只经组件方法访问; 状态/锁归一个组件所有。
+type probeDeadTracker struct {
+	mu  sync.Mutex
+	obs map[uint64]probeDeadObservation
+}
+
+// observe 记录一次双族失败并返回 (fresh, act, scheduleConfirm)。
+func (t *probeDeadTracker) observe(node domain.Node, now time.Time) (fresh, act, scheduleConfirm bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.obs == nil {
+		t.obs = make(map[uint64]probeDeadObservation)
+	}
+	entry, ok := t.obs[node.ID]
+	if !ok || now.Sub(entry.at) > probeDeadWindow || entry.binding != node.EncryptedProxyURL || entry.revision != node.BindingRevision {
+		entry = probeDeadObservation{}
+	}
+	entry.binding, entry.revision = node.EncryptedProxyURL, node.BindingRevision
+	entry.at = now
+	entry.count++
+	scheduleConfirm = entry.count == 1 && !entry.confirming
+	if scheduleConfirm {
+		entry.confirming = true
+	}
+	if entry.count >= 2 {
+		entry.confirming = false
+	}
+	if len(t.obs) >= 4096 {
+		for id, value := range t.obs {
+			if now.Sub(value.at) > probeDeadWindow {
+				delete(t.obs, id)
+			}
+		}
+		if len(t.obs) >= 4096 {
+			for id := range t.obs {
+				delete(t.obs, id)
+				break
+			}
+		}
+	}
+	t.obs[node.ID] = entry
+	return entry.count == 2, entry.count >= 2, scheduleConfirm
+}
+
+func (t *probeDeadTracker) clear(nodeID uint64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	delete(t.obs, nodeID)
+	t.mu.Unlock()
+}
+
+func (t *probeDeadTracker) clearConfirming(nodeID uint64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	entry := t.obs[nodeID]
+	entry.confirming = false
+	t.obs[nodeID] = entry
+	t.mu.Unlock()
+}
+
 // observeProbeResult 是所有探活结果的统一漏斗(手动单测/批量测试/定时
 // 巡检/确认补测都经此)。waitNodeHealthy 的密集重试除外(testNode 的
 // observe=false): 那不是独立健康观测, 计入会把轮换等待期污染成"确认"。
@@ -50,57 +116,21 @@ func (s *Service) observeProbeResult(node domain.Node, result domain.ProbeResult
 	}
 	dead := result.IPv4.Status == domain.ProbeStatusUnhealthy && result.IPv6.Status == domain.ProbeStatusUnhealthy
 	now := time.Now().UTC()
-	s.probeDeadMu.Lock()
 	if !dead {
-		delete(s.probeDead, node.ID)
-		s.probeDeadMu.Unlock()
+		s.probeDead.clear(node.ID)
 		return
 	}
 	if s.probeDead == nil {
-		s.probeDead = make(map[uint64]probeDeadObservation)
+		s.probeDead = &probeDeadTracker{}
 	}
-	entry, ok := s.probeDead[node.ID]
-	if !ok || now.Sub(entry.at) > probeDeadWindow || entry.binding != node.EncryptedProxyURL || entry.revision != node.BindingRevision {
-		entry = probeDeadObservation{}
-	}
-	entry.binding, entry.revision = node.EncryptedProxyURL, node.BindingRevision
-	entry.at = now
-	entry.count++
-	scheduleConfirm := entry.count == 1 && !entry.confirming
-	if scheduleConfirm {
-		entry.confirming = true
-	}
-	if entry.count >= 2 {
-		entry.confirming = false
-	}
-	if len(s.probeDead) >= 4096 {
-		for id, value := range s.probeDead {
-			if now.Sub(value.at) > probeDeadWindow {
-				delete(s.probeDead, id)
-			}
-		}
-		if len(s.probeDead) >= 4096 {
-			for id := range s.probeDead {
-				delete(s.probeDead, id)
-				break
-			}
-		}
-	}
-	s.probeDead[node.ID] = entry
-	fresh := entry.count == 2
-	act := entry.count >= 2
+	fresh, act, scheduleConfirm := s.probeDead.observe(node, now)
 	// 捕获当前确认延迟：confirmProbeLater 是异步 goroutine，事后读取
 	// 可变包级变量会与测试的恢复写入构成数据竞争（race detector 已
 	// 抓获）。在调度点取快照即可根治。
 	confirmDelay := probeDeadConfirmDelay
-	s.probeDeadMu.Unlock()
 	if scheduleConfirm {
 		if !s.background().after(confirmDelay, func(ctx context.Context) { s.confirmProbe(ctx, node) }) {
-			s.probeDeadMu.Lock()
-			entry := s.probeDead[node.ID]
-			entry.confirming = false
-			s.probeDead[node.ID] = entry
-			s.probeDeadMu.Unlock()
+			s.probeDead.clearConfirming(node.ID)
 		}
 	}
 	if act {
@@ -152,11 +182,13 @@ func (s *Service) markProbeDead(observed domain.Node, fresh bool) {
 	if node.CooldownUntil != nil && node.CooldownUntil.After(now) && node.LastError == domain.LastErrorExitIPQuality {
 		return
 	}
+	// 池模式判定委托 domain.IsPoolMode 单源策略(节点池标志 || 账号模板
+	// 代理);不得在调用方手拼同一条件——三处早退曾各自维护平行副本。
 	if node.ProxyPool {
 		return
 	}
 	if cipher != nil {
-		if proxyURL, decryptErr := cipher.Decrypt(node.EncryptedProxyURL); decryptErr == nil && domain.IsAccountTemplateProxy(proxyURL) {
+		if proxyURL, decryptErr := cipher.Decrypt(node.EncryptedProxyURL); decryptErr == nil && domain.IsPoolMode(false, domain.IsAccountTemplateProxy(proxyURL)) {
 			return
 		}
 	}

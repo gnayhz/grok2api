@@ -106,9 +106,6 @@ func fhttpResponseAsHTTP(response *fhttp.Response) *http.Response {
 	return &http.Response{StatusCode: response.StatusCode, Header: http.Header(response.Header), Body: response.Body}
 }
 
-func newBrowserClient(proxyURL, userAgent string) (*browserClient, error) {
-	return newBrowserClientWithBudget(proxyURL, userAgent, nil)
-}
 func newBrowserClientWithBudget(proxyURL, userAgent string, budget *netbudget.Runtime) (*browserClient, error) {
 	var dial browsertransport.DialContextFunc
 	if proxyURL != "" {

@@ -1,9 +1,9 @@
 import { useTranslation } from "react-i18next";
 
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { DashboardDTO } from "@/features/dashboard/dashboard-api";
-import { formatUSD } from "@/features/dashboard/dashboard-format";
-import { DashboardPanel } from "@/features/dashboard/dashboard-panel";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/shared/ui/table";
+import type { DashboardDTO } from "@/entities/dashboard/dashboard-api";
+import { formatUSD } from "./dashboard-format";
+import { DashboardPanel } from "./dashboard-panel";
 import { EmptyState, TableLoadingRow } from "@/shared/components/data-state";
 import { cn } from "@/shared/lib/cn";
 import { formatNumber } from "@/shared/lib/format";

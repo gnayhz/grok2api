@@ -69,8 +69,8 @@ func TestCompletedGroupReleasesBeforeOtherGroupAndIsNotReheld(t *testing.T) {
 			s := newFixtureCourt(cfg, b.registry, storeSource{b.evidence}, simpleTaskDispatcher{store})
 			defer s.Close(context.Background())
 			id := openSimpleTestCase(t, s, b.registry)
-			calls := 0
-			s.SetAccountReleaseHook(func(context.Context, uint64) { calls++ })
+			releaseCalls := 0
+			s.SetAccountReleased(func(context.Context, uint64) error { releaseCalls++; return nil })
 			tasks, err := store.ClaimPendingProbeTasks(context.Background(), 32)
 			if err != nil {
 				t.Fatal(err)
@@ -105,15 +105,26 @@ func TestCompletedGroupReleasesBeforeOtherGroupAndIsNotReheld(t *testing.T) {
 				if b.registry.AccountEligible(7) != (direction == model.ProbeAccountDifferential) || b.registry.ExitEligible(3) != (direction == model.ProbeExitJury) {
 					t.Fatal("clear party held or pending party released")
 				}
-			}
-			if direction == model.ProbeAccountDifferential && calls != 1 {
-				t.Fatalf("release hook calls=%d", calls)
+				// The cleared account must be reported once, on whichever round
+				// actually freed it; a still-held account is never reported.
+				wantReleaseCalls := 0
+				if direction == model.ProbeAccountDifferential {
+					wantReleaseCalls = 1
+				}
+				if releaseCalls != wantReleaseCalls {
+					t.Fatalf("account release reports=%d, want %d for direction %s", releaseCalls, wantReleaseCalls, direction)
+				}
 			}
 			if _, err = s.Evaluate(context.Background(), time.Now().Add(cfg.InvestigationTimeout+time.Minute)); err != nil {
 				t.Fatal(err)
 			}
 			if !b.registry.AccountEligible(7) || !b.registry.ExitEligible(3) {
 				t.Fatal("deadline failed to release remaining party")
+			}
+			// Whichever path freed the account — the early release or the
+			// closing settle — it is reported exactly once, never twice.
+			if releaseCalls != 1 {
+				t.Fatalf("account must be reported exactly once across both paths, reports=%d for direction %s", releaseCalls, direction)
 			}
 		})
 	}

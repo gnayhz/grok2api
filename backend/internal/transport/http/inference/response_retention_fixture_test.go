@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"log/slog"
 	"net/http"
@@ -29,12 +33,12 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -93,7 +97,7 @@ func newResponseRetentionFixture(t testing.TB, dialect string, kind account.Prov
 	audits := relational.NewAuditRepository(db)
 	states := &completionFaultStore{ResponseRepository: relational.NewResponseRepository(db), failOwnership: false, failState: false}
 	journal := &completionFaultJournal{ConversationJournal: relational.NewConversationJournal(db, cipher, 8<<20), fail: false}
-	network := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+	network := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = network.Close(ctx) })
 	model := "grok-4.5"
 	if kind == account.ProviderWeb {
@@ -138,15 +142,15 @@ func newResponseRetentionFixture(t testing.TB, dialect string, kind account.Prov
 	if len(hooks) > 0 && hooks[0].wrapAdapter != nil {
 		adapter = hooks[0].wrapAdapter(adapter)
 	}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
 	var concurrency repository.ConcurrencyLimiter = memory.NewConcurrencyLimiter()
 	if len(hooks) > 0 && hooks[0].limiter != nil {
 		concurrency = hooks[0].limiter
 	}
 	f.limiter = concurrency
-	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clients := clientkeyapp.NewService("test-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 100000, 4, cipher)
+	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+	clients := clientkeyapp.NewService("test-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 100000, 4, cipher, security.RandomTokenSource{})
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -159,21 +163,21 @@ func newResponseRetentionFixture(t testing.TB, dialect string, kind account.Prov
 		t.Fatal(err)
 	}
 	f.restartGateway = func() {
-		selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+		selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
 		var service *gateway.Service
 		if len(hooks) > 0 && hooks[0].useModelService {
 			modelService := modelapp.NewService(models, accounts, accountService, registry)
 			t.Cleanup(func() { _ = modelService.Close(context.Background()) })
-			service = gateway.NewService(modelService, audits, accountService, clients, registry, selector, states, 3)
+			service = gateway.NewService(modelService, audits, accountService, clients, registry, selector, historyapp.NewResponseResources(states), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
 		} else {
-			service = gateway.NewService(models, audits, accountService, clients, registry, selector, states, 3)
+			service = gateway.NewService(models, audits, accountService, clients, registry, selector, historyapp.NewResponseResources(states), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
 		}
 		service.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		service.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2})
+		service.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2, GuardedModels: []string{"grok-4.5", "grok-chat-fast"}}))
 		receipts := &completionReceiptSink{fail: false}
 		service.SetQualityEventRecorder(receipts)
 		router := gin.New()
-		router.Use(middleware.RequestID())
+		router.Use(middleware.RequestID(nil))
 		if len(hooks) > 0 {
 			router.Use(hooks[0].middleware...)
 		}

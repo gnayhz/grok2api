@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,9 +38,9 @@ func TestMediaDeletionEligibilityAcrossCommands(t *testing.T) {
 			db, peer := settingsDatabasePair(t, dialect)
 			ctx := context.Background()
 			keyRepo, jobs := NewClientKeyRepository(db), NewMediaJobRepository(db)
-			keys := clientkeyapp.NewService("deletion", keyRepo, nil, nil, 0, 0, nil)
+			keys := clientkeyapp.NewService("deletion", keyRepo, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 			defer keys.Close(ctx)
-			admin := mediaapp.NewService(NewMediaAssetRepository(db), jobs, nil, nil, mediaapp.Config{})
+			admin := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(db), jobs, nil, nil, nil, mediaapp.Config{})
 			var seq int
 			for _, stage := range []string{"queued", "in_progress", "completed", "failed", "completed_no_quota", "completed_no_usage", "failed_no_usage", "generated_failed_no_quota", "generated_failed_no_usage", "generated_failed_complete"} {
 				for _, entry := range []string{"key_single", "key_batch", "key_repo_single", "key_repo_batch", "media_admin", "media_repo"} {
@@ -140,11 +142,11 @@ func TestMediaDeletionRetainsPricedRecoverySource(t *testing.T) {
 				if err := jobs.CreateMediaJob(ctx, job); err != nil {
 					t.Fatal(err)
 				}
-				keys := clientkeyapp.NewService("deletion", NewClientKeyRepository(db), nil, nil, 0, 0, nil)
+				keys := clientkeyapp.NewService("deletion", NewClientKeyRepository(db), nil, nil, 0, 0, nil, security.RandomTokenSource{})
 				defer keys.Close(ctx)
 				switch entry {
 				case "media_admin":
-					admin := mediaapp.NewService(NewMediaAssetRepository(db), jobs, nil, nil, mediaapp.Config{})
+					admin := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(db), jobs, nil, nil, nil, mediaapp.Config{})
 					if n, err := admin.AdminDeleteVideoJobs(ctx, []string{job.ID}); n != 0 || !errors.Is(err, media.ErrJobCompletionPending) {
 						t.Fatalf("pending usage deleted: %d %v", n, err)
 					}
@@ -158,8 +160,8 @@ func TestMediaDeletionRetainsPricedRecoverySource(t *testing.T) {
 					}
 				}
 				audits := NewAuditRepository(peer)
-				recovery := gateway.NewService(nil, audits, nil, keys, nil, nil, nil, 1)
-				recovery.ConfigureMedia(NewMediaJobRepository(peer), 1)
+				recovery := gateway.NewService(nil, audits, nil, keys, nil, nil, nil, security.RandomTokenSource{}, testsupport.NewPhysicalJournalFactory(), nil, 1)
+				recovery.ConfigureMedia(NewMediaJobRepository(peer), mediaapp.NewVideoResources(NewMediaJobRepository(peer), nil), 1)
 				for range 2 {
 					if err := recovery.RecoverVideoJobs(ctx); err != nil {
 						t.Fatal(err)
@@ -268,7 +270,7 @@ func TestClientKeyDeletionKeepsInternalIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			ordinary, _ := seedMediaDeletion(t, db, "ordinary", media.StatusFailed)
-			service := clientkeyapp.NewService("deletion", repo, nil, nil, 0, 0, nil)
+			service := clientkeyapp.NewService("deletion", repo, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 			defer service.Close(ctx)
 			if err := service.Delete(ctx, internal.ID); !errors.Is(err, clientkeyapp.ErrSystemManaged) {
 				t.Fatalf("single internal identity not protected: %v", err)

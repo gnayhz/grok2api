@@ -3,13 +3,14 @@ package gateway
 import (
 	"context"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -52,7 +53,7 @@ func TestConfiguredModelNameStopsReasoningAliasFallback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service := &Service{models: repo, providers: provider.NewRegistry(console.NewAdapter(console.Config{}, nil, nil, nil))}
+			service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), models: repo, providers: providerimpl.NewRegistry(console.NewAdapter(console.Config{}, nil, nil, nil))}
 			for _, allow := range []bool{false, true} {
 				if rows, effort, err := service.resolvePublicModelRoutes(ctx, requested, allow); !errors.Is(err, repository.ErrNotFound) {
 					t.Errorf("disabled name redirected (allow=%t): %+v effort=%s err=%v", allow, rows, effort, err)

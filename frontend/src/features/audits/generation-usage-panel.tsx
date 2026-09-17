@@ -5,7 +5,7 @@ import { CopyButton } from "@/shared/components/copy-button";
 import { cn } from "@/shared/lib/cn";
 import { formatNumber } from "@/shared/lib/format";
 import { formatUSDTicks } from "@/shared/lib/usd";
-import type { AuditGenerationUsageDTO } from "./request-audits-api";
+import type { AuditGenerationUsageDTO } from "@/entities/audit/audit-api";
 import { auditCachedUsageAvailable } from "./audit-usage";
 
 export function GenerationUsagePanel({ values }: { values: AuditGenerationUsageDTO[] }) {

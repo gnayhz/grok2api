@@ -9,23 +9,23 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/court"
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 // QueryRegistry exposes quality records and a single state revision. It cannot
 // mutate account or exit eligibility and exposes no database handle.
 type QueryRegistry interface {
-	ListRecentCases(context.Context, int) ([]registry.CaseRecord, error)
-	ListParties(context.Context, uint64) ([]registry.PartyRecord, error)
-	ListNodeIPArchives(context.Context, int) ([]registry.NodeQualityView, error)
-	ManagementState(context.Context) (registry.ManagementState, error)
+	ListRecentCases(context.Context, int) ([]model.CaseRecord, error)
+	CountCases(context.Context) (int64, error)
+	CountOpenCases(context.Context) (int64, error)
+	ListParties(context.Context, uint64) ([]model.PartyRecord, error)
+	ListNodeIPArchives(context.Context, int) ([]model.NodeQualityView, error)
+	ManagementState(context.Context) (model.ManagementState, error)
 }
 
 type QueryEvidence interface {
-	SnapshotWindow(time.Time) evidence.Snapshot
+	SnapshotWindow(time.Time) model.Snapshot
 	Count(context.Context) (int64, error)
 }
 
@@ -36,8 +36,8 @@ type LiveCases interface {
 }
 
 type QueryProbes interface {
-	ListProbeTasks(context.Context, int) ([]registry.ProbeTaskView, error)
-	ListProbeTasksForCase(context.Context, uint64) ([]registry.ProbeTaskView, error)
+	ListProbeTasks(context.Context, int) ([]model.ProbeTaskView, error)
+	ListProbeTasksForCase(context.Context, uint64) ([]model.ProbeTaskView, error)
 }
 
 type NodeProfiles interface {
@@ -91,11 +91,14 @@ type EvidenceSummary struct {
 }
 type Overview struct {
 	CasesTotal, CasesOpen int
-	Verdicts              map[string]int
-	Evidence              EvidenceSummary
-	ObservationsTotal     int64
-	GuardSelfCheck        SelfCheck
-	ObservationDrops      *int64
+	// Verdicts 是最近 200 案的裁决分布(近期窗口口径,非全量)。
+	Verdicts map[string]int
+	// VerdictWindow 标识分布的近期窗口大小;API/UI 据此显式标注。
+	VerdictWindow     int
+	Evidence          EvidenceSummary
+	ObservationsTotal int64
+	GuardSelfCheck    SelfCheck
+	ObservationDrops  *int64
 }
 
 func (q *Queries) Overview(ctx context.Context) (Overview, error) {
@@ -108,12 +111,20 @@ func (q *Queries) Overview(ctx context.Context) (Overview, error) {
 	if err != nil {
 		return value, fmt.Errorf("read observation total: %w", err)
 	}
-	value.CasesTotal = len(records)
+	if caseTotal, caseErr := q.deps.Registry.CountCases(ctx); caseErr != nil {
+		return value, fmt.Errorf("read case total: %w", caseErr)
+	} else {
+		value.CasesTotal = int(caseTotal)
+	}
+	if openTotal, openErr := q.deps.Registry.CountOpenCases(ctx); openErr != nil {
+		return value, fmt.Errorf("read open case total: %w", openErr)
+	} else {
+		value.CasesOpen = int(openTotal)
+	}
+	// Verdicts 是最近 200 案的裁决分布(近期窗口口径,非全量)。
 	value.Verdicts = make(map[string]int)
+	value.VerdictWindow = len(records)
 	for _, record := range records {
-		if record.Status == model.CaseInvestigating {
-			value.CasesOpen++
-		}
 		if record.Verdict != model.VerdictNone {
 			value.Verdicts[string(record.Verdict)]++
 		}
@@ -227,7 +238,7 @@ type Case struct {
 	Verdict  model.Verdict
 	OpenedAt time.Time
 	ClosedAt *time.Time
-	Parties  []registry.PartyRecord
+	Parties  []model.PartyRecord
 	Evidence map[string]any
 	Live     *court.LiveCaseView
 }
@@ -271,7 +282,7 @@ func (q *Queries) Cases(ctx context.Context) ([]Case, error) {
 }
 
 type EgressNode struct {
-	registry.NodeQualityView
+	model.NodeQualityView
 	Webhook bool
 }
 
@@ -295,7 +306,7 @@ func (q *Queries) Egress(ctx context.Context) ([]EgressNode, error) {
 	return values, nil
 }
 
-type Probe = registry.ProbeTaskView
+type Probe = model.ProbeTaskView
 
 // Probes keeps the entire case history; only the global recent list is capped.
 func (q *Queries) Probes(ctx context.Context, caseID uint64, limit int) ([]Probe, error) {

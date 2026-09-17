@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"errors"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"net/http"
 	"testing"
 
@@ -15,7 +17,7 @@ func TestPhysicalCallTraceRecordsPlaneStageOrdinalAndOutcome(t *testing.T) {
 	perfmetrics.Default = registry
 	t.Cleanup(func() { perfmetrics.Default = previous })
 
-	ctx := WithPhysicalCallTrace(context.Background(), "grok_build", "responses")
+	ctx := physical.WithPhysicalCallTrace(context.Background(), testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_build", "responses")
 	recordPhysicalCall(ctx, &http.Response{StatusCode: http.StatusForbidden}, nil)
 	fallbackCtx := WithPhysicalCallPlane(WithPhysicalCallStage(ctx, "plane_fallback"), "xai")
 	recordPhysicalCall(fallbackCtx, &http.Response{StatusCode: http.StatusOK}, nil)
@@ -33,9 +35,9 @@ func TestPhysicalCallTraceNormalizesCompactionOperation(t *testing.T) {
 	perfmetrics.Default = registry
 	t.Cleanup(func() { perfmetrics.Default = previous })
 
-	ctx := WithPhysicalCallTrace(context.Background(), "grok_build", "compaction")
+	ctx := physical.WithPhysicalCallTrace(context.Background(), testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_build", "compaction")
 	recordPhysicalCall(ctx, &http.Response{StatusCode: http.StatusOK}, nil)
-	legacyCtx := WithPhysicalCallTrace(context.Background(), "grok_build", "responses_compact")
+	legacyCtx := physical.WithPhysicalCallTrace(context.Background(), testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_build", "responses_compact")
 	recordPhysicalCall(legacyCtx, &http.Response{StatusCode: http.StatusOK}, nil)
 
 	samples := registry.CollectAndReset()
@@ -66,7 +68,7 @@ func TestProxyPoolConnectionRetriesEachHavePhysicalAccounting(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 	}}
 	lease := &Lease{client: client, proxyPool: true}
-	ctx := WithPhysicalCallTrace(context.Background(), "grok_web", "messages")
+	ctx := physical.WithPhysicalCallTrace(context.Background(), testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_web", "messages")
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://grok.com/rest/app-chat", http.NoBody)
 	if err != nil {
 		t.Fatal(err)

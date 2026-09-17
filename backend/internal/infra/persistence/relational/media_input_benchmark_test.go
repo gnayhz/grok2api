@@ -49,7 +49,7 @@ func BenchmarkMediaInputAdmission(b *testing.B) {
 					b.Fatal(err)
 				}
 				assets := NewMediaAssetRepository(db)
-				service := mediaapp.NewService(assets, nil, objects, nil, mediaapp.Config{MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 40, CleanupThresholdPercent: 80})
+				service := mediaapp.NewServiceWithTickets(assets, nil, nil, objects, nil, mediaapp.Config{MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 40, CleanupThresholdPercent: 80})
 				b.ReportAllocs()
 				b.SetBytes(int64(len(fixture.payload)))
 				b.ResetTimer()

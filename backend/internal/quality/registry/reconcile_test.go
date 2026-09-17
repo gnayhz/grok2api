@@ -222,7 +222,7 @@ func TestCleanExpiredCaseHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.UpsertParty(ctx, PartyRecord{CaseID: oldClosed, Kind: model.PartyAccount, AccountID: 1, Role: model.RoleDefendant, Disposition: model.DispositionRemanded}); err != nil {
+	if err := reg.UpsertParty(ctx, model.PartyRecord{CaseID: oldClosed, Kind: model.PartyAccount, AccountID: 1, Role: model.RoleDefendant, Disposition: model.DispositionRemanded}); err != nil {
 		t.Fatal(err)
 	}
 	probeStore := NewProbeTaskStore(reg)

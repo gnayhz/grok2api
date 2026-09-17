@@ -3,12 +3,13 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"sync"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type refreshWaitCancelAdapter struct {
@@ -41,7 +42,7 @@ func TestSharedAccountRefreshWaiterMustHonorOwnCancellation(t *testing.T) {
 			var once sync.Once
 			finish := func() { once.Do(func() { close(a.release) }) }
 			defer finish()
-			s.providers = provider.NewRegistry(a)
+			s.providers = providerimpl.NewRegistry(a)
 			call := func(ctx context.Context) error {
 				if operation == "refresh" {
 					_, err := s.EnsureCredential(ctx, credential, true)

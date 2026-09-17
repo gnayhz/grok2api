@@ -30,6 +30,7 @@ var catalog = []ModelSpec{
 }
 
 // Catalog retains the text protocol parameters; public products come from M05.
+// 跨包契约测试入口,生产经静态目录定义。
 func Catalog() []ModelSpec {
 	values := make([]ModelSpec, 0, len(catalog))
 	for _, spec := range catalog {

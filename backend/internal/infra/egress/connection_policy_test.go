@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net"
 	"net/http"
@@ -48,7 +50,7 @@ func TestBuildSessionConnectionPolicyOnWire(t *testing.T) {
 							if err != nil {
 								t.Fatal(err)
 							}
-							m := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{ID: 7, Enabled: true, Health: 1, ProxyPool: fresh, EncryptedProxyURL: proxyURL}}}, cipher)
+							m := NewManagerWithLimits(egressRepositoryTestStub{nodes: []domain.Node{{ID: 7, Enabled: true, Health: 1, ProxyPool: fresh, EncryptedProxyURL: proxyURL}}}, cipher, netbudget.Limits{})
 							t.Cleanup(func() { _ = m.Close(context.Background()) })
 							m.UpdateAccountIsolatedConnections(isolated)
 							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -56,7 +58,7 @@ func TestBuildSessionConnectionPolicyOnWire(t *testing.T) {
 							if session {
 								ctx = WithBuildSession(ctx, "history-stays")
 							}
-							ctx, trace := WithTrace(ctx)
+							ctx, trace := physical.WithTrace(ctx)
 							configured := map[requestClient]bool{}
 							var connections []string
 							for _, account := range []string{"A", "A", "B", "A"} {
@@ -167,7 +169,7 @@ func connectionPolicyProxy(t *testing.T, target string) *httptest.Server {
 }
 
 func TestSessionIsolationToggleRetiresOldClients(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	ctx := WithBuildSession(context.Background(), "session")
 	acquire := func(account string) *Lease {
@@ -219,7 +221,7 @@ func TestFreshSessionConcurrentCallsUseSeparateConnections(t *testing.T) {
 			upstream.StartTLS()
 			defer upstream.Close()
 			defer unblock()
-			m := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{ID: 7, Enabled: true, Health: 1, ProxyPool: true}}}, nil)
+			m := NewManagerWithLimits(egressRepositoryTestStub{nodes: []domain.Node{{ID: 7, Enabled: true, Health: 1, ProxyPool: true}}}, nil, netbudget.Limits{})
 			t.Cleanup(func() { _ = m.Close(context.Background()) })
 			ctx, cancel := context.WithTimeout(WithBuildSession(context.Background(), "same-session"), 5*time.Second)
 			defer cancel()
@@ -267,7 +269,7 @@ func TestFreshSessionConcurrentCallsUseSeparateConnections(t *testing.T) {
 }
 
 func TestSessionPolicyIsPerAcquisitionEvenOnSharedFreshClient(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{ID: 7, Enabled: true, Health: 1, ProxyPool: true}}}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{nodes: []domain.Node{{ID: 7, Enabled: true, Health: 1, ProxyPool: true}}}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	first, err := m.Acquire(context.Background(), domain.ScopeBuild, "A")
 	if err != nil {
@@ -303,7 +305,7 @@ func TestSessionIsolationUpdateAllowsActiveStreamToDrain(t *testing.T) {
 	}))
 	defer upstream.Close()
 	defer unblock()
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	ctx, cancel := context.WithTimeout(WithBuildSession(context.Background(), "session"), 5*time.Second)
 	defer cancel()

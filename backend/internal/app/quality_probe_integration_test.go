@@ -104,7 +104,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 			cfg := court.DefaultConfig()
 			cfg.EvaluateEvery = time.Hour
 			cfg.Logger = a.logger
-			a.qualityCourt = court.New(cfg, a.quality, qualityEvidenceSource{store: a.qualityEvidence}, nil)
+			a.qualityCourt = court.New(cfg, a.quality, qualityEvidenceSource{store: a.qualityEvidence}, nil, registry.NewProbeTaskStore(a.quality))
 			a.qualityCourt.SetNodes(baseNodeSource{egress: a.egressOps})
 			cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 			if err != nil {
@@ -255,7 +255,7 @@ func TestApplicationProbeExecutionThroughTaskAndCourt(t *testing.T) {
 					cancel()
 				}
 			}
-			if err := a.qualityInvestigator.RunDue(ctx, a.qualityProbeExec, 1); err != nil {
+			if err := a.qualityInvestigator.RunDueOnce(ctx, a.qualityProbeExec, 1); err != nil {
 				t.Fatal(err)
 			}
 			if strings.HasPrefix(scenario, "epoch_read_failed") {

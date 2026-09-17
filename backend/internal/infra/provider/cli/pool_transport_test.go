@@ -14,6 +14,7 @@ import (
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 )
 
 // poolRuleRepository 在固定节点仓储之上叠加专属池仓储面。
@@ -69,7 +70,7 @@ func TestPoolTargetRoutesThroughPoolMember(t *testing.T) {
 		pool:   map[uint64]domainegress.Pool{poolID: {ID: poolID, Name: "premium", Enabled: true}},
 		member: map[uint64][]domainegress.Node{poolID: {member}},
 	}
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
 
@@ -118,7 +119,7 @@ func TestPoolTargetExhaustedFailsStrict(t *testing.T) {
 		pool:   map[uint64]domainegress.Pool{poolID: {ID: poolID, Name: "exhausted", Enabled: true}},
 		member: map[uint64][]domainegress.Node{poolID: {quarantined}},
 	}
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
 

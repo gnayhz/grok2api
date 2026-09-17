@@ -40,7 +40,7 @@ func TestCopyStreamReportsFlushFailureBeforeAnotherRead(t *testing.T) {
 	c, _ := gin.CreateTestContext(writer)
 	source := &writeFailureSource{data: "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"}
 	marked := false
-	_, err := copyStream(c.Writer, source, streamProtocolChat, func() { marked = true })
+	_, err := copyStreamWithCompletion(c.Writer, source, streamProtocolChat, func() { marked = true }, "", nil)
 	if !errors.Is(err, failure) || source.reads != 1 || marked {
 		t.Fatalf("err=%v reads=%d firstToken=%v", err, source.reads, marked)
 	}
@@ -67,7 +67,7 @@ func (w *shortStreamWriter) Write(p []byte) (int, error) { return w.ResponseReco
 
 func TestCopyStreamCountsShortWriteAndStops(t *testing.T) {
 	c, _ := gin.CreateTestContext(&shortStreamWriter{httptest.NewRecorder()})
-	meta, err := copyStream(c.Writer, strings.NewReader("data: [DONE]\n\n"), streamProtocolChat, nil)
+	meta, err := copyStreamWithCompletion(c.Writer, strings.NewReader("data: [DONE]\n\n"), streamProtocolChat, nil, "", nil)
 	if !errors.Is(err, io.ErrShortWrite) || meta.DeliveredBytes != 3 {
 		t.Fatalf("err=%v bytes=%d", err, meta.DeliveredBytes)
 	}

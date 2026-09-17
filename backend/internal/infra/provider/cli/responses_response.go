@@ -9,11 +9,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
-	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 const (
-	maxCompatibleResponseBytes        = 128 << 20
 	maxCompatibleSSEEventBytes        = 8 << 20
 	maxBufferedFunctionArgumentsBytes = 1 << 20
 	maxTotalBufferedFunctionArgsBytes = 4 << 20
@@ -37,17 +35,6 @@ func (c *responsesToolCompatibility) normalizeResponseJSON(body []byte) ([]byte,
 		return nil, fmt.Errorf("编码兼容 Responses 响应: %w", err)
 	}
 	return converted, nil
-}
-
-// normalizeResponseStream applies the Build-to-OpenAI SSE boundary for every
-// Responses stream. Tool rewriting is optional, while BOM removal and private
-// Grok control-event filtering always apply.
-func (c *responsesToolCompatibility) normalizeResponseStream(source io.ReadCloser) io.ReadCloser {
-	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
-		return consumeCompatibleSSE(input, func(event compatibleSSEEvent) error {
-			return c.writeResponseEvent(writer, event)
-		})
-	})
 }
 
 func (c *responsesToolCompatibility) writeResponseEvent(writer io.Writer, event compatibleSSEEvent) error {

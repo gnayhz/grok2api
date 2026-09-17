@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,7 +29,7 @@ func TestQuotaRecoveryLateRequestDoesNotChangeNewState(t *testing.T) {
 				t.Fatal(err)
 			}
 			repo := relational.NewAccountRepository(db)
-			selector := NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+			sel := selector.NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 			v, _, err := repo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: "recovery", SourceKey: "recovery", EncryptedAccessToken: "token", Enabled: true, AuthStatus: account.AuthStatusActive})
 			if err != nil {
 				t.Fatal(err)
@@ -36,7 +38,7 @@ func TestQuotaRecoveryLateRequestDoesNotChangeNewState(t *testing.T) {
 				if err := repo.ResetQuotaState(ctx, v.Provider, []uint64{v.ID}); err != nil {
 					t.Fatal(err)
 				}
-				selector.MarkFreeQuotaExhausted(ctx, v, 100, 100)
+				sel.MarkFreeQuotaExhausted(ctx, v, 100, 100)
 				if _, err := repo.GetQuotaRecovery(ctx, v.ID); !errors.Is(err, repository.ErrNotFound) {
 					t.Fatalf("late pre-reset exhaustion recreated old quota state: %v", err)
 				}
@@ -47,7 +49,11 @@ func TestQuotaRecoveryLateRequestDoesNotChangeNewState(t *testing.T) {
 			if err := testsupport.Recovery(ctx, repo, account.QuotaRecovery{AccountID: v.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted, NextProbeAt: &due, UpdatedAt: now}); err != nil {
 				t.Fatal(err)
 			}
-			lease, err := selector.Acquire(ctx, v.Provider, 0, "model", "", "", map[uint64]bool{}, true)
+			session, sessionErr := sel.BeginSelectionSessionForKey(ctx, v.Provider, 0, "model", "", "", map[uint64]bool{}, true, clientkeydomain.AccountScope{})
+			if sessionErr != nil {
+				t.Fatal(sessionErr)
+			}
+			lease, err := session.Acquire(ctx, map[uint64]bool{}, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -59,8 +65,8 @@ func TestQuotaRecoveryLateRequestDoesNotChangeNewState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			selector.MarkFreeQuotaExhausted(ctx, current, 200, 200)
-			selector.markSuccess(ctx, lease.Credential, lease.QuotaRecoveryRef)
+			sel.MarkFreeQuotaExhausted(ctx, current, 200, 200)
+			sel.MarkSuccessWithRecovery(ctx, lease.Credential, lease.QuotaRecoveryRef)
 			got, err := repo.GetQuotaRecovery(ctx, v.ID)
 			if err != nil || got.ConfirmedUsed != 200 {
 				t.Fatalf("late probe success erased newer exhaustion: used=%d err=%v", got.ConfirmedUsed, err)
@@ -84,7 +90,7 @@ func TestQuotaProbeSelectionPathsCarryClaimAndFinishRevision(t *testing.T) {
 				}
 				repo := relational.NewAccountRepository(db)
 				limiter := memory.NewConcurrencyLimiter()
-				selector := NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+				sel := selector.NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 				v, _, err := repo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: "path", SourceKey: "path", EncryptedAccessToken: "token", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
 				if err != nil {
 					t.Fatal(err)
@@ -93,15 +99,19 @@ func TestQuotaProbeSelectionPathsCarryClaimAndFinishRevision(t *testing.T) {
 				if err != nil || !seed.Applied {
 					t.Fatal(err)
 				}
-				var lease *accountLease
+				var lease *selector.Lease
 				switch path {
 				case "ordinary":
-					lease, err = selector.Acquire(ctx, v.Provider, 0, "model", "", "", map[uint64]bool{}, true)
+					var session *selector.SelectionSession
+					session, err = sel.BeginSelectionSessionForKey(ctx, v.Provider, 0, "model", "", "", map[uint64]bool{}, true, clientkeydomain.AccountScope{})
+					if err == nil {
+						lease, err = session.Acquire(ctx, map[uint64]bool{}, true)
+					}
 				case "pinned":
-					lease, err = selector.AcquirePinned(ctx, v.Provider, v.ID, 0, "model", "", true)
+					lease, err = sel.AcquirePinnedForKey(ctx, v.Provider, v.ID, 0, "model", "", true, clientkeydomain.AccountScope{})
 				case "session":
-					var session *selectionSession
-					session, err = selector.beginSelectionSession(ctx, v.Provider, 0, "model", "", "", map[uint64]bool{}, true)
+					var session *selector.SelectionSession
+					session, err = sel.BeginSelectionSessionForKey(ctx, v.Provider, 0, "model", "", "", map[uint64]bool{}, true, clientkeydomain.AccountScope{})
 					if err == nil {
 						lease, err = session.Acquire(ctx, map[uint64]bool{}, true)
 					}
@@ -115,22 +125,22 @@ func TestQuotaProbeSelectionPathsCarryClaimAndFinishRevision(t *testing.T) {
 				}
 				switch outcome {
 				case "stale_success":
-					selector.MarkFreeQuotaExhausted(ctx, lease.Credential, 200, 200)
+					sel.MarkFreeQuotaExhausted(ctx, lease.Credential, 200, 200)
 					// An unrelated credential reload can return the new revision. The explicit
 					// claim still prevents this old request from adopting it for completion.
 					current, err := repo.Get(ctx, v.ID)
 					if err != nil {
 						t.Fatal(err)
 					}
-					selector.markSuccess(ctx, current, lease.QuotaRecoveryRef)
+					sel.MarkSuccessWithRecovery(ctx, current, lease.QuotaRecoveryRef)
 				case "success_then_failure":
-					completed := selector.markSuccess(ctx, lease.Credential, lease.QuotaRecoveryRef)
+					completed := sel.MarkSuccessWithRecovery(ctx, lease.Credential, lease.QuotaRecoveryRef)
 					if completed.QuotaRecoveryRevision != lease.QuotaRecoveryRef.Revision+1 {
 						t.Fatal("successful completion lost own next revision")
 					}
-					selector.MarkFreeQuotaExhausted(ctx, completed, 200, 200)
+					sel.MarkFreeQuotaExhausted(ctx, completed, 200, 200)
 				case "unrelated_success":
-					selector.MarkSuccess(ctx, lease.Credential)
+					sel.MarkSuccess(ctx, lease.Credential)
 				}
 				recovery, err := repo.GetQuotaRecovery(ctx, v.ID)
 				if err != nil {

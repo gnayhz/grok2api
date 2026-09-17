@@ -3,18 +3,17 @@ package gateway
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type eventRecorderFunc func(context.Context, QualityObservation, time.Duration) error
@@ -25,7 +24,7 @@ func (f eventRecorderFunc) RecordQualityEvent(ctx context.Context, obs QualityOb
 
 func TestEveryRejectedAttemptReleasesCapacityBeforeDurableReceipt(t *testing.T) {
 	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
-	s, accounts := newGuardLoopService(t, adapter, "event-a", "event-b")
+	s, accounts, limiter := newGuardLoopServiceWithLimiter(t, adapter, "event-a", "event-b")
 	for _, account := range accounts {
 		adapter.responses[account.ID] = []scriptedBuildResponse{{status: http.StatusOK, body: "data: {\"choices\":[{\"delta\":{\"content\":\"bare\"}}]}\n\ndata: [DONE]\n\n"}}
 	}
@@ -34,7 +33,7 @@ func TestEveryRejectedAttemptReleasesCapacityBeforeDurableReceipt(t *testing.T) 
 		if obs.Outcome != QualityObservedDegraded {
 			t.Fatalf("unexpected outcome %s", obs.Outcome)
 		}
-		if count, err := s.selector.concurrency.Current(ctx, accountConcurrencyKey(obs.AccountID)); err != nil || count != 0 {
+		if count, err := limiter.Current(ctx, repository.AccountConcurrencyKey(obs.AccountID)); err != nil || count != 0 {
 			t.Fatalf("lease held while recording: count=%d err=%v", count, err)
 		}
 		if obs.Attempt.ID == "" || ids[obs.Attempt.ID] {
@@ -66,71 +65,19 @@ func TestDurableReceiptFailureStopsRetriesAndLeavesLocalProtection(t *testing.T)
 	if len(adapter.Attempts()) != 1 {
 		t.Fatal("retried without a durable receipt")
 	}
-	if s.selector.localQualityAllowed(accounts[0].ID, time.Now()) {
+	if s.selector.LocalQualityAllowed(accounts[0].ID, time.Now()) {
 		t.Fatal("missing local outage protection")
 	}
-}
-
-type admissionGate struct {
-	blocked bool
-	err     error
-	checks  int
-}
-
-func (*admissionGate) AccountSchedulable(uint64) bool { return true }
-func (g *admissionGate) CheckAccountAdmission(context.Context, uint64) (bool, error) {
-	g.checks++
-	return !g.blocked, g.err
-}
-
-func TestFinalAccountAdmissionDoesNotTrustCachedEligibility(t *testing.T) {
-	limiter := memory.NewConcurrencyLimiter()
-	s := NewSelector(nil, limiter, nil, nil, time.Minute, time.Second, time.Minute)
-	gate := &admissionGate{blocked: true}
-	s.SetQualityEligibility(gate)
-	candidate := accountdomain.RoutingCandidate{Credential: accountdomain.Credential{ID: 7, Provider: accountdomain.ProviderBuild, Enabled: true, AuthStatus: accountdomain.AuthStatusActive, MaxConcurrent: 1}}
-	scope, _ := clientkeydomain.NormalizeAccountScope(clientkeydomain.AccountScope{})
-	criteria := selectionCriteria{provider: accountdomain.ProviderBuild, accountScope: scope}
-	lease, err := s.claimAccountSlotTracked(context.Background(), candidate, criteria, nil)
-	if lease != nil || !errors.Is(err, errRoutingCredentialStale) || gate.checks != 1 {
-		t.Fatalf("lease=%v err=%v checks=%d", lease, err, gate.checks)
-	}
-	if count, _ := limiter.Current(context.Background(), accountConcurrencyKey(7)); count != 0 {
-		t.Fatal("rejected admission leaked capacity")
-	}
-	gate.err = errors.New("database unavailable")
-	if lease, err = s.claimAccountSlotTracked(context.Background(), candidate, criteria, nil); lease != nil || err == nil {
-		t.Fatalf("failed authority authorized account: lease=%v err=%v", lease, err)
-	}
-	gate.err = nil
-	gate.blocked = false
-	if lease, err = s.claimAccountSlotTracked(context.Background(), candidate, criteria, nil); err != nil || lease == nil {
-		t.Fatalf("released restriction still denied: %v", err)
-	}
-	lease.Release()
-	lease.Release()
-}
-
-type physicalEventRecorder struct {
-	facts []attemptmeta.PhysicalFact
-}
-
-func (*physicalEventRecorder) RecordQualityEvent(context.Context, QualityObservation, time.Duration) error {
-	return nil
-}
-func (r *physicalEventRecorder) RecordPhysicalEvents(_ context.Context, facts []attemptmeta.PhysicalFact) error {
-	r.facts = append(r.facts, facts...)
-	return nil
 }
 
 func TestBufferedPhysicalResponsePersistsDeliveryUsageAfterInternalFailure(t *testing.T) {
 	for _, guarded := range []bool{false, true} {
 		base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 		s, _ := newGuardLoopService(t, base, "physical-buffered")
-		s.UpdateQualityRetry(QualityRetryRuntime{Enabled: guarded})
+		s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: guarded, GuardedModels: []string{"grok-4.6"}}))
 		recorder := &physicalEventRecorder{}
 		s.SetQualityEventRecorder(recorder)
-		s.providers = provider.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
+		s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
 			// An internal failed exchange must persist before handoff even when
 			// the final exchange has already been read and buffered by an adapter.
 			failed := attemptmeta.Begin(ctx, attemptmeta.Path{})

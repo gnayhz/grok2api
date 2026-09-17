@@ -39,11 +39,11 @@ func TestFeedback403EvictsOnlyBrowserScopeClients(t *testing.T) {
 	manager.clearance.repository = manager.repository
 	manager.transport.accountIsolated.Store(false)
 
-	buildClient, err := manager.transport.clientForWithOptions(9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{})
+	buildClient, err := manager.transport.clientForContext(context.Background(), 9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	webClient, err := manager.transport.clientForWithOptions(9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{})
+	webClient, err := manager.transport.clientForContext(context.Background(), 9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,10 +85,10 @@ func TestFeedbackTransportErrorStillEvictsAllScopes(t *testing.T) {
 	manager.clearance.repository = manager.repository
 	manager.transport.accountIsolated.Store(false)
 
-	if _, err := manager.transport.clientForWithOptions(9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForContext(context.Background(), 9, domain.ScopeBuild, "http://proxy:8080", "", "", false, "shared", clientOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.transport.clientForWithOptions(9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForContext(context.Background(), 9, domain.ScopeWeb, "http://proxy:8080", "UA/1.0", "", false, "shared", clientOptions{}); err != nil {
 		t.Fatal(err)
 	}
 

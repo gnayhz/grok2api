@@ -9,8 +9,9 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
+	selectorapp "github.com/chenyme/grok2api/backend/internal/application/selector"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
 )
@@ -122,7 +123,7 @@ func readinessSnapshot(
 	runtimeHealth func(context.Context) error,
 	models repository.ModelRepository,
 	accounts repository.AccountRepository,
-	providers *provider.Registry,
+	providers provider.Registry,
 	ledger *auditapp.Service,
 ) httpserver.ReadinessSnapshot {
 	phase, updatedAt, report, statsig := state.snapshot()
@@ -192,7 +193,7 @@ func readinessSnapshot(
 			continue
 		}
 		for _, candidate := range candidates {
-			if !startupCandidateUsable(candidate, now, providers) {
+			if !selectorapp.StartupUsable(candidate, now, providers) {
 				continue
 			}
 			material, materialErr := accounts.GetCredentialMaterial(ctx, candidate.Credential.ID, candidate.Credential.Provider)
@@ -274,36 +275,6 @@ func newReadinessStartupReport(report startupReport) *httpserver.ReadinessStartu
 		StaleModelCatalogsSynced: report.StaleModelCatalogsSynced,
 		ErrorCount:               report.ErrorCount,
 	}
-}
-
-func startupCandidateUsable(candidate accountdomain.RoutingCandidate, now time.Time, providers *provider.Registry) bool {
-	credential := candidate.Credential
-	if credential.AuthType == "" || credential.AuthStatus != accountdomain.AuthStatusActive {
-		return false
-	}
-	refreshable := credential.AuthType == accountdomain.AuthTypeOAuth
-	if providers != nil {
-		refreshable = providers.SupportsCredentialRefresh(credential.Provider)
-	}
-	if refreshable && !credential.ExpiresAt.IsZero() && !now.Before(credential.ExpiresAt) {
-		return false
-	}
-	if credential.CooldownUntil != nil && now.Before(*credential.CooldownUntil) {
-		return false
-	}
-	if candidate.ModelCapabilityKnown && !candidate.SupportsModel {
-		return false
-	}
-	if candidate.ModelQuotaBlock != nil && now.Before(candidate.ModelQuotaBlock.CooldownUntil) {
-		return false
-	}
-	if candidate.QuotaRecovery != nil && candidate.QuotaRecovery.Status != accountdomain.QuotaRecoveryStatusActive {
-		return false
-	}
-	if candidate.Billing != nil && candidate.Billing.IsExhausted(credential.MinimumRemaining) {
-		return false
-	}
-	return candidate.QuotaWindow == nil || candidate.QuotaWindow.Remaining > 0
 }
 
 func (a *Application) reconcileStartup(ctx context.Context) {

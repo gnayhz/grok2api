@@ -21,12 +21,12 @@ func TestResetQualityStateAnchorsD7(t *testing.T) {
 
 	now := time.Now().UTC()
 	// 造状态:账号羁押+出口羁押+案件+观测+台账+IP 档案。
-	if err := registry.TransitionAccount(ctx, AccountTransitionRequest{
+	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{
 		AccountID: 11, To: model.AccountRemanded, CaseID: 1,
 	}); err != nil {
 		t.Fatalf("羁押账号: %v", err)
 	}
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{
 		NodeID: 7, Epoch: 0, To: model.ExitRemanded, CaseID: 1,
 	}); err != nil {
 		t.Fatalf("羁押出口: %v", err)

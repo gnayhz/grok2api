@@ -27,7 +27,7 @@ func TestFinalReviewPinnedDownloadSharesClientBudget(t *testing.T) {
 	defer proxy.Close()
 	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{Clients: 1, QueueTimeout: 20 * time.Millisecond})
 	defer m.Close(context.Background())
-	cached, err := m.transport.clientFor(7, domain.ScopeBuild, proxy.URL, "", "", false, "")
+	cached, err := m.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, proxy.URL, "", "", false, "", clientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestFinalReviewPinnedDownloadOwnsResponseLifecycle(t *testing.T) {
 			proxy, calls := newFinalReviewCONNECTProxy(t, origin.Listener.Addr().String())
 			m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{Clients: 2, Requests: 1, Connections: 1})
 			defer m.Close(context.Background())
-			cached, err := m.transport.clientFor(7, domain.ScopeBuild, proxy.URL, "", "", false, "")
+			cached, err := m.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, proxy.URL, "", "", false, "", clientOptions{})
 			if err != nil || !cached.handle.retainLease() {
 				t.Fatalf("retain original client: %v", err)
 			}

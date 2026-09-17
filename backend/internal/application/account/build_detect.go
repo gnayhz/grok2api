@@ -10,8 +10,8 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -49,6 +49,23 @@ type BuildDetectItemObserver func(item BuildDetectItemResult) error
 // DetectBuildAccountsWithProgress 对指定或全部 Grok Build 账号发起探测请求；all 与 ids 必须且只能提供一个。
 // 该方法同时上报批量进度与单账号明细。
 // itemObserver 在每个账号完成后串行调用：选中检测会推送全部结果，全量检测仅推送已确认失效账号。
+// inspectProbe 经注入的解释器读取检测响应;未装配时保留包级规则。
+func (s *Service) inspectProbe(status int, body io.Reader) (provider.CredentialRejection, error) {
+	if s.probeInspect != nil {
+		return s.probeInspect.InspectResponsesProbe(status, body)
+	}
+	return provider.InspectResponsesProbe(status, body)
+}
+
+// classifyRejection 经注入的分类器解释上游状态/错误;未装配时按原包级规则
+// 内联判定(错误路径仅涉及状态码,不读 body)。
+func (s *Service) classifyRejection(status int, body []byte, err error) provider.CredentialRejection {
+	if s.rejections != nil {
+		return s.rejections.ClassifyCredentialRejection(status, body, err)
+	}
+	return provider.ClassifyCredentialRejection(status, body, err)
+}
+
 func (s *Service) DetectBuildAccountsWithProgress(ctx context.Context, ids []uint64, all bool, progress BatchProgressObserver, itemObserver BuildDetectItemObserver) (int, int, error) {
 	if all == (len(ids) > 0) {
 		return 0, 0, invalidInput("必须明确选择全部账号或提供非空账号 ID")
@@ -238,7 +255,7 @@ func (s *Service) finishBuildDetectCredentialError(ctx context.Context, value ac
 		item.Reason = reason
 		return item
 	}
-	if rejection := provider.ClassifyCredentialRejection(0, nil, err); rejection.Rejected {
+	if rejection := s.classifyRejection(0, nil, err); rejection.Rejected {
 		reason := fmt.Sprintf("%s OAuth credential rejected", value.Provider)
 		if markErr := s.markBuildDetectReauth(ctx, value.CredentialRef(), reason); markErr != nil {
 			item.Reason = errors.Join(err, markErr).Error()
@@ -309,7 +326,7 @@ func (s *Service) finishBuildDetectResponse(ctx context.Context, response *provi
 	if response.Body != nil {
 		defer func() { _ = response.Body.Close() }()
 	}
-	rejection, readErr := provider.InspectResponsesProbe(response.StatusCode, response.Body)
+	rejection, readErr := s.inspectProbe(response.StatusCode, response.Body)
 	if rejection.Rejected {
 		reason := fmt.Sprintf("%s OAuth credential rejected (HTTP %d)", credential.Provider, response.StatusCode)
 		if markErr := s.markBuildDetectReauth(ctx, credential.CredentialRef(), reason); markErr != nil {

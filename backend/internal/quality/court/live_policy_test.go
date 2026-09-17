@@ -17,7 +17,7 @@ func TestLiveCaseWaitingUsesSavedExperimentPolicy(t *testing.T) {
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	id := openSimpleTestCase(t, service, bench.registry)
 	first := true
-	settleSimpleTestTasks(t, bench.registry, id, func(task registry.ProbeTaskView) model.ProbeTaskResult {
+	settleSimpleTestTasks(t, bench.registry, id, func(task model.ProbeTaskView) model.ProbeTaskResult {
 		if task.Direction == model.ProbeAccountDifferential && first {
 			first = false
 			return model.ProbeTaskResult{Outcome: model.ProbeResultClean}

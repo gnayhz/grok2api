@@ -6,14 +6,14 @@ import {
 	NetworkButton as Button,
 	NetworkText,
 } from "./network-ui";
-import { StatusPill } from "@/features/operations/operations-ui";
-import { AlertDialogContent } from "@/components/ui/alert-dialog";
+import { StatusPill } from "@/shared/ui/operations";
+import { AlertDialogContent } from "@/shared/ui/alert-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Inbox, Rss, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Dialog, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogTitle } from "@/shared/ui/dialog";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -22,16 +22,16 @@ import {
 	AlertDialogFooter,
 	AlertDialogHeader,
 	AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+} from "@/shared/ui/alert-dialog";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
-import { Spinner } from "@/components/ui/spinner";
+} from "@/shared/ui/dropdown-menu";
+import { Input } from "@/shared/ui/input";
+import { Switch } from "@/shared/ui/switch";
+import { Spinner } from "@/shared/ui/spinner";
 import {
 	createEgressSource,
 	deleteEgressSource,
@@ -42,14 +42,11 @@ import {
 	updateEgressSource,
 	type EgressSourceDTO,
 	type EgressSourceInput,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 import { IntervalInput, OperationSectionHeader } from "./operations-context";
-import { showError } from "./operations-shared";
-import {
-	validSubscriptionProxyURL,
-	validSubscriptionURL,
-} from "@/features/settings/settings-model";
+import { validSubscriptionProxyURL, validSubscriptionURL } from "@/entities/egress/proxy-url";
 import { formatDateTime } from "@/shared/lib/format";
+import { showErrorToast } from "@/shared/lib/show-error";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
 import "./resources-panel.css";
 import { Pagination } from "@/shared/components/pagination";
@@ -113,7 +110,7 @@ export function SubscriptionsPanel({ showHeader = true }: { showHeader?: boolean
 			}
 			toast.success(t("settings.egress.sourceSaved"));
 		},
-		onError: showError,
+		onError: (error: unknown) => showErrorToast(error, t),
 	});
 	const removeSource = useMutation({
 		mutationFn: deleteEgressSource,
@@ -123,7 +120,7 @@ export function SubscriptionsPanel({ showHeader = true }: { showHeader?: boolean
 			invalidate();
 			toast.success(t("settings.egress.sourceDeleted"));
 		},
-		onError: showError,
+		onError: (error: unknown) => showErrorToast(error, t),
 	});
 	const syncSource = useMutation({
 		mutationFn: syncEgressSource,
@@ -131,7 +128,7 @@ export function SubscriptionsPanel({ showHeader = true }: { showHeader?: boolean
 			invalidate();
 			toast.success(t("settings.egress.sourceSynced", value));
 		},
-		onError: showError,
+		onError: (error: unknown) => showErrorToast(error, t),
 	});
 	function openSource(value?: EgressSourceDTO) {
 		editor.current?.controller.abort();
@@ -345,7 +342,6 @@ export function SubscriptionsPanel({ showHeader = true }: { showHeader?: boolean
 							>
 								<Input
 									id="source-url"
-									className="net-address-input"
 									type="text"
 									autoComplete="off"
 									aria-invalid={sourceURLInvalid}

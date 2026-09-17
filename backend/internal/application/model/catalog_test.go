@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,7 +11,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
@@ -53,11 +53,11 @@ func TestModelSyncPublishesSharedCatalogDefaults(t *testing.T) {
 			}
 			// Web and Console use their actual static adapters; Build supplies a
 			// deterministic remote observation including an unknown text model.
-			registry := provider.NewRegistry(
+			registry := providerimpl.NewRegistry(
 				&modelCapabilityAdapter{models: map[uint64][]string{credentials[0].ID: {"future-text", "grok-imagine-video-1.5"}}},
 				webprovider.NewAdapter(webprovider.Config{}, nil, cipher, nil, nil),
 				consoleprovider.NewAdapter(consoleprovider.Config{}, nil, cipher, nil))
-			as := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+			as := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 			service := NewService(models, accounts, as, registry)
 			t.Cleanup(func() { _ = service.Close(context.Background()) })
 			if err := service.PublishCatalogs(ctx); err != nil {
@@ -68,7 +68,7 @@ func TestModelSyncPublishesSharedCatalogDefaults(t *testing.T) {
 				t.Fatal(err)
 			}
 			if bulk {
-				if _, err := service.Sync(ctx); err != nil {
+				if _, err := service.SyncObserved(ctx, nil); err != nil {
 					t.Fatal(err)
 				}
 			} else {

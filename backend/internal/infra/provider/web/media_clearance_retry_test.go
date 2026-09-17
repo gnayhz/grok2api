@@ -18,8 +18,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestIsClearanceRefreshableMediaError(t *testing.T) {
@@ -104,8 +105,8 @@ func TestGenerateWSImageReacquiresAfterChallengeHandshake(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter, credential := testMediaAdapter(t, server.URL)
-	enableTestClearance(adapter, server.URL)
+	adapter, manager, credential := testMediaAdapter(t, server.URL)
+	enableTestClearance(manager, server.URL)
 	response, err := adapter.GenerateImage(context.Background(), provider.ImageGenerationRequest{
 		Credential: credential, Model: "grok-imagine-image-quality", Prompt: "draw a teapot", Count: 1,
 		Resolution: "2k", Quality: "medium", ResponseFormat: "b64_json",
@@ -186,8 +187,8 @@ func TestGenerateLiteImageReacquiresAfterChallengeHandshake(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter, credential := testMediaAdapter(t, server.URL)
-	enableTestClearance(adapter, server.URL)
+	adapter, manager, credential := testMediaAdapter(t, server.URL)
+	enableTestClearance(manager, server.URL)
 	credential.UserID = "497f19f8-49d4-458a-bee4-43ec3dcaf8ca"
 	spec, ok := Resolve("grok-imagine-image")
 	if !ok {
@@ -226,8 +227,8 @@ func TestStructuredImageForbiddenDoesNotInvalidateClearance(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter, credential := testMediaAdapter(t, server.URL)
-	enableTestClearance(adapter, server.URL)
+	adapter, manager, credential := testMediaAdapter(t, server.URL)
+	enableTestClearance(manager, server.URL)
 	for range 2 {
 		response, err := adapter.GenerateImage(context.Background(), provider.ImageGenerationRequest{
 			Credential: credential, Model: "grok-imagine-image-quality", Prompt: "draw a teapot", Count: 1,
@@ -267,8 +268,8 @@ func TestLiteChallengeRetryExhaustionReturnsNormalizedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter, credential := testMediaAdapter(t, server.URL)
-	enableTestClearance(adapter, server.URL)
+	adapter, manager, credential := testMediaAdapter(t, server.URL)
+	enableTestClearance(manager, server.URL)
 	credential.UserID = "497f19f8-49d4-458a-bee4-43ec3dcaf8ca"
 	response, err := adapter.GenerateImage(context.Background(), provider.ImageGenerationRequest{
 		Credential: credential, Model: "grok-imagine-image", Prompt: "draw a teapot", Count: 1,
@@ -326,8 +327,8 @@ func TestImageEditReplaysWholeFlowWithRefreshedClearance(t *testing.T) {
 			}))
 			defer server.Close()
 
-			adapter, credential := testMediaAdapter(t, server.URL)
-			enableTestClearance(adapter, server.URL)
+			adapter, manager, credential := testMediaAdapter(t, server.URL)
+			enableTestClearance(manager, server.URL)
 			response, err := adapter.EditImage(context.Background(), provider.ImageEditRequest{
 				Credential:  credential,
 				ImageURLs:   []string{"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="},
@@ -386,8 +387,8 @@ func TestImageEditStructuredForbiddenDoesNotRetryOrRefresh(t *testing.T) {
 			}))
 			defer server.Close()
 
-			adapter, credential := testMediaAdapter(t, server.URL)
-			enableTestClearance(adapter, server.URL)
+			adapter, manager, credential := testMediaAdapter(t, server.URL)
+			enableTestClearance(manager, server.URL)
 			for range 2 {
 				response, err := adapter.EditImage(context.Background(), provider.ImageEditRequest{
 					Credential: credential,
@@ -423,7 +424,7 @@ func TestImageEditStructuredForbiddenDoesNotRetryOrRefresh(t *testing.T) {
 	}
 }
 
-func testMediaAdapter(t *testing.T, baseURL string) (*Adapter, account.Credential) {
+func testMediaAdapter(t *testing.T, baseURL string) (*Adapter, *infraegress.Manager, account.Credential) {
 	t.Helper()
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {
@@ -433,13 +434,14 @@ func testMediaAdapter(t *testing.T, baseURL string) (*Adapter, account.Credentia
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: baseURL, StatsigMode: "manual", ChatTimeout: 5 * time.Second, ImageTimeout: 5 * time.Second, MaxInputImageBytes: 1 << 20}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, imageAssetStoreStub{})
+	manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
+	adapter := NewAdapter(Config{BaseURL: baseURL, StatsigMode: "manual", ChatTimeout: 5 * time.Second, ImageTimeout: 5 * time.Second, MaxInputImageBytes: 1 << 20}, manager, cipher, nil, imageAssetStoreStub{})
 	credential := account.Credential{ID: 1, Provider: account.ProviderWeb, EncryptedAccessToken: encrypted}
-	return adapter, credential
+	return adapter, manager, credential
 }
 
-func enableTestClearance(adapter *Adapter, solverURL string) {
-	adapter.egress.UpdateClearanceConfig(infraegress.ClearanceConfig{
+func enableTestClearance(manager *infraegress.Manager, solverURL string) {
+	manager.UpdateClearanceConfig(infraegress.ClearanceConfig{
 		Mode: "flaresolverr", FlareSolverrURL: solverURL, TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour,
 	})
 }

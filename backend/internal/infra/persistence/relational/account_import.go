@@ -144,25 +144,3 @@ func writeDeletedAccountTombstones(tx *gorm.DB, ids []uint64) error {
 		DoUpdates: clause.AssignmentColumns([]string{"provider", "name", "deleted_at"}),
 	}).Create(&models).Error
 }
-
-// ClearTombstones is an explicit maintenance operation. It shares deletion's
-// exclusive barrier so no in-flight import observes an intermediate state.
-func (r *AccountRepository) ClearTombstones(ctx context.Context, emails []string) (int64, error) {
-	normalized := normalizedImportEmails(emails)
-	if len(normalized) == 0 {
-		return 0, nil
-	}
-	var count int64
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockAccountLinkMutation(tx); err != nil {
-			return err
-		}
-		result := tx.Where("LOWER(email) IN ?", normalized).Delete(&accountTombstoneModel{})
-		count = result.RowsAffected
-		return result.Error
-	})
-	if err != nil {
-		return 0, mapError(err)
-	}
-	return count, nil
-}

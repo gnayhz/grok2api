@@ -33,8 +33,8 @@ func newMediaInputHandoffFixture(t *testing.T, dialect string) mediaInputHandoff
 		t.Fatal(err)
 	}
 	cfg := mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80}
-	owner := mediaapp.NewService(NewMediaAssetRepository(db), NewMediaJobRepository(db), objects, nil, cfg)
-	releaser := mediaapp.NewService(NewMediaAssetRepository(peer), NewMediaJobRepository(peer), objects, nil, cfg)
+	owner := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(db), NewMediaJobRepository(db), nil, objects, nil, cfg)
+	releaser := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(peer), NewMediaJobRepository(peer), nil, objects, nil, cfg)
 	picture, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 	input, err := owner.SaveInputImage(context.Background(), picture)
 	if err != nil {

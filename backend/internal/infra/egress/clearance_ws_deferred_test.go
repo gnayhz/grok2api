@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,12 +29,12 @@ func newWSForbiddenFixture(t *testing.T, statusCode int) (*Lease, *Manager, stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	browser, err := newBrowserClient("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+	browser, err := newBrowserClientWithBudget("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36", nil)
 	if err != nil {
 		t.Fatalf("newBrowserClient: %v", err)
 	}
 	t.Cleanup(browser.CloseIdleConnections)
-	manager := NewManager(&e2eRepo{}, cipher)
+	manager := NewManagerWithLimits(&e2eRepo{}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	key := "ws-deferred-test-key"
 	manager.clearance.clearanceMu.Lock()

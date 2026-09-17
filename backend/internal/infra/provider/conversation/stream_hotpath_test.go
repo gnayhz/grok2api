@@ -51,7 +51,7 @@ func TestConvertChatKeepsReasoningAcrossHugeEncryptedItem(t *testing.T) {
 		"",
 		"",
 	}, string([]byte{10}))
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -86,7 +86,7 @@ func BenchmarkImageImportCoordinationAndStorage(b *testing.B) {
 				b.Fatal(err)
 			}
 			assets := relational.NewMediaAssetRepository(db)
-			service := mediaapp.NewService(assets, nil, objects, nil, mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 40, CleanupThresholdPercent: 80})
+			service := mediaapp.NewServiceWithTickets(assets, nil, nil, objects, nil, mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 40, CleanupThresholdPercent: 80})
 			runImport := imageImportCostOperation(service, "https://example.com/image.png", encoded.Bytes())
 			b.ReportAllocs()
 			b.SetBytes(int64(encoded.Len()))

@@ -29,19 +29,7 @@ const (
 // UpdateAutoCleanConfig 热更新账号自动清理策略。
 // 仅在策略实际变化时唤醒调度器；唤醒只重排 timer，不会直接硬删。
 func (s *Service) UpdateAutoCleanConfig(value AutoCleanConfig) {
-	value = normalizeAutoCleanConfig(value)
-	s.autoCleanMu.Lock()
-	if s.autoClean == value {
-		s.autoCleanMu.Unlock()
-		return
-	}
-	s.autoClean = value
-	s.autoCleanRevision++
-	s.autoCleanMu.Unlock()
-	select {
-	case s.autoCleanWake <- struct{}{}:
-	default:
-	}
+	s.maintenance.updateAutoClean(normalizeAutoCleanConfig(value))
 }
 
 func normalizeAutoCleanConfig(value AutoCleanConfig) AutoCleanConfig {
@@ -61,14 +49,7 @@ func normalizeAutoCleanConfig(value AutoCleanConfig) AutoCleanConfig {
 }
 
 func (s *Service) autoCleanSnapshot() (AutoCleanConfig, uint64) {
-	s.autoCleanMu.RLock()
-	defer s.autoCleanMu.RUnlock()
-	return s.autoClean, s.autoCleanRevision
-}
-
-func (s *Service) autoCleanConfig() AutoCleanConfig {
-	value, _ := s.autoCleanSnapshot()
-	return value
+	return s.maintenance.snapshot()
 }
 
 func (s *Service) autoCleanRevisionCurrent(expected uint64, cfg AutoCleanConfig) bool {
@@ -88,7 +69,7 @@ func autoCleanInterval(cfg AutoCleanConfig) time.Duration {
 func (s *Service) RunAccountAutoClean(ctx context.Context) {
 	// NewService / 启动接线可能已向 wake 写入；启动时统一按最新快照排程。
 	select {
-	case <-s.autoCleanWake:
+	case <-s.maintenance.wakeChan():
 	default:
 	}
 	cfg, scheduledRevision := s.autoCleanSnapshot()
@@ -98,7 +79,7 @@ func (s *Service) RunAccountAutoClean(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.autoCleanWake:
+		case <-s.maintenance.wakeChan():
 			cfg, scheduledRevision = s.autoCleanSnapshot()
 			resetCredentialRefreshTimer(timer, autoCleanInterval(cfg))
 		case <-timer.C:
@@ -112,12 +93,6 @@ func (s *Service) RunAccountAutoClean(ctx context.Context) {
 			resetCredentialRefreshTimer(timer, autoCleanInterval(cfg))
 		}
 	}
-}
-
-// runAutoCleanReauth 保留给同包测试与维护调用；生产调度使用带 revision 的实现。
-func (s *Service) runAutoCleanReauth(ctx context.Context, cfg AutoCleanConfig) error {
-	_, revision := s.autoCleanSnapshot()
-	return s.runAutoCleanReauthRevision(ctx, cfg, revision)
 }
 
 func (s *Service) runAutoCleanReauthRevision(ctx context.Context, cfg AutoCleanConfig, revision uint64) error {

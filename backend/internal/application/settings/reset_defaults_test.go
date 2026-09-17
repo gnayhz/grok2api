@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 )
 
 // TestResetToDefaultsRestoresFileBaseline：重置必须持久记录文件默认标记并使
@@ -14,8 +14,8 @@ func TestResetToDefaultsRestoresFileBaseline(t *testing.T) {
 	repo := &runtimeSettingsRepositoryStub{}
 	cfg := testConfig(t)
 	// 文件基线为构造值；后台保存改为 2048。
-	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next config.Config) {})
-	service.SetFileConfig(cfg)
+	service := newTestService(cfg, time.Time{}, 0, repo, nil, func(next settingsdomain.Config) {})
+	service.SetFileConfig(runtimeOf(cfg))
 	snapshot := service.Get()
 	updated := snapshot.Config
 	updated.Server.MaxConcurrentRequests = 2048

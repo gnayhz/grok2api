@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { apiRequest, decodeAdminDTO, decodeLoggedOut, decodeLoginResponseDTO, refreshAccessToken, type AdminDTO } from "@/shared/api/client";
+import { apiRequest, refreshAccessToken } from "@/shared/api/client";
+import { decodeAdminDTO, decodeLoggedOut, decodeLoginResponseDTO, type AdminDTO } from "@/shared/auth/admin-dto";
 import { acceptSessionToken, currentSession, endSession, isCurrentSession, subscribeSessionEnded } from "@/shared/auth/session";
 import { AuthContext, type AuthStatus } from "@/shared/auth/auth-state";
 

@@ -117,8 +117,8 @@ func TestSaveInputVideoIsPrivateExpiringAsset(t *testing.T) {
 	database, objects, _, cleanup := openUploadTestDeps(t)
 	defer cleanup()
 	ctx := context.Background()
-	service := NewService(
-		relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil,
+	service := NewServiceWithTickets(
+		relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil,
 		Config{MaxImageBytes: mediadomain.MaxInputAssetBytes, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute},
 	)
 	payload := append([]byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, bytes.Repeat([]byte{0x04}, 64)...)

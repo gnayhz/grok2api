@@ -122,7 +122,7 @@ func TestAuditRetentionSettingsMigrationIntegration(t *testing.T) {
 			if _, err := restarted.AuditRetentionPolicy(ctx); err == nil {
 				t.Fatal("invalid persisted policy used cached fallback")
 			}
-			if _, _, _, err := settingsapp.LoadPersisted(ctx, base, repo); err == nil {
+			if _, _, _, err := loadSettingsConfig(ctx, base, repo); err == nil {
 				t.Fatal("startup accepted invalid persisted retention")
 			}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,7 +67,7 @@ func TestVideoWorkerKeepsAcceptedAccountScope(t *testing.T) {
 			if err := testsupport.Capabilities(ctx, fx.models, fx.accounts, second.ID, []string{"grok-imagine-video"}, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			fx.service.UpdateVideoMaxAttempts(3)
 			job := createVideoAuthorizationJob(t, fx)
 			if job.AccountID != fx.account.ID {
@@ -111,7 +112,7 @@ func TestVideoWorkerKeepsAcceptedAccountScope(t *testing.T) {
 			}
 			if stage == "recovery_scope" {
 				// Drop the local wakeup queue and reload the accepted task from SQL.
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 				if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -255,7 +256,7 @@ func TestLegacyVideoWorkerRequiresExplicitPermission(t *testing.T) {
 			if stage == "policy_write_failed" {
 				jobs = videoPolicyWriteFailure{MediaJobRepository: fx.jobs}
 			}
-			fx.service.ConfigureMedia(jobs, 1)
+			fx.service.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 			if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 				t.Fatal(err)
 			}

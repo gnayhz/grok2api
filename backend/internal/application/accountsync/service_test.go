@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -15,9 +16,9 @@ import (
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type billingStub struct {
@@ -129,7 +130,7 @@ func (s *modelStub) counts() (int, int) {
 func TestSyncAccountSkipsExistingSnapshots(t *testing.T) {
 	billing := &billingStub{hasSnapshot: true}
 	models := &modelStub{hasSnapshot: true}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, billing, nil, models)
 
 	if err := service.syncAccount(context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -145,7 +146,7 @@ func TestSyncAccountSkipsExistingSnapshots(t *testing.T) {
 func TestSyncAccountFetchesOnlyMissingSnapshots(t *testing.T) {
 	billing := &billingStub{hasSnapshot: true}
 	models := &modelStub{}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, billing, nil, models)
 
 	if err := service.syncAccount(context.Background(), 7); err != nil {
 		t.Fatal(err)
@@ -161,7 +162,7 @@ func TestSyncAccountFetchesOnlyMissingSnapshots(t *testing.T) {
 func TestSyncAccountRecomputesModelsAfterCreatingBillingSnapshot(t *testing.T) {
 	billing := &billingStub{}
 	models := &modelStub{hasSnapshot: true}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, billing, nil, models)
 
 	if err := service.syncAccount(context.Background(), 8); err != nil {
 		t.Fatal(err)
@@ -176,7 +177,7 @@ func TestSyncAccountRecomputesModelsAfterCreatingBillingSnapshot(t *testing.T) {
 
 func TestSyncModelsAlwaysRefreshesExistingCapabilitySnapshot(t *testing.T) {
 	models := &modelStub{hasSnapshot: true}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, &billingStub{}, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, &billingStub{}, nil, models)
 
 	if err := service.SyncModels(context.Background(), 8); err != nil {
 		t.Fatal(err)
@@ -189,7 +190,7 @@ func TestSyncModelsAlwaysRefreshesExistingCapabilitySnapshot(t *testing.T) {
 
 func TestSyncModelsPropagatesRefreshFailure(t *testing.T) {
 	models := &modelStub{syncErr: errors.New("upstream unavailable")}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, &billingStub{}, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, &billingStub{}, nil, models)
 
 	if err := service.SyncModels(context.Background(), 9); err == nil {
 		t.Fatal("expected model sync error")
@@ -200,7 +201,7 @@ func TestSyncAccountUsesQuotaForConsoleProvider(t *testing.T) {
 	billing := &billingStub{}
 	quota := &quotaStub{}
 	models := &modelStub{hasSnapshot: true}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderConsole}, billing, quota, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderConsole}, accountReaderStub{provider: accountdomain.ProviderConsole}, nil, nil, nil, billing, quota, models)
 
 	if err := service.syncAccount(context.Background(), 9); err != nil {
 		t.Fatal(err)
@@ -218,7 +219,7 @@ func TestSyncAccountIgnoresBestEffortSSOIdentityFailure(t *testing.T) {
 			reader := &identityAccountReaderStub{accountReaderStub: accountReaderStub{provider: providerValue}, err: errors.New("session unavailable")}
 			quota := &quotaStub{}
 			models := &modelStub{hasSnapshot: true}
-			service := NewService(slog.Default(), reader, &billingStub{}, quota, models)
+			service := NewService(slog.Default(), reader, reader, reader, nil, nil, &billingStub{}, quota, models)
 
 			if err := service.syncAccount(context.Background(), 10); err != nil {
 				t.Fatal(err)
@@ -236,7 +237,7 @@ func TestSyncAccountStopsAfterSSOIdentityUnauthorized(t *testing.T) {
 			reader := &identityAccountReaderStub{accountReaderStub: accountReaderStub{provider: providerValue}, err: provider.ErrUnauthorized}
 			quota := &quotaStub{}
 			models := &modelStub{hasSnapshot: true}
-			service := NewService(slog.Default(), reader, &billingStub{}, quota, models)
+			service := NewService(slog.Default(), reader, reader, reader, nil, nil, &billingStub{}, quota, models)
 
 			if err := service.syncAccount(context.Background(), 10); !errors.Is(err, provider.ErrUnauthorized) {
 				t.Fatalf("err = %v", err)
@@ -253,7 +254,7 @@ func TestSyncAccountUsesDeclaredQuotaPolicyInsteadOfProviderName(t *testing.T) {
 	quota := &quotaStub{}
 	models := &modelStub{hasSnapshot: true}
 	reader := accountReaderStub{provider: accountdomain.ProviderBuild, quota: provider.QuotaRemoteWindow}
-	service := NewService(slog.Default(), reader, billing, quota, models)
+	service := NewService(slog.Default(), reader, reader, nil, nil, nil, billing, quota, models)
 
 	if err := service.syncAccount(context.Background(), 10); err != nil {
 		t.Fatal(err)
@@ -267,7 +268,7 @@ func TestSyncAccountUsesDeclaredQuotaPolicyInsteadOfProviderName(t *testing.T) {
 func TestSyncDeduplicatesAccountsAndWaitsForCompletion(t *testing.T) {
 	billing := &billingStub{}
 	models := &modelStub{}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, billing, nil, models)
 	result := service.Sync(context.Background(), 1, 1, 2, 0)
 	if result.Succeeded != 2 || result.Failed != 0 {
 		t.Fatalf("result = %#v", result)
@@ -282,7 +283,7 @@ func TestSyncDeduplicatesAccountsAndWaitsForCompletion(t *testing.T) {
 func TestSyncStreamStartsBeforeImportCompletesAndDeduplicates(t *testing.T) {
 	billing := &billingStub{}
 	models := &modelStub{}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, billing, nil, models)
 	service.UpdateConcurrency(10)
 	input := make(chan uint64)
 	done := make(chan Result, 1)
@@ -315,7 +316,7 @@ func TestSyncStreamStartsBeforeImportCompletesAndDeduplicates(t *testing.T) {
 }
 
 func TestSyncStreamObservedReportsDeduplicatedCompletion(t *testing.T) {
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, &billingStub{}, nil, &modelStub{})
+	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, &billingStub{}, nil, &modelStub{})
 	input := make(chan uint64, 3)
 	input <- 1
 	input <- 1
@@ -339,7 +340,7 @@ func TestSyncStreamObservedReportsDeduplicatedCompletion(t *testing.T) {
 func TestSyncReportsInitialSyncFailure(t *testing.T) {
 	billing := &billingStub{syncErr: errors.New("billing unavailable")}
 	models := &modelStub{syncErr: errors.New("models unavailable")}
-	result := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models).Sync(context.Background(), 9)
+	result := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, accountReaderStub{provider: accountdomain.ProviderBuild}, nil, nil, nil, billing, nil, models).Sync(context.Background(), 9)
 	if result.Succeeded != 0 || result.Failed != 1 {
 		t.Fatalf("result = %#v", result)
 	}
@@ -380,10 +381,10 @@ func TestInitialSyncDoesNotRepeatUpstreamRequestsForSyncedAccount(t *testing.T) 
 		t.Fatal(err)
 	}
 	adapter := &countingAdapter{}
-	registry := provider.NewRegistry(adapter)
-	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	registry := providerimpl.NewRegistry(adapter)
+	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	modelService := modelapp.NewService(models, accounts, accountService, registry)
-	service := NewService(slog.Default(), accountService, accountService, accountService, modelService)
+	service := NewService(slog.Default(), accountService, accountService, accountService, nil, nil, accountService, accountService, modelService)
 
 	if err := service.syncAccount(ctx, credential.ID); err != nil {
 		t.Fatal(err)

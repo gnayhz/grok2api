@@ -7,7 +7,10 @@ const root = resolvePath(fileURLToPath(new URL(".", import.meta.url)));
 export async function resolve(specifier, context, next) {
   if (specifier.startsWith("@/") || (/^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier))) {
     const base = specifier.startsWith("@/") ? pathToFileURL(resolvePath(root, "src", specifier.slice(2))).href : new URL(specifier, context.parentURL).href;
-    for (const candidate of [base + ".ts", base + ".tsx", base + "/index.ts"]) {
+    // "@/" specifiers may already carry an extension (e.g. "@/entities/audit/audit-api.ts"),
+    // mirroring vite/tsconfig paths resolution which accepts both forms.
+    const candidates = /\.[a-z]+$/i.test(specifier) ? [base] : [base + ".ts", base + ".tsx", base + "/index.ts"];
+    for (const candidate of candidates) {
       try {
         return await next(candidate, context);
       } catch {

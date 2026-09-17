@@ -29,7 +29,7 @@ func TestAccountAdministrationOwnsFieldPatches(t *testing.T) {
 				if value.Name.Name == "SetAccountEnabled" || value.Name.Name == "UpdateRiskStatus" {
 					t.Errorf("%s restores removed admin state writer %s", path, value.Name.Name)
 				}
-				if filepath.ToSlash(path) == "../application/account/service.go" && value.Name.Name == "Update" {
+				if (filepath.ToSlash(path) == "../application/account/service.go" || filepath.ToSlash(path) == "../application/account/admin.go") && value.Name.Name == "Update" {
 					ast.Inspect(value.Body, func(node ast.Node) bool {
 						call, ok := node.(*ast.CallExpr)
 						if !ok {
@@ -52,7 +52,7 @@ func TestAccountAdministrationOwnsFieldPatches(t *testing.T) {
 				}
 				if sel.Sel.Name == "UpdateAdministration" {
 					consumers++
-					if filepath.ToSlash(path) != "../application/account/service.go" {
+					if path := filepath.ToSlash(path); path != "../application/account/service.go" && path != "../application/account/admin.go" {
 						t.Errorf("%s bypasses the account administration use case", path)
 					}
 				}

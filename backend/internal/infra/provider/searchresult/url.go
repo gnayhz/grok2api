@@ -9,7 +9,7 @@ import (
 const (
 	maxURLBytes   = 8 << 10
 	MaxResults    = 50
-	MaxTitleRunes = 512
+	maxTitleRunes = 512
 )
 
 // NormalizeURL accepts only public-link schemes and rejects credential-bearing
@@ -41,8 +41,8 @@ func NormalizeTitle(raw, fallback string) string {
 		value = sanitizeTitle(fallback)
 	}
 	runes := []rune(value)
-	if len(runes) > MaxTitleRunes {
-		value = string(runes[:MaxTitleRunes])
+	if len(runes) > maxTitleRunes {
+		value = string(runes[:maxTitleRunes])
 	}
 	return value
 }

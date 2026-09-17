@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,9 +15,10 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
+	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -112,9 +115,10 @@ func TestDeviceCompletionFormalHTTPAndOAuth(t *testing.T) {
 			if tc.storeFail {
 				sessions = deviceHTTPFailedStore{DeviceSessionRepository: store}
 			}
-			service := accountapp.NewService(repo, relational.NewAuditRepository(db), sessions, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, relational.NewAuditRepository(db), sessions, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			router := gin.New()
-			accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+			syncService := accountsyncapp.NewService(slog.Default(), service, service, service, service, service, service, service, modelapp.NewService(relational.NewModelRepository(db), repo, service, providerimpl.NewRegistry(adapter)))
+			accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, syncService), DeviceOnboarding: syncService}).Register(router.Group("/api/admin/v1"))
 			request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/accounts/device/session/poll", nil).WithContext(ctx)
 			recorder := httptest.NewRecorder()
 			router.ServeHTTP(recorder, request)
@@ -172,9 +176,12 @@ func TestDeviceStartFormalHTTPPreservesPollingContract(t *testing.T) {
 	adapter.oauth.http = upstream.Client()
 	adapter.oauth.deviceURL = upstream.URL + "/oauth2/device/code"
 	adapter.oauth.tokenURL = upstream.URL + "/oauth2/token"
-	service := accountapp.NewService(nil, nil, memory.NewDeviceSessionStore(), nil, provider.NewRegistry(adapter), nil, nil)
+	db := controlDocumentDatabase(t, "sqlite")
+	repo := relational.NewAccountRepository(db)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	router := gin.New()
-	accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+	syncService := accountsyncapp.NewService(slog.Default(), service, service, service, service, service, service, service, modelapp.NewService(relational.NewModelRepository(db), repo, service, providerimpl.NewRegistry(adapter)))
+	accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, syncService), DeviceOnboarding: syncService}).Register(router.Group("/api/admin/v1"))
 	out := httptest.NewRecorder()
 	router.ServeHTTP(out, httptest.NewRequest(http.MethodPost, "/api/admin/v1/accounts/device/start", nil))
 	var payload struct {

@@ -3,6 +3,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net/http"
 	"strings"
@@ -15,7 +18,7 @@ import (
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -93,8 +96,8 @@ func TestQualityProbeDoesNotPromoteTransportSilenceToDegraded(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := &Service{providers: provider.NewRegistry(qualityProbeAttemptAdapter{body: test.body})}
-			outcome, reason := service.qualityProbeAttempt(context.Background(), provider.ResponseResourceRequest{
+			service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), providers: providerimpl.NewRegistry(qualityProbeAttemptAdapter{body: test.body})}
+			outcome, reason := probeOutcome(service, context.Background(), provider.ResponseResourceRequest{
 				Credential: account.Credential{Provider: account.ProviderBuild},
 			}, test.hold)
 			if outcome != qualitymodel.MeasurementError {
@@ -115,7 +118,7 @@ func TestQualityProbeDoesNotPromoteTransportSilenceToDegraded(t *testing.T) {
 // 探针永远测不出 clean(事故:全部探针 degraded、零 clean、裁决无法
 // 落地,只能靠羁押期限兜底);输出预算必须容得下思考增量。
 func TestQualityProbeRequestExplicitEndpoint(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	request, err := service.qualityProbeRequest(model.Route{Provider: "grok_build", PublicID: "grok-4.5", UpstreamModel: "grok-4.5"}, account.Credential{Provider: account.ProviderBuild}, nil)
 	if err != nil {
 		t.Fatalf("构造探针请求: %v", err)
@@ -158,7 +161,7 @@ func TestQualityProbeBuildFaceOnly(t *testing.T) {
 // 如果再次请求 baseline,原始降智出口的排队/静默会把所有差分任务拖成
 // created_timeout,即使对比出口本身可用也永远得不到账号证据。
 func TestAccountDifferentialUsesKnownBaselineAndOneComparisonAttempt(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetNodeExitIPResolver(stubNodeExitAddrResolver{addrs: map[uint64]domainegress.ExitAddresses{
 		112: {IPv4: "198.51.100.112", IPv6: "2001:db8::112"},
 		108: {IPv4: "198.51.100.108", IPv6: "2001:db8::108"},
@@ -188,7 +191,7 @@ func TestAccountDifferentialUsesKnownBaselineAndOneComparisonAttempt(t *testing.
 // 的可采条件:comparison 降智仍须证明它与已知 baseline 是不同出口；
 // 不把 transport error 变成降智票。
 func TestAccountDifferentialComparisonDegradedNeedsDistinctPath(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetNodeExitIPResolver(stubNodeExitAddrResolver{addrs: map[uint64]domainegress.ExitAddresses{
 		112: {IPv4: "198.51.100.112"},
 		108: {IPv4: "198.51.100.108"},
@@ -210,7 +213,7 @@ func TestAccountDifferentialComparisonDegradedNeedsDistinctPath(t *testing.T) {
 // 对比出口传输失败只能是 error,不能因为 baseline 已知降智就把 error
 // 拼成一张假的账号降智票。
 func TestAccountDifferentialComparisonTransportStaysInconclusive(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	var attempts int
 	result := service.probeAccountComparison(
 		context.Background(), provider.ResponseResourceRequest{}, QualityRetryRuntime{}, 112, 108,
@@ -230,7 +233,7 @@ func TestAccountDifferentialComparisonTransportStaysInconclusive(t *testing.T) {
 }
 
 func TestAccountDifferentialComparisonCleanNeedsDistinctPath(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetNodeExitIPResolver(stubNodeExitAddrResolver{addrs: map[uint64]domainegress.ExitAddresses{
 		112: {IPv4: "same"},
 		108: {IPv4: "same"},
@@ -296,7 +299,7 @@ func TestQualityProbeRouteScansAllPages(t *testing.T) {
 	}
 	routes[len(routes)-1] = model.Route{ID: 2001, Provider: account.ProviderBuild, PublicID: "grok-4.5", UpstreamModel: "grok-4.5"}
 	resolver := &pagedQualityProbeRouteResolver{routes: routes}
-	service := &Service{models: resolver}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), models: resolver}
 	route, reason := service.qualityProbeRoute(context.Background())
 	if reason != nil || route.PublicID != "grok-4.5" {
 		t.Fatalf("跨页探针路由解析失败: route=%+v reason=%q", route, reason)
@@ -348,13 +351,13 @@ func TestExitPathsDistinctPerFamily(t *testing.T) {
 // TestVerifyExcludeRoutePathFamilyAware 排除换路差分的事后核实必须按族:
 // WARP 兄弟(v4 相同、v6 不同)是可采差分;真孪生仍不可采。
 func TestVerifyExcludeRoutePathFamilyAware(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetNodeExitIPResolver(stubNodeExitAddrResolver{addrs: map[uint64]domainegress.ExitAddresses{
 		116: {IPv4: "198.51.100.10", IPv6: "2001:db8::116"},
 		115: {IPv4: "198.51.100.10", IPv6: "2001:db8::115"},
 		117: {IPv4: "198.51.100.10", IPv6: "2001:db8::116"},
 	}})
-	_, secondTrace := infraegress.WithTrace(context.Background())
+	_, secondTrace := physical.WithTrace(context.Background())
 	secondTrace.Record(infraegress.Selection{NodeID: 115, Scope: domainegress.ScopeBuild})
 
 	note, verified := service.verifyExcludeRoutePathChange(context.Background(), 116, secondTrace)
@@ -366,7 +369,7 @@ func TestVerifyExcludeRoutePathFamilyAware(t *testing.T) {
 	}
 
 	twinTrace := func() *infraegress.Trace {
-		_, trace := infraegress.WithTrace(context.Background())
+		_, trace := physical.WithTrace(context.Background())
 		trace.Record(infraegress.Selection{NodeID: 117, Scope: domainegress.ScopeBuild})
 		return trace
 	}()
@@ -376,7 +379,7 @@ func TestVerifyExcludeRoutePathFamilyAware(t *testing.T) {
 }
 
 func TestComparisonTransportPersistsObservedIndependentPath(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetNodeExitIPResolver(stubNodeExitAddrResolver{addrs: map[uint64]domainegress.ExitAddresses{1: {IPv4: "198.51.100.1"}, 2: {IPv4: "198.51.100.2"}}})
 	result := service.probeAccountComparison(context.Background(), provider.ResponseResourceRequest{}, QualityRetryRuntime{}, 1, 2,
 		func(ctx context.Context, _ provider.ResponseResourceRequest, _ QualityRetryRuntime) qualitymodel.ProbeMeasurement {

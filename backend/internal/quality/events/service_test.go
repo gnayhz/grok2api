@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,13 +23,13 @@ func TestDurableEventSurvivesWorkerRestartWithoutDuplicateVotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	evidence, err := qualityevidence.New(ctx, r.DB(), qualityevidence.DefaultConfig())
+	evidence, err := qualityevidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := qualitycourt.DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
-	court := qualitycourt.New(cfg, r, qualityEvidenceSource{store: evidence}, nil)
+	court := qualitycourt.New(cfg, r, qualityEvidenceSource{store: evidence}, nil, qualityregistry.NewProbeTaskStore(r))
 	t.Cleanup(func() { _ = court.Close(context.Background()) })
 	store := journal.New(r.DB())
 	sink := New(store, evidence, court)
@@ -44,23 +45,25 @@ func TestDurableEventSurvivesWorkerRestartWithoutDuplicateVotes(t *testing.T) {
 	if allowed, err := store.AccountAllowed(ctx, 7, at); err != nil || allowed {
 		t.Fatalf("receipt missing restriction: allowed=%v err=%v", allowed, err)
 	}
-	claims, err := store.Claim(ctx, "old-worker", at, time.Second, 1)
-	if err != nil || len(claims) != 1 {
-		t.Fatalf("claims=%v err=%v", claims, err)
+	// 模拟旧 worker 崩溃:下游副作用已发生但未确认 durable outbox。
+	// ProcessOne 是 journal 的唯一导出处理入口;处理函数在完成副作用后返回
+	// 错误即等价于「崩在确认之前」,事件经 retry 退避回到待领取状态。
+	crashAfterEffects := func(ctx context.Context, e model.Event) error {
+		if err := sink.handle(ctx, e); err != nil {
+			return err
+		}
+		return errors.New("worker crashed after downstream effects")
 	}
-	// Crash after downstream effects, before acknowledging the durable outbox.
-	if err := sink.handle(ctx, claims[0].Event); err != nil {
+	if _, err := store.ProcessOne(ctx, "old-worker", crashAfterEffects); err == nil {
+		t.Fatal("old worker crash should surface from ProcessOne")
+	}
+	// 快进重试退避(免睡眠):新 worker 接手同一事件并确认一次即完成。
+	if err := r.DB().Exec("UPDATE q_guard_outbox SET ready_at = ?", at.Add(-time.Second)).Error; err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := journal.New(r.DB()).Claim(ctx, "new-worker", at.Add(time.Second), time.Second, 1)
-	if err != nil || len(resumed) != 1 {
-		t.Fatalf("resumed=%v err=%v", resumed, err)
-	}
-	if err := sink.handle(ctx, resumed[0].Event); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Complete(ctx, resumed[0], at.Add(time.Second)); err != nil {
-		t.Fatal(err)
+	worked, err := store.ProcessOne(ctx, "new-worker", sink.handle)
+	if err != nil || !worked {
+		t.Fatalf("resume worked=%v err=%v", worked, err)
 	}
 	if count, err := evidence.Count(ctx); err != nil || count != 1 {
 		t.Fatalf("duplicate evidence: count=%d err=%v", count, err)
@@ -97,12 +100,12 @@ func TestUnknownPathNeverBecomesExitEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	evidence, err := qualityevidence.New(ctx, r.DB(), qualityevidence.DefaultConfig())
+	evidence, err := qualityevidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	sink := New(journal.New(r.DB()), evidence, (*qualitycourt.Service)(nil))
-	e := journal.Event{Attempt: attemptmeta.Identity{ID: "unknown-path", AccountID: 7, Provider: string(accountdomain.ProviderBuild),
+	e := model.Event{Attempt: attemptmeta.Identity{ID: "unknown-path", AccountID: 7, Provider: string(accountdomain.ProviderBuild),
 		Path: attemptmeta.Path{NodeID: 91, Epoch: 9, Status: attemptmeta.PathUnknown, Rotating: true}}, Stage: "admission", Outcome: "degraded", At: time.Now().UTC()}
 	if err := sink.handle(ctx, e); err != nil {
 		t.Fatal(err)
@@ -130,7 +133,7 @@ func TestAdmissionAndCompletionNeverManufactureHealthyComparisonSamples(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	evidence, err := qualityevidence.New(ctx, r.DB(), qualityevidence.DefaultConfig())
+	evidence, err := qualityevidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,9 +177,9 @@ func TestAdmissionAndCompletionNeverManufactureHealthyComparisonSamples(t *testi
 // Adapts only the evidence view; case decisions remain in the real Court.
 type qualityEvidenceSource struct{ store *qualityevidence.Store }
 
-func (s qualityEvidenceSource) SnapshotWindow(now time.Time) qualityevidence.Snapshot {
+func (s qualityEvidenceSource) SnapshotWindow(now time.Time) model.Snapshot {
 	return s.store.AttributionWindow(now)
 }
-func (s qualityEvidenceSource) CrossValidate(snapshot qualityevidence.Snapshot) qualityevidence.Estimate {
+func (s qualityEvidenceSource) CrossValidate(snapshot model.Snapshot) model.Estimate {
 	return s.store.CrossValidate(snapshot)
 }

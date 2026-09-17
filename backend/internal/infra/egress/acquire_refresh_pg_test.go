@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"os"
 	"sort"
 	"testing"
@@ -47,7 +48,7 @@ func TestAcquireRefreshLatencyDistributionOnPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	sample := func(refresh bool) []time.Duration {

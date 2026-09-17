@@ -16,7 +16,6 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 // ExitIPSource 提供节点当前已知出口身份(被动漂移检测的探测面,
@@ -58,7 +57,7 @@ var ErrRateLimited = errors.New("enforcement: 轮换限速")
 // Service 是执行所。
 type Service struct {
 	cfg      Config
-	registry *registry.Registry
+	registry StateStore
 	ipSource ExitIPSource
 	rotator  Rotator
 	nodes    proxy.NodeSource
@@ -67,13 +66,16 @@ type Service struct {
 	// 同节点不得每拍重烧全局限速槽——既骚扰上游 webhook,也让
 	// 排序在后的被禁节点饿死)。
 	lastRotateMu sync.Mutex
+	lifecycleMu  sync.Mutex
 	lastRotate   map[uint64]time.Time
 	cancel       context.CancelFunc
+	closed       bool
+	doneOnce     sync.Once
 	done         chan struct{}
 }
 
-// New 构建执行所并启动 epoch 检测循环(nodes/ipSource 为 nil 时空转)。
-func New(cfg Config, qualityRegistry *registry.Registry, nodes proxy.NodeSource, ipSource ExitIPSource, rotator Rotator) *Service {
+// New 构建执行所；Run 显式启动循环，缺少依赖时不启动。
+func New(cfg Config, qualityRegistry StateStore, nodes proxy.NodeSource, ipSource ExitIPSource, rotator Rotator) *Service {
 	cfg = cfg.normalized()
 	logger := cfg.Logger
 	if logger == nil {
@@ -85,22 +87,51 @@ func New(cfg Config, qualityRegistry *registry.Registry, nodes proxy.NodeSource,
 		lastRotate: map[uint64]time.Time{},
 		done:       make(chan struct{}),
 	}
-	if service.registry != nil && service.nodes != nil && service.ipSource != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		service.cancel = cancel
-		go service.run(ctx)
-	} else {
-		close(service.done)
+	if service.registry == nil || service.nodes == nil || service.ipSource == nil {
+		service.doneOnce.Do(func() { close(service.done) })
 	}
 	return service
 }
 
-// Close 停止检测循环(循环未启动时为 no-op——Close 不因空转服务阻塞)。
+// Run starts the owned epoch polling loop on the caller's context; the first
+// poll happens immediately after start. Run returns immediately; repeated
+// calls are ignored. Close prevents subsequent starts and joins the loop.
+func (s *Service) Run(ctx context.Context) {
+	s.lifecycleMu.Lock()
+	if s.cancel != nil || s.closed {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	// Inert construction (missing registry/nodes/ipSource) never runs a loop.
+	select {
+	case <-s.done:
+		s.lifecycleMu.Unlock()
+		return
+	default:
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	s.lifecycleMu.Unlock()
+	go s.run(runCtx)
+}
+
+// Close stops admission and joins the loop, including retries after timeout.
 func (s *Service) Close(ctx context.Context) error {
-	if s == nil || s.cancel == nil {
+	if s == nil {
 		return nil
 	}
-	s.cancel()
+	s.lifecycleMu.Lock()
+	cancel := s.cancel
+	if !s.closed {
+		s.closed = true
+		if cancel == nil {
+			s.doneOnce.Do(func() { close(s.done) })
+		}
+	}
+	s.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	select {
 	case <-s.done:
 		return nil
@@ -115,7 +146,7 @@ func (s *Service) Close(ctx context.Context) error {
 }
 
 func (s *Service) run(parent context.Context) {
-	defer close(s.done)
+	defer s.doneOnce.Do(func() { close(s.done) })
 	// 启动即首询:重建"最近已知 IP"基线,后续轮询检测漂移。
 	firstCtx, firstCancel := context.WithTimeout(parent, s.cfg.PollInterval)
 	if _, err := s.PollEpochs(firstCtx); err != nil {

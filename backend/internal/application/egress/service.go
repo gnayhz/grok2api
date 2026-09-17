@@ -5,16 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 	"github.com/chenyme/grok2api/backend/internal/pkg/proxyurl"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -25,6 +25,9 @@ var (
 	ErrNotFound             = errors.New("代理节点不存在")
 	ErrProbeStale           = errors.New("代理配置或探测版本已更新，本次结果已过期，请重新测试")
 	ErrClearanceUnavailable = errors.New("Clearance 刷新不可用")
+	// ErrClearanceRefresh 标记 Clearance 刷新链路的执行失败:底层细节可能
+	// 含 FlareSolverr URL/超时/内部地址,只落服务端日志,不透传管理端响应。
+	ErrClearanceRefresh = errors.New("出口会话 Clearance 刷新失败")
 )
 
 const (
@@ -32,7 +35,6 @@ const (
 	maxRotationURLBytes = 8192
 	// 代理账号模板占位符与判定收敛于 domain,此处仅做兼容别名。
 	ProxyAccountPlaceholder = domain.ProxyAccountPlaceholder
-	proxyAccountSentinel    = "grok2api_account_placeholder"
 )
 
 // Input is the create/update payload for one egress node. Nodes are pure
@@ -62,14 +64,13 @@ type ServiceRepository interface {
 }
 
 type Service struct {
-	httpOwner               HTTPTransportOwner
 	backgroundOnce          sync.Once
 	backgroundWork          *backgroundWork
 	subscriptionMaintenance sync.Mutex
 	probeMaintenance        sync.Mutex
 	repository              ServiceRepository
 	operations              OperationsRepository
-	cipher                  security.Cryptor
+	cipher                  portcrypto.Cryptor
 	mu                      sync.RWMutex
 	clearance               ClearanceManager
 	prober                  NodeProber
@@ -81,8 +82,8 @@ type Service struct {
 	qualityQuarantiner QualityQuarantiner
 	qualityLogger      *slog.Logger
 	// 死出口确认状态(probe_dead.go): 连续双族探活失败的观测计数。
-	probeDeadMu sync.Mutex
-	probeDead   map[uint64]probeDeadObservation
+	// probeDead 持有死出口确认状态(窗口/计数/确认标记);仅经组件方法访问。
+	probeDead *probeDeadTracker
 
 	rotationLock   repository.DistributedLock
 	rotationRate   repository.RollingRateLimiter
@@ -92,22 +93,19 @@ type Service struct {
 	// rotationObserver 轮换成功记账后的单节点出口身份观测回调,由组合根
 	// 注入(执行所的 ObserveNodeExit);nil=未接线(单测/独立运行)。
 	rotationObserver func(context.Context, uint64)
+	// webhookExecutor 由组合根注入的轮换 webhook 传输端口(infra 实现);
+	// nil 时轮换 webhook 显式失败——与订阅拉取同一合同,不为缺依赖自建
+	// 网络客户端,也不存在内联回退路径。
+	webhookExecutor WebhookExecutor
+	// subscriptionFetcher 由组合根注入的订阅拉取传输端口(infra 实现);
+	// nil 时订阅同步显式失败——不为缺依赖自建网络客户端。
+	subscriptionFetcher SubscriptionFetcher
 }
 
-type HTTPTransportOwner interface {
-	ManageHTTPTransport(context.Context, *http.Transport) (http.RoundTripper, func(), error)
-}
-
-func (s *Service) SetHTTPTransportOwner(owner HTTPTransportOwner) {
-	s.mu.Lock()
-	s.httpOwner = owner
-	s.mu.Unlock()
-}
-
-func (s *Service) httpTransportOwner() HTTPTransportOwner {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.httpOwner
+// SubscriptionFetcher 是订阅内容拉取的消费方端口；拨号、代理方案、
+// 重定向与 SSRF 收窄在 infra 传输组件内。
+type SubscriptionFetcher interface {
+	FetchProxySubscription(ctx context.Context, url, viaProxy string) ([]byte, error)
 }
 
 type UnhealthyCleanupPreview struct {
@@ -134,7 +132,7 @@ type BatchClearanceManager interface {
 	ForgetClearances([]uint64)
 }
 
-func NewService(storage ServiceRepository, cipher security.Cryptor) *Service {
+func NewService(storage ServiceRepository, cipher portcrypto.Cryptor) *Service {
 	service := &Service{repository: storage, cipher: cipher}
 	if operations, ok := storage.(OperationsRepository); ok {
 		service.operations = operations
@@ -150,8 +148,8 @@ func (s *Service) SetClearanceManager(value ClearanceManager) {
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]domain.PublicNode, int64, error) {
 	page, pageSize = repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
-	if !validListValue(filter.Enabled, "enabled", "disabled") ||
-		!validListValue(filter.ProbeStatus, string(domain.ProbeStatusHealthy), string(domain.ProbeStatusUnhealthy), string(domain.ProbeStatusUnknown)) {
+	if !(filter.Enabled == "" || slices.Contains([]string{"enabled", "disabled"}, filter.Enabled)) ||
+		!(filter.ProbeStatus == "" || slices.Contains([]string{string(domain.ProbeStatusHealthy), string(domain.ProbeStatusUnhealthy), string(domain.ProbeStatusUnknown)}, filter.ProbeStatus)) {
 		return nil, 0, ErrInvalidFilter
 	}
 	if !repository.IsValidSort(filter.Sort, "name", "proxy", "health") {
@@ -192,18 +190,6 @@ func (s *Service) publicNodes(ctx context.Context, values []domain.Node) []domai
 		result = append(result, s.publicNode(value, poolNames))
 	}
 	return result
-}
-
-func validListValue(value string, allowed ...string) bool {
-	if value == "" {
-		return true
-	}
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) Create(ctx context.Context, input Input) (domain.PublicNode, error) {
@@ -445,7 +431,11 @@ func (s *Service) RefreshClearance(ctx context.Context, id uint64) error {
 	if manager == nil {
 		return ErrClearanceUnavailable
 	}
-	return manager.RefreshClearance(ctx, id)
+	if err := manager.RefreshClearance(ctx, id); err != nil {
+		// 类型化哨兵替代传输层按错误文案子串分类;原始错误保留给日志。
+		return fmt.Errorf("%w: %w", ErrClearanceRefresh, err)
+	}
+	return nil
 }
 
 func uniqueIDs(values []uint64) []uint64 {
@@ -579,10 +569,12 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 
 func (s *Service) publicNode(value domain.Node, poolNames map[uint64]string) domain.PublicNode {
 	proxyDisplay, proxyFingerprint, accountTemplate := s.proxyMetadata(value.EncryptedProxyURL)
-	rotatingEndpoint := value.ProxyPool || accountTemplate
-	health, failureCount, cooldownUntil, lastError := value.Health, value.FailureCount, value.CooldownUntil, value.LastError
+	// 池模式判定与"旋转端点无共享健康惩罚"投影都委托 domain 唯一实现:
+	// 应用层只负责提供已解密的元数据(accountTemplate),不重推导策略。
+	rotatingEndpoint := domain.IsPoolMode(value.ProxyPool, accountTemplate)
+	health := value.HealthState()
 	if rotatingEndpoint {
-		health, failureCount, cooldownUntil, lastError = 1, 0, nil, ""
+		health = domain.RotatingEndpointHealth(health)
 	}
 	return domain.PublicNode{
 		ID: value.ID, Name: value.Name, Enabled: value.Enabled,
@@ -596,7 +588,7 @@ func (s *Service) publicNode(value domain.Node, poolNames map[uint64]string) dom
 		SourceName:        value.SourceName,
 		Pools:             nodePoolRefs(value.PoolIDs, poolNames),
 		AccountBoundProxy: accountTemplate,
-		Health:            health, FailureCount: failureCount, CooldownUntil: cooldownUntil, LastError: lastError,
+		Health:            health.Health, FailureCount: health.FailureCount, CooldownUntil: health.CooldownUntil, LastError: health.LastError,
 		ProbeStatus: value.ProbeStatus, LastProbedAt: value.LastProbedAt, ProbeLatencyMS: value.ProbeLatencyMS, ExitIP: value.ExitIP, ProbeError: value.ProbeError,
 		ProbeProvider: value.ProbeProvider,
 		IPv4Probe:     value.IPv4Probe, IPv6Probe: value.IPv6Probe,
@@ -649,7 +641,7 @@ func (s *Service) proxyMetadata(encrypted string) (string, string, bool) {
 	if err != nil || proxyURL == "" {
 		return "", "", false
 	}
-	return ProxyDisplay(proxyURL), security.HashToken(proxyURL)[:12], domain.IsAccountTemplateProxy(proxyURL)
+	return ProxyDisplay(proxyURL), tokenhash.HashToken(proxyURL)[:12], domain.IsAccountTemplateProxy(proxyURL)
 }
 
 // ProxyDisplay preserves the routable endpoint and, for standard proxies, the
@@ -688,10 +680,4 @@ func ProxyDisplay(proxyURL string) string {
 // (dependency direction is strictly downward again).
 func NormalizeProxyURL(value string) (string, error) {
 	return proxyurl.NormalizeProxyURL(value)
-}
-
-// SanitizeCloudflareCookies 委托 pkg/cfcookies:实现移至中立包, 账号层
-// 不再需要为净化 Cookie 导入出口应用包(业务与代理解耦)。
-func SanitizeCloudflareCookies(value string) string {
-	return cfcookies.Sanitize(value)
 }

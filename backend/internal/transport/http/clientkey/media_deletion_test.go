@@ -39,11 +39,11 @@ func TestKeyAndMediaHTTPDeletionPreservePendingCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo, jobs := relational.NewClientKeyRepository(db), relational.NewMediaJobRepository(db)
-	keys := clientkeyapp.NewService("http-deletion", repo, nil, nil, 0, 0, cipher)
+	keys := clientkeyapp.NewService("http-deletion", repo, nil, nil, 0, 0, cipher, security.RandomTokenSource{})
 	defer keys.Close(ctx)
 	router := gin.New()
 	NewHandler(keys).Register(router.Group("/api"))
-	mediahttp.NewHandler(mediaapp.NewService(relational.NewMediaAssetRepository(db), jobs, nil, nil, mediaapp.Config{}), nil).RegisterAdmin(router.Group("/api"))
+	mediahttp.NewHandler(mediaapp.NewServiceWithTickets(relational.NewMediaAssetRepository(db), jobs, nil, nil, nil, mediaapp.Config{}), nil).RegisterAdmin(router.Group("/api"))
 	call := func(path, body string, want int, code string) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodDelete, path, strings.NewReader(body))

@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/sessionidentity"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // SyncAccountIdentity 通过 Grok Web Session 接口补充 Console SSO 身份。

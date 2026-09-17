@@ -5,14 +5,16 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 func TestResponsesCustomToolRequestHistoryAndJSONResponse(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"run code",
 		"tools":[{"type":"custom","name":"code","description":"Run code","format":{"type":"text"}}],
 		"tool_choice":{"type":"custom","name":"code"}
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,12 +56,12 @@ func TestResponsesCustomToolRequestHistoryAndJSONResponse(t *testing.T) {
 		t.Fatalf("下游 custom tool = %#v", visible)
 	}
 
-	history, _, err := normalizeResponsesRequest([]byte(`{
+	history, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"custom_tool_call","call_id":"call_1","name":"code","input":"print(1)"},
 			{"type":"custom_tool_call_output","call_id":"call_1","output":"1"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +81,10 @@ func TestResponsesCustomToolRequestHistoryAndJSONResponse(t *testing.T) {
 }
 
 func TestResponsesCustomToolStreamUsesCustomEvents(t *testing.T) {
-	_, compatibility, err := normalizeResponsesRequest([]byte(`{
+	_, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"run",
 		"tools":[{"type":"custom","name":"code"}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,10 +128,10 @@ func TestResponsesCustomToolStreamUsesCustomEvents(t *testing.T) {
 }
 
 func TestResponsesCustomGrammarDowngradesWithoutRejectingRequest(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"run",
 		"tools":[{"type":"custom","name":"code","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,11 +149,11 @@ func TestResponsesCustomGrammarDowngradesWithoutRejectingRequest(t *testing.T) {
 }
 
 func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"search",
 		"tools":[{"type":"web_search_preview"}],
 		"tool_choice":{"type":"web_search_preview"}
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +169,10 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		t.Fatalf("web search alias = %#v, choice = %#v", tool, request["tool_choice"])
 	}
 
-	normalized, compatibility, err = normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err = normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"search",
 		"tools":[{"type":"web_search","external_web_access":true,"indexed_web_access":true,"search_content_types":["text"],"search_context_size":"low","user_location":{"type":"approximate","country":"CN"},"filters":{"allowed_domains":[]}}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,9 +200,9 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		{fragment: `"filters":{"excluded_domains":["example.com"]}`, field: "excluded_domains"},
 		{fragment: `"excluded_domains":["example.com"]`, field: "excluded_domains", warning: "web_search_excluded_domains_normalized"},
 	} {
-		normalized, compatibility, err = normalizeResponsesRequest([]byte(`{
+		normalized, compatibility, err = normalizeResponsesRequestWithMetadata([]byte(`{
 			"model":"public","input":"search","tools":[{"type":"web_search",`+supported.fragment+`}]
-		}`), "grok-4.5")
+		}`), "grok-4.5", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,16 +225,16 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		`"filters":{"excluded_domains":["a.example","b.example","c.example","d.example","e.example","f.example"]}`,
 		`"filters":{"allowed_domains":["allow.example"],"excluded_domains":["deny.example"]}`,
 	} {
-		if _, _, err = normalizeResponsesRequest([]byte(`{
+		if _, _, err = normalizeResponsesRequestWithMetadata([]byte(`{
 			"model":"public","input":"search","tools":[{"type":"web_search",`+invalid+`}]
-		}`), "grok-4.5"); err == nil {
+		}`), "grok-4.5", nil); err == nil {
 			t.Fatalf("invalid web_search filters accepted: %s", invalid)
 		}
 	}
 
-	normalized, _, err = normalizeResponsesRequest([]byte(`{
+	normalized, _, err = normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"search","tools":[{"type":"web_search","filters":{"excluded_domains":["a.example","b.example","c.example","d.example","e.example"]}}]
-	}`), "grok-4.6")
+	}`), "grok-4.6", nil)
 	if err != nil {
 		t.Fatalf("five excluded domains must remain valid: %v", err)
 	}
@@ -245,9 +247,9 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		t.Fatalf("excluded_domains count = %d", len(domains))
 	}
 
-	normalized, _, err = normalizeResponsesRequest([]byte(`{
+	normalized, _, err = normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"search","tools":[{"type":"web_search","filters":{"allowed_domains":null,"excluded_domains":[]}}]
-	}`), "grok-4.6")
+	}`), "grok-4.6", nil)
 	if err != nil {
 		t.Fatalf("null/empty domain filters must remain unbounded: %v", err)
 	}
@@ -269,7 +271,7 @@ func TestResponsesWebSearchAliasesAndOptions(t *testing.T) {
 		`"unknown_control":true`,
 	} {
 		for _, choice := range []string{`"auto"`, `{"type":"web_search"}`} {
-			_, _, err = normalizeResponsesRequest([]byte(`{"input":"search","tools":[{"type":"web_search",`+restricted+`}],"tool_choice":`+choice+`}`), "grok-4.5")
+			_, _, err = normalizeResponsesRequestWithMetadata([]byte(`{"input":"search","tools":[{"type":"web_search",`+restricted+`}],"tool_choice":`+choice+`}`), "grok-4.5", nil)
 			if err == nil {
 				t.Fatalf("unrepresentable search constraint accepted: %s", restricted)
 			}
@@ -282,7 +284,7 @@ func TestResponsesBuild02110NativeAndUnsupportedToolMatrix(t *testing.T) {
 	for _, kind := range native {
 		t.Run("native_"+kind, func(t *testing.T) {
 			body := []byte(`{"model":"public","input":"hello","tools":[{"type":"` + kind + `"}]}`)
-			normalized, _, err := normalizeResponsesRequest(body, "grok-4.5")
+			normalized, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -301,7 +303,7 @@ func TestResponsesBuild02110NativeAndUnsupportedToolMatrix(t *testing.T) {
 	for _, kind := range compatible {
 		t.Run("compatible_"+kind, func(t *testing.T) {
 			body := []byte(`{"model":"public","input":"hello","tools":[{"type":"` + kind + `"}]}`)
-			if _, compatibility, err := normalizeResponsesRequest(body, "grok-4.5"); err != nil || compatibility == nil {
+			if _, compatibility, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil); err != nil || compatibility == nil {
 				t.Fatalf("compatibility=%#v error=%v", compatibility, err)
 			}
 		})
@@ -311,7 +313,7 @@ func TestResponsesBuild02110NativeAndUnsupportedToolMatrix(t *testing.T) {
 	for _, kind := range unsupported {
 		t.Run("unsupported_"+kind, func(t *testing.T) {
 			body := []byte(`{"model":"public","input":"hello","tools":[{"type":"` + kind + `"}]}`)
-			_, _, err := normalizeResponsesRequest(body, "grok-4.5")
+			_, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 			requestErr, ok := err.(*responsesRequestError)
 			if !ok || requestErr.Code != "unsupported_parameter" || requestErr.Param != "tools[0].type" || !strings.Contains(requestErr.Message, "Grok Build") {
 				t.Fatalf("error = %#v", err)
@@ -321,10 +323,10 @@ func TestResponsesBuild02110NativeAndUnsupportedToolMatrix(t *testing.T) {
 }
 
 func TestResponsesXSearchDateBounds(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"search",
 		"tools":[{"type":"x_search","from_date":"2026-07-01","to_date":"2026-07-23"}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +351,7 @@ func TestResponsesXSearchDateBounds(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, err := normalizeResponsesRequest([]byte(test.body), "grok-4.5")
+			_, _, err := normalizeResponsesRequestWithMetadata([]byte(test.body), "grok-4.5", nil)
 			requestErr, ok := err.(*responsesRequestError)
 			if !ok || requestErr.Code != "invalid_parameter" || requestErr.Param != test.param {
 				t.Fatalf("error = %#v", err)
@@ -359,11 +361,11 @@ func TestResponsesXSearchDateBounds(t *testing.T) {
 }
 
 func TestResponsesHostedToolChoiceNarrowsToMatchingTool(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"draw",
 		"tools":[{"type":"image_generation"},{"type":"web_search"}],
 		"tool_choice":{"type":"image_generation"}
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,13 +383,13 @@ func TestResponsesHostedToolChoiceNarrowsToMatchingTool(t *testing.T) {
 }
 
 func TestResponsesMCPDeferLoadingUsesClientToolSearch(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"find tools",
 		"tools":[
 			{"type":"mcp","server_label":"github","server_url":"https://example.com/mcp","description":"GitHub tools","defer_loading":true},
 			{"type":"tool_search","execution":"client"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,14 +402,14 @@ func TestResponsesMCPDeferLoadingUsesClientToolSearch(t *testing.T) {
 		t.Fatalf("上游 tools = %#v", tools)
 	}
 
-	loaded, _, err := normalizeResponsesRequest([]byte(`{
+	loaded, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"tool_search_call","execution":"client","call_id":"search_1","arguments":{}},
 			{"type":"tool_search_output","execution":"client","call_id":"search_1","tools":[
 				{"type":"mcp","server_label":"github","server_url":"https://example.com/mcp","defer_loading":true}
 			]}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,14 +423,14 @@ func TestResponsesMCPDeferLoadingUsesClientToolSearch(t *testing.T) {
 }
 
 func TestResponsesCodexHistoryItemsAreStructuredOrVisible(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"agent_message","author":"worker","recipient":"root","content":[{"type":"input_text","text":"analysis result"}]},
 			{"type":"local_shell_call","call_id":"shell_1","status":"completed","action":{"type":"exec","command":"pwd"}},
 			{"type":"local_shell_call_output","call_id":"shell_1","status":"completed","output":"/workspace\n"},
 			{"type":"mcp_tool_call_output","call_id":"mcp_1","output":{"content":"done"}}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,9 +449,9 @@ func TestResponsesCodexHistoryItemsAreStructuredOrVisible(t *testing.T) {
 		}
 	}
 
-	normalized, _, err = normalizeResponsesRequest([]byte(`{
+	normalized, _, err = normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[{"type":"agent_message","content":[{"type":"encrypted_text","encrypted_content":"opaque"}]}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,10 +465,10 @@ func TestResponsesCodexHistoryItemsAreStructuredOrVisible(t *testing.T) {
 }
 
 func TestResponsesStreamFiltersPrivateEventsAndPreservesSSEFields(t *testing.T) {
-	_, compatibility, err := normalizeResponsesRequest([]byte(`{
+	_, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"lookup",
 		"tools":[{"type":"namespace","name":"crm","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +537,7 @@ func TestResponsesToolAliasesAreUniqueAndBounded(t *testing.T) {
 			{"type":"namespace","name":"` + longNamespace + `","tools":[{"type":"function","name":"` + longName + `","parameters":{"type":"object"}}]}
 		]
 	}`)
-	normalized, _, err := normalizeResponsesRequest(body, "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,4 +560,17 @@ func TestResponsesToolAliasesAreUniqueAndBounded(t *testing.T) {
 	if tools[0].(map[string]any)["name"] != "a__bc" || tools[1].(map[string]any)["name"] == "a__bc" || !strings.Contains(tools[1].(map[string]any)["name"].(string), "__") {
 		t.Fatalf("碰撞 alias = %#v", tools)
 	}
+}
+
+// normalizeResponseStream 是测试缝:按生产流式转换边界(response_conversion.go
+// 内联的同款管线——streampipe.Transform + consumeCompatibleSSE →
+// writeResponseEvent)把 Build SSE 流转换为 OpenAI Responses 事件流,供
+// 兼容层测试直接断言转换结果。Tool rewriting is optional, while BOM
+// removal and private Grok control-event filtering always apply.
+func (c *responsesToolCompatibility) normalizeResponseStream(source io.ReadCloser) io.ReadCloser {
+	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
+		return consumeCompatibleSSE(input, func(event compatibleSSEEvent) error {
+			return c.writeResponseEvent(writer, event)
+		})
+	})
 }

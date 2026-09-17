@@ -56,7 +56,7 @@ func TestDefaultEligibility(t *testing.T) {
 func TestExitTransitionRejectsInvisibleEpoch(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{
 		NodeID: 7, Epoch: 1, To: model.ExitRemanded, CaseID: 100,
 	}); !errors.Is(err, ErrStaleEpoch) {
 		t.Fatalf("未知节点的非零 epoch 必须被拒, got %v", err)
@@ -104,7 +104,7 @@ func TestNodeQualityArchivesUseLatestEpochWithoutGrouping(t *testing.T) {
 func TestDirectPlaceholderNeverEntersExitState(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 0, To: model.ExitRemanded, CaseID: 100}); !errors.Is(err, ErrInvalidNode) {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 0, To: model.ExitRemanded, CaseID: 100}); !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("直连占位节点不得羁押, got %v", err)
 	}
 	if _, _, err := registry.AdvanceEpoch(ctx, 0, model.ExitIdentityFromAggregate("198.51.100.1")); !errors.Is(err, ErrInvalidNode) {
@@ -124,11 +124,11 @@ func TestAccountRemandReleaseErase(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
 	// I25:羁押必须挂案件号。
-	err := registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 1, To: model.AccountRemanded})
+	err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 1, To: model.AccountRemanded})
 	if !errors.Is(err, ErrCaseRequired) {
 		t.Fatalf("无案件号羁押必须被拒, got %v", err)
 	}
-	if err := registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 1, To: model.AccountRemanded, CaseID: 100}); err != nil {
+	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 1, To: model.AccountRemanded, CaseID: 100}); err != nil {
 		t.Fatal(err)
 	}
 	if registry.AccountEligible(1) {
@@ -203,13 +203,13 @@ func TestProbeTaskPersistsDifferentialBaseline(t *testing.T) {
 func TestExitRemandBanAndEpochFlip(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 4, To: model.ExitRemanded, CaseID: 50}); err != nil {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 4, To: model.ExitRemanded, CaseID: 50}); err != nil {
 		t.Fatal(err)
 	}
 	if registry.ExitEligible(4) {
 		t.Fatal("羁押出口不可调度")
 	}
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 4, To: model.ExitBanned, CaseID: 50}); err != nil {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 4, To: model.ExitBanned, CaseID: 50}); err != nil {
 		t.Fatal(err)
 	}
 	if registry.ExitEligible(4) {
@@ -227,7 +227,7 @@ func TestExitRemandBanAndEpochFlip(t *testing.T) {
 		t.Fatal("IP 变化即解禁(统一 ban 律)")
 	}
 	// 旧 epoch 的裁决不得追新 IP。
-	err = registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 4, Epoch: 0, To: model.ExitBanned, CaseID: 50})
+	err = registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 4, Epoch: 0, To: model.ExitBanned, CaseID: 50})
 	if !errors.Is(err, ErrStaleEpoch) {
 		t.Fatalf("过期 epoch 转移必须被拒, got %v", err)
 	}
@@ -255,7 +255,7 @@ func TestStickyRemandAutoReleaseOnEpoch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 9, Epoch: 2, To: model.ExitRemanded, CaseID: 60}); err != nil {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 9, Epoch: 2, To: model.ExitRemanded, CaseID: 60}); err != nil {
 		t.Fatal(err)
 	}
 	if _, released, err := registry.AdvanceEpoch(ctx, 9, model.ExitIdentityFromAggregate("198.51.100.7")); err != nil {
@@ -276,13 +276,13 @@ func TestStickyRemandAutoReleaseOnEpoch(t *testing.T) {
 func TestCurrentAccountStatesProjection(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
-	if err := registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 7, To: model.AccountRemanded, CaseID: 60}); err != nil {
+	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 7, To: model.AccountRemanded, CaseID: 60}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 7, To: model.AccountSentenced, CaseID: 60}); err != nil {
+	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 7, To: model.AccountSentenced, CaseID: 60}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 8, To: model.AccountRemanded, CaseID: 61}); err != nil {
+	if err := registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 8, To: model.AccountRemanded, CaseID: 61}); err != nil {
 		t.Fatal(err)
 	}
 	states := registry.CurrentAccountStates()
@@ -304,13 +304,13 @@ func TestCurrentAccountStatesProjection(t *testing.T) {
 func TestCurrentExitStatesProjection(t *testing.T) {
 	registry := openTestRegistry(t)
 	ctx := context.Background()
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 5, To: model.ExitRemanded, CaseID: 60}); err != nil {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 5, To: model.ExitRemanded, CaseID: 60}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 6, To: model.ExitRemanded, CaseID: 61}); err != nil {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 6, To: model.ExitRemanded, CaseID: 61}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.TransitionExit(ctx, ExitTransitionRequest{NodeID: 6, To: model.ExitBanned, CaseID: 61}); err != nil {
+	if err := registry.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 6, To: model.ExitBanned, CaseID: 61}); err != nil {
 		t.Fatal(err)
 	}
 	states := registry.CurrentExitStates()
@@ -338,13 +338,13 @@ func TestRegistryRestartRebuildsCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 77, To: model.AccountRemanded, CaseID: 900}); err != nil {
+	if err := first.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 77, To: model.AccountRemanded, CaseID: 900}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.TransitionExit(ctx, ExitTransitionRequest{NodeID: 88, To: model.ExitRemanded, CaseID: 900}); err != nil {
+	if err := first.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 88, To: model.ExitRemanded, CaseID: 900}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.TransitionExit(ctx, ExitTransitionRequest{NodeID: 88, To: model.ExitBanned, CaseID: 900}); err != nil {
+	if err := first.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 88, To: model.ExitBanned, CaseID: 900}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := first.AdvanceEpoch(ctx, 12, model.ExitIdentityFromAggregate("192.0.2.4")); err != nil {
@@ -458,14 +458,14 @@ func TestCaseStorage(t *testing.T) {
 	if err != nil || caseID == 0 {
 		t.Fatalf("立案 = %d, %v", caseID, err)
 	}
-	if err := registry.UpsertParty(ctx, PartyRecord{
+	if err := registry.UpsertParty(ctx, model.PartyRecord{
 		CaseID: caseID, Kind: model.PartyAccount, AccountID: 10, Role: model.RoleDefendant,
 		Disposition: model.DispositionRemanded,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// 幂等 upsert。
-	if err := registry.UpsertParty(ctx, PartyRecord{
+	if err := registry.UpsertParty(ctx, model.PartyRecord{
 		CaseID: caseID, Kind: model.PartyAccount, AccountID: 10, Role: model.RoleDefendant,
 		Disposition: model.DispositionReleased,
 	}); err != nil {
@@ -493,7 +493,7 @@ func TestConcurrentEligibilityReadsDuringTransition(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < 200; i++ {
-			_ = registry.TransitionAccount(ctx, AccountTransitionRequest{AccountID: 99, To: model.AccountRemanded, CaseID: uint64(i + 1)})
+			_ = registry.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 99, To: model.AccountRemanded, CaseID: uint64(i + 1)})
 			_ = registry.ReleaseAccountErase(ctx, 99)
 		}
 	}()

@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net/http"
 	"strings"
@@ -40,7 +42,7 @@ func newRouteRuleTestManager(t *testing.T, node domain.Node, config domain.Opera
 	if node.EncryptedProxyURL == "" {
 		node.EncryptedProxyURL = mustEncryptRouteRuleProxy(t, cipher, "http://proxy.example:8080")
 	}
-	manager := NewManager(&routeRuleRepository{node: node, config: config}, cipher)
+	manager := NewManagerWithLimits(&routeRuleRepository{node: node, config: config}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.transport.newBuildClient = func(string, time.Duration) (requestClient, error) {
 		return &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) {
@@ -148,8 +150,8 @@ func TestRoutingTargetNodeUnavailableFailsStrict(t *testing.T) {
 }
 
 // 旋转出口(节点级代理池模式)可以作为固定目标:固定的是隧道而非瞬时出口
-// IP。即使该节点带有硬冷却(单个坏 IP 不代表端点坏),固定目标
-// 仍继续服务——与自动调度对池模式节点的豁免口径一致。
+// IP。普通传输冷却(单个坏 IP 不代表端点坏)被豁免,固定目标仍继续服务
+// ——与自动调度对池模式节点的豁免口径一致。
 func TestRotatingNodeServesFixedTargetDespiteCooldowns(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -168,12 +170,45 @@ func TestRotatingNodeServesFixedTargetDespiteCooldowns(t *testing.T) {
 	ctx := WithTrafficClass(context.Background(), domain.TrafficClassBilling)
 	lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, "acct")
 	if acquireErr != nil {
-		t.Fatalf("rotating fixed target must ignore cooldowns: %v", acquireErr)
+		t.Fatalf("rotating fixed target must ignore ordinary cooldowns: %v", acquireErr)
 	}
 	if lease.NodeID != 11 {
 		t.Fatalf("lease node = %d, want the rotating node 11", lease.NodeID)
 	}
 	lease.Release()
+}
+
+// 池模式豁免只覆盖普通冷却:出口 IP 质量隔离(exit_ip_quality)指向端点
+// 自身的降智问题,固定目标同样必须让路。此前的固定目标副本整段绕过冷却
+// 检查,被隔离的降智出口借"旋转"名义继续承流,隔离形同虚设——与池成员
+// 过滤/自动调度"隔离对池模式同样生效"的口径直接矛盾。
+func TestRotatingFixedTargetHonorsExitIPQualityQuarantine(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatingProxy, err := cipher.Encrypt("http://rotating.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cooldown := time.Now().UTC().Add(5 * time.Minute)
+	node := domain.Node{
+		ID: 11, Name: "rotating", Enabled: true, Health: 0.2, FailureCount: 3,
+		EncryptedProxyURL: rotatingProxy, ProxyPool: true,
+		CooldownUntil: &cooldown, LastError: domain.LastErrorExitIPQuality,
+	}
+	config := domain.OperationsConfig{
+		DefaultTarget: domain.RoutingTarget{Mode: domain.RoutingTargetNode, NodeID: 11},
+	}
+	manager := newRouteRuleTestManager(t, node, config)
+	ctx := WithTrafficClass(context.Background(), domain.TrafficClassBilling)
+	lease, acquireErr := manager.Acquire(ctx, domain.ScopeBuild, "acct")
+	if lease != nil {
+		lease.Release()
+	}
+	if !errors.Is(acquireErr, ErrRoutingTargetUnavailable) {
+		t.Fatalf("quarantined rotating fixed target must fail strict, got lease=%v err=%v", lease, acquireErr)
+	}
 }
 
 // 读取 operations config 失败时请求失败(fail closed at config layer),
@@ -183,7 +218,7 @@ func TestAcquireFailsWhenOperationsConfigUnreadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := NewManager(&failingRouteRuleConfigRepository{}, cipher)
+	fresh := NewManagerWithLimits(&failingRouteRuleConfigRepository{}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = fresh.Close(context.Background()) })
 	if _, _, err := fresh.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "acct"); err == nil {
 		t.Fatal("config read failure must surface as an error")
@@ -277,7 +312,7 @@ func TestFixedTargetHonorsNodeExclusions(t *testing.T) {
 	// 守卫排除 31 后:固定目标是强绑定,重试不得改道其它出口——账号出口
 	// IP 的中途突变本身就是风险。必须以 ErrRoutingTargetUnavailable 快速
 	// 失败,让操作者看到配置的出口已不适合服务。
-	ctx := WithNodeExclusions(context.Background(), map[uint64]struct{}{31: {}})
+	ctx := physical.WithNodeExclusions(context.Background(), map[uint64]struct{}{31: {}})
 	lease2, err := manager.Acquire(ctx, domain.ScopeBuild, "acct")
 	if lease2 != nil {
 		lease2.Release()
@@ -312,7 +347,7 @@ func TestFixedTargetDbErrorFailsInsteadOfSilentFallback(t *testing.T) {
 	}
 	node.EncryptedProxyURL = mustEncryptRouteRuleProxy(t, cipher, "http://proxy.example:8080")
 	dbErr := errors.New("db temporarily unavailable")
-	manager := NewManager(&routeRuleDbErrorRepo{routeRuleRepository{node: node, config: config}, dbErr}, cipher)
+	manager := NewManagerWithLimits(&routeRuleDbErrorRepo{routeRuleRepository{node: node, config: config}, dbErr}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	lease, err := manager.Acquire(WithTrafficClass(context.Background(), domain.TrafficClassBilling), domain.ScopeBuild, "acct")

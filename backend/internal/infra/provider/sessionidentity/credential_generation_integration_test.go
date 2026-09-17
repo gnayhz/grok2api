@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -17,10 +18,11 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestSSOHTTPCompletionUsesObservedGeneration(t *testing.T) {
@@ -81,7 +83,7 @@ func TestSSOHTTPCompletionUsesObservedGeneration(t *testing.T) {
 						}
 					}))
 					defer func() { finish(); server.Close() }()
-					egress := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+					egress := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 					defer egress.Close(ctx)
 					var adapter provider.Adapter
 					if kind == accountdomain.ProviderConsole {
@@ -89,7 +91,7 @@ func TestSSOHTTPCompletionUsesObservedGeneration(t *testing.T) {
 					} else {
 						adapter = web.NewAdapter(web.Config{BaseURL: server.URL}, egress, cipher, nil, nil)
 					}
-					service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+					service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 					result := make(chan error, 1)
 					go func() { result <- service.SyncAccountIdentity(ctx, original.ID) }()
 					select {

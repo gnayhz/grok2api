@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -80,6 +81,7 @@ func TestRotationSharedOwnershipAndRate(t *testing.T) {
 				s.SetNodeProber(&sequenceProber{results: []domain.ProbeResult{{Status: domain.ProbeStatusHealthy, ExitIP: "203.0.113.99", TestedAt: time.Now()}}})
 				s.SetRotationCoordination(lock, rate)
 				s.SetRotationConfig(cfg)
+				s.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
 			}
 			setup(first, firstLock, firstRate)
 			second := NewService(repo, first.cipher)
@@ -234,6 +236,7 @@ func TestRotationWorkerCanEnableAfterDisabledStartup(t *testing.T) {
 	}
 	cfg.Enabled = true
 	service.SetRotationConfig(cfg)
+	service.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
 	if err := service.RotateNodeAutomatically(ctx, node.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +250,7 @@ func TestRotationWorkerCanEnableAfterDisabledStartup(t *testing.T) {
 func TestRotationQueueReportsAdmissionAndDeduplicates(t *testing.T) {
 	_, service, _ := newPoolServiceFixture(t)
 	service.SetRotationConfig(fastRotationConfig())
+	service.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
 	for id := uint64(1); id <= 4096; id++ {
 		if err := service.enqueueRotation(id); err != nil {
 			t.Fatal(err)

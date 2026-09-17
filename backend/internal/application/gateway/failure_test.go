@@ -2,14 +2,15 @@ package gateway
 
 import (
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type responseHeaderTimeoutTestError struct{}
@@ -297,7 +298,7 @@ func TestBuildForbiddenAlwaysEntersAccountFailureHandling(t *testing.T) {
 }
 
 func TestBuildForbiddenReauthPolicyMatchesExactErrorCodes(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.UpdateBuildForbiddenReauthPolicy(true, []string{"permission-denied", "team-access-denied"})
 
 	for _, code := range []string{"permission-denied", "permission_denied", "TEAM-ACCESS-DENIED"} {
@@ -355,7 +356,7 @@ func TestBuildRateLimitForcesAccountFailoverDespiteRetryVeto(t *testing.T) {
 }
 
 func TestBuildForbiddenReauthPolicyIgnoresSafetyRejection(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.UpdateBuildForbiddenReauthPolicy(true, []string{"permission-denied"})
 	failure := &UpstreamFailure{HTTPStatus: http.StatusForbidden, UpstreamCode: "permission-denied", AccountScoped: true, SafetyRejection: true}
 	if service.shouldInvalidateBuildForbidden(failure) {

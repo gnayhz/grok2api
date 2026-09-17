@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,11 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
 )
@@ -75,7 +77,7 @@ func TestBuildDetectionRequiresCompletedReadableResponse(t *testing.T) {
 			defer upstream.Close()
 			adapter := NewAdapter(Config{BaseURL: upstream.URL}, cipher)
 			adapter.http = upstream.Client()
-			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			var items []accountapp.BuildDetectItemResult
 			success, failed, err := service.DetectBuildAccountsWithProgress(ctx, []uint64{value.ID}, false, nil, func(v accountapp.BuildDetectItemResult) error { items = append(items, v); return nil })
 			if err != nil {
@@ -138,7 +140,7 @@ func TestBuildDetectionCancellationDoesNotReportAvailable(t *testing.T) {
 	defer upstream.Close()
 	adapter := NewAdapter(Config{BaseURL: upstream.URL}, cipher)
 	adapter.http = upstream.Client()
-	service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	type outcome struct {
 		success, failed int
 		err             error
@@ -223,9 +225,9 @@ func TestBuildDetectionFormalHTTPReportsActualCompletion(t *testing.T) {
 			defer upstream.Close()
 			adapter := NewAdapter(Config{BaseURL: upstream.URL}, cipher)
 			adapter.http = upstream.Client()
-			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			router := gin.New()
-			accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+			accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, nil)}).Register(router.Group("/api/admin/v1"))
 			body := fmt.Sprintf(`{"ids":["%d","%d","%d"]}`, ids[0], ids[1], ids[2])
 			if all {
 				body = `{"all":true}`
@@ -342,7 +344,7 @@ func TestBuildDetectionRefreshChecksSecondResponseAndPersistsRotatedMaterial(t *
 			defer upstream.Close()
 			adapter := NewAdapter(Config{BaseURL: upstream.URL}, cipher)
 			adapter.http, adapter.oauth.http, adapter.oauth.tokenURL = upstream.Client(), upstream.Client(), upstream.URL+"/token"
-			service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			var items []accountapp.BuildDetectItemResult
 			succeeded, failed, err := service.DetectBuildAccountsWithProgress(ctx, []uint64{value.ID}, false, nil, func(item accountapp.BuildDetectItemResult) error { items = append(items, item); return nil })
 			if err != nil || calls.Load() != 2 || refreshes.Load() != 1 || len(items) != 1 {

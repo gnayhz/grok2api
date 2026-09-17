@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,11 +25,11 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -103,7 +107,7 @@ func TestHTTPResponseResourceStoreFailuresAndRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				sticky, capacity := memory.NewStickyStore(), memory.NewConcurrencyLimiter()
-				clients := clientkeyapp.NewService("resource-owner", keys, memory.NewRateLimiter(), capacity, 1000, 8, cipher)
+				clients := clientkeyapp.NewService("resource-owner", keys, memory.NewRateLimiter(), capacity, 1000, 8, cipher, security.RandomTokenSource{})
 				t.Cleanup(func() { closeClientKeyService(t, clients) })
 				owner, err := clients.Create(ctx, clientkeyapp.CreateInput{Name: "owner", Enabled: true, RPMLimit: 1000, MaxConcurrent: 8})
 				if err != nil {
@@ -114,7 +118,7 @@ func TestHTTPResponseResourceStoreFailuresAndRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				store := &httpResourceFaultStore{ResponseRepository: relational.NewResponseRepository(db), cause: errors.New("private database endpoint and query text")}
-				network := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+				network := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 				t.Cleanup(func() { _ = network.Close(context.Background()) })
 				var calls atomic.Int32
 				var recoverCredential atomic.Bool
@@ -157,13 +161,13 @@ func TestHTTPResponseResourceStoreFailuresAndRecovery(t *testing.T) {
 				} else {
 					adapter = webprovider.NewAdapter(webprovider.Config{BaseURL: upstream.URL}, network, cipher, historyapp.NewResponseResources(store), nil)
 				}
-				registry := provider.NewRegistry(adapter)
-				maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
+				registry := providerimpl.NewRegistry(adapter)
+				maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 				router := func() *gin.Engine {
-					selector := gateway.NewSelector(accounts, capacity, sticky, registry, time.Hour, time.Second, time.Minute)
-					service := gateway.NewService(models, audits, maintenance, clients, registry, selector, store, 2)
+					selector := selector.NewSelector(accounts, capacity, sticky, registry, time.Hour, time.Second, time.Minute)
+					service := gateway.NewService(models, audits, maintenance, clients, registry, selector, historyapp.NewResponseResources(store), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 					r := gin.New()
-					r.Use(middleware.RequestID(), middleware.ClientAuth(clients))
+					r.Use(middleware.RequestID(nil), middleware.ClientAuth(clients))
 					NewHandler(service, nil, 1<<20).Register(r.Group("/v1"))
 					return r
 				}

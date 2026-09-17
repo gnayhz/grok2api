@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"math"
 	"net/http"
@@ -1022,7 +1023,7 @@ func TestCopyStreamForwardsUpstreamCommentsVerbatim(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	marked := 0
-	if _, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolChat, func() { marked++ }); err != nil {
+	if _, err := copyStreamWithCompletion(context.Writer, strings.NewReader(body), streamProtocolChat, func() { marked++ }, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if marked != 1 {
@@ -1040,7 +1041,7 @@ func TestCopyStreamPreservesBufferedTailOnReadError(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	body := []byte(`data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n:")
-	_, err := copyStream(context.Writer, &chunkErrorReader{data: body}, streamProtocolChat, nil)
+	_, err := copyStreamWithCompletion(context.Writer, &chunkErrorReader{data: body}, streamProtocolChat, nil, "", nil)
 	if !errors.Is(err, errUpstreamStreamRead) {
 		t.Fatalf("copy error = %v", err)
 	}
@@ -1116,7 +1117,7 @@ func TestCopyStreamFlushesUnterminatedResponsesTail(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	body := "event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_tail","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
-	metadata, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolResponses, nil)
+	metadata, err := copyStreamWithCompletion(context.Writer, strings.NewReader(body), streamProtocolResponses, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1135,12 +1136,12 @@ func TestCopyStreamFlushesUnterminatedResponsesTailBeforeAbort(t *testing.T) {
 	context, _ := gin.CreateTestContext(recorder)
 	body := []byte(`data: {"type":"response.output_text.delta","delta":"partial"}`)
 	marked := 0
-	metadata, err := copyStream(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, func() {
+	metadata, err := copyStreamWithCompletion(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, func() {
 		marked++
 		if !strings.Contains(recorder.Body.String(), `"delta":"partial"`) {
 			t.Fatalf("first token marked before the unterminated tail was flushed: %q", recorder.Body.String())
 		}
-	})
+	}, "", nil)
 	if !errors.Is(err, errUpstreamStreamRead) {
 		t.Fatalf("copy error = %v", err)
 	}
@@ -1161,7 +1162,7 @@ func TestCopyStreamDropsMalformedResponsesTailBeforeAbort(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	malformed := []byte(`data: {"type":"response.output_text.delta","delta":"partial`)
-	_, err := copyStream(context.Writer, &chunkErrorReader{data: malformed}, streamProtocolResponses, nil)
+	_, err := copyStreamWithCompletion(context.Writer, &chunkErrorReader{data: malformed}, streamProtocolResponses, nil, "", nil)
 	if !errors.Is(err, errUpstreamStreamRead) {
 		t.Fatalf("copy error = %v", err)
 	}
@@ -1179,7 +1180,7 @@ func TestCopyStreamDoesNotAppendAbortAfterUpstreamFailureTerminal(t *testing.T) 
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	body := []byte(`data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"message":"failed"}}}` + "\n\n")
-	_, err := copyStream(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, nil)
+	_, err := copyStreamWithCompletion(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, nil, "", nil)
 	if !errors.Is(err, errUpstreamStreamFailed) {
 		t.Fatalf("copy error = %v", err)
 	}
@@ -1209,7 +1210,7 @@ func TestCopyStreamAbortTrailerAlwaysIncludesModel(t *testing.T) {
 	context, _ := gin.CreateTestContext(recorder)
 	// 流在首个事件前中止：无 model 元数据。TUI serde 要求 response.failed
 	// 必含 model 键——宁可空串也不能缺失。
-	_, err := copyStream(context.Writer, &chunkErrorReader{}, streamProtocolResponses, nil)
+	_, err := copyStreamWithCompletion(context.Writer, &chunkErrorReader{}, streamProtocolResponses, nil, "", nil)
 	if !errors.Is(err, errUpstreamStreamRead) {
 		t.Fatalf("copy error = %v", err)
 	}
@@ -1409,12 +1410,12 @@ func TestCopyStreamMarksFirstTokenAfterFlush(t *testing.T) {
 	body := `data: {"type":"response.reasoning_text.delta","delta":"thinking"}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"usage":{"output_tokens":1}}}` + "\n\n"
 	marked := 0
-	_, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolResponses, func() {
+	_, err := copyStreamWithCompletion(context.Writer, strings.NewReader(body), streamProtocolResponses, func() {
 		marked++
 		if !recorder.Flushed || !strings.Contains(recorder.Body.String(), `"delta":"thinking"`) {
 			t.Fatalf("first token was marked before the generated delta was flushed: flushed=%v body=%q", recorder.Flushed, recorder.Body.String())
 		}
-	})
+	}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1564,7 +1565,7 @@ func TestCopyStreamRequiresProtocolTerminalEvent(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			context, _ := gin.CreateTestContext(recorder)
-			metadata, err := copyStream(context.Writer, strings.NewReader(test.body), test.protocol, nil)
+			metadata, err := copyStreamWithCompletion(context.Writer, strings.NewReader(test.body), test.protocol, nil, "", nil)
 			if test.wantErr == nil && err != nil {
 				t.Fatal(err)
 			}
@@ -1828,20 +1829,22 @@ func TestSelectionErrorResponseDistinguishesCoolingAndSaturation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, test := range []struct {
 		name       string
-		failure    *gateway.SelectionUnavailableError
+		failure    *selector.SelectionUnavailableError
 		status     int
 		code       string
 		retryAfter string
 	}{
-		{name: "cooling", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionCooling, RetryAfter: 1500 * time.Millisecond}, status: http.StatusTooManyRequests, code: "upstream_cooling", retryAfter: "2"},
-		{name: "model cooling", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionModelCooling, RetryAfter: time.Second}, status: http.StatusTooManyRequests, code: "upstream_model_cooling", retryAfter: "1"},
-		{name: "saturated", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionSaturated, RetryAfter: time.Second}, status: http.StatusServiceUnavailable, code: "upstream_saturated", retryAfter: "1"},
-		{name: "scoped account range", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionNoAccounts, Scope: clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeFree}}, status: http.StatusServiceUnavailable, code: "client_key_account_scope_unavailable"},
+		{name: "cooling", failure: &selector.SelectionUnavailableError{Reason: selector.SelectionCooling, RetryAfter: 1500 * time.Millisecond}, status: http.StatusTooManyRequests, code: "upstream_cooling", retryAfter: "2"},
+		{name: "model cooling", failure: &selector.SelectionUnavailableError{Reason: selector.SelectionModelCooling, RetryAfter: time.Second}, status: http.StatusTooManyRequests, code: "upstream_model_cooling", retryAfter: "1"},
+		{name: "saturated", failure: &selector.SelectionUnavailableError{Reason: selector.SelectionSaturated, RetryAfter: time.Second}, status: http.StatusServiceUnavailable, code: "upstream_saturated", retryAfter: "1"},
+		{name: "scoped account range", failure: &selector.SelectionUnavailableError{Reason: selector.SelectionNoAccounts, Scope: clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeFree}}, status: http.StatusServiceUnavailable, code: "client_key_account_scope_unavailable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			context, _ := gin.CreateTestContext(recorder)
-			status, code, _ := selectionErrorResponse(context, test.failure)
+			view := classifyClientError(test.failure)
+			encodeClientError(context, view, false)
+			status, code := view.Status, view.Code
 			if status != test.status || code != test.code || recorder.Header().Get("Retry-After") != test.retryAfter {
 				t.Fatalf("status=%d code=%q retry-after=%q", status, code, recorder.Header().Get("Retry-After"))
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -11,9 +12,9 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 )
@@ -194,7 +195,7 @@ func TestAccountConversionCompletionAcrossSQL(t *testing.T) {
 						}
 						defer a.db.Callback().Create().Remove(name)
 					}
-					svc := accountapp.NewService(port, NewAuditRepository(a), nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
+					svc := accountapp.NewService(port, NewAuditRepository(a), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 					observed := 0
 					var progress [][2]int
 					out, callErr := svc.ConvertWebAccountsToBuildWithStrategy(ctx, []uint64{web.ID}, accountapp.BuildConversionAll, func(uint64) error { observed++; return nil }, func(done, total int) error { progress = append(progress, [2]int{done, total}); return nil })

@@ -11,16 +11,15 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/quality/court"
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 type finalReviewEvidence struct{}
 
-func (finalReviewEvidence) SnapshotWindow(time.Time) evidence.Snapshot { return evidence.Snapshot{} }
-func (finalReviewEvidence) CrossValidate(evidence.Snapshot) evidence.Estimate {
-	return evidence.Estimate{}
+func (finalReviewEvidence) SnapshotWindow(time.Time) model.Snapshot { return model.Snapshot{} }
+func (finalReviewEvidence) CrossValidate(model.Snapshot) model.Estimate {
+	return model.Estimate{}
 }
 
 func TestInternalAndLegacyProbeErrorsCannotSentenceAccount(t *testing.T) {
@@ -90,7 +89,7 @@ func TestInternalAndLegacyProbeErrorsCannotSentenceAccount(t *testing.T) {
 			}
 			cfg := court.DefaultConfig()
 			cfg.EvaluateEvery = time.Hour
-			s := court.New(cfg, r, finalReviewEvidence{}, nil)
+			s := court.New(cfg, r, finalReviewEvidence{}, nil, registry.NewProbeTaskStore(r))
 			defer s.Close(context.Background())
 			views, err := s.LiveCaseViews(ctx, now)
 			if err != nil {

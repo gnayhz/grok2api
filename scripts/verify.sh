@@ -41,7 +41,7 @@ SKIPPED=()
 declare -a STAGES=()
 declare -a RESULTS=()
 REPEAT_PACKAGES=(./internal/application/gateway ./internal/application/account
-	./internal/infra/rsc ./internal/infra/persistence/relational ./internal/app
+	./internal/infra/persistence/relational ./internal/app
 	./internal/transport/http/inference ./internal/pkg/jsonpeek)
 FUZZ_PACKAGES=(./internal/application/gateway ./internal/pkg/jsonpeek
 	./internal/infra/provider/searchresult ./internal/application/egress

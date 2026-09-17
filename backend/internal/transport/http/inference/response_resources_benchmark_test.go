@@ -2,6 +2,10 @@ package inference
 
 import (
 	"context"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,10 +21,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
@@ -79,12 +83,12 @@ func BenchmarkResponseResourcePipeline(b *testing.B) {
 					} else {
 						adapter = resourceBenchmarkWeb(cipher, states)
 					}
-					registry := provider.NewRegistry(adapter)
+					registry := providerimpl.NewRegistry(adapter)
 					sticky, capacity := memory.NewStickyStore(), memory.NewConcurrencyLimiter()
-					maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-					clients := clientkeyapp.NewService("cost", nil, nil, nil, 100000, 8, nil)
-					selector := gateway.NewSelector(accounts, capacity, sticky, registry, time.Hour, time.Second, time.Minute)
-					service := gateway.NewService(models, audits, maintenance, clients, registry, selector, states, 2)
+					maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+					clients := clientkeyapp.NewService("cost", nil, nil, nil, 100000, 8, nil, security.RandomTokenSource{})
+					selector := selector.NewSelector(accounts, capacity, sticky, registry, time.Hour, time.Second, time.Minute)
+					service := gateway.NewService(models, audits, maintenance, clients, registry, selector, historyapp.NewResponseResources(states), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 					seed := func() {
 						now := time.Now().UTC()
 						if err := states.Save(ctx, inferencedomain.ResponseOwnership{ResponseID: "cost", AccountID: credential.ID, ClientKeyID: key.ID, ModelRouteID: route.ID, Provider: kind, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now}); err != nil {

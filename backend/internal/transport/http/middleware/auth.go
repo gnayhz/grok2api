@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"crypto/subtle"
 	"errors"
 	"net/http"
 	"net/url"
@@ -11,8 +10,9 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/adminsession"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -77,27 +77,14 @@ func adminCookieRequestAllowed(request *http.Request) bool {
 	return strings.EqualFold(parsed.Host, request.Host)
 }
 
-// QualityGuardAuth accepts only the process-scoped token shared with the
-// quality-guard sidecar. It is intentionally separate from administrator JWTs.
-func QualityGuardAuth(expected string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		raw, ok := bearerToken(c.GetHeader("Authorization"))
-		if !ok || len(raw) != len(expected) || subtle.ConstantTimeCompare([]byte(raw), []byte(expected)) != 1 {
-			response.Error(c, http.StatusUnauthorized, "qualityGuardUnauthorized", "质量守护内部认证失败")
-			return
-		}
-		c.Next()
-	}
-}
-
 // ClientAuth 校验下游 API Key，并在请求结束时释放并发租约。
-func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
+func ClientAuth(auth clientkeyapp.Authorization) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, ok := bearerToken(c.GetHeader("Authorization"))
 		if !ok {
 			raw = strings.TrimSpace(c.GetHeader("X-API-Key"))
 		}
-		value, release, err := service.Authenticate(c.Request.Context(), raw)
+		value, release, err := auth.Authenticate(c.Request.Context(), raw)
 		if err != nil {
 			writeRateLimitRetryAfter(c, err)
 			writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
@@ -163,6 +150,9 @@ func writeRateLimitRetryAfter(c *gin.Context, err error) {
 }
 
 func writeOpenAIError(c *gin.Context, status int, code, message string) {
+	// /v1/messages 是 Anthropic 面，鉴权失败要回 Anthropic 信封；其 type
+	// 口径与 OpenAI 面不同(5xx=api_error)，故在中间件内单独推导后交给同一
+	// 个 Anthropic 信封实现。
 	if c.Request.URL.Path == "/v1/messages" {
 		errorType := "authentication_error"
 		if status == http.StatusTooManyRequests {
@@ -170,20 +160,9 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 		} else if status >= 500 {
 			errorType = "api_error"
 		}
-		c.AbortWithStatusJSON(status, gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}})
+		httphelpers.WriteAnthropicError(c, status, errorType, message)
 		return
 	}
-	// OpenAI 错误信封 type 与 inference handler 同口径(round 24 修复):
-	// 401=authentication_error、429=rate_limit_error、5xx=server_error、
-	// 其余 invalid_request_error。此前硬编码 invalid_request_error。
-	errorType := "invalid_request_error"
-	switch {
-	case status == http.StatusUnauthorized:
-		errorType = "authentication_error"
-	case status == http.StatusTooManyRequests:
-		errorType = "rate_limit_error"
-	case status >= 500:
-		errorType = "server_error"
-	}
-	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": errorType, "code": code, "param": nil}})
+	// OpenAI 错误信封 type 与 inference handler 同口径(round 24 修复)。
+	httphelpers.WriteOpenAIError(c, status, code, message)
 }

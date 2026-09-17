@@ -31,10 +31,6 @@ type qualityReadPump struct {
 	readMu      sync.Mutex
 }
 
-func newQualityReadPump(source io.ReadCloser) *qualityReadPump {
-	return newQualityReadPumpWithBudget(source, responsebuffer.BudgetOf(source))
-}
-
 func newQualityReadPumpWithBudget(source io.ReadCloser, budget *responsebuffer.Budget) *qualityReadPump {
 	pump := &qualityReadPump{
 		source:  source,
@@ -158,7 +154,7 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 		return io.NopCloser(bytes.NewReader(nil)), QualityWait, Usage{}, empty.fingerprint(QualityWait, err), err
 	}
 	pump := newQualityReadPumpWithBudget(body, responsebuffer.FromContext(ctx))
-	state := qualityScanState{kernel: cfg.kernel, protocol: protocol, startedAt: time.Now()}
+	state := qualityScanState{kernel: cfg.Kernel(), protocol: protocol, startedAt: time.Now()}
 	held := responsebuffer.New(responsebuffer.FromContext(ctx), qualityHoldMaxBufferBytes)
 	frameOffset := 0
 	liveness := newQualityLivenessTimer(cfg)
@@ -261,7 +257,7 @@ func finishQualityPeek(held *responsebuffer.Buffer, pump *qualityReadPump, state
 		verdict, verdictErr := state.emptyStreamVerdict(cfg.ReasoningExpected)
 		return newPrefixReplay(held, pump), verdict, state.usage, verdictErr
 	}
-	return newPrefixReplay(held, pump), cfg.classify(signals), state.usage, nil
+	return newPrefixReplay(held, pump), classifyQualityHold(cfg, signals), state.usage, nil
 }
 
 func newPrefixReplay(held *responsebuffer.Buffer, rest io.ReadCloser) io.ReadCloser {

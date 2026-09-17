@@ -2,11 +2,11 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Area, Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
 
-import { ChartContainer, ChartLegend, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
-import { Spinner } from "@/components/ui/spinner";
-import type { DashboardDTO, DashboardPeriod } from "@/features/dashboard/dashboard-api";
-import { formatCompactNumber, formatCompactUSD, formatUSDValue } from "@/features/dashboard/dashboard-format";
-import { DashboardPanel } from "@/features/dashboard/dashboard-panel";
+import { ChartContainer, ChartLegend, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/shared/ui/chart";
+import { Spinner } from "@/shared/ui/spinner";
+import type { DashboardDTO, DashboardPeriod } from "@/entities/dashboard/dashboard-api";
+import { formatCompactNumber, formatCompactUSD, formatUSDValue } from "./dashboard-format";
+import { DashboardPanel } from "./dashboard-panel";
 import { EmptyState } from "@/shared/components/data-state";
 import { cn } from "@/shared/lib/cn";
 import { formatNumber } from "@/shared/lib/format";

@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,11 +41,11 @@ func TestCachedRoutingTargetNodeMergesConcurrentReloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := &targetGatedRepo{gate: make(chan struct{}), node: domain.Node{ID: 42, Name: "fixed", Enabled: true, Health: 1}}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
-	if _, ok, err := manager.cachedRoutingTargetNode(ctx, 42); err != nil || !ok {
+	if _, ok, err := manager.routing.cachedRoutingTargetNode(ctx, 42); err != nil || !ok {
 		t.Fatalf("warmup: ok=%v err=%v", ok, err)
 	}
 
@@ -62,7 +63,7 @@ func TestCachedRoutingTargetNodeMergesConcurrentReloads(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			node, ok, err := manager.cachedRoutingTargetNode(ctx, 42)
+			node, ok, err := manager.routing.cachedRoutingTargetNode(ctx, 42)
 			if err != nil || !ok || node.ID != 42 {
 				t.Errorf("reload: ok=%v err=%v node=%d", ok, err, node.ID)
 			}

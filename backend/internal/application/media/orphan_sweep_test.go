@@ -35,7 +35,7 @@ func TestSweepOrphanObjectsReclaimsCrashResidue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, Config{
+	service := NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: 10 * time.Minute,
 	})
@@ -115,7 +115,7 @@ func TestRunCleanupTriggersOrphanSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, Config{
+	service := NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, Config{
 		MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: 30 * time.Millisecond,
 	})
@@ -158,7 +158,7 @@ func TestRunCleanupTriggersOrphanSweep(t *testing.T) {
 // TestSweepOrphanObjectsSkipsNonListerStorage：对象存储未实现枚举能力时
 // 静默跳过（返回 0、nil），不破坏既有后端行为。
 func TestSweepOrphanObjectsSkipsNonListerStorage(t *testing.T) {
-	service := NewService(nil, nil, stubObjectStorage{}, nil, Config{})
+	service := NewServiceWithTickets(nil, nil, nil, stubObjectStorage{}, nil, Config{})
 	deleted, err := service.sweepOrphanObjects(context.Background(), time.Now().UTC())
 	if err != nil || deleted != 0 {
 		t.Fatalf("non-lister storage must be a no-op, got deleted=%d err=%v", deleted, err)

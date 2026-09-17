@@ -10,9 +10,10 @@ import (
 	"github.com/bogdanfinn/websocket"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net/http"
 	"strings"
@@ -76,7 +77,7 @@ func TestInferenceProtocolModeMatrix(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+				manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
 				defer manager.Close(context.Background())
 				adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", ChatTimeout: 5 * time.Second}, manager, cipher, nil, nil)
 				body := map[string]any{"model": "grok-chat-fast", "stream": streaming}

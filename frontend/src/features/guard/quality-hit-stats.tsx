@@ -16,12 +16,12 @@ import {
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { Spinner } from "@/components/ui/spinner";
+import { Badge } from "@/shared/ui/badge";
+import { Spinner } from "@/shared/ui/spinner";
 import { cn } from "@/shared/lib/cn";
 
-import { getGuardStats } from "./guard-stats-api";
-import { OperationsError } from "@/features/operations/operations-ui";
+import { getGuardStats } from "@/entities/guard/guard-stats-api";
+import { OperationsError } from "@/shared/ui/operations";
 
 /** Signal humanized descriptions and iconography matching backend canonical tokens */
 const SIGNAL_PROFILES: Record<

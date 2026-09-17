@@ -1,10 +1,10 @@
 import { Ban, Check, CircleHelp, Clock3, FileX2, Gauge, KeyRound, LockKeyhole, ServerOff, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldX, Unplug, Wallet, Wrench, X, ZapOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Button } from "@/shared/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { auditGuardState, auditOutcome, type AuditGuardState, type AuditOutcome } from "./audit-presentation";
-import type { AuditDTO } from "./request-audits-api";
+import type { AuditDTO } from "@/entities/audit/audit-api";
 
 const outcomeIcons = {
   firstSuccess: Check, retrySuccess: Check, qualityReleased: Check, qualityBlocked: ShieldX,

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
 	"github.com/gin-gonic/gin"
 )
 
@@ -40,9 +41,7 @@ func (g *ConcurrencyGate) Middleware() gin.HandlerFunc {
 		if active := g.active.Add(1); active > g.limit.Load() {
 			g.active.Add(-1)
 			c.Header("Retry-After", "1")
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-				"code": "server_overloaded", "message": "服务并发已达到上限，请稍后重试", "param": nil, "type": "server_error",
-			}})
+			httphelpers.WriteOpenAIError(c, http.StatusServiceUnavailable, "server_overloaded", "服务并发已达到上限，请稍后重试")
 			return
 		}
 		defer g.active.Add(-1)

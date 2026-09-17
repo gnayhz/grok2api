@@ -7,11 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
 	"io"
 	"math"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -19,12 +20,14 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
+
+type TTSOutputFormat = provider.TTSOutputFormat
 
 type TTSInput struct {
 	RequestID                string
@@ -33,7 +36,7 @@ type TTSInput struct {
 	Text                     string
 	VoiceID                  string
 	Language                 string
-	OutputFormat             provider.TTSOutputFormat
+	OutputFormat             TTSOutputFormat
 	Speed                    float64
 	OptimizeStreamingLatency int
 	TextNormalization        bool
@@ -112,8 +115,8 @@ func (s *Service) SynthesizeSpeech(ctx context.Context, input TTSInput) (*Result
 		pricing, _ := audit.EstimateOfficialTTSCharacterCost(result.InputCharacters)
 		if result.JSONEnvelope || input.WithTimestamps {
 			payload := map[string]any{
-				"audio":        firstNonEmpty(result.Base64Audio, base64.StdEncoding.EncodeToString(result.Audio)),
-				"content_type": firstNonEmpty(result.ContentType, "audio/mpeg"),
+				"audio":        texts.FirstNonEmptyTrimmed(result.Base64Audio, base64.StdEncoding.EncodeToString(result.Audio)),
+				"content_type": texts.FirstNonEmptyTrimmed(result.ContentType, "audio/mpeg"),
 				"duration":     result.Duration,
 			}
 			if result.Timestamps != nil {
@@ -126,7 +129,7 @@ func (s *Service) SynthesizeSpeech(ctx context.Context, input TTSInput) (*Result
 			return voiceExecutionResult{response: jsonMediaResponse(http.StatusOK, payload), pricing: pricing}, nil
 		}
 		header := http.Header{}
-		header.Set("Content-Type", firstNonEmpty(result.ContentType, "audio/mpeg"))
+		header.Set("Content-Type", texts.FirstNonEmptyTrimmed(result.ContentType, "audio/mpeg"))
 		header.Set("Content-Length", fmt.Sprintf("%d", len(result.Audio)))
 		return voiceExecutionResult{response: &provider.Response{
 			StatusCode: http.StatusOK,
@@ -295,9 +298,9 @@ func (s *Service) executeVoice(
 	supports voiceProviderSupport,
 	execute func(context.Context, accountdomain.Provider, accountdomain.Credential, string) (voiceExecutionResult, error),
 ) (*Result, error) {
-	ctx, egressTrace := infraegress.WithTrace(ctx)
+	ctx, egressTrace := portphysical.WithTrace(ctx)
 	startedAt := time.Now()
-	eventID := newAuditEventID()
+	eventID := s.newAuditEventID()
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
 		// 与 resolvePublicModelRoutes 同口径的 404/503 消歧（round 59：
@@ -327,9 +330,9 @@ func (s *Service) executeVoice(
 		return nil, err
 	}
 	ctx = attemptmeta.WithRequest(ctx, eventID, 0, "", nil)
-	ctx = infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
-	requestBudget := inferencedomain.NewAttemptBudget(infraegress.MaxPhysicalCalls)
-	ctx = infraegress.WithPhysicalCallBudget(ctx, requestBudget)
+	ctx = s.startPhysicalTrace(ctx, string(route.Provider), string(operation))
+	requestBudget := inferencedomain.NewAttemptBudget(portphysical.MaxPhysicalCalls)
+	ctx = portphysical.WithPhysicalCallBudget(ctx, requestBudget)
 	handedOff, reserved := false, false
 	defer func() {
 		if !handedOff {
@@ -351,7 +354,7 @@ func (s *Service) executeVoice(
 		record.ErrorCode = errorCode
 		record.AdmissionOutcome, record.GenerationOutcome, record.DeliveryOutcome = "not_admitted", "not_started", "not_started"
 		record.HistoryCommit, record.ProviderStateCommit, record.OwnershipCommit, record.QualityReceipt = "not_required", "not_required", "not_required", "not_required"
-		for _, fact := range infraegress.PhysicalFacts(ctx) {
+		for _, fact := range portphysical.PhysicalFacts(ctx) {
 			if fact.Stage == "credential_prepare" {
 				continue
 			}
@@ -382,7 +385,7 @@ func (s *Service) executeVoice(
 	attemptPolicy := newRoutingAttemptPolicy(int(s.maxAttempts.Load()))
 	excluded := make(map[uint64]bool)
 	selection := preselectedSession
-	var lease *accountLease
+	var lease *selector.Lease
 	defer func() {
 		if !handedOff {
 			lease.Release()
@@ -396,14 +399,14 @@ func (s *Service) executeVoice(
 	var lastCredentialError error
 	for attempt := 0; attemptPolicy.allows(attempt); attempt++ {
 		if selection == nil {
-			selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, key.AccountScope())
+			selection, err = s.selector.BeginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, key.AccountScope())
 		}
 		if err == nil {
 			lease, err = selection.Acquire(ctx, excluded, false)
 		}
 		if err != nil {
 			errorCode := "upstream_unavailable"
-			var selectionFailure *SelectionUnavailableError
+			var selectionFailure *selector.SelectionUnavailableError
 			if errors.As(err, &selectionFailure) {
 				errorCode = selectionFailure.Code()
 			}
@@ -419,7 +422,7 @@ func (s *Service) executeVoice(
 			lease.Release()
 			continue
 		}
-		lease.markSelectorUpstreamStarted()
+		lease.MarkSelectorUpstreamStarted()
 		responseRequestScoped = false
 		attemptCtx := attemptmeta.WithAccount(ctx, credential.ID, string(route.Provider), route.UpstreamModel)
 		execution, executionErr := execute(attemptCtx, route.Provider, credential, route.UpstreamModel)
@@ -427,13 +430,13 @@ func (s *Service) executeVoice(
 		if err != nil {
 			var validation *inferencedomain.RequestValidationError
 			if errors.As(err, &validation) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 				lease.Release()
 				writeFailureAudit(http.StatusBadRequest, validation.Code, nil)
 				return nil, err
 			}
 			if errors.Is(err, inferencedomain.ErrAttemptBudget) {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 				lease.Release()
 				writeFailureAudit(http.StatusServiceUnavailable, "physical_attempt_limit", &credential)
 				return nil, &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "physical_attempt_limit", PublicMessage: "上游尝试次数达到安全上限", Cause: err}
@@ -521,15 +524,15 @@ func (s *Service) executeVoice(
 	}
 	accountID := credential.ID
 	generated := consumesQuota && completed.response != nil && completed.response.StatusCode >= 200 && completed.response.StatusCode < 300
-	response.Body = lease.ownBody(response.Body)
+	response.Body = lease.OwnBody(response.Body)
 	handoff := &mediaHandoff{ctx: ctx, response: response, budget: requestBudget,
 		release: func() {
 			if generated {
-				lease.completeSelectorObservation(true)
+				lease.CompleteSelectorObservation(true)
 			} else if ctx.Err() != nil {
-				lease.skipSelectorObservation()
+				lease.SkipSelectorObservation()
 			} else {
-				lease.completeSelectorObservation(response.StatusCode < 400)
+				lease.CompleteSelectorObservation(response.StatusCode < 400)
 			}
 			lease.Release()
 		},
@@ -601,13 +604,4 @@ func voiceErrorResponse(err error) (*provider.Response, error) {
 		return response, nil
 	}
 	return nil, err
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

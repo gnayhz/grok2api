@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	portprovider "github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +32,8 @@ const (
 	ClearanceModeOnDemand         = "on_demand"
 	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
 	DefaultFlareSolverrURL        = "http://flaresolverr:8191"
-	RecommendedBuildClientVersion = "1.0.4"
-	RecommendedBuildUserAgent     = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
+	RecommendedBuildClientVersion = portprovider.RecommendedBuildClientVersion
+	RecommendedBuildUserAgent     = portprovider.RecommendedBuildUserAgent
 
 	maxServerBodyBytes     = 256 << 20
 	maxRequestTimeout      = 24 * time.Hour
@@ -46,14 +46,8 @@ const (
 	maxAuditFlushInterval  = time.Minute
 	maxAuditBufferSize     = 262144
 	maxAuditBatchSize      = 4096
-	minAuditCommitDelay    = time.Millisecond
-	maxAuditCommitDelay    = 50 * time.Millisecond
 	maxDeploymentReplicas  = 1024
 )
-
-const unlimitedRoutingAttempts = -1
-
-var buildForbiddenCodePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // Config 表示后端运行配置。
 type Config struct {
@@ -95,16 +89,12 @@ type FrontendConfig struct {
 	StaticPath               string `yaml:"staticPath"`
 }
 
-const DefaultPublicAPIBaseURL = "http://127.0.0.1:8000"
+const DefaultPublicAPIBaseURL = settingsdomain.DefaultPublicAPIBaseURL
 
 // EffectivePublicAPIBaseURL 按运行设置、配置文件、内置默认值的顺序解析公开地址。
 func (c FrontendConfig) EffectivePublicAPIBaseURL() string {
-	for _, value := range []string{c.PublicAPIBaseURLOverride, c.PublicAPIBaseURL} {
-		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
-			return value
-		}
-	}
-	return DefaultPublicAPIBaseURL
+	return (settingsdomain.FrontendConfig{PublicAPIBaseURL: c.PublicAPIBaseURLOverride,
+		FilePublicAPIBaseURL: c.PublicAPIBaseURL}).EffectivePublicAPIBaseURL()
 }
 
 type DatabaseConfig struct {
@@ -166,9 +156,6 @@ type BuildProviderConfig struct {
 	ResponseHeaderTimeout Duration `yaml:"-"`
 	StreamIdleTimeout     Duration `yaml:"-"`
 }
-
-// DefaultBuildFallbackBaseURL 是主 Build API 对可回退推理操作 403 时探测的 XAI API 根地址。
-const DefaultBuildFallbackBaseURL = "https://api.x.ai/v1"
 
 type WebProviderConfig struct {
 	BaseURL             string   `yaml:"baseURL"`
@@ -327,6 +314,8 @@ type BootstrapAdminConfig struct {
 // Duration 支持在 YAML 中使用 10m、1h 等可读时间格式。
 type Duration time.Duration
 
+// UnmarshalYAML 让 yaml.v3 接受 "10m"、"1h" 这类可读时长；它由解码器经
+// yaml.Unmarshaler 接口调用，不是死代码。
 func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	parsed, err := time.ParseDuration(node.Value)
 	if err != nil {
@@ -335,8 +324,6 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	*d = Duration(parsed)
 	return nil
 }
-
-func (d Duration) MarshalYAML() (any, error) { return d.String(), nil }
 
 func (d Duration) Value() time.Duration { return time.Duration(d) }
 
@@ -479,9 +466,6 @@ func (c Config) Validate() error {
 	if c.Server.RequestTimeout.Value() <= 0 || c.Server.RequestTimeout.Value() > maxRequestTimeout {
 		return errors.New("server.requestTimeout 必须大于零且不超过 24 小时")
 	}
-	if c.Server.MaxConcurrentRequests < 1 || c.Server.MaxConcurrentRequests > 100000 {
-		return errors.New("server.maxConcurrentRequests 必须在 1 到 100000 之间")
-	}
 	for _, value := range c.Server.TrustedProxies {
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" {
@@ -499,20 +483,6 @@ func (c Config) Validate() error {
 		}
 		if ones, _ := network.Mask.Size(); ones == 0 {
 			return fmt.Errorf("server.trustedProxies %q 不能信任整个互联网", value)
-		}
-	}
-	for _, item := range []struct {
-		name  string
-		value string
-	}{
-		{name: "frontend.publicApiBaseURL", value: c.Frontend.PublicAPIBaseURL},
-		{name: "frontend.publicApiBaseURL 运行设置", value: c.Frontend.PublicAPIBaseURLOverride},
-	} {
-		if publicBase := strings.TrimSpace(item.value); publicBase != "" {
-			publicAPIURL, err := url.ParseRequestURI(publicBase)
-			if err != nil || (publicAPIURL.Scheme != "http" && publicAPIURL.Scheme != "https") || publicAPIURL.Host == "" || publicAPIURL.User != nil || publicAPIURL.RawQuery != "" || publicAPIURL.Fragment != "" {
-				return fmt.Errorf("%s 必须是不含凭据、查询参数和片段的 HTTP(S) URL", item.name)
-			}
 		}
 	}
 	switch c.Database.Driver {
@@ -574,18 +544,6 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Media.Local.Path) == "" {
 		return errors.New("media.local.path 不能为空")
 	}
-	if c.Media.MaxImageBytes < 1<<20 || c.Media.MaxImageBytes > 32<<20 {
-		return errors.New("media.maxImageBytes 必须在 1 MiB 到 32 MiB 之间")
-	}
-	if c.Media.MaxTotalBytes < c.Media.MaxImageBytes || c.Media.MaxTotalBytes > 1<<40 {
-		return errors.New("media.maxTotalBytes 必须不小于单图上限且不超过 1 TiB")
-	}
-	if c.Media.CleanupThresholdPercent < 50 || c.Media.CleanupThresholdPercent > 95 {
-		return errors.New("media.cleanupThresholdPercent 必须在 50 到 95 之间")
-	}
-	if c.Media.CleanupInterval.Value() < time.Minute || c.Media.CleanupInterval.Value() > 24*time.Hour {
-		return errors.New("media.cleanupInterval 必须在 1 分钟到 24 小时之间")
-	}
 	if len(c.Secrets.JWTSecret) < 32 {
 		return errors.New("secrets.jwtSecret 至少需要 32 个字符")
 	}
@@ -612,119 +570,15 @@ func (c Config) Validate() error {
 	if c.Auth.AccessTokenTTL.Value() <= 0 || c.Auth.RefreshTokenTTL.Value() <= 0 {
 		return errors.New("JWT 有效期必须大于零")
 	}
-	if err := validateAPIBaseURL("provider.build.baseURL", c.Provider.Build.BaseURL, false); err != nil {
-		return err
-	}
 	fallbackBase := strings.TrimSpace(c.Provider.Build.FallbackBaseURL)
 	if fallbackBase == "" {
-		fallbackBase = DefaultBuildFallbackBaseURL
+		fallbackBase = settingsdomain.DefaultBuildFallbackBaseURL
 	}
-	if err := validateAPIBaseURL("provider.build.fallbackBaseURL", fallbackBase, true); err != nil {
+	if err := settingsdomain.ValidateAPIBaseURL("provider.build.fallbackBaseURL", fallbackBase, true); err != nil {
 		return err
-	}
-	if strings.TrimSpace(c.Provider.Build.ClientVersion) == "" || strings.TrimSpace(c.Provider.Build.ClientIdentifier) == "" || strings.TrimSpace(c.Provider.Build.TokenAuth) == "" || strings.TrimSpace(c.Provider.Build.UserAgent) == "" {
-		return errors.New("provider.build 客户端标识不能为空")
-	}
-	if timeout := c.Provider.Build.ResponseHeaderTimeout.Value(); timeout < settingsdomain.MinBuildResponseHeaderTimeout || timeout > settingsdomain.MaxBuildResponseHeaderTimeout {
-		return errors.New("Grok Build 响应头超时必须在 30 秒到 30 分钟之间")
-	}
-	if idle := c.Provider.Build.StreamIdleTimeout.Value(); idle < settingsdomain.MinBuildStreamIdleTimeout || idle > settingsdomain.MaxBuildStreamIdleTimeout {
-		return errors.New("Grok Build 流式空闲超时必须在 30 秒到 10 分钟之间")
-	}
-	webURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Web.BaseURL))
-	if err != nil || webURL.Scheme != "https" || webURL.Host == "" || webURL.User != nil {
-		return errors.New("provider.web.baseURL 必须是无凭据的 HTTPS URL")
-	}
-	switch c.Provider.Web.StatsigMode {
-	case StatsigModeManual:
-		if !validStatsigID(c.Provider.Web.StatsigManualValue) {
-			return errors.New("provider.web 手动 x-statsig-id 格式无效")
-		}
-	case StatsigModeURL:
-		if err := signerurl.Validate(c.Provider.Web.StatsigSignerURL); err != nil {
-			return fmt.Errorf("provider.web Statsig 签名 URL 无效: %w", err)
-		}
-	default:
-		return errors.New("provider.web Statsig 模式必须是 manual 或 url")
-	}
-	switch c.Provider.Web.ClearanceMode {
-	case ClearanceModeManual:
-	case ClearanceModeFlareSolverr, ClearanceModeOnDemand:
-		if err := validateFlareSolverrURL(c.Provider.Web.FlareSolverrURL); err != nil {
-			return fmt.Errorf("provider.web FlareSolverr URL 无效: %w", err)
-		}
-	default:
-		return errors.New("provider.web Clearance 模式必须是 manual、flaresolverr 或 on_demand")
-	}
-	if c.Provider.Web.ClearanceTimeout.Value() < 10*time.Second || c.Provider.Web.ClearanceTimeout.Value() > 5*time.Minute {
-		return errors.New("provider.web Clearance 超时必须在 10 秒到 5 分钟之间")
-	}
-	if c.Provider.Web.ClearanceRefresh.Value() < time.Minute || c.Provider.Web.ClearanceRefresh.Value() > 24*time.Hour {
-		return errors.New("provider.web Clearance 刷新间隔必须在 1 分钟到 24 小时之间")
-	}
-	if c.Provider.Web.QuotaTimeout.Value() < time.Second || c.Provider.Web.QuotaTimeout.Value() > 2*time.Minute {
-		return errors.New("provider.web.quotaTimeout 必须在 1 秒到 2 分钟之间")
-	}
-	if c.Provider.Web.ChatTimeout.Value() < 5*time.Second || c.Provider.Web.ChatTimeout.Value() > 30*time.Minute {
-		return errors.New("provider.web.chatTimeout 必须在 5 秒到 30 分钟之间")
-	}
-	if c.Provider.Web.ImageTimeout.Value() < 5*time.Second || c.Provider.Web.ImageTimeout.Value() > 30*time.Minute {
-		return errors.New("provider.web.imageTimeout 必须在 5 秒到 30 分钟之间")
-	}
-	if c.Provider.Web.VideoTimeout.Value() < time.Minute || c.Provider.Web.VideoTimeout.Value() > 2*time.Hour {
-		return errors.New("provider.web.videoTimeout 必须在 1 分钟到 2 小时之间")
-	}
-	if idle := c.Provider.Web.StreamIdleTimeout.Value(); idle < settingsdomain.MinProviderStreamIdleTimeout || idle > settingsdomain.MaxProviderStreamIdleTimeout {
-		return errors.New("Grok Web 流式空闲超时必须在 30 秒到 10 分钟之间")
-	}
-	if c.Provider.Web.MediaConcurrency < 1 || c.Provider.Web.MediaConcurrency > 64 {
-		return errors.New("provider.web 媒体并发必须在 1 到 64 之间")
-	}
-	consoleURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Console.BaseURL))
-	if err != nil || consoleURL.Scheme != "https" || consoleURL.Host == "" || consoleURL.User != nil {
-		return errors.New("provider.console.baseURL 必须是无凭据的 HTTPS URL")
-	}
-	if c.Provider.Console.ChatTimeout.Value() < 5*time.Second || c.Provider.Console.ChatTimeout.Value() > 30*time.Minute {
-		return errors.New("provider.console.chatTimeout 必须在 5 秒到 30 分钟之间")
-	}
-	if idle := c.Provider.Console.StreamIdleTimeout.Value(); idle < settingsdomain.MinProviderStreamIdleTimeout || idle > settingsdomain.MaxProviderStreamIdleTimeout {
-		return errors.New("Grok Console 流式空闲超时必须在 30 秒到 10 分钟之间")
-	}
-	if c.Batch.ImportConcurrency < 1 || c.Batch.ImportConcurrency > 50 ||
-		c.Batch.ConversionConcurrency < 1 || c.Batch.ConversionConcurrency > 50 ||
-		c.Batch.SyncConcurrency < 1 || c.Batch.SyncConcurrency > 50 ||
-		c.Batch.RefreshConcurrency < 1 || c.Batch.RefreshConcurrency > 50 {
-		return errors.New("批量任务并发必须在 1 到 50 之间")
-	}
-	if c.Batch.RandomDelay.Value() < 0 || c.Batch.RandomDelay.Value() > 5*time.Second {
-		return errors.New("批量任务随机延迟必须在 0 到 5 秒之间")
-	}
-	if c.Provider.Web.RecoveryBackoffBase.Value() < 5*time.Second || c.Provider.Web.RecoveryBackoffMax.Value() < c.Provider.Web.RecoveryBackoffBase.Value() || c.Provider.Web.RecoveryBackoffMax.Value() > 6*time.Hour {
-		return errors.New("provider.web 恢复退避配置无效")
 	}
 	// routing 各约束拆分校验并指明具体字段：此前 9 个条件合并为一条
 	// 「routing 配置无效」，运维只能通读整块代码定位是哪个字段越界。
-	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL {
-		return fmt.Errorf("routing.stickyTTL 必须在 1 纳秒到 %s 之间", maxRoutingTTL)
-	}
-	if c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown {
-		return errors.New("routing.cooldownBase/cooldownMax 配置无效: 需要 0 < cooldownBase <= cooldownMax <= 30m")
-	}
-	if c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > maxRoutingCapacityWait {
-		return fmt.Errorf("routing.capacityWait 必须在 1 纳秒到 %s 之间", maxRoutingCapacityWait)
-	}
-	if c.Routing.MaxAttempts < unlimitedRoutingAttempts || c.Routing.MaxAttempts == 0 || c.Routing.MaxAttempts > maxRoutingAttempts {
-		return errors.New("routing.maxAttempts 必须是 -1(不限)、1 到 65535；0 不被接受")
-	}
-	if c.Routing.VideoMaxAttempts < unlimitedRoutingAttempts || c.Routing.VideoMaxAttempts > maxRoutingAttempts {
-		return errors.New("routing.videoMaxAttempts 必须是 -1(不限)、0(默认 3)或 1 到 65535")
-	}
-	if c.Routing.SegmentedMinCandidates < 100 || c.Routing.SegmentedMinCandidates > 1000000 {
-		return errors.New("routing.segmentedMinCandidates 必须在 100 到 1000000 之间")
-	}
-	if c.Routing.SegmentedWindowSize < 8 || c.Routing.SegmentedWindowSize > 256 || c.Routing.SegmentedWindowSize > c.Routing.SegmentedMinCandidates {
-		return errors.New("routing.segmentedWindowSize 必须在 8 到 256 之间且不超过 segmentedMinCandidates")
-	}
 	if c.Routing.ReasoningReplayTTL.Value() <= 0 || c.Routing.ReasoningReplayTTL.Value() > 24*time.Hour {
 		return errors.New("routing.reasoningReplayTTL 必须在 1 纳秒到 24 小时之间")
 	}
@@ -743,22 +597,7 @@ func (c Config) Validate() error {
 	if c.Audit.JournalMaxBytes < 1<<20 || c.Audit.JournalMaxBytes > 64<<30 {
 		return errors.New("audit.journalMaxBytes 必须在 1 MiB 到 64 GiB 之间")
 	}
-	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize {
-		return errors.New("audit.bufferSize 必须在 1 到 100000 之间")
-	}
-	if c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize {
-		return errors.New("audit.batchSize 必须在 1 到 1000 之间且不超过 bufferSize")
-	}
-	if c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
-		return errors.New("audit.flushInterval 必须在 50ms 到 60s 之间")
-	}
-	if c.Audit.CommitDelay.Value() < minAuditCommitDelay || c.Audit.CommitDelay.Value() > maxAuditCommitDelay {
-		return errors.New("audit.commitDelay 必须在 1ms 到 50ms 之间")
-	}
 
-	if err := (auditdomain.RetentionPolicy{Period: c.Audit.RetentionPeriod.Value()}).Validate(); err != nil {
-		return err
-	}
 	if c.Audit.LedgerMode != "observe" && c.Audit.LedgerMode != "enforce" {
 		return errors.New("audit.ledgerMode 必须是 observe 或 enforce")
 	}
@@ -777,27 +616,21 @@ func (c Config) Validate() error {
 	if err := c.Egress.Validate(); err != nil {
 		return err
 	}
-	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
-		return errors.New("clientKeyDefaults 超出允许范围")
-	}
-	if c.Accounts.AutoCleanReauthInterval.Value() < time.Minute || c.Accounts.AutoCleanReauthInterval.Value() > time.Hour {
-		return errors.New("accounts.autoCleanReauthInterval 必须在 1 分钟到 1 小时之间")
-	}
-	if c.Accounts.AutoCleanReauthMinAge.Value() < time.Minute || c.Accounts.AutoCleanReauthMinAge.Value() > 30*24*time.Hour {
-		return errors.New("accounts.autoCleanReauthMinAge 必须在 1 分钟到 30 天之间")
-	}
-	if len(c.Accounts.BuildForbiddenReauthCodes) > 32 {
-		return errors.New("accounts.buildForbiddenReauthCodes 最多支持 32 个错误码")
-	}
-	for _, code := range c.Accounts.BuildForbiddenReauthCodes {
-		if !buildForbiddenCodePattern.MatchString(strings.TrimSpace(code)) {
-			return errors.New("accounts.buildForbiddenReauthCodes 包含无效错误码")
+	// 外部签名/清理服务 URL 属部署耦合检查：模式合法性与其余热更新范围由
+	// 领域校验唯一解释（ToRuntimeSettings(c).Validate()）。
+	if strings.TrimSpace(c.Provider.Web.StatsigMode) == StatsigModeURL {
+		if err := signerurl.Validate(c.Provider.Web.StatsigSignerURL); err != nil {
+			return fmt.Errorf("provider.web Statsig 签名 URL 无效: %w", err)
 		}
 	}
-	if len(c.Accounts.BuildForbiddenReauthCodes) == 0 {
-		return errors.New("accounts.buildForbiddenReauthCodes 至少需要一个错误码")
+	switch strings.TrimSpace(c.Provider.Web.ClearanceMode) {
+	case ClearanceModeFlareSolverr, ClearanceModeOnDemand:
+		if err := validateFlareSolverrURL(c.Provider.Web.FlareSolverrURL); err != nil {
+			return fmt.Errorf("provider.web FlareSolverr URL 无效: %w", err)
+		}
 	}
-	return nil
+	// 可热更新字段的政策范围由领域校验唯一解释；文件边界保留部署级检查。
+	return ToRuntimeSettings(c).Validate()
 }
 
 // GuardPolicy decodes the legacy file shape. Domain policy owns bootstrap
@@ -823,34 +656,6 @@ func validateRequestRetry(value RequestRetryConfig) error {
 		return fmt.Errorf("requestRetry: %w", err)
 	}
 	return nil
-}
-
-// validateAPIBaseURL 仅允许无凭据、query、fragment 的 HTTP(S) API 根地址。
-// requireHTTPS 为 true 时强制 HTTPS（用于生产默认 XAI 备用地址）。
-func validateAPIBaseURL(name, raw string, requireHTTPS bool) error {
-	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("%s 必须是不含凭据、查询参数和片段的 HTTP(S) URL", name)
-	}
-	switch parsed.Scheme {
-	case "https":
-		return nil
-	case "http":
-		if requireHTTPS {
-			return fmt.Errorf("%s 必须是 HTTPS URL", name)
-		}
-		return nil
-	default:
-		return fmt.Errorf("%s 必须是不含凭据、查询参数和片段的 HTTP(S) URL", name)
-	}
-}
-
-// NormalizeBuildFallbackBaseURL 在旧配置缺字段时填入默认 XAI 备用地址。
-func NormalizeBuildFallbackBaseURL(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return DefaultBuildFallbackBaseURL
-	}
-	return strings.TrimSpace(value)
 }
 
 func defaultConfig() Config {
@@ -880,7 +685,7 @@ func defaultConfig() Config {
 		},
 		Provider: ProviderConfig{
 			Build: BuildProviderConfig{
-				BaseURL: "https://cli-chat-proxy.grok.com/v1", FallbackBaseURL: DefaultBuildFallbackBaseURL,
+				BaseURL: "https://cli-chat-proxy.grok.com/v1", FallbackBaseURL: settingsdomain.DefaultBuildFallbackBaseURL,
 				ClientVersion: RecommendedBuildClientVersion, ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
 				UserAgent: RecommendedBuildUserAgent, ResponseHeaderTimeout: Duration(settingsdomain.DefaultBuildResponseHeaderTimeout),
 				StreamIdleTimeout: Duration(settingsdomain.DefaultBuildStreamIdleTimeout),
@@ -957,15 +762,6 @@ func validateFlareSolverrURL(value string) error {
 		return errors.New(strings.ReplaceAll(err.Error(), "签名 URL", "URL"))
 	}
 	return nil
-}
-
-func validStatsigID(value string) bool {
-	value = strings.TrimSpace(value)
-	decoded, err := base64.RawStdEncoding.DecodeString(value)
-	if err != nil {
-		decoded, err = base64.StdEncoding.DecodeString(value)
-	}
-	return err == nil && len(decoded) == 70
 }
 
 func validCredentialEncryptionKey(value string) bool {

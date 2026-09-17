@@ -3,6 +3,8 @@ package account
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +13,6 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -85,9 +86,9 @@ func TestRedisQuotaRefreshCrossInstanceTrailing(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &quotaCountingAdapter{modeStarted: make(chan struct{}, 4), modeRelease: make(chan struct{}, 4)}
-	registry := provider.NewRegistry(adapter)
-	first := NewService(accounts, nil, nil, nil, registry, nil, redisruntime.NewLockStore(firstRuntime))
-	second := NewService(accounts, nil, nil, nil, registry, nil, redisruntime.NewLockStore(secondRuntime))
+	registry := providerimpl.NewRegistry(adapter)
+	first := NewService(accounts, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, redisruntime.NewLockStore(firstRuntime))
+	second := NewService(accounts, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, redisruntime.NewLockStore(secondRuntime))
 	first.SetQuotaRefreshCoordinator(firstRuntime)
 	second.SetQuotaRefreshCoordinator(secondRuntime)
 

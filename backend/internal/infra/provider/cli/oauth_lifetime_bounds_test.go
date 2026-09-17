@@ -37,7 +37,7 @@ func TestOAuthPositiveSecondsCannotWrap(t *testing.T) {
 				var duration time.Duration
 				var err error
 				if field == "token_expires" {
-					value, callErr := client.refresh(context.Background(), "original-refresh")
+					value, callErr := client.refreshWithClientID(context.Background(), "original-refresh", "")
 					err = callErr
 					duration = value.ExpiresAt.Sub(started)
 				} else {

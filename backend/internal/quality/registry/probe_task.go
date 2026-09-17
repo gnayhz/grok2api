@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
+
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"time"
-
-	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 // 调查局任务队列存储(B3 q_probe_task)。court 派发、investigator
@@ -164,39 +164,8 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 	})
 }
 
-// ProbeTaskView 是探针任务的面板投影。
-type ProbeTaskView struct {
-	Experiment       model.ProbeExperiment
-	Attempt          attemptmeta.Identity
-	ControlAttempt   attemptmeta.Identity
-	ControlAccountID uint64
-	ControlNodeID    uint64
-	ControlEpoch     uint64
-	FailureKind      string
-	PathKey          string
-	ControlOutcome   model.ProbeResult
-	ControlDetail    string
-	ControlPathKey   string
-	ControlVerified  bool
-	ID               uint64
-	CaseID           uint64
-	Direction        model.ProbeDirection
-	Defendant        uint64
-	NodeID           uint64
-	Epoch            uint64
-	BaselineNodeID   uint64
-	BaselineEpoch    uint64
-	Juror            uint64
-	State            model.ProbeTaskState
-	Result           model.ProbeResult
-	VerifiedIPChange bool
-	Detail           string
-	CreatedAt        time.Time
-	FinishedAt       *time.Time
-}
-
 // ListProbeTasks 列出最近探针任务(面板/调查局观测)。
-func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]ProbeTaskView, error) {
+func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]model.ProbeTaskView, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -204,9 +173,9 @@ func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]Probe
 	if err := s.registry.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	views := make([]ProbeTaskView, 0, len(rows))
+	views := make([]model.ProbeTaskView, 0, len(rows))
 	for _, row := range rows {
-		views = append(views, ProbeTaskView{
+		views = append(views, model.ProbeTaskView{
 			Experiment: probeExperimentFromJSON(row.ExperimentJSON),
 			Attempt:    probeAttemptIdentity(row.AttemptJSON), ControlAttempt: probeAttemptIdentity(row.ControlAttemptJSON),
 			ID: row.ID, CaseID: row.CaseID, Direction: model.ProbeDirection(row.Direction),
@@ -226,15 +195,15 @@ func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]Probe
 // ListProbeTasksForCase returns every task belonging to one case. The direct
 // tribunal workflow evaluates one finite investigation round, so it must read
 // the complete round rather than a recent global page.
-func (s *ProbeTaskStore) ListProbeTasksForCase(ctx context.Context, caseID uint64) ([]ProbeTaskView, error) {
+func (s *ProbeTaskStore) ListProbeTasksForCase(ctx context.Context, caseID uint64) ([]model.ProbeTaskView, error) {
 	var rows []qProbeTaskModel
 	if err := s.registry.db.WithContext(ctx).
 		Where("case_id = ?", caseID).Order("id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	views := make([]ProbeTaskView, 0, len(rows))
+	views := make([]model.ProbeTaskView, 0, len(rows))
 	for _, row := range rows {
-		views = append(views, ProbeTaskView{
+		views = append(views, model.ProbeTaskView{
 			Experiment: probeExperimentFromJSON(row.ExperimentJSON),
 			Attempt:    probeAttemptIdentity(row.AttemptJSON), ControlAttempt: probeAttemptIdentity(row.ControlAttemptJSON),
 			ID: row.ID, CaseID: row.CaseID, Direction: model.ProbeDirection(row.Direction),

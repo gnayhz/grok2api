@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net/http"
 	"sync"
@@ -65,7 +67,7 @@ func TestWithBuildSessionDigestStableAndOpaque(t *testing.T) {
 func TestSessionNodePinStabilizesAcrossAvailabilityChanges(t *testing.T) {
 	repo := &sessionPinRepo{}
 	repo.setNodes(sessionTestNodes(1, 2, 3)...)
-	manager := NewManager(repo, nil)
+	manager := NewManagerWithLimits(repo, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	acquire := func() uint64 {
 		t.Helper()
@@ -114,7 +116,7 @@ func TestSessionNodePinStabilizesAcrossAvailabilityChanges(t *testing.T) {
 func TestSessionNodePinHonorsNodeExclusions(t *testing.T) {
 	repo := &sessionPinRepo{}
 	repo.setNodes(sessionTestNodes(1, 2)...)
-	manager := NewManager(repo, nil)
+	manager := NewManagerWithLimits(repo, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	sessionCtx := WithBuildSession(context.Background(), "sess-exclude")
 
@@ -126,7 +128,7 @@ func TestSessionNodePinHonorsNodeExclusions(t *testing.T) {
 	lease.Release()
 
 	excluded := map[uint64]struct{}{pinned: {}}
-	retryCtx := WithNodeExclusions(WithBuildSession(context.Background(), "sess-exclude"), excluded)
+	retryCtx := physical.WithNodeExclusions(WithBuildSession(context.Background(), "sess-exclude"), excluded)
 	leaseRetry, _, err := manager.AcquireIfConfigured(retryCtx, domain.ScopeBuild, "acct-1")
 	if err != nil || leaseRetry == nil {
 		t.Fatalf("排除重试获取失败: %v", err)
@@ -138,14 +140,14 @@ func TestSessionNodePinHonorsNodeExclusions(t *testing.T) {
 }
 
 func TestSessionClientReuseRespectsAccountIsolation(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
-	first, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
+	first, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatalf("会话客户端创建失败: %v", err)
 	}
 	// Reuse across accounts is allowed while isolation is disabled.
-	afterSwitch, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
+	afterSwitch, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatalf("换号后获取失败: %v", err)
 	}
@@ -154,14 +156,14 @@ func TestSessionClientReuseRespectsAccountIsolation(t *testing.T) {
 	}
 	// Enabling isolation retires the shared session pool.
 	manager.UpdateAccountIsolatedConnections(true)
-	afterToggle, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
+	afterToggle, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatalf("隔离开启后获取失败: %v", err)
 	}
 	if first.client == afterToggle.client {
 		t.Fatal("开启隔离后仍使用原共享会话连接池")
 	}
-	isolatedOther, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
+	isolatedOther, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{sessionKey: "sess-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +171,7 @@ func TestSessionClientReuseRespectsAccountIsolation(t *testing.T) {
 		t.Fatal("隔离模式下两个账号共享会话连接池")
 	}
 	// 不同会话必须拿到不同连接池。
-	other, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-2"})
+	other, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-2"})
 	if err != nil {
 		t.Fatalf("第二会话客户端创建失败: %v", err)
 	}
@@ -190,20 +192,20 @@ func TestSessionClientReuseRespectsAccountIsolation(t *testing.T) {
 }
 
 func TestSessionClientEvictionExemptions(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
-	if _, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{}); err != nil {
 		t.Fatalf("共享池创建失败: %v", err)
 	}
 	// 会话客户端的出现不得逐出同节点共享池。
-	if _, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-keep"}); err != nil {
+	if _, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-keep"}); err != nil {
 		t.Fatalf("会话客户端创建失败: %v", err)
 	}
 	if !managerHasClientForKey(manager, clientCacheKey{nodeID: 7, scope: domain.ScopeBuild, fingerprint: sharedFingerprint(t, manager, 7)}) {
 		t.Fatalf("会话客户端出现后共享池被逐出")
 	}
 	// 共享池的节点切换清理不得回收会话客户端。
-	if _, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{}); err != nil {
+	if _, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-B", clientOptions{}); err != nil {
 		t.Fatalf("第二共享池创建失败: %v", err)
 	}
 	if !managerHasClientForSession(manager, "sess-keep") {
@@ -252,9 +254,9 @@ func (noopRequestClient) Do(*http.Request) (*http.Response, error) {
 func (noopRequestClient) CloseIdleConnections() {}
 
 func TestSessionClientCapacityBudgetSeparation(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
-	shared, err := manager.transport.clientForWithOptions(7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{})
+	shared, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{})
 	if err != nil {
 		t.Fatalf("共享池创建失败: %v", err)
 	}

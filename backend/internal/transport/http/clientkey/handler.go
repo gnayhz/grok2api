@@ -2,7 +2,6 @@ package clientkey
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,13 +10,14 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	httphelpers "github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ service *clientkeyapp.Service }
+type Handler struct{ admin clientkeyapp.Administration }
 
-func NewHandler(service *clientkeyapp.Service) *Handler { return &Handler{service: service} }
+func NewHandler(admin clientkeyapp.Administration) *Handler { return &Handler{admin: admin} }
 
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/client-keys", h.list)
@@ -90,8 +90,8 @@ type keyResponse struct {
 }
 
 func (h *Handler) list(c *gin.Context) {
-	page, pageSize := pagination(c)
-	values, total, err := h.service.List(c.Request.Context(), page, pageSize, c.Query("search"), clientkeyapp.ListFilter{Status: c.Query("status"), ModelScope: c.Query("modelScope"), Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))}})
+	page, pageSize := httphelpers.Pagination(c)
+	values, total, err := h.admin.List(c.Request.Context(), page, pageSize, c.Query("search"), clientkeyapp.ListFilter{Status: c.Query("status"), ModelScope: c.Query("modelScope"), Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))}})
 	if errors.Is(err, clientkeyapp.ErrInvalidFilter) {
 		response.Error(c, http.StatusBadRequest, "invalidFilter", err.Error())
 		return
@@ -113,7 +113,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
-	ids, err := parseIDs(request.IDs)
+	ids, err := httphelpers.ParseIDs(request.IDs)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
@@ -122,7 +122,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "enabled 字段必填")
 		return
 	}
-	updated, err := h.service.BatchSetEnabled(c.Request.Context(), ids, *request.Enabled)
+	updated, err := h.admin.BatchSetEnabled(c.Request.Context(), ids, *request.Enabled)
 	if err != nil {
 		h.writeServiceError(c, "clientKeyBatchUpdateFailed", err)
 		return
@@ -136,12 +136,12 @@ func (h *Handler) batchDelete(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+bindErr.Error())
 		return
 	}
-	ids, err := parseIDs(request.IDs)
+	ids, err := httphelpers.ParseIDs(request.IDs)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
 	}
-	deleted, err := h.service.BatchDelete(c.Request.Context(), ids)
+	deleted, err := h.admin.BatchDelete(c.Request.Context(), ids)
 	if err != nil {
 		h.writeServiceError(c, "clientKeyBatchDeleteFailed", err)
 		return
@@ -160,7 +160,7 @@ func (h *Handler) create(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidExpiresAt", "expiresAt 必须是 RFC3339 时间")
 		return
 	}
-	modelIDs, err := parseIDs(request.AllowedModelIDs)
+	modelIDs, err := httphelpers.ParseIDs(request.AllowedModelIDs)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalidModelId", "allowedModelIds 包含无效 ID")
 		return
@@ -192,7 +192,7 @@ func (h *Handler) create(c *gin.Context) {
 		input.MaxConcurrent = *request.MaxConcurrent
 		input.ConcurrencyUnlimited = *request.MaxConcurrent == 0
 	}
-	created, err := h.service.Create(c.Request.Context(), input)
+	created, err := h.admin.Create(c.Request.Context(), input)
 	if err != nil {
 		h.writeServiceError(c, "clientKeyCreateFailed", err)
 		return
@@ -201,7 +201,7 @@ func (h *Handler) create(c *gin.Context) {
 }
 
 func (h *Handler) update(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
@@ -229,14 +229,14 @@ func (h *Handler) update(c *gin.Context) {
 		}
 	}
 	if request.AllowedModelIDs != nil {
-		ids, err := parseIDs(*request.AllowedModelIDs)
+		ids, err := httphelpers.ParseIDs(*request.AllowedModelIDs)
 		if err != nil {
 			response.Error(c, http.StatusBadRequest, "invalidModelId", "allowedModelIds 包含无效 ID")
 			return
 		}
 		input.AllowedModels = &ids
 	}
-	value, err := h.service.Update(c.Request.Context(), id, input)
+	value, err := h.admin.Update(c.Request.Context(), id, input)
 	if err != nil {
 		h.writeServiceError(c, "clientKeyUpdateFailed", err)
 		return
@@ -245,11 +245,11 @@ func (h *Handler) update(c *gin.Context) {
 }
 
 func (h *Handler) revealSecret(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
-	secret, err := h.service.RevealSecret(c.Request.Context(), id)
+	secret, err := h.admin.RevealSecret(c.Request.Context(), id)
 	if err != nil {
 		h.writeServiceError(c, "clientKeySecretReadFailed", err)
 		return
@@ -260,11 +260,11 @@ func (h *Handler) revealSecret(c *gin.Context) {
 }
 
 func (h *Handler) delete(c *gin.Context) {
-	id, ok := pathID(c)
+	id, ok := httphelpers.PathID(c)
 	if !ok {
 		return
 	}
-	if err := h.service.Delete(c.Request.Context(), id); err != nil {
+	if err := h.admin.Delete(c.Request.Context(), id); err != nil {
 		h.writeServiceError(c, "clientKeyDeleteFailed", err)
 		return
 	}
@@ -350,34 +350,4 @@ func parseTime(value string) (*time.Time, error) {
 	}
 	parsed = parsed.UTC()
 	return &parsed, nil
-}
-
-// parseIDs 同时解析客户端 Key ID 与 allowedModelIds；错误消息保持中性，
-// 模型位点的调用方以自己的 invalidModelId 消息覆盖（round 69：Key 批量
-// 操作曾把 Key ID 报成「无效模型 ID」，误导运维）。
-func parseIDs(values []string) ([]uint64, error) {
-	result := make([]uint64, 0, len(values))
-	for _, value := range values {
-		id, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || id == 0 {
-			return nil, fmt.Errorf("无效 ID: %s", value)
-		}
-		result = append(result, id)
-	}
-	return result, nil
-}
-
-func pathID(c *gin.Context) (uint64, bool) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
-		return 0, false
-	}
-	return id, true
-}
-
-func pagination(c *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	size, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	return repository.NormalizePage(page, size, repository.DefaultPageSize)
 }

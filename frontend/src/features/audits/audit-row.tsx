@@ -2,14 +2,14 @@ import { ChevronRight, KeyRound, Minimize2, Monitor, UserRound, Waypoints } from
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { TableCell, TableRow } from "@/components/ui/table";
+import { Button } from "@/shared/ui/button";
+import { TableCell, TableRow } from "@/shared/ui/table";
 import { formatCompactDateTime, formatDuration, formatNumber } from "@/shared/lib/format";
 import { formatUSDTicks } from "@/shared/lib/usd";
 import { auditBilling, auditOutcome, auditProviderLabel } from "./audit-presentation";
 import { AuditResultButton } from "./audit-result-mark";
 import { buildAuditUsageView } from "./audit-usage";
-import type { AuditDTO } from "./request-audits-api";
+import type { AuditDTO } from "@/entities/audit/audit-api";
 
 type RowProps = { audit: AuditDTO; locale: string; onOpen: (audit: AuditDTO) => void };
 

@@ -75,7 +75,7 @@ func TestAccountRepositoryUpsertsImportChunkInOneBatch(t *testing.T) {
 		{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "batch-1", SourceKey: "batch-1", EncryptedAccessToken: testEncryptedToken, EncryptedRefreshToken: "encrypted-refresh", AuthStatus: account.AuthStatusActive},
 		{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "batch-2", SourceKey: "batch-2", EncryptedAccessToken: testEncryptedToken, AuthStatus: account.AuthStatusActive},
 	}
-	created, err := repo.UpsertManyByIdentity(ctx, values)
+	created, err := repo.ImportAccounts(ctx, testsupport.AccountImports(values))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestAccountRepositoryUpsertsImportChunkInOneBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	values[0].Name = "batch-1-updated"
-	updated, err := repo.UpsertManyByIdentity(ctx, values[:1])
+	updated, err := repo.ImportAccounts(ctx, testsupport.AccountImports(values[:1]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestAccountRepositoryUpsertsDuplicateIdentityWithinChunk(t *testing.T) {
 		{Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "duplicate-final", SourceKey: "duplicate", EncryptedAccessToken: testEncryptedToken, AuthStatus: account.AuthStatusActive},
 	}
 
-	results, err := repo.UpsertManyByIdentity(ctx, values)
+	results, err := repo.ImportAccounts(ctx, testsupport.AccountImports(values))
 	if err != nil {
 		t.Fatal(err)
 	}

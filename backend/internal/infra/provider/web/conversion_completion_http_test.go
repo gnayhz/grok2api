@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,11 +14,12 @@ import (
 	"testing"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
@@ -148,9 +150,9 @@ func TestConversionFormalHTTPWithRealOAuthFlow(t *testing.T) {
 				}
 			}
 			adapter := &conversionHTTPAdapter{flow: &ssoBuildFlow{client: rewrite, userAgent: "local-test", cookies: map[string]string{"sso": "local-sso", "sso-rw": "local-sso"}}}
-			service := accountapp.NewService(port, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
+			service := accountapp.NewService(port, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 			router := gin.New()
-			accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+			accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, nil)}).Register(router.Group("/api/admin/v1"))
 			request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/accounts/web/convert-to-build", strings.NewReader(fmt.Sprintf(`{"ids":["%d"],"strategy":"all"}`, web.ID))).WithContext(ctx)
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()

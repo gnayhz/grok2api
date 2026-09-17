@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"net/http"
 	"net/url"
 	"sync"
@@ -12,8 +13,8 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type responseHistory interface {
@@ -43,7 +44,7 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	}
 	accountScope := input.ClientKey.AccountScope()
 	if !accountScope.AllowsProvider(ownership.Provider) {
-		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: accountScope}
+		return nil, &selector.SelectionUnavailableError{Reason: selector.SelectionNoAccounts, Scope: accountScope}
 	}
 	if _, ok := s.providers.Responses(ownership.Provider); !ok {
 		return nil, ErrResponseAccountUnavailable
@@ -52,12 +53,12 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	if method == http.MethodDelete {
 		operation = "response_delete"
 	}
-	physicalCallCtx := infraegress.WithPhysicalCallTrace(ctx, string(ownership.Provider), operation)
+	physicalCallCtx := s.startPhysicalTrace(ctx, string(ownership.Provider), operation)
 	// Resource access is pinned to its owner. One explicit authentication recovery
 	// is permitted, and all real sends (including connection retries) share two slots.
 	requestBudget := inferencedomain.NewAttemptBudget(2)
 	defer requestBudget.Close()
-	physicalCallCtx = infraegress.WithPhysicalCallBudget(physicalCallCtx, requestBudget)
+	physicalCallCtx = portphysical.WithPhysicalCallBudget(physicalCallCtx, requestBudget)
 	lease, err := s.selector.AcquirePinnedForKey(ctx, ownership.Provider, ownership.AccountID, 0, "", "", false, accountScope)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrResponseAccountUnavailable, err)
@@ -66,10 +67,10 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	var once sync.Once
 	release := func() { once.Do(func() { cancel(); lease.Release() }) }
 	stop := context.AfterFunc(physicalCallCtx, release)
-	var resources *attemptResources
+	var resources *selector.AttemptResources
 	finish := func() {
 		if resources != nil {
-			resources.close()
+			resources.Close()
 		}
 		stop()
 		release()
@@ -90,10 +91,10 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	}
 	forward := func(callCtx context.Context, credential accountdomain.Credential) (*provider.Response, error) {
 		if resources != nil {
-			resources.close()
+			resources.Close()
 		}
 		var attemptCtx context.Context
-		attemptCtx, resources = newAttemptResources(callCtx)
+		attemptCtx, resources = selector.NewAttemptResources(callCtx)
 		return s.runPhysicalAttempt(attemptCtx, provider.ResponseResourceRequest{Credential: credential, Method: method, Path: path}, resources)
 	}
 	response, err := forward(physicalCallCtx, credential)
@@ -104,7 +105,7 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 		return nil, err
 	}
 	if response.StatusCode == http.StatusUnauthorized {
-		resources.close()
+		resources.Close()
 		if credential.AuthType == accountdomain.AuthTypeSSO {
 			s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
 			return nil, ErrResponseAccountUnavailable
@@ -125,13 +126,13 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 			return nil, refreshErr
 		}
 		credential = refreshed
-		response, err = forward(infraegress.WithPhysicalCallPermit(physicalCallCtx, permit), credential)
+		response, err = forward(portphysical.WithPhysicalCallPermit(physicalCallCtx, permit), credential)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		s.selector.markSuccess(ctx, credential, nil)
+		s.selector.MarkSuccessWithRecovery(ctx, credential, nil)
 		if method == http.MethodDelete {
 			if err := s.completeResponseRemoval(ctx, input); err != nil {
 				return nil, err

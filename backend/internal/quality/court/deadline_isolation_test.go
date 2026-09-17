@@ -71,7 +71,7 @@ func TestPostgresRowLockCannotStarveOtherDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	archive, err := evidence.New(ctx, r.DB(), evidence.DefaultConfig())
+	archive, err := evidence.New(ctx, r.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ type deadlineFirstSource struct {
 	check func()
 }
 
-func (s deadlineFirstSource) SnapshotWindow(now time.Time) evidence.Snapshot {
+func (s deadlineFirstSource) SnapshotWindow(now time.Time) model.Snapshot {
 	s.check()
 	return s.storeSource.SnapshotWindow(now)
 }

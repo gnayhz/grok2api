@@ -6,7 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -31,13 +35,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 	localmedia "github.com/chenyme/grok2api/backend/internal/infra/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -65,7 +69,7 @@ func (*voiceReceiptSink) RecordQualityEvent(context.Context, gateway.QualityObse
 }
 
 type voiceCompletionFixture struct {
-	registry       *provider.Registry
+	registry       provider.Registry
 	dbPath         string
 	service        *gateway.Service
 	audits         *relational.AuditRepository
@@ -76,7 +80,7 @@ type voiceCompletionFixture struct {
 	models         *relational.ModelRepository
 	jobs           *relational.MediaJobRepository
 	concurrency    repository.ConcurrencyLimiter
-	selector       *gateway.Selector
+	selector       *selector.Selector
 	created        clientkeyapp.Created
 	receipts       *voiceReceiptSink
 	account        account.Credential
@@ -128,7 +132,7 @@ func newProviderCompletionFixtureOnDatabase(t *testing.T, endpoint, model string
 	token, _ := cipher.Encrypt("synthetic-sso")
 	accounts, models := relational.NewAccountRepository(db), relational.NewModelRepository(db)
 	audits, clients := relational.NewAuditRepository(db), relational.NewClientKeyRepository(db)
-	network := egress.NewManager(relational.NewEgressRepository(db), cipher)
+	network := egress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = network.Close(ctx) })
 	var assetService *mediaapp.Service
 	var store provider.ImageAssetStore
@@ -178,7 +182,7 @@ func newProviderCompletionFixtureOnDatabase(t *testing.T, endpoint, model string
 	if err := testsupport.Capabilities(ctx, models, accounts, credential.ID, []string{model}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
 	var concurrency repository.ConcurrencyLimiter = memory.NewConcurrencyLimiter()
 	if len(limiters) > 0 {
@@ -188,8 +192,8 @@ func newProviderCompletionFixtureOnDatabase(t *testing.T, endpoint, model string
 	if wrapAccounts != nil {
 		accountStore = wrapAccounts(accounts)
 	}
-	accountService := accountapp.NewService(accountStore, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clientService := clientkeyapp.NewService("test-owner", clients, memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+	accountService := accountapp.NewService(accountStore, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+	clientService := clientkeyapp.NewService("test-owner", clients, memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 	t.Cleanup(func() { closeClientKeyService(t, clientService) })
 	created, err := clientService.Create(ctx, clientkeyapp.CreateInput{Name: "voice", Enabled: true, RPMLimit: 120, MaxConcurrent: 4, BillingLimitUSDTicks: 100_000_000_000})
 	if err != nil {
@@ -199,13 +203,13 @@ func newProviderCompletionFixtureOnDatabase(t *testing.T, endpoint, model string
 	if wrapSelector != nil {
 		selectorStore = wrapSelector(accounts)
 	}
-	selector := gateway.NewSelector(selectorStore, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-	service := gateway.NewService(models, audits, accountService, clientService, registry, selector, relational.NewResponseRepository(db), 1)
+	selector := selector.NewSelector(selectorStore, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+	service := gateway.NewService(models, audits, accountService, clientService, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 1)
 	receipts := &voiceReceiptSink{}
 	service.SetQualityEventRecorder(receipts)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.RequestID(), middleware.ClientAuth(clientService))
+	router.Use(middleware.RequestID(nil), middleware.ClientAuth(clientService))
 	modelService := modelapp.NewService(models, accounts, accountService, registry)
 	t.Cleanup(func() { _ = modelService.Close(context.Background()) })
 	NewHandler(service, modelService, 1<<20).Register(router.Group("/v1"))

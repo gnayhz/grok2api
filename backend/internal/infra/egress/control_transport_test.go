@@ -17,7 +17,7 @@ import (
 func TestControlTransportRetainsActiveBodyAndCustomDialPolicy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "healthy") }))
 	defer server.Close()
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	var dials atomic.Int32
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {

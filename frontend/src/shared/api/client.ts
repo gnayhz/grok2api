@@ -1,5 +1,6 @@
 import { acceptSessionToken, currentSession, endSession, isCurrentSession, sessionAccessToken, type AdminSession } from "@/shared/auth/session";
-import { createObjectDecoder, hasShape, isString, type ApiDecoder } from "@/shared/api/decoder";
+import { decodeAuthTokensDTO } from "@/shared/auth/admin-dto";
+import type { ApiDecoder } from "@/shared/api/decoder";
 import { runtimeConfig } from "@/shared/config/runtime-config";
 import { i18n } from "@/shared/i18n";
 
@@ -315,34 +316,6 @@ export async function apiDownloadResponse(path: string, options: RequestOptions 
 export async function apiDownload(path: string, options: RequestOptions = {}): Promise<Blob> {
   return (await apiDownloadResponse(path, options)).blob;
 }
-
-export type AdminDTO = {
-  id: string;
-  username: string;
-};
-
-export type AuthTokensDTO = {
-  accessToken: string;
-  accessTokenExpiresAt: string;
-  refreshTokenExpiresAt: string;
-};
-
-export type LoginResponseDTO = {
-  admin: AdminDTO;
-  tokens: AuthTokensDTO;
-};
-
-const adminValidator = hasShape({ id: isString, username: isString });
-const authTokensValidator = hasShape({ accessToken: isString, accessTokenExpiresAt: isString, refreshTokenExpiresAt: isString });
-
-export const decodeAdminDTO = createObjectDecoder<AdminDTO>("admin", { id: isString, username: isString });
-export const decodeAuthTokensDTO = createObjectDecoder<AuthTokensDTO>("auth tokens", {
-  accessToken: isString,
-  accessTokenExpiresAt: isString,
-  refreshTokenExpiresAt: isString,
-});
-export const decodeLoginResponseDTO = createObjectDecoder<LoginResponseDTO>("login", { admin: adminValidator, tokens: authTokensValidator });
-export const decodeLoggedOut = createObjectDecoder<{ loggedOut: boolean }>("logout", { loggedOut: (value) => typeof value === "boolean" });
 
 function decodeNever(): never {
   throw new Error("unexpected successful response");

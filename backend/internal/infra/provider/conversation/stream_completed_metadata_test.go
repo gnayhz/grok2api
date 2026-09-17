@@ -19,7 +19,7 @@ func TestCompletedMetadataIndependentOfSizeAndKeyOrder(t *testing.T) {
 		var baseline []byte
 		for _, padding := range []int{0, 40 << 10, 1 << 20} {
 			var output bytes.Buffer
-			converter := newStreamConverter(&output, operation, ResponseOptions{})
+			converter := newStreamConverterWithBudget(&output, operation, ResponseOptions{}, nil)
 			defer converter.releaseResources()
 			converter.created = 7
 			if err := converter.handle("", completedMetadataFrame(padding)); err != nil {
@@ -48,7 +48,7 @@ func BenchmarkConvertHugeCompletedMetadata(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
 	for b.Loop() {
-		c := newStreamConverter(io.Discard, OperationChat, ResponseOptions{})
+		c := newStreamConverterWithBudget(io.Discard, OperationChat, ResponseOptions{}, nil)
 		if err := c.handleHugeCompleted(data, "response.completed"); err != nil {
 			b.Fatal(err)
 		}

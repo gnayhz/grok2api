@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
@@ -15,8 +17,8 @@ func BenchmarkVideoResourceProjection(b *testing.B) {
 			if scenario == "queued" {
 				job.Status = media.StatusQueued
 			}
-			service := &Service{}
-			service.ConfigureMedia(&videoUsageRepository{job: job}, 1)
+			service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
+			service.ConfigureMedia(&videoUsageRepository{job: job}, mediaapp.NewVideoResources(&videoUsageRepository{job: job}, nil), 1)
 			if scenario == "local" {
 				service.ConfigureMediaAssets(&videoAssetStoreStub{openAsset: media.Asset{ID: "asset", Kind: "video"}, openData: []byte("video")})
 			}

@@ -44,7 +44,7 @@ func TestAccountAdministrationAcrossConnections(t *testing.T) {
 					case 3:
 						_, err = rotateOAuthFixture(rb, ctx, v.ID, "new-access", "new-refresh", time.Now().Add(time.Hour), 0)
 					case 4:
-						err = rb.UpdateRiskAttribution(ctx, v.ID, repository.RiskAttribution{Status: account.RiskStatusRSCDenied, Trigger: account.RiskTriggerDegrade, Detail: "concurrent risk"})
+						_, err = rb.UpdateAdministration(ctx, v.ID, repository.AccountAdminPatch{Risk: &repository.RiskAttribution{Status: account.RiskStatusRSCDenied, Trigger: account.RiskTriggerDegrade, Detail: "concurrent risk"}})
 					}
 					errs <- err
 				}()

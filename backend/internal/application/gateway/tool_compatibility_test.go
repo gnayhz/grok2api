@@ -2,17 +2,18 @@ package gateway
 
 import (
 	"context"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"testing"
 
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestGatewayReviewsCacheToolPlanBeforeUpstream(t *testing.T) {
 	base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 	s, _ := newGuardLoopService(t, base, "tool-plan-first", "tool-plan-second")
 	reviews := 0
-	s.providers = provider.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 		reviews++
 		if request.ToolCompatibilityPolicy != inferencedomain.AllowDisabledCacheTools {
 			t.Error("logical request owner did not supply cache policy")

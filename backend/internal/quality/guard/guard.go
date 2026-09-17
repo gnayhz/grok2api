@@ -89,8 +89,6 @@ func Judge(sig Signals) (Verdict, Rule) {
 // Config is the domain policy; storage readiness belongs to Service.
 type Config = guardpolicy.Config
 
-func DefaultConfig() Config { return guardpolicy.DefaultConfig() }
-
 // configState atomically publishes the policy with its readiness.
 type configState struct {
 	Config
@@ -112,11 +110,6 @@ type Store interface {
 	LoadGuard(ctx context.Context) (cfg Config, found bool, err error)
 	// SaveGuard 持久化配置(先落库后生效:失败即拒绝更新,库为真相源 I17)。
 	SaveGuard(ctx context.Context, cfg Config) error
-}
-
-// New 构建守卫配置服务;store 可为 nil(纯内存,测试/剥离形态)。
-func New(cfg Config, store Store) *Service {
-	return NewWithFileDefaults(cfg, cfg, store)
 }
 
 // NewWithFileDefaults preserves the legacy startup fallback separately from

@@ -8,19 +8,22 @@ import (
 	"fmt"
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -122,7 +125,7 @@ func TestHTTPSessionIdentityHistoryAndHints(t *testing.T) {
 					if err = testsupport.Discover(ctx, models, account.ProviderBuild, modelNames); err != nil {
 						t.Fatal(err)
 					}
-					egress := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+					egress := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 					t.Cleanup(func() { _ = egress.Close(context.Background()) })
 					var sticky repository.StickySessionRepository = memory.NewStickyStore()
 					var concurrency repository.ConcurrencyLimiter = memory.NewConcurrencyLimiter()
@@ -139,7 +142,7 @@ func TestHTTPSessionIdentityHistoryAndHints(t *testing.T) {
 						sticky = store
 						concurrency = redisruntime.NewConcurrencyLimiter(store)
 					}
-					clientService := clientkeyapp.NewService("identity-owner", keys, memory.NewRateLimiter(), concurrency, 240, 4, cipher)
+					clientService := clientkeyapp.NewService("identity-owner", keys, memory.NewRateLimiter(), concurrency, 240, 4, cipher, security.RandomTokenSource{})
 					t.Cleanup(func() { closeClientKeyService(t, clientService) })
 					firstKey, err := clientService.Create(ctx, clientkeyapp.CreateInput{Name: "one", Enabled: true, RPMLimit: 240, MaxConcurrent: 4})
 					if err != nil {
@@ -160,13 +163,13 @@ func TestHTTPSessionIdentityHistoryAndHints(t *testing.T) {
 						build.SetReasoningReplay(makeHistory())
 						build.SetLegacyReplayAccounts([]uint64{99})
 						build.SetEgress(egress)
-						registry := provider.NewRegistry(build)
-						maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-						selector := gateway.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-						service := gateway.NewService(models, audits, maintenance, clientService, registry, selector, relational.NewResponseRepository(db), 2)
+						registry := providerimpl.NewRegistry(build)
+						maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+						selector := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+						service := gateway.NewService(models, audits, maintenance, clientService, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 						activeService = service
 						router := gin.New()
-						router.Use(middleware.RequestID(), middleware.ClientAuth(clientService))
+						router.Use(middleware.RequestID(nil), middleware.ClientAuth(clientService))
 						NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 						return router
 					}

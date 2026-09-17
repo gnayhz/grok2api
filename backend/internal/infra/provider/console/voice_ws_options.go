@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // PrepareVoiceWebSocket is pure protocol preparation. It runs before account

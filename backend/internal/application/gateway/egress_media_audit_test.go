@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"testing"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -13,7 +14,7 @@ import (
 
 func TestApplyMediaJobEgressFields(t *testing.T) {
 	t.Parallel()
-	_, trace := infraegress.WithTrace(context.Background())
+	_, trace := physical.WithTrace(context.Background())
 	trace.Record(infraegress.Selection{NodeID: 7, NodeName: "media-node", Scope: egress.ScopeBuild, Proxied: true})
 	job := &media.Job{}
 	applyMediaJobEgress(job, trace, accountdomain.ProviderBuild)

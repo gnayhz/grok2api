@@ -9,7 +9,7 @@ import (
 
 func TestLargeReasoningItemsPreserveIdentityAndSignature(t *testing.T) {
 	var output bytes.Buffer
-	c := newStreamConverter(&output, OperationMessages, ResponseOptions{AnthropicThinking: true})
+	c := newStreamConverterWithBudget(&output, OperationMessages, ResponseOptions{AnthropicThinking: true}, nil)
 	defer c.releaseResources()
 	signature := strings.Repeat("S", 70<<10)
 	// Identity and type deliberately follow ciphertext, beyond any head window.
@@ -31,7 +31,7 @@ func TestLargeReasoningItemsPreserveIdentityAndSignature(t *testing.T) {
 func TestLargeFunctionItemsPreserveToolArguments(t *testing.T) {
 	for _, operation := range []string{OperationChat, OperationMessages} {
 		var output bytes.Buffer
-		c := newStreamConverter(&output, operation, ResponseOptions{})
+		c := newStreamConverterWithBudget(&output, operation, ResponseOptions{}, nil)
 		defer c.releaseResources()
 		arguments := `{"text":"` + strings.Repeat("A", 70<<10) + `"}`
 		item := map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "write", "arguments": arguments}

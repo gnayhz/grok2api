@@ -14,8 +14,9 @@ import (
 	"github.com/bogdanfinn/websocket"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestWebFractionalDeadlinesReachHTTPAndWebSocket(t *testing.T) {
@@ -49,7 +50,7 @@ func TestWebFractionalDeadlinesReachHTTPAndWebSocket(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+			manager := infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{})
 			defer manager.Close(context.Background())
 			adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "synthetic-signature", ChatTimeout: 175 * time.Millisecond, ImageTimeout: 175 * time.Millisecond, VideoTimeout: 175 * time.Millisecond}, manager, cipher, nil, nil)
 			credential := account.Credential{ID: 1, Provider: account.ProviderWeb, UserID: "497f19f8-49d4-458a-bee4-43ec3dcaf8ca", EncryptedAccessToken: encrypted}

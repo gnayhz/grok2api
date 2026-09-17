@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,8 @@ func BenchmarkSourceSyncCommit(b *testing.B) {
 				}
 				repo := relational.NewEgressRepository(db)
 				service := NewService(repo, cipher)
+				service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
+				service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 				defer service.Close(ctx)
 				var calls atomic.Int64
 				feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

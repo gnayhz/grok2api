@@ -16,35 +16,13 @@ func isRecordNotFound(err error) bool { return errors.Is(err, gorm.ErrRecordNotF
 // 案件与当事方存储(B3 数据层)。本文件只提供无语义的存取原语——
 // 案件状态机与裁决规则属于 court;登记处只提供持久化存取原语。
 
-// CaseRecord 是案件的一行。
-type CaseRecord struct {
-	ID           uint64
-	Status       model.CaseStatus
-	Verdict      model.Verdict
-	EvidenceJSON string
-	OpenedAt     time.Time
-	ClosedAt     *time.Time
-	UpdatedAt    time.Time
-}
-
 // CaseEvidence supplies the immutable opening evidence to legacy task recovery.
 func (r *Registry) CaseEvidence(ctx context.Context, caseID uint64) (string, bool, error) {
 	record, found, err := r.GetCase(ctx, caseID)
 	return record.EvidenceJSON, found, err
 }
 
-// PartyRecord 是案件当事方的一行。
-type PartyRecord struct {
-	CaseID      uint64
-	Kind        model.PartyKind
-	AccountID   uint64
-	NodeID      uint64
-	Epoch       uint64
-	Role        model.PartyRole
-	Disposition model.PartyDisposition
-	UpdatedAt   time.Time
-}
-
+// test/ops-only:生产开案走 OpenInvestigation,生产组合根不调用此入口。
 // CreateCase 立案:写一行 investigating 案件,返回案件号。
 // evidenceJSON 由调用方保证脱敏(I24:无 IP 明文/账号名/密钥)。
 func (r *Registry) CreateCase(ctx context.Context, openedAt time.Time, evidenceJSON string) (uint64, error) {
@@ -63,8 +41,27 @@ func (r *Registry) CreateCase(ctx context.Context, openedAt time.Time, evidenceJ
 	return row.ID, nil
 }
 
+// CountCases 返回全量案件数(不受近期窗口截断)。Overview 的总量口径
+// 使用本聚合,近期窗口只用于裁决分布。
+func (r *Registry) CountCases(ctx context.Context) (int64, error) {
+	var total int64
+	if err := r.db.WithContext(ctx).Model(&qCaseModel{}).Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// CountOpenCases 返回调查中案件数(全量)。
+func (r *Registry) CountOpenCases(ctx context.Context) (int64, error) {
+	var total int64
+	if err := r.db.WithContext(ctx).Model(&qCaseModel{}).Where("status = ?", string(model.CaseInvestigating)).Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // ListRecentCases 列出最近案件(开案在前,结案在后;面板裁决流)。
-func (r *Registry) ListRecentCases(ctx context.Context, limit int) ([]CaseRecord, error) {
+func (r *Registry) ListRecentCases(ctx context.Context, limit int) ([]model.CaseRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -72,9 +69,9 @@ func (r *Registry) ListRecentCases(ctx context.Context, limit int) ([]CaseRecord
 	if err := r.db.WithContext(ctx).Order("CASE WHEN status = 'investigating' THEN 0 ELSE 1 END, id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	records := make([]CaseRecord, 0, len(rows))
+	records := make([]model.CaseRecord, 0, len(rows))
 	for _, row := range rows {
-		records = append(records, CaseRecord{
+		records = append(records, model.CaseRecord{
 			ID: row.ID, Status: model.CaseStatus(row.Status), Verdict: model.Verdict(row.Verdict),
 			EvidenceJSON: row.EvidenceJSON, OpenedAt: row.OpenedAt, ClosedAt: row.ClosedAt, UpdatedAt: row.UpdatedAt,
 		})
@@ -82,11 +79,13 @@ func (r *Registry) ListRecentCases(ctx context.Context, limit int) ([]CaseRecord
 	return records, nil
 }
 
+// test/ops-only:生产结案走 SettleInvestigation,生产组合根不调用此入口。
 // CloseCase 以裁决结案(状态与裁决词一致性由 court 保证)。
 func (r *Registry) CloseCase(ctx context.Context, caseID uint64, status model.CaseStatus, verdict model.Verdict, closedAt time.Time) error {
 	return r.CloseCaseWithEvidence(ctx, caseID, status, verdict, "", closedAt)
 }
 
+// test/ops-only:生产结案走 SettleInvestigation,生产组合根不调用此入口。
 // CloseCaseWithEvidence 以裁决结案并落证据链摘要(I25:定罪留档;
 // evidenceJSON 由 court 保证脱敏 I24)。
 func (r *Registry) CloseCaseWithEvidence(ctx context.Context, caseID uint64, status model.CaseStatus, verdict model.Verdict, evidenceJSON string, closedAt time.Time) error {
@@ -121,22 +120,24 @@ func (r *Registry) CloseCaseWithEvidence(ctx context.Context, caseID uint64, sta
 }
 
 // GetCase 读取案件。
-func (r *Registry) GetCase(ctx context.Context, caseID uint64) (CaseRecord, bool, error) {
+func (r *Registry) GetCase(ctx context.Context, caseID uint64) (model.CaseRecord, bool, error) {
 	var row qCaseModel
 	if err := r.db.WithContext(ctx).Where("id = ?", caseID).First(&row).Error; err != nil {
 		if isRecordNotFound(err) {
-			return CaseRecord{}, false, nil
+			return model.CaseRecord{}, false, nil
 		}
-		return CaseRecord{}, false, err
+		return model.CaseRecord{}, false, err
 	}
-	return CaseRecord{
+	return model.CaseRecord{
 		ID: row.ID, Status: model.CaseStatus(row.Status), Verdict: model.Verdict(row.Verdict),
 		EvidenceJSON: row.EvidenceJSON, OpenedAt: row.OpenedAt, ClosedAt: row.ClosedAt, UpdatedAt: row.UpdatedAt,
 	}, true, nil
 }
 
+// test/ops-only:生产开案/结案走 OpenInvestigation/SettleInvestigation,
+// 生产组合根不调用此入口。
 // UpsertParty 登记或更新案件当事方(程序处置状态)。
-func (r *Registry) UpsertParty(ctx context.Context, record PartyRecord) error {
+func (r *Registry) UpsertParty(ctx context.Context, record model.PartyRecord) error {
 	if !r.inTransition {
 		return r.withTransition(ctx, func(w *Registry) error { return w.UpsertParty(ctx, record) })
 	}
@@ -181,14 +182,14 @@ func (r *Registry) UpdatePartyDisposition(ctx context.Context, caseID uint64, ki
 }
 
 // ListOpenCases 列出调查中的案件(court 评估节拍消费)。
-func (r *Registry) ListOpenCases(ctx context.Context) ([]CaseRecord, error) {
+func (r *Registry) ListOpenCases(ctx context.Context) ([]model.CaseRecord, error) {
 	var rows []qCaseModel
 	if err := r.db.WithContext(ctx).Where("status = ?", string(model.CaseInvestigating)).Order("id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	records := make([]CaseRecord, 0, len(rows))
+	records := make([]model.CaseRecord, 0, len(rows))
 	for _, row := range rows {
-		records = append(records, CaseRecord{
+		records = append(records, model.CaseRecord{
 			ID: row.ID, Status: model.CaseStatus(row.Status), Verdict: model.Verdict(row.Verdict),
 			EvidenceJSON: row.EvidenceJSON, OpenedAt: row.OpenedAt, ClosedAt: row.ClosedAt, UpdatedAt: row.UpdatedAt,
 		})
@@ -249,14 +250,14 @@ func (r *Registry) OpenCaseForIncident(ctx context.Context, accountID uint64, ex
 }
 
 // ListParties 列出案件全部当事方。
-func (r *Registry) ListParties(ctx context.Context, caseID uint64) ([]PartyRecord, error) {
+func (r *Registry) ListParties(ctx context.Context, caseID uint64) ([]model.PartyRecord, error) {
 	var rows []qCasePartyModel
 	if err := r.db.WithContext(ctx).Where("case_id = ?", caseID).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	records := make([]PartyRecord, 0, len(rows))
+	records := make([]model.PartyRecord, 0, len(rows))
 	for _, row := range rows {
-		records = append(records, PartyRecord{
+		records = append(records, model.PartyRecord{
 			CaseID: row.CaseID, Kind: model.PartyKind(row.Kind),
 			AccountID: row.AccountID, NodeID: row.NodeID, Epoch: row.Epoch,
 			Role: model.PartyRole(row.Role), Disposition: model.PartyDisposition(row.Disposition),

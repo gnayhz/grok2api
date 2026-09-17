@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestTextGenerationUsageSurvivesPreHandoffFailure(t *testing.T) {
@@ -14,7 +14,7 @@ func TestTextGenerationUsageSurvivesPreHandoffFailure(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			s, records := completionService(t, func(response *provider.Response) {
+			s, records, _ := completionService(t, func(response *provider.Response) {
 				if stage == "conversion" || stage == "cancel_during_conversion" {
 					response.ConvertJSON = func([]byte) ([]byte, error) {
 						if stage == "cancel_during_conversion" {
@@ -24,7 +24,7 @@ func TestTextGenerationUsageSurvivesPreHandoffFailure(t *testing.T) {
 					}
 				}
 			})
-			s.UpdateQualityRetry(QualityRetryRuntime{Enabled: stage == "quality_receipt"})
+			s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: stage == "quality_receipt", GuardedModels: []string{"grok-4.6"}}))
 			if stage == "quality_receipt" {
 				s.SetQualityEventRecorder(eventRecorderFunc(func(_ context.Context, _ QualityObservation, _ time.Duration) error {
 					return errors.New("injected quality receipt failure")

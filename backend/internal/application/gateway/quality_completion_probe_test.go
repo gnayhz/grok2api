@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestLegacyProbeCleanRequiresCompletedResponse(t *testing.T) {
@@ -44,9 +45,9 @@ func TestLegacyProbeCleanRequiresCompletedResponse(t *testing.T) {
 			identity.Profile = spec.Profile()
 			source := &changingGuardSource{}
 			source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{RuleVersion: identity.RuleVersion}), Kernel: builtinQualityKernel{}})
-			s := &Service{providers: provider.NewRegistry(identifiedProbeAdapter{qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }}, identity})}
+			s := newProbeTestService(providerimpl.NewRegistry(identifiedProbeAdapter{qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }}, identity}))
 			s.SetGuardSnapshotSource(source)
-			outcome, reason := s.qualityProbeAttempt(qualitymodel.WithProbeExperiment(context.Background(), spec), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
+			outcome, reason := probeOutcome(s, qualitymodel.WithProbeExperiment(context.Background(), spec), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
 			if outcome != test.want || body.closed.Load() != 1 {
 				t.Fatalf("outcome=%s reason=%s closes=%d", outcome, reason, body.closed.Load())
 			}
@@ -57,10 +58,10 @@ func TestLegacyProbeCleanRequiresCompletedResponse(t *testing.T) {
 func TestProbeThinkingEvidenceStopsAndClosesUnreadTail(t *testing.T) {
 	idle := newIdleQualityProbeBody()
 	body := &replayReadCloser{Reader: io.MultiReader(strings.NewReader("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n"), idle), source: idle}
-	s := &Service{providers: provider.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }})}
+	s := newProbeTestService(providerimpl.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }}))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	outcome, reason := s.qualityProbeAttempt(ctx, provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
+	outcome, reason := probeOutcome(s, ctx, provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
 	if outcome != qualitymodel.MeasurementClean || ctx.Err() != nil {
 		t.Fatalf("outcome=%s reason=%s", outcome, reason)
 	}
@@ -100,7 +101,7 @@ func TestProbeFreezesPhysicalPolicyAndStopsCanonicalStreamAtEvidence(t *testing.
 	epoch.Store(7)
 	source := &changingGuardSource{}
 	source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{Enabled: true, Revision: 41, RuleVersion: "original", GuardedModels: []string{"grok-4.6"}}), Kernel: builtinQualityKernel{}, PathResolver: probeEpochResolver{epoch}})
-	s := &Service{providers: provider.NewRegistry(probeIdentityAdapter{source: source, epoch: epoch, observed: observed})}
+	s := newProbeTestService(providerimpl.NewRegistry(probeIdentityAdapter{source: source, epoch: epoch, observed: observed}))
 	s.SetGuardSnapshotSource(source)
 	pool := responsebuffer.NewPool(2 << 20)
 	ctx := responsebuffer.WithContext(context.Background(), pool.Request(2<<20))
@@ -146,8 +147,8 @@ func TestProbeSignalClassificationDoesNotWaitForAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := &countedBody{Reader: strings.NewReader(tc.raw)}
-			s := &Service{providers: provider.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }})}
-			outcome, reason := s.qualityProbeAttempt(context.Background(), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
+			s := newProbeTestService(providerimpl.NewRegistry(qualityProbeAttemptAdapter{body: func() io.ReadCloser { return body }}))
+			outcome, reason := probeOutcome(s, context.Background(), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
 			if outcome != tc.want || body.closed.Load() != 1 {
 				t.Fatalf("outcome=%s reason=%s closes=%d", outcome, reason, body.closed.Load())
 			}

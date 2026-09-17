@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"os"
@@ -12,10 +13,10 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -84,7 +85,7 @@ func BenchmarkAccountGrantCost(b *testing.B) {
 						b.Fatal(err)
 					}
 				}
-				service := accountapp.NewService(repo, NewAuditRepository(db), sessions, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
+				service := accountapp.NewService(repo, NewAuditRepository(db), sessions, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 				service.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 				operations := 0
 				b.ReportAllocs()

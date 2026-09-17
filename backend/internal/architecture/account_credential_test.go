@@ -54,7 +54,7 @@ func TestAccountCredentialWritesHaveObservedMaterial(t *testing.T) {
 				switch sel.Sel.Name {
 				case "LinkWebToBuild":
 					conversionLinks++
-					if path != "../application/account/service.go" {
+					if path != "../application/account/service.go" && path != "../application/account/conversion.go" {
 						t.Errorf("%s bypasses the conversion completion use case", path)
 					}
 				case "MatchWebBuildConversion":
@@ -106,10 +106,10 @@ func TestAccountCredentialWritesHaveObservedMaterial(t *testing.T) {
 						t.Errorf("%s checks import identity outside the write transaction", path)
 					}
 				case "ImportAccounts":
-					if path != "../application/account/service.go" && path != "../infra/persistence/relational/account_repository.go" {
+					if path != "../application/account/service.go" && path != "../application/account/import.go" && path != "../infra/persistence/relational/account_repository.go" {
 						t.Errorf("%s installs account material outside M07 import policy", path)
 					}
-					if path == "../application/account/service.go" {
+					if path == "../application/account/service.go" || path == "../application/account/import.go" {
 						imports++
 					}
 				case "UpsertByIdentity", "UpsertManyByIdentity":

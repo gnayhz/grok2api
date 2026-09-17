@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,12 +57,12 @@ func TestRevokedCacheCannotReauthorizeLaterHTTPRequests(t *testing.T) {
 				held := &httpAuthReadGate{ClientKeyRepository: fx.clients, read: make(chan struct{}), resume: make(chan struct{})}
 				resume := sync.OnceFunc(func() { close(held.resume) })
 				defer resume()
-				keys := clientkeyapp.NewService("test-owner", held, nil, nil, 0, 0, nil)
+				keys := clientkeyapp.NewService("test-owner", held, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 				t.Cleanup(func() { closeClientKeyService(t, keys) })
 				models := modelapp.NewService(fx.models, fx.accounts, fx.accountService, fx.registry)
 				t.Cleanup(func() { _ = models.Close(context.Background()) })
 				router := gin.New()
-				router.Use(middleware.RequestID(), middleware.ClientAuth(keys))
+				router.Use(middleware.RequestID(nil), middleware.ClientAuth(keys))
 				NewHandler(fx.service, models, 1<<20).Register(router.Group("/v1"))
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()

@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"log/slog"
 	"math/big"
@@ -59,7 +60,7 @@ func TestCompleteProbeResponseControlsPersistedHealth(t *testing.T) {
 					t.Run(format+"/"+healthy, func(t *testing.T) {
 						service := egressapp.NewService(repo, cipher)
 						defer service.Close(ctx)
-						manager := infraegress.NewManager(repo, cipher)
+						manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 						defer manager.Close(ctx)
 						manager.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 						service.SetNodeProber(manager)

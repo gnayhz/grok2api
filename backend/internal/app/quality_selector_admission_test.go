@@ -3,12 +3,13 @@ package app
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
@@ -88,7 +89,7 @@ func TestQualitySelectorAdmissionUsesCurrentDurableAuthority(t *testing.T) {
 						}
 						now := time.Now().UTC()
 						if scenario == "committed_hold" {
-							err := writeJournal.Record(ctx, journal.Event{Attempt: attemptmeta.Identity{ID: name, RequestID: name, AccountID: v.ID, Provider: string(v.Provider)}, Stage: "admission", Outcome: "degraded", At: now, HoldUntil: now.Add(time.Minute)})
+							err := writeJournal.Record(ctx, model.Event{Attempt: attemptmeta.Identity{ID: name, RequestID: name, AccountID: v.ID, Provider: string(v.Provider)}, Stage: "admission", Outcome: "degraded", At: now, HoldUntil: now.Add(time.Minute)})
 							if err != nil {
 								t.Fatal(err)
 							}
@@ -101,11 +102,11 @@ func TestQualitySelectorAdmissionUsesCurrentDurableAuthority(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						if err := reader.TransitionAccount(ctx, qualityregistry.AccountTransitionRequest{AccountID: v.ID, To: model.AccountRemanded, CaseID: caseID}); err != nil {
+						if err := reader.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: v.ID, To: model.AccountRemanded, CaseID: caseID}); err != nil {
 							t.Fatal(err)
 						}
 						if scenario == "released_with_stale_hint" {
-							if err := writer.TransitionAccount(ctx, qualityregistry.AccountTransitionRequest{AccountID: v.ID, To: model.AccountActive}); err != nil {
+							if err := writer.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: v.ID, To: model.AccountActive}); err != nil {
 								t.Fatal(err)
 							}
 						}
@@ -113,10 +114,10 @@ func TestQualitySelectorAdmissionUsesCurrentDurableAuthority(t *testing.T) {
 							t.Fatal("fixture must retain the reader's restrictive registry hint")
 						}
 					}}
-					selector := gateway.NewSelector(material, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+					selector := selector.NewSelector(material, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 					selector.UpdateConfig(time.Hour, time.Second, time.Minute, 0)
 					selector.SetQualityEligibility(eligibility)
-					lease, err := selector.AcquirePinned(ctx, v.Provider, v.ID, 0, "grok-test", "", false)
+					lease, err := selector.AcquirePinnedForKey(ctx, v.Provider, v.ID, 0, "grok-test", "", false, clientkeydomain.AccountScope{})
 					if scenario == "released_with_stale_hint" {
 						if err != nil || lease == nil {
 							t.Fatalf("stale hint overrode durable release: %v", err)

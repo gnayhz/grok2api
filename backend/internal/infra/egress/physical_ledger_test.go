@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"io"
 	"net/http"
 	"strings"
@@ -15,7 +17,7 @@ import (
 func ledgerContext() context.Context {
 	ctx := attemptmeta.WithRequest(context.Background(), "physical-request", 7, "rules", nil)
 	ctx = attemptmeta.WithAccount(ctx, 42, "grok_build", "grok-4.6")
-	return WithPhysicalCallTrace(ctx, "grok_build", "responses")
+	return physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_build", "responses")
 }
 
 func TestPhysicalLedgerRetainsIndependentFailuresUsageAndIdentity(t *testing.T) {
@@ -36,7 +38,7 @@ func TestPhysicalLedgerRetainsIndependentFailuresUsageAndIdentity(t *testing.T) 
 	ObservePhysicalPayload(ctx, id.ID, []byte(`{"response":{"usage":{"input_tokens":13,"output_tokens":7,"total_tokens":20}}}`))
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
-	facts := PhysicalFacts(ctx)
+	facts := physical.PhysicalFacts(ctx)
 	if len(facts) != 2 {
 		t.Fatalf("physical facts=%+v", facts)
 	}
@@ -49,8 +51,8 @@ func TestPhysicalLedgerRetainsIndependentFailuresUsageAndIdentity(t *testing.T) 
 	if facts[1].Attempt.Path.NodeID != 9 || !facts[1].Attempt.Path.Rotating {
 		t.Fatal("lost actual path")
 	}
-	ConfirmPhysicalFacts(ctx, facts)
-	if len(PhysicalFacts(ctx)) != 0 {
+	physical.ConfirmPhysicalFacts(ctx, facts)
+	if len(physical.PhysicalFacts(ctx)) != 0 {
 		t.Fatal("confirmed facts emitted twice")
 	}
 }
@@ -59,15 +61,15 @@ func TestPhysicalLedgerLimitsBeforeTransportSubmission(t *testing.T) {
 	ctx := ledgerContext()
 	client := &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) { return nil, errors.New("dial failed") }}
 	lease := &Lease{client: client}
-	for i := 0; i <= MaxPhysicalCalls; i++ {
+	for i := 0; i <= physical.MaxPhysicalCalls; i++ {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.test/responses", http.NoBody)
 		_, err := lease.Do(request)
-		if (i == MaxPhysicalCalls) != errors.Is(err, ErrPhysicalCallLimit) {
+		if (i == physical.MaxPhysicalCalls) != errors.Is(err, ErrPhysicalCallLimit) {
 			t.Fatalf("call %d err=%v", i, err)
 		}
 	}
-	if client.calls != MaxPhysicalCalls || len(PhysicalFacts(ctx)) != MaxPhysicalCalls {
-		t.Fatalf("calls=%d facts=%d", client.calls, len(PhysicalFacts(ctx)))
+	if client.calls != physical.MaxPhysicalCalls || len(physical.PhysicalFacts(ctx)) != physical.MaxPhysicalCalls {
+		t.Fatalf("calls=%d facts=%d", client.calls, len(physical.PhysicalFacts(ctx)))
 	}
 }
 
@@ -79,15 +81,15 @@ func TestPhysicalUsageIgnoresNestedUserFieldsAndRecordsReportedZero(t *testing.T
 	id := attemptmeta.FromContext(ctx).ID
 	recordPhysicalCall(ctx, nil, errors.New("failed"))
 	ObservePhysicalPayload(ctx, id, []byte(`{"output":[{"usage":{"output_tokens":999}}]}`))
-	if PhysicalFacts(ctx)[0].Usage.Found {
+	if physical.PhysicalFacts(ctx)[0].Usage.Found {
 		t.Fatal("nested tool/user usage treated as billing")
 	}
 	ObservePhysicalPayload(ctx, id, []byte(`{"usage":null}`))
-	if PhysicalFacts(ctx)[0].Usage.Found {
+	if physical.PhysicalFacts(ctx)[0].Usage.Found {
 		t.Fatal("absent usage treated as reported zero")
 	}
 	ObservePhysicalPayload(ctx, id, []byte(`{"usage":{"input_tokens":0,"output_tokens":0}}`))
-	if !PhysicalFacts(ctx)[0].Usage.Found {
+	if !physical.PhysicalFacts(ctx)[0].Usage.Found {
 		t.Fatal("reported zero conflated with unknown")
 	}
 }
@@ -102,25 +104,25 @@ func TestPhysicalLedgerDefersBufferedDeliveryAndPreservesCanonicalUsage(t *testi
 	recordPhysicalCall(ctx, response, nil)
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
-	if len(PhysicalFacts(ctx, id)) != 0 {
+	if len(physical.PhysicalFacts(ctx, id)) != 0 {
 		t.Fatal("buffered delivery persisted before its usage became available")
 	}
-	ObservePhysicalUsage(ctx, id, jsonpeek.TokenUsage{Found: true, Input: 20, Output: 5})
-	if facts := PhysicalFacts(ctx); len(facts) != 1 || facts[0].Usage.Input != 20 {
+	physical.ObservePhysicalUsage(ctx, id, jsonpeek.TokenUsage{Found: true, Input: 20, Output: 5})
+	if facts := physical.PhysicalFacts(ctx); len(facts) != 1 || facts[0].Usage.Input != 20 {
 		t.Fatalf("lost late usage: %+v", facts)
 	}
 	ObservePhysicalPayload(ctx, id, []byte(`{"usage":{"input_tokens":20,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}`))
-	ObservePhysicalUsage(ctx, id, jsonpeek.TokenUsage{Found: true, Input: 20, Output: 5})
-	facts := PhysicalFacts(ctx)
+	physical.ObservePhysicalUsage(ctx, id, jsonpeek.TokenUsage{Found: true, Input: 20, Output: 5})
+	facts := physical.PhysicalFacts(ctx)
 	if facts[0].Usage.Reasoning != 3 {
 		t.Fatal("converted usage overwrote the physical counters")
 	}
-	ConfirmPhysicalFacts(ctx, facts)
+	physical.ConfirmPhysicalFacts(ctx, facts)
 	ObservePhysicalPayload(ctx, id, []byte(`{"usage":{"input_tokens":999}}`))
-	if len(PhysicalFacts(ctx)) != 0 {
+	if len(physical.PhysicalFacts(ctx)) != 0 {
 		t.Fatal("confirmed facts changed after persistence")
 	}
-	observed := PhysicalObservations(ctx)
+	observed := physical.PhysicalObservations(ctx)
 	if len(observed) != 1 || observed[0].Usage.Input != 20 || observed[0].Usage.Reasoning != 3 {
 		t.Fatalf("receipt acknowledgment erased generation usage: %+v", observed)
 	}

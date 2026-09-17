@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"testing"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 )
 
 func TestImmediateFailureProbesBoundOutageConcurrency(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	gate := make(chan struct{})
 	m.SetFailureProber(func(ctx context.Context, _ uint64) (domain.ProbeResult, error) {
@@ -43,7 +44,7 @@ func TestImmediateFailureProbesBoundOutageConcurrency(t *testing.T) {
 }
 
 func TestImmediateFailureProbeCompletionCacheIsBounded(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	m.SetFailureProber(func(context.Context, uint64) (domain.ProbeResult, error) {
 		return domain.ProbeResult{}, nil

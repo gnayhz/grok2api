@@ -15,11 +15,11 @@ import (
 
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/google/uuid"
 )
 
@@ -217,9 +217,6 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 	return nil, lastErr
 }
 
-func parseGatewayCompactionStream(data []byte) (gatewayCompactionSample, error) {
-	return parseGatewayCompactionReader(bytes.NewReader(data))
-}
 func parseGatewayCompactionReader(source io.Reader) (gatewayCompactionSample, error) {
 	var completed map[string]any
 	var streamedParts []string

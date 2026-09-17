@@ -21,17 +21,17 @@ func (r *Registry) ExitEligible(nodeID uint64) bool {
 }
 
 // ExitStateOfCurrentEpoch 返回节点当前 epoch 的质量状态条目。
-func (r *Registry) ExitStateOfCurrentEpoch(nodeID uint64) ExitEntry {
+func (r *Registry) ExitStateOfCurrentEpoch(nodeID uint64) model.ExitEntry {
 	return r.exitStateOfCurrentEpoch(nodeID)
 }
 
-func (r *Registry) exitStateOfCurrentEpoch(nodeID uint64) ExitEntry {
+func (r *Registry) exitStateOfCurrentEpoch(nodeID uint64) model.ExitEntry {
 	snap := r.snapshot.load()
 	epoch := snap.nodeEpoch[nodeID]
 	if entry, ok := snap.exitStates[model.EpochKey{NodeID: nodeID, Epoch: epoch}]; ok {
 		return entry
 	}
-	return ExitEntry{State: model.ExitAvailable}
+	return model.ExitEntry{State: model.ExitAvailable}
 }
 
 // CurrentEpoch 返回节点当前 epoch(无探测档案时为 0)。
@@ -42,9 +42,9 @@ func (r *Registry) CurrentEpoch(nodeID uint64) uint64 {
 // CurrentExitStates 返回全部当前 epoch 的出口质量状态投影(管理面
 // 可见性:节点列表消费)。只含有行的出口(remanded/banned);缺席=
 // AVAILABLE(稀疏表示,不占投影)。
-func (r *Registry) CurrentExitStates() map[uint64]ExitEntry {
+func (r *Registry) CurrentExitStates() map[uint64]model.ExitEntry {
 	snap := r.snapshot.load()
-	states := make(map[uint64]ExitEntry, len(snap.exitStates))
+	states := make(map[uint64]model.ExitEntry, len(snap.exitStates))
 	for key, entry := range snap.exitStates {
 		if key.NodeID == 0 || key.Epoch != snap.nodeEpoch[key.NodeID] {
 			continue
@@ -73,20 +73,9 @@ func (r *Registry) ListBannedExits() []model.EpochKey {
 	return keys
 }
 
-// ExitTransitionRequest 描述一次出口状态转移(必须指向当前 epoch)。
-type ExitTransitionRequest struct {
-	NodeID uint64
-	// Epoch 目标 epoch;必须等于节点当前 epoch,过期即拒(I15:
-	// 新 IP 不继承旧嫌疑,反之旧裁决也不得追新 IP)。
-	Epoch uint64
-	To    model.ExitState
-	// CaseID 案件号:REMANDED/BANNED 目标必须非零(I25)。
-	CaseID uint64
-}
-
 // TransitionExit 应用一次出口状态转移。释放目标(→AVAILABLE)删行
 // (调度无痕,台账留痕——B1.2 决议2)。
-func (r *Registry) TransitionExit(ctx context.Context, req ExitTransitionRequest) error {
+func (r *Registry) TransitionExit(ctx context.Context, req model.ExitTransitionRequest) error {
 	if !r.inTransition {
 		return r.withTransition(ctx, func(w *Registry) error { return w.TransitionExit(ctx, req) })
 	}
@@ -112,7 +101,7 @@ func (r *Registry) TransitionExit(ctx context.Context, req ExitTransitionRequest
 		return fmt.Errorf("%w: 节点 %d 当前 epoch=%d, 目标 epoch=%d", ErrStaleEpoch, req.NodeID, currentEpoch, req.Epoch)
 	}
 	key := model.EpochKey{NodeID: req.NodeID, Epoch: req.Epoch}
-	current := ExitEntry{State: model.ExitAvailable}
+	current := model.ExitEntry{State: model.ExitAvailable}
 	hasRow := false
 	if entry, ok := snap.exitStates[key]; ok {
 		current, hasRow = entry, true
@@ -147,7 +136,7 @@ func (r *Registry) TransitionExit(ctx context.Context, req ExitTransitionRequest
 		return err
 	}
 	next := snap.clone()
-	next.exitStates[key] = ExitEntry{State: req.To, StateSince: now, CurrentCaseID: req.CaseID}
+	next.exitStates[key] = model.ExitEntry{State: req.To, StateSince: now, CurrentCaseID: req.CaseID}
 	r.snapshot.store(next)
 	return nil
 }
@@ -393,37 +382,31 @@ func (r *Registry) RecordExitIdentity(ctx context.Context, nodeID uint64, identi
 
 // ExitIPArchive 返回节点 IP 档案(按 epoch 升序)。
 // 定期探测与管理面板消费。
-// LatestExitIP and ExitIPAt read at most one indexed archive row.
-func (r *Registry) LatestExitIP(ctx context.Context, nodeID uint64) (ExitIPRecord, bool, error) {
-	var row qIPEpochModel
-	err := r.db.WithContext(ctx).Where("node_id = ?", nodeID).Order("epoch DESC").Take(&row).Error
-	return exitIPRecordResult(row, err)
-}
-
-func (r *Registry) ExitIPAt(ctx context.Context, nodeID, epoch uint64) (ExitIPRecord, bool, error) {
+// ExitIPAt reads at most one indexed archive row.
+func (r *Registry) ExitIPAt(ctx context.Context, nodeID, epoch uint64) (model.ExitIPRecord, bool, error) {
 	var row qIPEpochModel
 	err := r.db.WithContext(ctx).Where("node_id = ? AND epoch = ?", nodeID, epoch).Take(&row).Error
 	return exitIPRecordResult(row, err)
 }
 
-func exitIPRecordResult(row qIPEpochModel, err error) (ExitIPRecord, bool, error) {
+func exitIPRecordResult(row qIPEpochModel, err error) (model.ExitIPRecord, bool, error) {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return ExitIPRecord{}, false, nil
+		return model.ExitIPRecord{}, false, nil
 	}
 	if err != nil {
-		return ExitIPRecord{}, false, err
+		return model.ExitIPRecord{}, false, err
 	}
-	return ExitIPRecord{Epoch: row.Epoch, IP: row.CurrentIP, IPv6: row.CurrentIPv6, FirstSeenAt: row.FirstSeenAt, ChangedAt: row.ChangedAt}, true, nil
+	return model.ExitIPRecord{Epoch: row.Epoch, IP: row.CurrentIP, IPv6: row.CurrentIPv6, FirstSeenAt: row.FirstSeenAt, ChangedAt: row.ChangedAt}, true, nil
 }
 
-func (r *Registry) ExitIPArchive(ctx context.Context, nodeID uint64) ([]ExitIPRecord, error) {
+func (r *Registry) ExitIPArchive(ctx context.Context, nodeID uint64) ([]model.ExitIPRecord, error) {
 	var rows []qIPEpochModel
 	if err := r.db.WithContext(ctx).Where("node_id = ?", nodeID).Order("epoch").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	records := make([]ExitIPRecord, 0, len(rows))
+	records := make([]model.ExitIPRecord, 0, len(rows))
 	for _, row := range rows {
-		records = append(records, ExitIPRecord{
+		records = append(records, model.ExitIPRecord{
 			Epoch:       row.Epoch,
 			IP:          row.CurrentIP,
 			IPv6:        row.CurrentIPv6,
@@ -434,30 +417,9 @@ func (r *Registry) ExitIPArchive(ctx context.Context, nodeID uint64) ([]ExitIPRe
 	return records, nil
 }
 
-// ExitIPRecord 是 IP 档案的一行。IP 保持聚合展示口径(IPv4 优先),
-// IPv6 是双族身份的 IPv6 侧(旧档案可能为空)。
-type ExitIPRecord struct {
-	Epoch       uint64
-	IP          string
-	IPv6        string
-	FirstSeenAt time.Time
-	ChangedAt   time.Time
-}
-
-// NodeQualityView 是节点质量面的面板投影(IP 轮换入口):
-// 当前 epoch/IP+台账总数+明细(G8:节点看总数,历史看 IP 明细)。
-type NodeQualityView struct {
-	NodeID        uint64               `json:"node_id"`
-	CurrentEpoch  uint64               `json:"current_epoch"`
-	CurrentIP     string               `json:"current_ip"`
-	State         model.ExitState      `json:"state"`
-	DegradeTotal  int64                `json:"degrade_total"`
-	DegradeDetail []DegradeLedgerEntry `json:"degrade_detail"`
-}
-
 // ListNodeIPArchives 列出有质量档案的节点面板视图(只含有 q_ip_epoch
 // 档案的节点;台账无档案不计——无档案即无质量事件史)。
-func (r *Registry) ListNodeIPArchives(ctx context.Context, limit int) ([]NodeQualityView, error) {
+func (r *Registry) ListNodeIPArchives(ctx context.Context, limit int) ([]model.NodeQualityView, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -473,14 +435,14 @@ func (r *Registry) ListNodeIPArchives(ctx context.Context, limit int) ([]NodeQua
 		Order("current.node_id").Limit(limit).Scan(&epochRows).Error; err != nil {
 		return nil, err
 	}
-	views := make([]NodeQualityView, 0, len(epochRows))
+	views := make([]model.NodeQualityView, 0, len(epochRows))
 	for _, row := range epochRows {
-		view := NodeQualityView{
+		view := model.NodeQualityView{
 			NodeID: row.NodeID, CurrentEpoch: row.Epoch, CurrentIP: row.CurrentIP,
 			State: model.ExitState(row.QualityState),
 			// DegradeDetail 必须非 nil:nil 切片序列化成 null,前端数组
 			// 解码器直接失败(批8 契约测试抓出)。空历史=空数组。
-			DegradeDetail: []DegradeLedgerEntry{},
+			DegradeDetail: []model.DegradeLedgerEntry{},
 		}
 		if view.State == "" {
 			view.State = model.ExitAvailable

@@ -78,11 +78,6 @@ func (t *teeReadCloser) Close() error {
 	return err
 }
 
-// DumpBody 落盘非流式完整原始响应（转换之前）。
-func DumpBody(d, op, model string, data []byte) {
-	_ = os.WriteFile(path(d, op, model, "body", "json"), data, 0o600)
-}
-
 // TeeBody 包装非流式原始响应：读取过程镜像到缓冲，EOF 时整体落盘
 // （native responses 非流式路径 body 直通不读，用包装捕获）。
 func TeeBody(d, op, model string, body io.ReadCloser) io.ReadCloser {

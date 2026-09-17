@@ -30,7 +30,7 @@ func TestCreateDistinguishesOmittedLimitsFromExplicitZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := clientkeyapp.NewService("test-owner", relational.NewClientKeyRepository(database), nil, nil, 60, 5, cipher)
+	service := clientkeyapp.NewService("test-owner", relational.NewClientKeyRepository(database), nil, nil, 60, 5, cipher, security.RandomTokenSource{})
 	router := gin.New()
 	NewHandler(service).Register(router.Group("/api"))
 

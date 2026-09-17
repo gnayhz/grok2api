@@ -62,42 +62,6 @@ func TestQuotedKeyNeedleLongKey(t *testing.T) {
 	}
 }
 
-func TestUnquotedStringFieldDecodesEscapes(t *testing.T) {
-	t.Parallel()
-	if got := UnquotedStringField([]byte("{\"delta\":\"\\n\"}"), "delta"); got != "\n" {
-		t.Fatalf("newline escape = %q", got)
-	}
-	if got := UnquotedStringField([]byte("{\"delta\":\"step\"}"), "delta"); got != "step" {
-		t.Fatalf("plain = %q", got)
-	}
-	if got := UnquotedStringField([]byte("{\"delta\":\"\"}"), "delta"); got != "" {
-		t.Fatalf("empty = %q", got)
-	}
-	if got := UnquotedStringField([]byte("{\"delta\":\"a\\\"b\"}"), "delta"); got != "a\"b" {
-		t.Fatalf("quoted = %q", got)
-	}
-	if got := UnquotedStringField([]byte("{\"n\":1}"), "delta"); got != "" {
-		t.Fatalf("missing = %q", got)
-	}
-}
-
-func TestUnquotedBytesMatchesStringField(t *testing.T) {
-	t.Parallel()
-	cases := [][]byte{
-		[]byte("{\"delta\":\"step\"}"),
-		[]byte("{\"delta\":\"\\n\"}"),
-		[]byte("{\"delta\":\"\"}"),
-		[]byte("{\"delta\":\"a\\\"b\"}"),
-		[]byte("{\"n\":1}"),
-		[]byte("{\"delta\":\"word word word word\"}"),
-	}
-	for _, payload := range cases {
-		if string(UnquotedBytes(payload, "delta")) != UnquotedStringField(payload, "delta") {
-			t.Fatalf("mismatch on %s: bytes=%q string=%q", payload, UnquotedBytes(payload, "delta"), UnquotedStringField(payload, "delta"))
-		}
-	}
-}
-
 func TestRootStringFieldIgnoresNestedType(t *testing.T) {
 	t.Parallel()
 	payload := []byte(`{"response":{"output":[{"type":"reasoning"}]},"type":"response.failed"}`)

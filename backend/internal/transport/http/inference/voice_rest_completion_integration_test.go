@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/gin-gonic/gin"
 )
 
@@ -201,7 +201,7 @@ func TestRESTVoicePhysicalBudgetIncludesPreparationAndRetry(t *testing.T) {
 			fx := newVoiceCompletionFixture(t, upstream.URL, "grok-stt")
 			budget := inferencedomain.NewAttemptBudget(limit)
 			defer budget.Close()
-			ctx := egress.WithPhysicalCallBudget(context.Background(), budget)
+			ctx := physical.WithPhysicalCallBudget(context.Background(), budget)
 			result, err := fx.service.TranscribeSpeech(ctx, gateway.STTInput{RequestID: "budget", ClientKey: fx.created.Key, PublicModel: "grok-stt", FileData: []byte("synthetic")})
 			if limit < 4 && !errors.Is(err, inferencedomain.ErrAttemptBudget) {
 				t.Fatalf("budget error: %v", err)

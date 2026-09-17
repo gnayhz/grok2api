@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ func TestAccountAuthDiagnosticHTTPContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, nil, nil)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	if err := service.MarkReauthRequired(ctx, v.CredentialRef(), "Grok Web SSO credential rejected"); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestAccountAuthDiagnosticHTTPContract(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Params = []gin.Param{{Key: "id", Value: strconv.FormatUint(v.ID, 10)}}
 	c.Request = httptest.NewRequest("GET", "/api/admin/v1/accounts/"+strconv.FormatUint(v.ID, 10), nil)
-	NewHandler(service, nil).get(c)
+	newTestHandler(service, nil).get(c)
 	var payload struct {
 		Data map[string]any `json:"data"`
 	}

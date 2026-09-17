@@ -4,9 +4,9 @@ import {
 	OperationsAlertDialogContent as AlertDialogContent,
 	StatusPill,
 	OperationsHelp,
-} from "@/features/operations/operations-ui";
+} from "@/shared/ui/operations";
 import { useMemo, useState } from "react";
-import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	ArrowLeft,
@@ -28,28 +28,27 @@ import {
 	AlertDialogFooter,
 	AlertDialogHeader,
 	AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { OperationsButton as Button } from "@/features/operations/operations-ui";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
+} from "@/shared/ui/alert-dialog";
+import { Badge } from "@/shared/ui/badge";
+import { OperationsButton as Button } from "@/shared/ui/operations";
+import { Checkbox } from "@/shared/ui/checkbox";
+import { Input } from "@/shared/ui/input";
+import { Spinner } from "@/shared/ui/spinner";
+import { Switch } from "@/shared/ui/switch";
 import { listModels } from "@/entities/model/model-api";
 import type { ModelRouteDTO } from "@/entities/model/types";
-import { QualitySection, QualityTabsList } from "@/features/guard/quality-ui";
-import { toQualityGuardForm } from "@/features/guard/quality-guard-model";
-import { useQualityGuardSettings } from "@/features/guard/use-quality-guard-settings";
-import { DurationInput } from "@/features/settings/settings-ui";
-import { SettingsApplicationStatus } from "@/features/settings/settings-status";
-import { useSettings } from "@/features/settings/use-settings";
+import { QualitySection, QualityTabsList } from "./quality-ui";
+import { toQualityGuardForm } from "@/entities/guard/quality-guard-model";
+import { useQualityGuardSettings } from "./use-quality-guard-settings";
+import { DurationInput } from "@/entities/settings/duration-input";
+import { SettingsApplicationStatus } from "@/entities/settings/application-status";
 import { useLifetimeSignal } from "@/shared/hooks/use-lifetime-signal";
 import {
 	fetchQualitySettings,
 	updateQualitySettings,
 	type QualitySettings,
 	type QualitySettingsInput,
-} from "./quality-api";
+} from "@/entities/guard/quality-api";
 
 // Guard scope and retry parameters share one guard draft and revision. Rotation
 // edits use gateway settings; investigation tunables own a third versioned form.
@@ -96,9 +95,23 @@ const SETTINGS_VIEWS = [
 ] as const;
 type SettingsView = (typeof SETTINGS_VIEWS)[number];
 
-export function QualitySettingsPage() {
+import type { UseFormReturn } from "react-hook-form";
+import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
+import type { SettingsSnapshotDTO } from "@/entities/settings/settings-api";
+import type { SettingsForm } from "@/entities/settings/settings-form";
+
+/** 由 app 层路由注入的设置表单运行时;guard feature 不依赖 settings feature。 */
+export type QualitySettingsRuntime = {
+	form: UseFormReturn<SettingsForm>;
+	settingsQuery: UseQueryResult<SettingsSnapshotDTO>;
+	updateMutation: UseMutationResult<SettingsSnapshotDTO, unknown, SettingsForm>;
+	resetRotationMutation: UseMutationResult<SettingsSnapshotDTO, unknown, void>;
+	reset: () => void;
+};
+
+export function QualitySettingsPage({ settings }: { settings: QualitySettingsRuntime }) {
 	const { t } = useTranslation();
- const { form, settingsQuery, updateMutation, resetRotationMutation, reset } = useSettings();
+ const { form, settingsQuery, updateMutation, resetRotationMutation, reset } = settings;
  const guard = useQualityGuardSettings();
  const guardForm = guard.form;
  const [resetDefaultsConfirm, setResetDefaultsConfirm] = useState<"guard" | "rotation" | null>(null);

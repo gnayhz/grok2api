@@ -3,18 +3,27 @@ package account
 import (
 	"context"
 	"encoding/base64"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
+
+// exportCredentialsForTest 是 Build 号池整池导出的测试接缝。生产导出必须
+// 显式给出 provider（ExportProviderCredentials / …Cursor / …ByIDs），
+// 因此不带 provider 的便捷包装只存在于测试文件里，避免把一个隐式默认
+// provider 变成生产 API。
+func exportCredentialsForTest(service *Service, ctx context.Context) (ExportResult, error) {
+	return service.ExportProviderCredentials(ctx, accountdomain.ProviderBuild)
+}
 
 func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 	ctx := context.Background()
@@ -50,9 +59,9 @@ func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := cliprovider.NewAdapter(cliprovider.Config{}, cipher)
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 
-	result, err := service.ExportCredentials(ctx)
+	result, err := exportCredentialsForTest(service, ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +87,7 @@ func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 		t.Fatalf("round-trip credential = %#v", value)
 	}
 	progress := make([][2]int, 0, 2)
-	if _, err := service.ImportCredentialsWithProgress(ctx, result.Data, nil, func(completed, total int) error {
+	if _, err := service.ImportCredentialDocumentsWithProgress(ctx, [][]byte{result.Data}, nil, func(completed, total int) error {
 		progress = append(progress, [2]int{completed, total})
 		return nil
 	}); err != nil {
@@ -143,7 +152,7 @@ func TestExportProviderCredentialsCursorKeepsStableSnapshot(t *testing.T) {
 	second := createAccount("second")
 	third := createAccount("third")
 	adapter := cliprovider.NewAdapter(cliprovider.Config{}, cipher)
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 
 	pageOne, err := service.ExportProviderCredentialsCursor(ctx, accountdomain.ProviderBuild, 0, 0, 2)
 	if err != nil {
@@ -247,7 +256,7 @@ func TestExportProviderCredentialsRoundTripsSSOProviders(t *testing.T) {
 			if _, err := repository.ApplyIdentity(ctx, created.CredentialRef(), accountdomain.IdentityObservation{Email: created.Email, UserID: created.UserID, TeamID: created.TeamID}); err != nil {
 				t.Fatal(err)
 			}
-			service := NewService(repository, nil, nil, nil, provider.NewRegistry(test.adapter), cipher, nil)
+			service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(test.adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 
 			result, err := service.ExportProviderCredentials(ctx, test.providerValue)
 			if err != nil {
@@ -269,9 +278,9 @@ func TestExportProviderCredentialsRoundTripsSSOProviders(t *testing.T) {
 			}
 			var imported ImportResult
 			if test.providerValue == accountdomain.ProviderWeb {
-				imported, err = service.ImportWebCredentialsWithProgress(ctx, result.Data, nil, nil)
+				imported, err = service.ImportWebCredentialDocumentsWithProgress(ctx, [][]byte{result.Data}, nil, nil)
 			} else {
-				imported, err = service.ImportConsoleCredentialsWithProgress(ctx, result.Data, nil, nil)
+				imported, err = service.ImportConsoleCredentialDocumentsWithProgress(ctx, [][]byte{result.Data}, nil, nil)
 			}
 			if err != nil || len(imported.AccountIDs) != 1 {
 				t.Fatalf("reimport result = %#v, error = %v", imported, err)
@@ -285,4 +294,14 @@ func TestExportProviderCredentialsRoundTripsSSOProviders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 本文件保存只服务本包测试的接缝：这些符号包装同包未导出状态，
+// 生产路径不再调用它们，因此从生产文件移到这里——Go 的 _test.go
+// 只对本包测试可见，既能保持测试可直接断言内部状态，又不会让
+// 生产包的导出面/test-only 代码继续增长。
+
+// quotaWindowControlsRouting 是测试专用接缝（原生产文件定义）。
+func quotaWindowControlsRouting(providerValue accountdomain.Provider, mode string) bool {
+	return accountdomain.QuotaWindowControlsRouting(providerValue, mode)
 }

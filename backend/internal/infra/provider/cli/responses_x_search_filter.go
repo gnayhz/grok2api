@@ -4,12 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 // buildXSearchResponseFilter hides internal custom_tool_call items emitted while xAI executes native x_search.
@@ -28,59 +24,6 @@ func newBuildXSearchResponseFilter(route buildPromptCacheRoute) *buildXSearchRes
 		droppedOutputIndexes: make(map[int]struct{}),
 		droppedItemIDs:       make(map[string]struct{}),
 	}
-}
-
-func filterBuildPromptCacheResponse(response *http.Response, streaming bool, route buildPromptCacheRoute) error {
-	if response == nil || response.Body == nil || (!route.filterXSearch && len(route.injectedToolTypes) == 0) {
-		return nil
-	}
-	filter := newBuildXSearchResponseFilter(route)
-	if streaming {
-		response.Body = filter.stream(response.Body)
-		response.Header.Del("Content-Length")
-		response.ContentLength = -1
-		return nil
-	}
-	source := response.Body
-	data, err := io.ReadAll(io.LimitReader(source, maxCompatibleResponseBytes+1))
-	_ = source.Close()
-	if err != nil {
-		return err
-	}
-	if len(data) > maxCompatibleResponseBytes {
-		return fmt.Errorf("Grok Build Responses 响应超过 %d MiB", maxCompatibleResponseBytes>>20)
-	}
-	filtered, err := filter.filterJSON(data)
-	if err != nil {
-		return err
-	}
-	response.Body = io.NopCloser(bytes.NewReader(filtered))
-	response.Header.Set("Content-Length", strconv.Itoa(len(filtered)))
-	response.ContentLength = int64(len(filtered))
-	return nil
-}
-
-func (f *buildXSearchResponseFilter) stream(source io.ReadCloser) io.ReadCloser {
-	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
-		return consumeCompatibleSSE(input, func(event compatibleSSEEvent) error {
-			if !event.HasData() {
-				return event.writeTo(writer)
-			}
-			data := event.Data()
-			if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-				return event.writeTo(writer)
-			}
-			filtered, keep, filterErr := f.filterEvent(data)
-			if filterErr != nil {
-				return filterErr
-			}
-			if !keep {
-				return nil
-			}
-			event.SetData(filtered)
-			return event.writeTo(writer)
-		})
-	})
 }
 
 func (f *buildXSearchResponseFilter) filterJSON(body []byte) ([]byte, error) {

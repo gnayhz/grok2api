@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	application "github.com/chenyme/grok2api/backend/internal/application/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 )
 
 var forbiddenBrowserIdentityFields = []string{
@@ -16,7 +16,7 @@ var forbiddenBrowserIdentityFields = []string{
 
 func TestCloudflareCookieWhitelistDropsBrowserIdentityFields(t *testing.T) {
 	raw := "cf_clearance=clear; __cf_bm=bm; _cfuvid=uv; cf_chl_2=challenge; grok_device_id=device; x-anonuserid=anon; x-userid=user; x-challenge=c; x-signature=s; unrelated=value"
-	sanitized := application.SanitizeCloudflareCookies(raw)
+	sanitized := cfcookies.Sanitize(raw)
 	for _, expected := range []string{"cf_clearance=clear", "__cf_bm=bm", "_cfuvid=uv", "cf_chl_2=challenge"} {
 		if !strings.Contains(sanitized, expected) {
 			t.Fatalf("sanitized cookies missing %q: %s", expected, sanitized)

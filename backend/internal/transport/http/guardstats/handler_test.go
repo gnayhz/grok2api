@@ -16,7 +16,7 @@ import (
 func TestGuardStatsEndpointServesSnapshot(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler().Register(router.Group("/api/admin/v1"))
+	NewHandler(&gateway.Service{}).Register(router.Group("/api/admin/v1"))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/v1/guard-stats", nil))
 	if recorder.Code != http.StatusOK {
@@ -45,14 +45,14 @@ func TestGuardStatsEndpointServesSnapshot(t *testing.T) {
 	for _, e := range payload.Data.Exempts {
 		reasons = append(reasons, e.Reason)
 	}
-	if len(reasons) != 8 {
-		t.Fatalf("exempt reasons = %v, want the eight canonical tokens", reasons)
+	if len(reasons) != 7 {
+		t.Fatalf("exempt reasons = %v, want the seven canonical tokens", reasons)
 	}
 	found := map[string]bool{}
 	for _, r := range reasons {
 		found[r] = true
 	}
-	for _, want := range []string{"disabled", "skip_input", "operation", "compaction", "provider", "model_out_of_scope", "messages_thinking_off", "model_no_reasoning"} {
+	for _, want := range []string{"disabled", "skip_input", "operation", "compaction", "provider", "model_out_of_scope", "model_no_reasoning"} {
 		if !found[want] {
 			t.Fatalf("exempt reason %q missing from snapshot: %v", want, reasons)
 		}

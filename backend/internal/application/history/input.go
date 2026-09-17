@@ -333,35 +333,6 @@ func assistantSignatureBytes(item []byte) string {
 	return assistantSignature(raw)
 }
 
-func lastAssistantMessage(items []map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
-	for index := len(items) - 1; index >= 0; index-- {
-		item := items[index]
-		var typeName, role string
-		_ = json.Unmarshal(item["type"], &typeName)
-		_ = json.Unmarshal(item["role"], &role)
-		if (strings.TrimSpace(typeName) == "" || strings.TrimSpace(typeName) == "message") && strings.EqualFold(strings.TrimSpace(role), "assistant") {
-			return item, true
-		}
-	}
-	return nil, false
-}
-
-func replayAssistantMessage(items [][]byte) (map[string]json.RawMessage, bool) {
-	for _, item := range items {
-		var raw map[string]json.RawMessage
-		if json.Unmarshal(item, &raw) != nil {
-			continue
-		}
-		var typeName, role string
-		_ = json.Unmarshal(raw["type"], &typeName)
-		_ = json.Unmarshal(raw["role"], &role)
-		if strings.TrimSpace(typeName) == "message" && strings.EqualFold(strings.TrimSpace(role), "assistant") {
-			return raw, true
-		}
-	}
-	return nil, false
-}
-
 func assistantContentEqual(left, right map[string]json.RawMessage) bool {
 	leftParts, leftOK := assistantParts(left["content"])
 	rightParts, rightOK := assistantParts(right["content"])

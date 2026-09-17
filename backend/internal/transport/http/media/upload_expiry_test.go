@@ -106,7 +106,7 @@ func TestHTTPUploadExpiredDuringBodyCannotCommit(t *testing.T) {
 				observer := &expiryObservedTickets{MediaUploadTicketRepository: source, preflight: make(chan struct{}, 1)}
 				service := mediaapp.NewServiceWithTickets(relational.NewMediaAssetRepository(db), relational.NewMediaJobRepository(db), observer, disk, nil, mediaapp.Config{PublicBaseURL: "https://api.example", MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80})
 				router := gin.New()
-				NewHandler(service, nil).RegisterPublic(router)
+				NewHandler(service, nil).RegisterPublic(router.Group("/v1/media"))
 				server := httptest.NewServer(router)
 				defer server.Close()
 				token := strings.Repeat("a", 64)

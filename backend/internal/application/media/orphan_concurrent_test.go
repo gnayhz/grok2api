@@ -122,9 +122,9 @@ func testSweepConcurrentDeletion(t *testing.T, dialect string) {
 		t.Fatal(err)
 	}
 	cfg := Config{MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80}
-	admin := NewService(relational.NewMediaAssetRepository(peer), nil, disk, nil, cfg)
+	admin := NewServiceWithTickets(relational.NewMediaAssetRepository(peer), nil, nil, disk, nil, cfg)
 	rows := &sweepConcurrentAssets{MediaAssetRepository: relational.NewMediaAssetRepository(db)}
-	subject := NewService(rows, nil, disk, nil, cfg)
+	subject := NewServiceWithTickets(rows, nil, nil, disk, nil, cfg)
 	raw, err := base64.StdEncoding.DecodeString(onePixelPNG)
 	if err != nil {
 		t.Fatal(err)

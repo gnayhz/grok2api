@@ -34,7 +34,7 @@ func TestReasoningOnlyCompletionReturnsErrorBeforeSuccess(t *testing.T) {
 			defer source.Close()
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
-			_, err := copyStream(ctx.Writer, source, tc.protocol, nil)
+			_, err := copyStreamWithCompletion(ctx.Writer, source, tc.protocol, nil, "", nil)
 			if !errors.Is(err, responsecheck.ErrEmptyOutput) {
 				t.Fatalf("error=%v", err)
 			}

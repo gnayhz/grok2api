@@ -9,9 +9,9 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useOperationsNodes, useOperationsPools } from "@/features/operations/operations-queries";
-import { OperationsError } from "@/features/operations/operations-ui";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+
+import { OperationsError } from "@/shared/ui/operations";
 
 import { EgressOperationsProvider } from "./operations-context";
 import { useEgressOperations } from "./operations-shared";
@@ -20,6 +20,7 @@ import { NodeAddOrImportDialog, ProxyNodesView } from "./proxy-nodes-view";
 import { ProxyPoolsView } from "./proxy-pools-view";
 import { ProxyRadarView } from "./proxy-radar-view";
 import { ProxyRoutingView } from "./proxy-routing-view";
+import { useEgressNodes, useEgressPools } from "@/entities/egress/egress-queries";
 
 export function ProxiesPage() {
 	return (
@@ -35,8 +36,8 @@ function NetworkWorkspace() {
 	const location = useLocation();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
-	const nodesQuery = useOperationsNodes();
-	const poolsQuery = useOperationsPools();
+	const nodesQuery = useEgressNodes();
+	const poolsQuery = useEgressPools();
 
 	// Page-level state for Add/Import modal to ensure 100% working clicks from any view
 	const [addModalOpen, setAddModalOpen] = useState(false);
@@ -103,8 +104,8 @@ function NetworkWorkspace() {
 				onValueChange={selectTab}
 			>
 				{/* Modern Tab Bar */}
-				<div className="flex items-center justify-between border-b border-border/80 pb-0">
-					<TabsList className="h-11 bg-transparent p-0 gap-1 rounded-none border-b-0">
+				<div className="flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b border-border/80 pb-0">
+					<TabsList className="h-11 max-w-full justify-start overflow-x-auto bg-transparent p-0 gap-1 rounded-none border-b-0">
 						{/* Tab 1: Radar & Topology */}
 						<TabsTrigger
 							value="radar"
@@ -153,7 +154,7 @@ function NetworkWorkspace() {
 					</TabsList>
 
 					{/* Save State Indicator */}
-					<div className="flex items-center gap-2 pr-1">
+					<div className="flex shrink-0 items-center gap-2 whitespace-nowrap py-1 pr-1">
 						{operations.isDirty ? (
 							<span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-600 dark:text-amber-400 border border-amber-500/20 animate-pulse">
 								<span className="size-1.5 rounded-full bg-amber-500" />

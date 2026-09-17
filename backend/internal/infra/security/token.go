@@ -2,17 +2,14 @@ package security
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"strings"
-	"time"
-
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	"github.com/golang-jwt/jwt/v5"
+	"time"
 )
-
-const clientKeyScheme = "g2a"
 
 type adminClaims struct {
 	AdminID   uint64 `json:"adminId"`
@@ -20,12 +17,8 @@ type adminClaims struct {
 	jwt.RegisteredClaims
 }
 
-type AdminTokenIdentity struct {
-	AdminID   uint64
-	SessionID uint64
-}
-
-// TokenService 负责管理员 access token 和随机 refresh token。
+// TokenService 用 HS256 签发和校验短期管理员 access token，并持有签名密钥。
+// 它实现 port/crypto.AdminTokenManager；消费方只依赖该合同。
 type TokenService struct {
 	secret []byte
 	issuer string
@@ -54,7 +47,7 @@ func (s *TokenService) CreateAccessToken(adminID, sessionID uint64, ttl time.Dur
 }
 
 // ParseAccessToken 校验管理员 JWT 并返回管理员 ID。
-func (s *TokenService) ParseAccessToken(raw string) (AdminTokenIdentity, error) {
+func (s *TokenService) ParseAccessToken(raw string) (portcrypto.AdminTokenIdentity, error) {
 	claims := &adminClaims{}
 	token, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
 		if token.Method != jwt.SigningMethodHS256 {
@@ -63,13 +56,15 @@ func (s *TokenService) ParseAccessToken(raw string) (AdminTokenIdentity, error) 
 		return s.secret, nil
 	}, jwt.WithIssuer(s.issuer))
 	if err != nil || !token.Valid || claims.AdminID == 0 || claims.SessionID == 0 {
-		return AdminTokenIdentity{}, fmt.Errorf("管理员令牌无效")
+		return portcrypto.AdminTokenIdentity{}, fmt.Errorf("管理员令牌无效")
 	}
-	return AdminTokenIdentity{AdminID: claims.AdminID, SessionID: claims.SessionID}, nil
+	return portcrypto.AdminTokenIdentity{AdminID: claims.AdminID, SessionID: claims.SessionID}, nil
 }
 
-// NewOpaqueToken 创建不可预测的 refresh token 或客户端 Key 密钥段。
-func NewOpaqueToken(bytesLength int) (string, error) {
+// RandomTokenSource 用 crypto/rand 实现不可预测 token 生成能力。
+type RandomTokenSource struct{}
+
+func (RandomTokenSource) NewOpaqueToken(bytesLength int) (string, error) {
 	buf := make([]byte, bytesLength)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
@@ -77,8 +72,7 @@ func NewOpaqueToken(bytesLength int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// NewHexToken 创建只包含十六进制字符的随机标识，适合放在分隔格式中。
-func NewHexToken(bytesLength int) (string, error) {
+func (RandomTokenSource) NewHexToken(bytesLength int) (string, error) {
 	buf := make([]byte, bytesLength)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
@@ -86,22 +80,18 @@ func NewHexToken(bytesLength int) (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// HashToken 返回不可逆的 SHA-256 十六进制摘要。
+var _ portcrypto.TokenSource = RandomTokenSource{}
+var _ portcrypto.AdminTokenManager = (*TokenService)(nil)
+
+// NewOpaqueToken 供 infra 内部（Provider 适配器）直接复用随机源；应用层
+// 消费方（含十六进制 token 需求）通过注入的 portcrypto.TokenSource 获得
+// 同一能力。
+func NewOpaqueToken(bytesLength int) (string, error) {
+	return RandomTokenSource{}.NewOpaqueToken(bytesLength)
+}
+
+// HashToken 返回不可逆的 SHA-256 十六进制摘要（infra 内复用；应用层使用
+// pkg/tokenhash 的同一确定性原语）。
 func HashToken(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
-}
-
-// FormatClientKey 生成 g2a_<prefix>_<secret> 格式的客户端 Key。
-func FormatClientKey(prefix, secret string) string {
-	return clientKeyScheme + "_" + prefix + "_" + secret
-}
-
-// SplitClientKey 解析 g2a_<prefix>_<secret> 格式的客户端 Key。
-func SplitClientKey(raw string) (string, bool) {
-	parts := strings.SplitN(raw, "_", 3)
-	if len(parts) != 3 || parts[0] != clientKeyScheme || parts[1] == "" || parts[2] == "" {
-		return "", false
-	}
-	return parts[1], true
+	return tokenhash.HashToken(raw)
 }

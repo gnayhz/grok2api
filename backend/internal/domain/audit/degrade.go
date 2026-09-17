@@ -7,7 +7,6 @@ package audit
 // 空」的最强降智签名在审计明细里可见。
 const (
 	DegradeClassTerminalBurst = "terminal_burst"
-	ErrorQualityDegraded      = "quality_degraded"
 )
 
 const (

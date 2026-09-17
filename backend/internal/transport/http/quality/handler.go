@@ -14,7 +14,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/enforcement"
 	"github.com/chenyme/grok2api/backend/internal/quality/guard"
 	"github.com/chenyme/grok2api/backend/internal/quality/management"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -80,11 +81,13 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 func (h *Handler) postReleaseCase(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	id, idOK := httphelpers.PathUint(c, "id")
 	var req struct {
 		Reason string `json:"reason" binding:"required"`
 	}
-	if err != nil || id == 0 || c.ShouldBindJSON(&req) != nil {
+	// 解析失败与请求体非法共用同一历史错误：case id 非法时不读请求体，
+	// 与旧的短路顺序一致。
+	if !idOK || c.ShouldBindJSON(&req) != nil {
 		response.Error(c, http.StatusBadRequest, "invalid_request", "case id and review reason required")
 		return
 	}
@@ -116,7 +119,7 @@ func (h *Handler) getOverview(c *gin.Context) {
 		check["detail"] = value.GuardSelfCheck.Detail
 	}
 	payload := gin.H{
-		"cases_total": value.CasesTotal, "cases_open": value.CasesOpen, "verdicts": value.Verdicts,
+		"cases_total": value.CasesTotal, "cases_open": value.CasesOpen, "verdicts": value.Verdicts, "verdict_window": value.VerdictWindow,
 		"evidence": gin.H{"decidable": value.Evidence.Decidable, "degraded": value.Evidence.Degraded,
 			"incidence": value.Evidence.Incidence, "nodes": value.Evidence.Nodes, "accounts": value.Evidence.Accounts},
 		"observations_total": value.ObservationsTotal, "guard_self_check": check,

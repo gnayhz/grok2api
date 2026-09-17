@@ -5,8 +5,8 @@ import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
-import { getSettings, resetSettings, resetSettingsRotation, updateSettings, type SettingsSnapshotDTO } from "@/features/settings/settings-api";
-import { settingsSchema, toSettingsDTO, toSettingsForm, type SettingsForm } from "@/features/settings/settings-model";
+import { getSettings, resetSettings, resetSettingsRotation, updateSettings, type SettingsSnapshotDTO } from "@/entities/settings/settings-api";
+import { settingsSchema, toSettingsDTO, toSettingsForm, type SettingsForm } from "@/entities/settings/settings-form";
 import { useLifetimeSignal } from "@/shared/hooks/use-lifetime-signal";
 
 export function useSettings() {

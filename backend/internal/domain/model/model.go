@@ -133,12 +133,6 @@ func NormalizeExternalPublicID(provider account.Provider, value string) (string,
 	return publicID, true
 }
 
-// IsCanonicalPublicID 判断内部路由 ID 是否已经采用精确的稳定命名空间。
-func IsCanonicalPublicID(provider account.Provider, value string) bool {
-	normalized, ok := NormalizePublicID(provider, value)
-	return ok && normalized == value
-}
-
 // ExternalPublicID 返回下游客户端使用的不带 Provider 前缀的模型名称。
 func ExternalPublicID(provider account.Provider, value string) string {
 	value = strings.TrimSpace(value)
@@ -182,16 +176,6 @@ func PublicIDCandidateGroups(value string) [][]string {
 		return nil
 	}
 	return [][]string{group}
-}
-
-// PublicIDCandidates 返回扁平化的内部路由候选，供无状态解析器按顺序尝试。
-func PublicIDCandidates(value string) []string {
-	groups := PublicIDCandidateGroups(value)
-	result := make([]string, 0, len(account.Providers())+1)
-	for _, group := range groups {
-		result = append(result, group...)
-	}
-	return result
 }
 
 // NormalizeUpstreamModel 接受带或不带来源前缀的上游模型名称，并返回 Provider 实际接收的名称。

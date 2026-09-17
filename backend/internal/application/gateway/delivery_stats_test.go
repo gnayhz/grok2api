@@ -4,6 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -16,9 +20,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
@@ -59,7 +63,7 @@ func TestDeliveredStatsRecordedFromTransportCallback(t *testing.T) {
 
 	stream := "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"think\"}\n\ndata: [DONE]\n\n"
 	adapter := &deliveryAdapter{sse: stream}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(key))
@@ -67,11 +71,11 @@ func TestDeliveredStatsRecordedFromTransportCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-	clientService := clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed, EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond})
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+	clientService := clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{})
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, sel, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, MaxAttempts: 2, OnExhausted: qualityRetryFailClosed, GuardedModels: []string{"grok-4.6"}, EvidenceTimeout: 400 * time.Millisecond, CreatedTimeout: 300 * time.Millisecond}))
 
 	result, err := service.CreateResponse(ctx, Input{RequestID: "deliv-cb", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true, Body: []byte("{\"model\":\"grok-4.6\",\"stream\":true,\"input\":\"hi\"}")})
 	if err != nil {

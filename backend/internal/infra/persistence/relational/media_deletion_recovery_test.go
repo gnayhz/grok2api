@@ -3,6 +3,9 @@ package relational
 import (
 	"context"
 	"errors"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -41,7 +44,7 @@ func TestMediaDeletionRetainsSourceThroughJournalAndSQLFailures(t *testing.T) {
 				if err := jobs.CreateMediaJob(ctx, job); err != nil {
 					t.Fatal(err)
 				}
-				keys := clientkeyapp.NewService("deletion", NewClientKeyRepository(db), nil, nil, 0, 0, nil)
+				keys := clientkeyapp.NewService("deletion", NewClientKeyRepository(db), nil, nil, 0, 0, nil, security.RandomTokenSource{})
 				defer keys.Close(context.Background())
 				if ok, err := NewClientKeyRepository(db).ReserveBillingUsage(ctx, key.ID, "video_usage_"+job.ID, 3000000000, time.Now().UTC().Add(-time.Hour), repository.BillingReservationScope{OwnerID: "deletion"}); err != nil || !ok {
 					t.Fatalf("reserve: %v %v", ok, err)
@@ -76,8 +79,8 @@ func TestMediaDeletionRetainsSourceThroughJournalAndSQLFailures(t *testing.T) {
 				case "marker_unavailable":
 					jobs.fail.Store(true)
 				}
-				recovery := gateway.NewService(nil, writer, nil, keys, nil, nil, nil, 1)
-				recovery.ConfigureMedia(jobs, 1)
+				recovery := gateway.NewService(nil, writer, nil, keys, nil, nil, nil, security.RandomTokenSource{}, testsupport.NewPhysicalJournalFactory(), nil, 1)
+				recovery.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 				failCtx, failCancel := context.WithTimeout(ctx, 150*time.Millisecond)
 				err = recovery.RecoverVideoJobs(failCtx)
 				failCancel()

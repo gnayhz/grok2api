@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -105,7 +106,7 @@ func TestDeletedLastGrantDeniesMediaAndAudio(t *testing.T) {
 			defer upstream.Close()
 			fx := newProviderCompletionFixture(t, upstream.URL, entry.upstreamModel, entry.provider, nil, nil)
 			if entry.path == "videos/generations" {
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			}
 			deleteOnlyClientModelGrant(t, fx)
 			var payload map[string]any

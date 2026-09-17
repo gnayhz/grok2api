@@ -11,15 +11,17 @@ import (
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
 	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
-	service *auditapp.Service
+	// queries 是审计只读查询能力；写入、账本健康与生命周期不在 HTTP 合同内。
+	queries auditapp.Queries
 }
 
-func NewHandler(service *auditapp.Service) *Handler { return &Handler{service: service} }
+func NewHandler(queries auditapp.Queries) *Handler { return &Handler{queries: queries} }
 
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/request-audits", h.list)
@@ -198,10 +200,8 @@ func (h *Handler) list(c *gin.Context) {
 			return
 		}
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	page, pageSize = repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
-	values, total, err := h.service.List(c.Request.Context(), page, pageSize)
+	page, pageSize := httphelpers.Pagination(c)
+	values, total, err := h.queries.List(c.Request.Context(), page, pageSize)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "auditListFailed", "读取审计记录失败")
 		return
@@ -214,9 +214,8 @@ func (h *Handler) list(c *gin.Context) {
 }
 
 func (h *Handler) listCursor(c *gin.Context) {
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "50"))
-	_, pageSize = repository.NormalizePage(1, pageSize, repository.DefaultCursorPageSize)
-	result, err := h.service.ListCursor(c.Request.Context(), c.Query("cursor"), pageSize, c.Query("search"), c.Query("period"), newListFilter(c))
+	pageSize := httphelpers.CursorPagination(c)
+	result, err := h.queries.ListCursor(c.Request.Context(), c.Query("cursor"), pageSize, c.Query("search"), c.Query("period"), newListFilter(c))
 	if errors.Is(err, auditapp.ErrInvalidCursor) {
 		response.Error(c, http.StatusBadRequest, "invalidCursor", err.Error())
 		return
@@ -241,12 +240,11 @@ func (h *Handler) listCursor(c *gin.Context) {
 }
 
 func (h *Handler) get(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "审计 ID 无效")
+	id, ok := httphelpers.PathParamID(c, "id", "审计 ID 无效")
+	if !ok {
 		return
 	}
-	value, err := h.service.Get(c.Request.Context(), id)
+	value, err := h.queries.Get(c.Request.Context(), id)
 	if errors.Is(err, repository.ErrNotFound) {
 		response.Error(c, http.StatusNotFound, "auditNotFound", "审计记录不存在")
 		return
@@ -345,9 +343,9 @@ type pricingResponse struct {
 }
 
 func (h *Handler) summary(c *gin.Context) {
-	load := h.service.Summary
+	load := h.queries.Summary
 	if c.Query("refresh") == "1" {
-		load = h.service.SummaryFresh
+		load = h.queries.SummaryFresh
 	}
 	result, err := load(c.Request.Context(), c.Query("search"), c.Query("period"), newListFilter(c))
 	if errors.Is(err, auditapp.ErrInvalidFilter) {

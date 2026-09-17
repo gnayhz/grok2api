@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"path/filepath"
 	"testing"
 
@@ -39,18 +40,18 @@ func BenchmarkClientKeyAuthorizationRead(b *testing.B) {
 		if i > 0 {
 			limit = 1000000
 		}
-		_, err := keys.Create(ctx, clientkey.Key{Name: prefix, Prefix: prefix, SecretHash: security.HashToken(security.FormatClientKey(prefix, "synthetic")), EncryptedSecret: "fixture", Enabled: true, BillingLimitUSDTicks: limit, AllowedModels: ids})
+		_, err := keys.Create(ctx, clientkey.Key{Name: prefix, Prefix: prefix, SecretHash: tokenhash.HashToken(clientkey.FormatClientKey(prefix, "synthetic")), EncryptedSecret: "fixture", Enabled: true, BillingLimitUSDTicks: limit, AllowedModels: ids})
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
-	service := clientkeyapp.NewService("bench", keys, nil, nil, 0, 0, nil)
+	service := clientkeyapp.NewService("bench", keys, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 	b.Cleanup(func() { _ = service.Close(ctx) })
 	for _, kind := range []string{"repository", "cached_auth", "finite_auth", "list_100"} {
 		b.Run(kind, func(b *testing.B) {
-			raw := security.FormatClientKey("bench0000000", "synthetic")
+			raw := clientkey.FormatClientKey("bench0000000", "synthetic")
 			if kind == "finite_auth" {
-				raw = security.FormatClientKey("bench0000001", "synthetic")
+				raw = clientkey.FormatClientKey("bench0000001", "synthetic")
 			}
 			if kind == "cached_auth" {
 				_, release, err := service.Authenticate(ctx, raw)

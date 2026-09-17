@@ -44,7 +44,7 @@ src/app/             路由与应用壳层
 src/features/        按业务能力组织的页面与交互
 src/entities/        领域 DTO 与查询接口
 src/shared/          API、鉴权、配置、组件和通用工具
-src/components/ui/   shadcn/ui 基础组件
+src/shared/ui/       shadcn/ui 基础组件
 ```
 
 业务请求统一通过 `shared/api`，服务端状态由 TanStack Query 管理；页面只组合业务能力，不直接维护重复的请求、鉴权或格式化逻辑。

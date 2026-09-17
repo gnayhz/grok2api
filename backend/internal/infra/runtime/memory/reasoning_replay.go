@@ -23,11 +23,10 @@ type ReasoningReplayStore struct {
 	totalBytes int64
 	evictBatch int
 	values     map[string]reasoningReplayEntry
-	ttlSlide   bool
 }
 
 // defaultReasoningReplayMaxBytes 是字节维度的默认预算:条目上限只约束
-// 条数,单条回放捕获可达数 MiB(见 reasoningreplay.maxReplayCaptureBytes),
+// 条数,单条回放捕获可达数 MiB(见 application/history.maxReplayCaptureBytes),
 // 只按条数限界时最坏内存无界。256MiB 覆盖典型会话规模,超预算按
 // storedAt 淘汰最旧条目。
 const defaultReasoningReplayMaxBytes int64 = 256 << 20
@@ -57,7 +56,7 @@ func NewReasoningReplayStoreWithBudget(maxSize int, maxBytes int64) *ReasoningRe
 	if evictBatch > 128 {
 		evictBatch = 128
 	}
-	return &ReasoningReplayStore{maxSize: maxSize, maxBytes: maxBytes, evictBatch: evictBatch, values: make(map[string]reasoningReplayEntry, maxSize), ttlSlide: true}
+	return &ReasoningReplayStore{maxSize: maxSize, maxBytes: maxBytes, evictBatch: evictBatch, values: make(map[string]reasoningReplayEntry, maxSize)}
 }
 
 func reasoningReplayMapKey(model, sessionKey string) string {
@@ -93,17 +92,15 @@ func (s *ReasoningReplayStore) Get(_ context.Context, model, sessionKey string, 
 		s.mu.Unlock()
 		return nil, false, nil
 	}
-	if s.ttlSlide {
+	if ttl <= 0 {
+		ttl = entry.expiresAt.Sub(entry.storedAt)
 		if ttl <= 0 {
-			ttl = entry.expiresAt.Sub(entry.storedAt)
-			if ttl <= 0 {
-				ttl = time.Hour
-			}
+			ttl = time.Hour
 		}
-		entry.expiresAt = now.Add(ttl)
-		entry.storedAt = now
-		s.values[key] = entry
 	}
+	entry.expiresAt = now.Add(ttl)
+	entry.storedAt = now
+	s.values[key] = entry
 	// 条目存入后不可变(Set 总是整体替换、从不在位修改),锁内取引用、
 	// 锁外深拷贝安全——单条回放可达数 MiB,锁内拷贝会阻塞其他会话的读写。
 	items := entry.items

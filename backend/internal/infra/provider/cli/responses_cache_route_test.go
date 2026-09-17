@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
 )
 
 func TestPrepareBuildPromptCacheRouteToolFree(t *testing.T) {
@@ -235,4 +239,63 @@ func TestFilterBuildPromptCacheResponseStream(t *testing.T) {
 	if !strings.Contains(text, `"output_index":1`) || !strings.Contains(text, `"id":"msg_1"`) {
 		t.Fatalf("remaining output was not compacted:\n%s", text)
 	}
+}
+
+// maxCompatibleResponseBytes 与 filterBuildPromptCacheResponse 是测试缝:
+// 生产路径在 response_conversion.go 内联消费 buildXSearchResponseFilter
+// (流式走 filterEvent、非流式走 filterJSON);这里保留独立 http.Response
+// 级别的编排入口,供过滤行为的 JSON/流式两种断言直接复用。
+const maxCompatibleResponseBytes = 128 << 20
+
+func filterBuildPromptCacheResponse(response *http.Response, streaming bool, route buildPromptCacheRoute) error {
+	if response == nil || response.Body == nil || (!route.filterXSearch && len(route.injectedToolTypes) == 0) {
+		return nil
+	}
+	filter := newBuildXSearchResponseFilter(route)
+	if streaming {
+		response.Body = filter.stream(response.Body)
+		response.Header.Del("Content-Length")
+		response.ContentLength = -1
+		return nil
+	}
+	source := response.Body
+	data, err := io.ReadAll(io.LimitReader(source, maxCompatibleResponseBytes+1))
+	_ = source.Close()
+	if err != nil {
+		return err
+	}
+	if len(data) > maxCompatibleResponseBytes {
+		return fmt.Errorf("Grok Build Responses 响应超过 %d MiB", maxCompatibleResponseBytes>>20)
+	}
+	filtered, err := filter.filterJSON(data)
+	if err != nil {
+		return err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(filtered))
+	response.Header.Set("Content-Length", strconv.Itoa(len(filtered)))
+	response.ContentLength = int64(len(filtered))
+	return nil
+}
+
+func (f *buildXSearchResponseFilter) stream(source io.ReadCloser) io.ReadCloser {
+	return streampipe.Transform(source, func(input io.Reader, writer io.Writer) error {
+		return consumeCompatibleSSE(input, func(event compatibleSSEEvent) error {
+			if !event.HasData() {
+				return event.writeTo(writer)
+			}
+			data := event.Data()
+			if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+				return event.writeTo(writer)
+			}
+			filtered, keep, filterErr := f.filterEvent(data)
+			if filterErr != nil {
+				return filterErr
+			}
+			if !keep {
+				return nil
+			}
+			event.SetData(filtered)
+			return event.writeTo(writer)
+		})
+	})
 }

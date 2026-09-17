@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,9 +20,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/gin-gonic/gin"
 )
 
@@ -105,7 +105,7 @@ func TestConsoleImageCompletionIntegration(t *testing.T) {
 					if stage == "budget_download" {
 						budget := inferencedomain.NewAttemptBudget(2)
 						defer budget.Close()
-						ctx = egress.WithPhysicalCallBudget(ctx, budget)
+						ctx = physical.WithPhysicalCallBudget(ctx, budget)
 					}
 					if stage == "memory_budget" {
 						ctx = responsebuffer.WithContext(ctx, responsebuffer.NewPool(1024).Request(1024))

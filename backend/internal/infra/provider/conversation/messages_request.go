@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonvalue"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"strings"
 )
 
 const anthropicBillingHeaderPrefix = "x-anthropic-billing-header: "
@@ -661,7 +661,7 @@ func anthropicWebSearchQuery(messages []anthropicMessage) string {
 		if offset := strings.Index(strings.ToLower(text), prefix); offset >= 0 {
 			text = strings.TrimSpace(text[offset+len(prefix):])
 		}
-		return truncateRunes(strings.TrimSpace(text), 4096)
+		return texts.TruncateRunes(strings.TrimSpace(text), 4096)
 	}
 	return ""
 }
@@ -685,17 +685,6 @@ func anthropicMessageText(raw json.RawMessage) string {
 		}
 	}
 	return strings.Join(parts, "\n")
-}
-
-func truncateRunes(value string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit])
 }
 
 func convertAnthropicWebSearchTool(tool map[string]json.RawMessage, index int) (map[string]any, error) {

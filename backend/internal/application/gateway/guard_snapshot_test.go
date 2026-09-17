@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	"io"
 	"net/http"
 	"strings"
@@ -23,11 +24,10 @@ func (rejectAllKernel) ClassifyQualityHold(QualityStreamSignals) QualityVerdict 
 func TestRequestGuardSnapshotPinsPolicyAndKernelAcrossUpdates(t *testing.T) {
 	source := &changingGuardSource{}
 	source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{Enabled: true, Revision: 7, MaxAttempts: 2, GuardedModels: []string{"grok-4.6"}}), Kernel: builtinQualityKernel{}})
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetGuardSnapshotSource(source)
 	request, scope := service.requestGuardSnapshot()
 	source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{Enabled: false, Revision: 8, MaxAttempts: 9, GuardedModels: []string{"other"}}), Kernel: rejectAllKernel{}})
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: false, MaxAttempts: 20})
 	if request.Revision != 7 || request.MaxAttempts != 2 || !request.Enabled || !scope.Jurisdiction("grok_build", "grok-4.6") {
 		t.Fatalf("mixed policy: %+v", request)
 	}
@@ -38,13 +38,13 @@ func TestRequestGuardSnapshotPinsPolicyAndKernelAcrossUpdates(t *testing.T) {
 		t.Fatalf("old request used new kernel: %v/%v", verdict, err)
 	}
 	next, _ := service.requestGuardSnapshot()
-	if next.Revision != 8 || next.Enabled || next.classify(QualityStreamSignals{HasThinking: true}) != QualityWithhold {
+	if next.Revision != 8 || next.Enabled || classifyQualityHold(next, QualityStreamSignals{HasThinking: true}) != QualityWithhold {
 		t.Fatal("new request missed new policy")
 	}
-	other := &Service{}
-	other.UpdateQualityRetry(QualityRetryRuntime{Enabled: true})
+	other := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
+	other.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true}))
 	isolated, _ := other.requestGuardSnapshot()
-	if isolated.classify(QualityStreamSignals{HasThinking: true}) != QualityDeliver {
+	if classifyQualityHold(isolated, QualityStreamSignals{HasThinking: true}) != QualityDeliver {
 		t.Fatal("kernel leaked across instances")
 	}
 }
@@ -87,7 +87,7 @@ func TestMalformedAuthoritySnapshotRejectsBeforeUpstream(t *testing.T) {
 func BenchmarkRequestGuardSnapshot(b *testing.B) {
 	source := &changingGuardSource{}
 	source.value.Store(&GuardSnapshot{Runtime: normalizeQualityRetry(QualityRetryRuntime{Enabled: true, Revision: 7, MaxAttempts: 2, GuardedModels: []string{"grok-4.5", "grok-4.6"}}), Kernel: builtinQualityKernel{}})
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.SetGuardSnapshotSource(source)
 	b.ReportAllocs()
 	for b.Loop() {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,10 +14,10 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestGatewayCompactionLifecycle(t *testing.T) {
@@ -27,7 +28,7 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 	codec := historydomain.NewCompactionCodec(cipher)
 	rawSummary := healthyCompactionSummary()
 	upstream := compactionSampleSSE("resp_upstream", rawSummary)
-	sample, err := parseGatewayCompactionStream([]byte(upstream))
+	sample, err := parseGatewayCompactionReader(bytes.NewReader([]byte(upstream)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +299,7 @@ func TestForeignCompactionNeverReachesBuildModelInput(t *testing.T) {
 }
 
 func TestRemoteCompactionTriggerMustBeTerminal(t *testing.T) {
-	_, _, err := normalizeResponsesRequest([]byte(`{"model":"public","input":[{"type":"compaction_trigger"},{"role":"user","content":"late item"}]}`), "grok-4.5")
+	_, _, err := normalizeResponsesRequestWithMetadata([]byte(`{"model":"public","input":[{"type":"compaction_trigger"},{"role":"user","content":"late item"}]}`), "grok-4.5", nil)
 	var requestErr *responsesRequestError
 	if err == nil || !strings.Contains(err.Error(), "最后一项") || !errors.As(err, &requestErr) || requestErr.Param != "input[0]" {
 		t.Fatalf("error = %#v", err)
@@ -463,7 +464,7 @@ func TestCompactionRetriesDegenerateSamplesOnSameAccount(t *testing.T) {
 		return sseResponse(http.StatusOK, compactionSampleSSE("resp_retry", summary), request), nil
 	})
 	request := compactionProviderRequest(encrypted)
-	prepared, compatibility, err := normalizeResponsesRequest(request.Body, request.Model)
+	prepared, compatibility, err := normalizeResponsesRequestWithMetadata(request.Body, request.Model, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +487,7 @@ func TestCompactionStreamErrorsUseGrokBuildRetryClassification(t *testing.T) {
 data: {"type":"response.failed","response":{"error":{"code":"invalid_request_error","message":"bad schema"}}}
 
 `
-	_, err := parseGatewayCompactionStream([]byte(deterministic))
+	_, err := parseGatewayCompactionReader(bytes.NewReader([]byte(deterministic)))
 	if err == nil || gatewayCompactionErrorIsTransient(err) {
 		t.Fatalf("deterministic error = %#v", err)
 	}
@@ -495,7 +496,7 @@ data: {"type":"response.failed","response":{"error":{"code":"invalid_request_err
 data: {"type":"error","code":"503","message":"temporarily unavailable"}
 
 `
-	_, err = parseGatewayCompactionStream([]byte(transient))
+	_, err = parseGatewayCompactionReader(bytes.NewReader([]byte(transient)))
 	if err == nil || !gatewayCompactionErrorIsTransient(err) {
 		t.Fatalf("transient error = %#v", err)
 	}

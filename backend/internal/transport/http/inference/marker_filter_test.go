@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 )
 
 // 内部思考证据注释必须在转发前剥除（含跨 chunk 边界分裂的形态）。
 func TestInternalSSEMarkerFilterStripsEvidenceComment(t *testing.T) {
 	t.Parallel()
-	marker := []byte(conversation.ThinkingEvidenceComment + "\n\n")
+	marker := []byte(inferencedomain.ThinkingEvidenceComment + "\n\n")
 	filter := internalSSEMarkerFilter{enabled: true}
 	var out bytes.Buffer
 	out.Write(filter.Filter([]byte("event: message_start\n\ndata: {\"type\":\"message_start\"}\n\n"), false))
@@ -39,7 +39,7 @@ func TestInternalSSEMarkerFilterKeepsThinkingDelta(t *testing.T) {
 	if !bytes.Contains(got, []byte(`"thinking":"plan"`)) {
 		t.Fatalf("thinking_delta must not be stripped: %q", got)
 	}
-	if bytes.Contains(got, []byte(conversation.ThinkingEvidenceComment)) {
+	if bytes.Contains(got, []byte(inferencedomain.ThinkingEvidenceComment)) {
 		t.Fatal("filter must not inject the internal marker")
 	}
 }

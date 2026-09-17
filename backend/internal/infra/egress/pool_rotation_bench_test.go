@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func newRotationBenchManager(tb testing.TB, latency time.Duration) (*Manager, *r
 	repo := &rotationWriteCountingRepo{latency: latency}
 	repo.pool = map[uint64]domain.Pool{}
 	repo.member = map[uint64][]domain.Node{}
-	return NewManager(repo, cipher), repo
+	return NewManagerWithLimits(repo, cipher, netbudget.Limits{}), repo
 }
 
 // 推进路径(pinned 节点失效/热游标失效)基准:池行快照仍指向旧游标
@@ -89,7 +90,7 @@ func TestRotationCursorPersistAsyncDedupAndRetry(t *testing.T) {
 	repo := &rotationFailingRepo{}
 	repo.pool = map[uint64]domain.Pool{}
 	repo.member = map[uint64][]domain.Node{}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	all := []domain.Node{{ID: 10, Enabled: true, Health: 1}, {ID: 20, Enabled: true, Health: 1}, {ID: 30, Enabled: true, Health: 1}}
 	pool := domain.Pool{ID: 1, Enabled: true, Strategy: domain.PoolStrategyRotation, RotationCursorNodeID: 10}

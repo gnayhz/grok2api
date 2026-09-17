@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestSuccessFeedbackDoesNotClearQualityQuarantine(t *testing.T) {
 		ID: 1, Name: "quarantined", Enabled: true, Health: 0.05,
 		FailureCount: 3, CooldownUntil: &until, LastError: domain.LastErrorExitIPQuality,
 	}}
-	manager := NewManager(repository, cipher)
+	manager := NewManagerWithLimits(repository, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	manager.Feedback(context.Background(), 1, http.StatusOK, nil)
@@ -53,7 +54,7 @@ func TestFailureFeedbackStillEscalatesOnQuarantinedNode(t *testing.T) {
 		ID: 1, Name: "quarantined", Enabled: true, Health: 0.05,
 		FailureCount: 3, CooldownUntil: &until, LastError: domain.LastErrorExitIPQuality,
 	}}
-	manager := NewManager(repository, cipher)
+	manager := NewManagerWithLimits(repository, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	manager.Feedback(context.Background(), 1, 0, context.DeadlineExceeded)

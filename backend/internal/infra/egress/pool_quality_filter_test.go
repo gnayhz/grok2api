@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 // 策略(random/affinity/least-used)只从可用成员中挑,被押成员不再让
 // 整个池路由失败;全部被押时候选为空(真·池耗尽,按 fallback 契约走)。
 func TestPoolCandidatesFilterQualityIneligible(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.SetExitEligibility(stubExitEligibility{ineligible: map[uint64]bool{116: true, 117: true}})
 	nodes := []domain.Node{
@@ -22,7 +23,7 @@ func TestPoolCandidatesFilterQualityIneligible(t *testing.T) {
 		{ID: 116, Name: "remanded", Enabled: true, Health: 1},
 		{ID: 117, Name: "banned", Enabled: true, Health: 1},
 	}
-	candidates := manager.poolCandidates(context.Background(), nodes, time.Now().UTC())
+	candidates := manager.routing.appendPoolCandidates(nil, context.Background(), nodes, time.Now().UTC())
 	if len(candidates) != 2 {
 		t.Fatalf("被押成员必须在候选阶段剔除, got %d: %+v", len(candidates), candidates)
 	}
@@ -32,14 +33,14 @@ func TestPoolCandidatesFilterQualityIneligible(t *testing.T) {
 		}
 	}
 	// 取证通道豁免:探针钉扎路径不过滤(B2 双通道)。
-	probeCandidates := manager.poolCandidates(WithExitEligibilityBypass(context.Background()), nodes, time.Now().UTC())
+	probeCandidates := manager.routing.appendPoolCandidates(nil, WithExitEligibilityBypass(context.Background()), nodes, time.Now().UTC())
 	if len(probeCandidates) != 4 {
 		t.Fatalf("取证通道不得过滤候选, got %d", len(probeCandidates))
 	}
 	// 全部被押 → 候选为空(池耗尽,交给 fallback 契约)。
-	allHeld := manager.poolCandidates(context.Background(), nodes[:1], time.Now().UTC())
+	allHeld := manager.routing.appendPoolCandidates(nil, context.Background(), nodes[:1], time.Now().UTC())
 	manager.SetExitEligibility(stubExitEligibility{ineligible: map[uint64]bool{52: true}})
-	allHeld = manager.poolCandidates(context.Background(), nodes[:1], time.Now().UTC())
+	allHeld = manager.routing.appendPoolCandidates(nil, context.Background(), nodes[:1], time.Now().UTC())
 	if len(allHeld) != 0 {
 		t.Fatalf("全部被押时候选必须为空, got %d", len(allHeld))
 	}
@@ -48,7 +49,7 @@ func TestPoolCandidatesFilterQualityIneligible(t *testing.T) {
 // TestQualitySchedulableSeamSemantics 候选过滤与租约收口同款语义:
 // nil 缝隙恒真(D2)、直连(节点 0)不适用、取证 ctx 放行。
 func TestQualitySchedulableSeamSemantics(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	if !manager.qualitySchedulable(context.Background(), 42) {
 		t.Fatal("nil 缝隙必须恒真")

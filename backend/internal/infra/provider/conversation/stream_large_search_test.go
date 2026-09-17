@@ -23,7 +23,7 @@ func TestCompletedSearchResultsIndependentOfCiphertextSize(t *testing.T) {
 			t.Fatal(err)
 		}
 		var output bytes.Buffer
-		c := newStreamConverter(&output, OperationMessages, ResponseOptions{AnthropicWebSearch: true})
+		c := newStreamConverterWithBudget(&output, OperationMessages, ResponseOptions{AnthropicWebSearch: true}, nil)
 		if err := c.handle("response.completed", data); err != nil {
 			t.Fatal(err)
 		}

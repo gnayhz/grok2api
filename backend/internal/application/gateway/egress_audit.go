@@ -5,10 +5,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
 )
 
-func applyAuditEgress(record *audit.Record, trace *infraegress.Trace, provider accountdomain.Provider) {
+func applyAuditEgress(record *audit.Record, trace *portphysical.Trace, provider accountdomain.Provider) {
 	selection, ok := trace.Selection(primaryEgressScope(provider))
 	if !ok {
 		return
@@ -26,7 +26,7 @@ func applyAuditEgress(record *audit.Record, trace *infraegress.Trace, provider a
 	}
 }
 
-func applyMediaJobEgress(job *media.Job, trace *infraegress.Trace, provider accountdomain.Provider) {
+func applyMediaJobEgress(job *media.Job, trace *portphysical.Trace, provider accountdomain.Provider) {
 	selection, ok := trace.Selection(primaryEgressScope(provider))
 	if !ok {
 		return
@@ -41,32 +41,6 @@ func applyMediaJobEgress(job *media.Job, trace *infraegress.Trace, provider acco
 		id := selection.NodeID
 		job.EgressNodeID = &id
 	}
-}
-
-// degradedEgressNodeID returns the egress node that served the degraded
-// attempt for the provider's primary scope. The trace keeps the most recent
-// selection per scope, which at degrade time is the current attempt's node.
-func degradedEgressNodeID(trace *infraegress.Trace, provider accountdomain.Provider) uint64 {
-	if trace == nil {
-		return 0
-	}
-	if selection, ok := trace.Selection(primaryEgressScope(provider)); ok {
-		return selection.NodeID
-	}
-	return 0
-}
-
-// egressSelectionPooled reports whether the degraded attempt left through a
-// rotating proxy pool (every request through the same pool member exits via a
-// DIFFERENT IP). Same-account quality retries are only meaningful there;
-// under direct or fixed egress they re-enter the same dirty exit IP with ~0%
-// recovery probability.
-func egressSelectionPooled(trace *infraegress.Trace, provider accountdomain.Provider) bool {
-	if trace == nil {
-		return false
-	}
-	selection, ok := trace.Selection(primaryEgressScope(provider))
-	return ok && selection.Pool
 }
 
 func primaryEgressScope(provider accountdomain.Provider) egressdomain.Scope {

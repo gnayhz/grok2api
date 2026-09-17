@@ -9,13 +9,13 @@ import (
 	"time"
 
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestNormalizeResponsesRequest(t *testing.T) {
 	body := []byte(`{"model":"public-model","input":[{"type":"reasoning","id":"old","encrypted_content":"cipher","content":[{"text":"thought"}]},{"role":"user","content":"hello"}],"prompt_cache_key":"official-key","response_format":{"type":"json_object"}}`)
-	normalized, _, err := normalizeResponsesRequest(body, "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestNormalizeBuildChatRequestsVisibleReasoningSummary(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			normalized, err := normalizeBuildRequest([]byte(test.body), "grok-4.6", test.operation)
+			normalized, err := normalizeBuildRequestWithMetadata([]byte(test.body), "grok-4.6", test.operation, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,7 +176,7 @@ func TestNormalizeBuildMaxAcrossCompatibilityProtocols(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			normalized, err := normalizeBuildRequest(test.body, "grok-4.6", test.operation)
+			normalized, err := normalizeBuildRequestWithMetadata(test.body, "grok-4.6", test.operation, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,7 +244,7 @@ func TestNormalizeBuildComposerStripsReasoningEffort(t *testing.T) {
 		})
 	}
 
-	stripped, err := normalizeBuildRequest([]byte(`{"reasoning":{"effort":"medium"},"input":"hello"}`), modeldomain.GrokComposer25Fast, conversation.OperationResponses)
+	stripped, err := normalizeBuildRequestWithMetadata([]byte(`{"reasoning":{"effort":"medium"},"input":"hello"}`), modeldomain.GrokComposer25Fast, conversation.OperationResponses, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestNormalizeBuildRequestAppliesSafeDefaultsAndStripsCodexEnvelope(t *testi
 		"client_metadata":{"cwd":"/private/workspace","git_remote":"ssh://private/repo"},
 		"include":["web_search_call.action.sources"]
 	}`)
-	normalized, err := normalizeBuildRequest(body, "grok-4.5", conversation.OperationResponses)
+	normalized, err := normalizeBuildRequestWithMetadata(body, "grok-4.5", conversation.OperationResponses, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestNormalizeBuildRequestAppliesSafeDefaultsAndStripsCodexEnvelope(t *testi
 
 func TestNormalizeBuildRequestPreservesExplicitStoreAndEncryptedInclude(t *testing.T) {
 	body := []byte(`{"input":"hello","store":true,"include":["reasoning.encrypted_content"],"stream_tool_calls":true}`)
-	normalized, err := normalizeBuildRequest(body, "grok-4.5", conversation.OperationResponses)
+	normalized, err := normalizeBuildRequestWithMetadata(body, "grok-4.5", conversation.OperationResponses, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestNormalizeBuildRequestPreservesExplicitStoreAndEncryptedInclude(t *testi
 }
 
 func TestNormalizeBuildRequestDoesNotInventStreamToolCalls(t *testing.T) {
-	normalized, err := normalizeBuildRequest([]byte(`{"input":"hello"}`), "grok-4.5", conversation.OperationResponses)
+	normalized, err := normalizeBuildRequestWithMetadata([]byte(`{"input":"hello"}`), "grok-4.5", conversation.OperationResponses, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestNormalizeBuildRequestDoesNotInventStreamToolCalls(t *testing.T) {
 }
 
 func TestNormalizeResponsesRequestPreservesExplicitPromptCacheKey(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{"model":"public","input":"hello","prompt_cache_key":"official-key"}`), "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{"model":"public","input":"hello","prompt_cache_key":"official-key"}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestNormalizeResponsesRequestPreservesExplicitPromptCacheKey(t *testing.T) 
 }
 
 func TestNormalizeResponsesRequestDoesNotInventPromptCacheKey(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{"model":"public","input":"hello"}`), "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{"model":"public","input":"hello"}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestNormalizeResponsesRequestDoesNotInventPromptCacheKey(t *testing.T) {
 }
 
 func TestNormalizeResponsesRequestAddsEmptySummaryToEncryptedReasoning(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{"model":"public","input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`), "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{"model":"public","input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestNormalizeResponsesRequestAddsEmptySummaryToEncryptedReasoning(t *testin
 
 func TestNormalizeResponsesRequestFlattensJSONSchema(t *testing.T) {
 	body := []byte(`{"model":"public","input":"hello","response_format":{"type":"json_schema","json_schema":{"type":"object","name":"answer","strict":true,"schema":{"type":"object"}}}}`)
-	normalized, _, err := normalizeResponsesRequest(body, "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

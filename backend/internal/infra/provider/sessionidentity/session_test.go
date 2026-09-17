@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestParseBlockedSessionIsUnauthorized(t *testing.T) {

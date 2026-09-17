@@ -29,6 +29,13 @@ type VideoResources struct {
 func NewVideoResources(jobs videoJobReader, assets videoAssetReader) *VideoResources {
 	return &VideoResources{jobs: jobs, assets: assets}
 }
+
+// WithAssetReader returns a copy bound to the given asset reader. Callers that
+// assemble execution entry points request the rebound view instead of
+// constructing a second resource bundle themselves.
+func (r *VideoResources) WithAssetReader(assets videoAssetReader) *VideoResources {
+	return &VideoResources{jobs: r.jobs, assets: assets}
+}
 func videoResourceReadError(err error) error {
 	return fmt.Errorf("%w: %w", mediadomain.ErrVideoResourceRead, err)
 }

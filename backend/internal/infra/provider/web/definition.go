@@ -3,7 +3,7 @@ package web
 import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // Definition 集中声明 Grok Web 的稳定能力边界；Web 私有协议由本包内部维护。

@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
@@ -17,7 +16,7 @@ import (
 // 挂案件号且证据可解释):定罪结案后 q_case.evidence_json 可读回且
 // 含规则标识与单元计数;同时验证 I24(键控引用,无 IP 明文/账号名)。
 func TestVerdictEvidenceExplainableReadback(t *testing.T) {
-	evidenceConfig := evidence.DefaultConfig()
+	evidenceConfig := model.DefaultEvidenceConfig()
 	bench := newBenchWithEvidenceConfig(t, evidenceConfig)
 	cfg := DefaultConfig()
 	probeStore := registry.NewProbeTaskStore(bench.registry)
@@ -30,7 +29,7 @@ func TestVerdictEvidenceExplainableReadback(t *testing.T) {
 	courtService := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: probeStore})
 	defer courtService.Close(context.Background())
 	caseID := openSimpleTestCase(t, courtService, bench.registry)
-	settleSimpleTestTasks(t, bench.registry, caseID, func(task registry.ProbeTaskView) model.ProbeTaskResult {
+	settleSimpleTestTasks(t, bench.registry, caseID, func(task model.ProbeTaskView) model.ProbeTaskResult {
 		if task.Direction == model.ProbeExitJury {
 			return model.ProbeTaskResult{Outcome: model.ProbeResultClean, Detail: "jury_clean"}
 		}

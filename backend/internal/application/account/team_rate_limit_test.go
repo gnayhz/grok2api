@@ -6,13 +6,13 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestTeamObservationRetainsOtherModelWindow(t *testing.T) {
 	now := time.Now().UTC()
 	credential := account.Credential{ID: 17, Provider: account.ProviderBuild, CredentialGeneration: 2}
-	s := &Service{}
+	s := &Service{rateLimiter: newTeamRateLimitTracker()}
 	s.ObserveTeamModelRateLimit(credential, "long-model", provider.RateLimitMetadata{TeamID: "observed", RetryAfter: time.Minute}, now)
 	s.ObserveTeamModelRateLimit(credential, "short-model", provider.RateLimitMetadata{TeamID: "observed", RetryAfter: time.Second}, now)
 	if _, active := s.ActiveTeamModelRateLimit(credential, "long-model", now.Add(2*time.Second)); !active {
@@ -31,7 +31,7 @@ func TestTeamRateLimitIdentityIsolation(t *testing.T) {
 	original := account.Credential{ID: 71, Provider: account.ProviderBuild, CredentialGeneration: 4, TeamID: "local-original"}
 	for _, scenario := range []string{"new_material", "new_local_team", "other_provider", "other_model", "same_team_rotation", "late_old_observation"} {
 		t.Run(scenario, func(t *testing.T) {
-			s := &Service{}
+			s := &Service{rateLimiter: newTeamRateLimitTracker()}
 			s.ObserveTeamModelRateLimit(original, "model-a", provider.RateLimitMetadata{TeamID: "observed-original", RetryAfter: time.Minute}, now)
 			current, model, expected := original, "model-a", false
 			checkAt := now
@@ -67,7 +67,7 @@ func TestTeamRateLimitIdentityIsolation(t *testing.T) {
 func TestTeamRateLimitConcurrentObservationsPreserveLongestWindow(t *testing.T) {
 	now := time.Now().UTC()
 	credential := account.Credential{ID: 17, Provider: account.ProviderBuild, CredentialGeneration: 2}
-	s := &Service{}
+	s := &Service{rateLimiter: newTeamRateLimitTracker()}
 	var workers sync.WaitGroup
 	for i := 1; i <= 32; i++ {
 		workers.Go(func() {
@@ -91,7 +91,7 @@ func TestTeamRateLimitConcurrentObservationsPreserveLongestWindow(t *testing.T) 
 func TestTeamRateLimitDefaultsAndMissingIdentity(t *testing.T) {
 	now := time.Now().UTC()
 	for _, scope := range []string{provider.RateLimitScopeRPS, provider.RateLimitScopeRPM} {
-		s := &Service{}
+		s := &Service{rateLimiter: newTeamRateLimitTracker()}
 		credential := account.Credential{ID: 5, Provider: account.ProviderBuild, TeamID: "known-team"}
 		limit, ok := s.ObserveTeamModelRateLimit(credential, "model", provider.RateLimitMetadata{Scope: scope}, now)
 		duration := time.Minute
@@ -105,7 +105,7 @@ func TestTeamRateLimitDefaultsAndMissingIdentity(t *testing.T) {
 			t.Fatal("credential team fallback unavailable")
 		}
 	}
-	s := &Service{}
+	s := &Service{rateLimiter: newTeamRateLimitTracker()}
 	if _, ok := s.ObserveTeamModelRateLimit(account.Credential{ID: 5}, "model", provider.RateLimitMetadata{}, now); ok {
 		t.Fatal("missing identity created team throttle")
 	}
@@ -118,17 +118,17 @@ func TestActiveTeamModelRateLimitFallsBackToCurrentCredentialTeam(t *testing.T) 
 	const currentTeam = "00000000-0000-0000-0000-0000000000f6"
 	credential := account.Credential{ID: 42, Provider: account.ProviderBuild, TeamID: currentTeam}
 	currentFingerprint := rateLimitTeamFingerprint(currentTeam)
-	service := &Service{
-		rateLimits: map[string]TeamModelRateLimit{
-			teamModelRateLimitKey(account.ProviderBuild, currentFingerprint, model): {
-				TeamFingerprint: shortTeamFingerprint(currentFingerprint), Until: now.Add(time.Minute),
-			},
-		},
-		rateLimitTeams: map[teamRateLimitIdentity]teamRateLimitObservation{
-			teamLimitIdentity(credential): {Fingerprint: rateLimitTeamFingerprint(observedTeam), ExpiresAt: now.Add(time.Minute)},
+	tracker := newTeamRateLimitTracker()
+	service := &Service{rateLimiter: tracker}
+	tracker.limits = map[string]TeamModelRateLimit{
+		teamModelRateLimitKey(account.ProviderBuild, currentFingerprint, model): {
+			TeamFingerprint: shortTeamFingerprint(currentFingerprint), Until: now.Add(time.Minute),
 		},
 	}
-	service.rateLimitActive.Store(true)
+	tracker.teams = map[teamRateLimitIdentity]teamRateLimitObservation{
+		teamLimitIdentity(credential): {Fingerprint: rateLimitTeamFingerprint(observedTeam), ExpiresAt: now.Add(time.Minute)},
+	}
+	tracker.active.Store(true)
 
 	limited, ok := service.ActiveTeamModelRateLimit(credential, model, now)
 	if !ok || limited.TeamFingerprint != shortTeamFingerprint(currentFingerprint) {
@@ -143,58 +143,58 @@ func TestActiveTeamModelRateLimitDropsExpiredObservedTeam(t *testing.T) {
 	const currentTeam = "00000000-0000-0000-0000-0000000000b2"
 	credential := account.Credential{ID: 43, Provider: account.ProviderBuild, TeamID: currentTeam}
 	currentFingerprint := rateLimitTeamFingerprint(currentTeam)
-	service := &Service{
-		rateLimits: map[string]TeamModelRateLimit{
-			teamModelRateLimitKey(account.ProviderBuild, rateLimitTeamFingerprint(observedTeam), model): {
-				TeamFingerprint: shortTeamFingerprint(rateLimitTeamFingerprint(observedTeam)), Until: now.Add(time.Minute),
-			},
-			teamModelRateLimitKey(account.ProviderBuild, currentFingerprint, model): {
-				TeamFingerprint: shortTeamFingerprint(currentFingerprint), Until: now.Add(time.Minute),
-			},
+	tracker := newTeamRateLimitTracker()
+	service := &Service{rateLimiter: tracker}
+	tracker.limits = map[string]TeamModelRateLimit{
+		teamModelRateLimitKey(account.ProviderBuild, rateLimitTeamFingerprint(observedTeam), model): {
+			TeamFingerprint: shortTeamFingerprint(rateLimitTeamFingerprint(observedTeam)), Until: now.Add(time.Minute),
 		},
-		rateLimitTeams: map[teamRateLimitIdentity]teamRateLimitObservation{
-			teamLimitIdentity(credential): {Fingerprint: rateLimitTeamFingerprint(observedTeam), ExpiresAt: now.Add(-time.Second)},
+		teamModelRateLimitKey(account.ProviderBuild, currentFingerprint, model): {
+			TeamFingerprint: shortTeamFingerprint(currentFingerprint), Until: now.Add(time.Minute),
 		},
 	}
-	service.rateLimitActive.Store(true)
+	tracker.teams = map[teamRateLimitIdentity]teamRateLimitObservation{
+		teamLimitIdentity(credential): {Fingerprint: rateLimitTeamFingerprint(observedTeam), ExpiresAt: now.Add(-time.Second)},
+	}
+	tracker.active.Store(true)
 
 	limited, ok := service.ActiveTeamModelRateLimit(credential, model, now)
 	if !ok || limited.TeamFingerprint != shortTeamFingerprint(currentFingerprint) {
 		t.Fatalf("limit = %#v, ok=%v", limited, ok)
 	}
-	if _, exists := service.rateLimitTeams[teamLimitIdentity(credential)]; exists {
+	if _, exists := tracker.teams[teamLimitIdentity(credential)]; exists {
 		t.Fatal("expired observed Team mapping was retained")
 	}
 }
 
 func TestActiveTeamModelRateLimitPrunesExpiredUnrelatedLimit(t *testing.T) {
 	now := time.Now().UTC()
-	service := &Service{
-		rateLimits: map[string]TeamModelRateLimit{
-			teamModelRateLimitKey(account.ProviderBuild, rateLimitTeamFingerprint("00000000-0000-0000-0000-0000000000a1"), "old-model"): {
-				Until: now.Add(-time.Second),
-			},
-		},
-		rateLimitTeams: map[teamRateLimitIdentity]teamRateLimitObservation{
-			teamLimitIdentity(account.Credential{ID: 99}): {Fingerprint: rateLimitTeamFingerprint("00000000-0000-0000-0000-0000000000a1"), ExpiresAt: now.Add(-time.Second)},
+	tracker := newTeamRateLimitTracker()
+	service := &Service{rateLimiter: tracker}
+	tracker.limits = map[string]TeamModelRateLimit{
+		teamModelRateLimitKey(account.ProviderBuild, rateLimitTeamFingerprint("00000000-0000-0000-0000-0000000000a1"), "old-model"): {
+			Until: now.Add(-time.Second),
 		},
 	}
-	service.rateLimitActive.Store(true)
-	service.rateLimitNextExpiry.Store(now.Add(-time.Second).UnixNano())
+	tracker.teams = map[teamRateLimitIdentity]teamRateLimitObservation{
+		teamLimitIdentity(account.Credential{ID: 99}): {Fingerprint: rateLimitTeamFingerprint("00000000-0000-0000-0000-0000000000a1"), ExpiresAt: now.Add(-time.Second)},
+	}
+	tracker.active.Store(true)
+	tracker.nextExpiry.Store(now.Add(-time.Second).UnixNano())
 
 	credential := account.Credential{ID: 100, Provider: account.ProviderBuild, TeamID: "00000000-0000-0000-0000-0000000000b2"}
 	if limited, ok := service.ActiveTeamModelRateLimit(credential, "new-model", now); ok {
 		t.Fatalf("expired unrelated limit remained active: %#v", limited)
 	}
-	if service.rateLimitActive.Load() || service.rateLimitNextExpiry.Load() != 0 || len(service.rateLimits) != 0 || len(service.rateLimitTeams) != 0 {
-		t.Fatalf("expired state was not fully pruned: active=%v next=%d limits=%d teams=%d", service.rateLimitActive.Load(), service.rateLimitNextExpiry.Load(), len(service.rateLimits), len(service.rateLimitTeams))
+	if tracker.active.Load() || tracker.nextExpiry.Load() != 0 || len(tracker.limits) != 0 || len(tracker.teams) != 0 {
+		t.Fatalf("expired state was not fully pruned: active=%v next=%d limits=%d teams=%d", tracker.active.Load(), tracker.nextExpiry.Load(), len(tracker.limits), len(tracker.teams))
 	}
 }
 
 func TestObservedTeamLimitDoesNotBindReplacementCredential(t *testing.T) {
 	now := time.Now().UTC()
 	credential := account.Credential{ID: 42, Provider: account.ProviderBuild, CredentialGeneration: 7, TeamID: "old-metadata-team"}
-	service := &Service{}
+	service := &Service{rateLimiter: newTeamRateLimitTracker()}
 	service.ObserveTeamModelRateLimit(credential, "grok-4.5", provider.RateLimitMetadata{TeamID: "observed-team", RetryAfter: time.Minute}, now)
 	if _, limited := service.ActiveTeamModelRateLimit(credential, "grok-4.5", now); !limited {
 		t.Fatal("original observed identity was not limited")

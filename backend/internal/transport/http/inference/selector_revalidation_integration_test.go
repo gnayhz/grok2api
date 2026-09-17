@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -181,7 +182,7 @@ func TestVideoWorkerRechecksCurrentFactsWithAcceptedScope(t *testing.T) {
 			if _, err := fx.clients.Patch(ctx, fx.created.Key.ID, clientkey.ManagementPatch{ProviderScope: &providerScope, TierScope: &tierScope}); err != nil {
 				t.Fatal(err)
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			job := createVideoAuthorizationJob(t, fx)
 			// A later key change cannot broaden this already accepted job.
 			tierScope = clientkey.TierScopeAll
@@ -200,7 +201,7 @@ func TestVideoWorkerRechecksCurrentFactsWithAcceptedScope(t *testing.T) {
 				return fx.accounts.SaveQuotaSnapshot(ctx, repository.QuotaSnapshotWrite{AccountID: id, Revision: revision, Tier: account.WebTierSuper, SyncedAt: time.Now()})
 			}
 			// Exercise durable queue recovery, retaining the warm candidate view.
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 				t.Fatal(err)
 			}

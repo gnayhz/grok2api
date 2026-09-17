@@ -7,7 +7,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/web"
@@ -29,7 +29,7 @@ func TestManagementRejectsInvalidCapabilityAndPreservesLegacyRoute(t *testing.T)
 		t.Fatal(err)
 	}
 	models := relational.NewModelRepository(db)
-	registry := provider.NewRegistry(cli.NewAdapter(cli.Config{}, nil), web.NewAdapter(web.Config{}, nil, nil, nil, nil), console.NewAdapter(console.Config{}, nil, nil, nil))
+	registry := providerimpl.NewRegistry(cli.NewAdapter(cli.Config{}, nil), web.NewAdapter(web.Config{}, nil, nil, nil, nil), console.NewAdapter(console.Config{}, nil, nil, nil))
 	svc := modelapp.NewService(models, relational.NewAccountRepository(db), nil, registry)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

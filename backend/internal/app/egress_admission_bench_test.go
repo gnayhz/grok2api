@@ -13,6 +13,7 @@ import (
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
@@ -40,7 +41,7 @@ func TestRuntimeEndToEndAuthoritativeAdmissionCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, admitted := infraegress.NewManager(repo, nil), infraegress.NewManager(repo, nil)
+	plain, admitted := infraegress.NewManagerWithLimits(repo, nil, netbudget.Limits{}), infraegress.NewManagerWithLimits(repo, nil, netbudget.Limits{})
 	defer plain.Close(ctx)
 	defer admitted.Close(ctx)
 	admitted.SetExitEligibility(qualityExitEligibility{registry: r})

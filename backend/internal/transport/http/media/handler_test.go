@@ -35,7 +35,7 @@ func TestPublicImageSupportsGetHeadAndETag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := mediaapp.NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, mediaapp.Config{
+	service := mediaapp.NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, mediaapp.Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: 10 * time.Minute,
 	})
@@ -45,7 +45,7 @@ func TestPublicImageSupportsGetHeadAndETag(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := gin.New()
-	NewHandler(service, nil).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router.Group("/v1/media"))
 	path := "/v1/media/images/" + asset.ID
 
 	get := httptest.NewRecorder()
@@ -82,7 +82,7 @@ func TestPublicVideoAssetSupportsGetHeadAndRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := mediaapp.NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, mediaapp.Config{
+	service := mediaapp.NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, mediaapp.Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: 10 * time.Minute,
 	})
@@ -92,7 +92,7 @@ func TestPublicVideoAssetSupportsGetHeadAndRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := gin.New()
-	NewHandler(service, nil).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router.Group("/v1/media"))
 	path := "/v1/media/videos/" + asset.ID
 
 	get := httptest.NewRecorder()
@@ -130,9 +130,9 @@ func TestAdminDeleteImagesRemovesObjectMetadataAndStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := mediaapp.NewService(
+	service := mediaapp.NewServiceWithTickets(
 		relational.NewMediaAssetRepository(database),
-		relational.NewMediaJobRepository(database),
+		relational.NewMediaJobRepository(database), nil,
 		objects,
 		nil,
 		mediaapp.Config{PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute},
@@ -210,7 +210,7 @@ func TestPutVideoUploadReturns413WhenBodyTooLarge(t *testing.T) {
 	}
 	payload := append([]byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, bytes.Repeat([]byte{0x0a}, 64)...)
 	router := gin.New()
-	NewHandler(service, nil).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router.Group("/v1/media"))
 	req := httptest.NewRequest(http.MethodPut, "/v1/media/uploads/"+token, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "video/mp4")
 	recorder := httptest.NewRecorder()
@@ -247,7 +247,7 @@ func TestPutVideoUploadReturns400ForInvalidMIME(t *testing.T) {
 	}
 	token := uploadURL[len("https://api.example/v1/media/uploads/"):]
 	router := gin.New()
-	NewHandler(service, nil).RegisterPublic(router)
+	NewHandler(service, nil).RegisterPublic(router.Group("/v1/media"))
 	payload := append([]byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'}, bytes.Repeat([]byte{1}, 16)...)
 	req := httptest.NewRequest(http.MethodPut, "/v1/media/uploads/"+token, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "video/webm")
@@ -269,9 +269,9 @@ func TestAdminVideoListRejectsInvalidFilters(t *testing.T) {
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	service := mediaapp.NewService(
+	service := mediaapp.NewServiceWithTickets(
 		relational.NewMediaAssetRepository(database),
-		relational.NewMediaJobRepository(database),
+		relational.NewMediaJobRepository(database), nil,
 		nil,
 		nil,
 		mediaapp.Config{},

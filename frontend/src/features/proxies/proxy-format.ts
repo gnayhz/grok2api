@@ -31,25 +31,6 @@ export function formatTimeAgo(dateString: string | null | undefined, locale?: st
 	return isEn ? `${days}d ago` : `${days} 天前`;
 }
 
-export function maskIP(ip: string | undefined): string {
-	if (!ip) return "--";
-	// IPv4 mask: 1.2.3.4 -> 1.2.*.*
-	if (ip.includes(".")) {
-		const parts = ip.split(".");
-		if (parts.length === 4) {
-			return `${parts[0]}.${parts[1]}.*.*`;
-		}
-	}
-	// IPv6 mask: 2400:cb00:2048:1::c629:d7a2 -> 2400:cb00:****:****
-	if (ip.includes(":")) {
-		const parts = ip.split(":");
-		if (parts.length >= 4) {
-			return `${parts[0]}:${parts[1]}:****:****`;
-		}
-	}
-	return ip;
-}
-
 export function getLatencyTone(ms: number | null | undefined): {
 	textClass: string;
 	badgeClass: string;

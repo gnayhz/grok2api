@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,8 +16,8 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/gin-gonic/gin"
 )
@@ -78,9 +79,9 @@ func TestAccountHTTPDeletionPreventsReimport(t *testing.T) {
 					t.Fatal(err)
 				}
 				port := &deletionImportHTTPPort{AccountRepository: repo}
-				s := accountapp.NewService(port, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+				s := accountapp.NewService(port, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 				router := gin.New()
-				NewHandler(s, nil).Register(router.Group("/api/admin/v1"))
+				newTestHandler(s, nil).Register(router.Group("/api/admin/v1"))
 				server := httptest.NewServer(router)
 				t.Cleanup(server.Close)
 				path, method, body := fmt.Sprintf("/accounts/%d", v.ID), http.MethodDelete, ""

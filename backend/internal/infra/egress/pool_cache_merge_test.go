@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,7 +54,7 @@ func TestCachedPoolMembersMergesConcurrentReloads(t *testing.T) {
 		pool:   map[uint64]domain.Pool{7: {ID: 7, Name: "p", Enabled: true}},
 		member: map[uint64][]domain.Node{7: {{ID: 71, Name: "m1", Enabled: true, Health: 1}}},
 	}, gate: make(chan struct{})}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	ctx := context.Background()

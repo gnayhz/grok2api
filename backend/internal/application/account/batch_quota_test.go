@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -11,9 +12,9 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestBatchRefreshQuotaSupportsWebAndConsole(t *testing.T) {
@@ -50,7 +51,7 @@ func TestBatchRefreshQuotaSupportsWebAndConsole(t *testing.T) {
 				ids = append(ids, value.ID)
 			}
 			adapter := &selectedQuotaAdapter{providerValue: providerValue}
-			service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
+			service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 
 			succeeded, failed, err := service.BatchRefreshQuota(ctx, ids)
 			if err != nil {

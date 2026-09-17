@@ -36,9 +36,3 @@ func IsResponseHeaderTimeout(err error) bool {
 func IsUpstreamStreamIdleTimeout(err error) bool {
 	return errors.Is(err, ErrUpstreamStreamIdleTimeout)
 }
-
-// IsUpstreamOutputLoop reports whether the stream was aborted by the repeated
-// delta doom-loop guard rather than a transport interrupt.
-func IsUpstreamOutputLoop(err error) bool {
-	return errors.Is(err, ErrUpstreamOutputLoop)
-}

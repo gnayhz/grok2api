@@ -311,3 +311,13 @@ func (r *countingReadCloser) Close() error {
 	r.closes.Add(1)
 	return nil
 }
+
+// wrapBuildSemanticIdle 是测试缝:直接构造 semanticIdleReadCloser 以断言
+// 语义空闲超时的读取行为;生产路径经 newBuildResponseStream(canonical
+// 形态)进入同一类型。
+func wrapBuildSemanticIdle(body io.ReadCloser, idle time.Duration) io.ReadCloser {
+	if body == nil || idle <= 0 {
+		return body
+	}
+	return &semanticIdleReadCloser{inner: body, idle: idle, remaining: idle}
+}

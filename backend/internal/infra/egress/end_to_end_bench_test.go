@@ -24,7 +24,7 @@ func TestRuntimeEndToEndLatencyAndResourceStability(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("healthy payload")) }))
 	defer server.Close()
-	raw, err := newBuildClient("", time.Second)
+	raw, err := newBuildClientConfigured("", time.Second, buildConnectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

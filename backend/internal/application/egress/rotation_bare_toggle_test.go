@@ -2,6 +2,7 @@ package egress
 
 import (
 	"errors"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -21,6 +22,7 @@ func TestPoolNodeAndRotationWebhookAreMutuallyExclusive(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := NewService(nil, cipher)
+	service.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
 	poolURL := "socks5h://pool.example:1080"
 	poolEncrypted, err := cipher.Encrypt(poolURL)
 	if err != nil {

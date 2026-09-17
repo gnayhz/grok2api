@@ -85,7 +85,7 @@ func TestRuntimeHealthyResponseNotBlockedByFeedbackStorage(t *testing.T) {
 		},
 		entered: make(chan context.Context, 1), gate: make(chan struct{}),
 	}
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 
 import { formatDuration, formatNumber } from "@/shared/lib/format";
 import { formatUSDTicks } from "@/shared/lib/usd";
-import type { DashboardDTO } from "@/features/dashboard/dashboard-api";
-import type { AuditSummaryDTO } from "./request-audits-api";
+import type { DashboardDTO } from "@/entities/dashboard/dashboard-api";
+import type { AuditSummaryDTO } from "@/entities/audit/audit-api";
 
 export const AuditSummary = memo(function AuditSummary({ summary, loading, updating, filtered, periodStats, periodLoading }: {
   summary?: AuditSummaryDTO;

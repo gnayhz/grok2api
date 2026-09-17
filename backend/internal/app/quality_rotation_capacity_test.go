@@ -18,6 +18,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/quality/enforcement"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -61,7 +62,9 @@ func TestQualityRotationCommandsRespectNetworkCapacity(t *testing.T) {
 			}
 			repo := relational.NewEgressRepository(db)
 			networkA, networkB := egressapp.NewService(repo, cipher), egressapp.NewService(repo, cipher)
-			manager := infraegress.NewManager(repo, cipher)
+			networkA.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
+			networkB.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(nil))
+			manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 			defer manager.Close(context.Background())
 			var lockA, lockB repository.DistributedLock
 			var rateA, rateB repository.RollingRateLimiter
@@ -90,7 +93,9 @@ func TestQualityRotationCommandsRespectNetworkCapacity(t *testing.T) {
 				rateB = rateA
 			}
 			decisions := make(chan bool, 16)
-			cfg := egressapp.DefaultRotationConfig()
+			cfg := egressapp.RotationConfig{Enabled: true, MaxAttemptsPerQuarantine: 3, MinNodeInterval: 3 * time.Minute,
+				MaxGlobalPerHour: 6, WebhookTimeout: 15 * time.Second, WebhookRetries: 2, SettleDelay: 20 * time.Second,
+				ProbeTimeout: 2 * time.Minute, ProbeInterval: 5 * time.Second}
 			cfg.Enabled, cfg.MaxGlobalPerHour, cfg.MaxAttemptsPerQuarantine, cfg.WebhookRetries = true, 2, 1, 0
 			for i, network := range []*egressapp.Service{networkA, networkB} {
 				network.SetQualityQuarantiner(manager)

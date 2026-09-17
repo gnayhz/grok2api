@@ -1,6 +1,6 @@
 import { createContext } from "react";
 
-import type { AdminDTO } from "@/shared/api/client";
+import type { AdminDTO } from "@/shared/auth/admin-dto";
 
 export type AuthStatus = "restoring" | "authenticated" | "anonymous" | "unavailable";
 

@@ -3,12 +3,12 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -55,8 +55,8 @@ func TestCurrentDeletionPreventsResurrection(t *testing.T) {
 			}
 			repo := relational.NewAccountRepository(db)
 			port := &tombstoneCurrentRepository{AccountRepository: repo}
-			service := NewService(port, nil, nil, nil, provider.NewRegistry(tombstoneImportAdapter{email: "g20@example.test"}), cipher, nil)
-			first, err := service.ImportCredentials(ctx, []byte("doc"))
+			service := NewService(port, nil, nil, nil, providerimpl.NewRegistry(tombstoneImportAdapter{email: "g20@example.test"}), cipher, security.RandomTokenSource{}, nil, nil, nil)
+			first, err := service.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("doc")}, nil, nil)
 			if err != nil || first.Created != 1 {
 				t.Fatalf("first import: %+v, %v", first, err)
 			}
@@ -83,7 +83,7 @@ func TestCurrentDeletionPreventsResurrection(t *testing.T) {
 					}
 				}
 			}
-			second, err := service.ImportCredentials(ctx, []byte("doc"))
+			second, err := service.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("doc")}, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

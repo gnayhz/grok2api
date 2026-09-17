@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +16,12 @@ import (
 	"testing"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
 )
@@ -122,11 +124,11 @@ func TestWebProfileHTTPCompletionBelongsToMaterial(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 			statsig := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{'s'}, 70))
-			adapter := NewAdapter(Config{BaseURL: upstream.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+			adapter := NewAdapter(Config{BaseURL: upstream.URL, StatsigMode: "manual", StatsigManualValue: statsig}, infraegress.NewManagerWithLimits(egressRepositoryStub{}, cipher, netbudget.Limits{}), cipher, nil, nil)
 			adapter.accountsBaseURL = upstream.URL
-			service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			router := gin.New()
-			accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+			accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, nil)}).Register(router.Group("/api/admin/v1"))
 			server := httptest.NewServer(router)
 			t.Cleanup(server.Close)
 			path := fmt.Sprintf("/accounts/web/%d/%s", v.ID, tc.endpoint)

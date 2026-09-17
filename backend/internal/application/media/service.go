@@ -77,11 +77,7 @@ type VideoStats struct {
 	Queued     int64
 }
 
-func NewService(assets repository.MediaAssetRepository, jobs repository.MediaJobRepository, objects repository.MediaObjectStorage, cleanupLock repository.DistributedLock, cfg Config) *Service {
-	return NewServiceWithTickets(assets, jobs, nil, objects, cleanupLock, cfg)
-}
-
-// NewServiceWithTickets 构造包含视频上传票据能力的媒体服务。
+// NewServiceWithTickets 构造媒体服务；无视频上传票据能力的调用方传 nil tickets。
 func NewServiceWithTickets(assets repository.MediaAssetRepository, jobs repository.MediaJobRepository, tickets repository.MediaUploadTicketRepository, objects repository.MediaObjectStorage, cleanupLock repository.DistributedLock, cfg Config) *Service {
 	return &Service{
 		assets: assets, jobs: jobs, tickets: tickets, objects: objects, cleanupLock: cleanupLock,

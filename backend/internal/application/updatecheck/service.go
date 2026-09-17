@@ -2,24 +2,15 @@ package updatecheck
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
-)
 
-const (
-	latestReleaseAPI = "https://api.github.com/repos/chenyme/grok2api/releases/latest"
-	maxReleaseBytes  = 1 << 20
-	maxNotesRunes    = 4096
+	portupdatecheck "github.com/chenyme/grok2api/backend/internal/port/updatecheck"
 )
 
 type Status string
@@ -42,9 +33,16 @@ type Snapshot struct {
 	Error           string     `json:"error"`
 }
 
+// Release 与 ReleaseSource 是内圈端口类型；应用层在此复用，
+// 使 infra 实现与 application 消费共享同一合同而不互相 import。
+type (
+	Release       = portupdatecheck.Release
+	ReleaseSource = portupdatecheck.ReleaseSource
+)
+
 type Service struct {
 	current string
-	client  *http.Client
+	source  ReleaseSource
 	now     func() time.Time
 
 	mu       sync.RWMutex
@@ -52,17 +50,14 @@ type Service struct {
 	checks   singleflight.Group
 }
 
-func NewService(currentVersion string, client *http.Client) *Service {
+func NewService(currentVersion string, source ReleaseSource) *Service {
 	currentVersion = strings.TrimSpace(currentVersion)
 	if currentVersion == "" {
 		currentVersion = "dev"
 	}
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
 	return &Service{
 		current: currentVersion,
-		client:  client,
+		source:  source,
 		now:     time.Now,
 		snapshot: Snapshot{
 			CurrentVersion: currentVersion,
@@ -79,7 +74,10 @@ func (s *Service) Snapshot() Snapshot {
 
 func (s *Service) Check(ctx context.Context) Snapshot {
 	result, err, _ := s.checks.Do("latest", func() (any, error) {
-		return s.fetchLatest(ctx)
+		if s.source == nil {
+			return Release{}, errors.New("更新检查来源未配置")
+		}
+		return s.source.LatestRelease(ctx)
 	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,7 +86,7 @@ func (s *Service) Check(ctx context.Context) Snapshot {
 		s.snapshot.Error = err.Error()
 		return cloneSnapshot(s.snapshot)
 	}
-	release := result.(latestRelease)
+	release := result.(Release)
 	checkedAt := s.now().UTC()
 	current, currentOK := parseSemanticVersion(s.current)
 	latest, latestOK := parseSemanticVersion(release.Tag)
@@ -111,55 +109,6 @@ func (s *Service) Check(ctx context.Context) Snapshot {
 		s.snapshot.Status = StatusUpdateAvailable
 	}
 	return cloneSnapshot(s.snapshot)
-}
-
-type latestRelease struct {
-	Tag   string
-	URL   string
-	Notes string
-}
-
-func (s *Service) fetchLatest(ctx context.Context) (latestRelease, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseAPI, nil)
-	if err != nil {
-		return latestRelease{}, err
-	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	// UA 不携带精确版本号:该请求发往第三方 api.github.com, 版本号属于被动
-	// 指纹; 检查结果只在管理端展示, UA 无需精确到版本。
-	request.Header.Set("User-Agent", "grok2api/update-check")
-	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	response, err := s.client.Do(request)
-	if err != nil {
-		return latestRelease{}, fmt.Errorf("检查 GitHub Release 失败: %w", err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return latestRelease{}, fmt.Errorf("GitHub Release 检查失败（HTTP %d）", response.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxReleaseBytes+1))
-	if err != nil {
-		return latestRelease{}, fmt.Errorf("读取 GitHub Release 响应: %w", err)
-	}
-	if len(data) > maxReleaseBytes {
-		return latestRelease{}, errors.New("GitHub Release 响应超过安全上限")
-	}
-	var payload struct {
-		Tag  string `json:"tag_name"`
-		Body string `json:"body"`
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return latestRelease{}, fmt.Errorf("解析 GitHub Release 响应: %w", err)
-	}
-	payload.Tag = strings.TrimSpace(payload.Tag)
-	if payload.Tag == "" {
-		return latestRelease{}, errors.New("GitHub Release 未返回版本号")
-	}
-	return latestRelease{
-		Tag:   payload.Tag,
-		URL:   "https://github.com/chenyme/grok2api/releases/tag/" + url.PathEscape(payload.Tag),
-		Notes: truncateRunes(strings.TrimSpace(payload.Body), maxNotesRunes),
-	}, nil
 }
 
 type semanticVersion struct {
@@ -246,14 +195,6 @@ func projectHotfix(value string) (bool, uint64) {
 		return false, 0
 	}
 	return true, number
-}
-
-func truncateRunes(value string, limit int) string {
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit])
 }
 
 func cloneSnapshot(value Snapshot) Snapshot {

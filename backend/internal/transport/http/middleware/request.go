@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,11 +18,17 @@ const RequestIDKey = "requestId"
 const maxRequestIDLength = 64
 
 // RequestID 为每个请求生成稳定关联 ID，并写入响应头。
-func RequestID() gin.HandlerFunc {
+func RequestID(tokens portcrypto.TokenSource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
 		if !validRequestID(requestID) {
-			requestID, _ = security.NewOpaqueToken(12)
+			requestID = ""
+			// An absent token source is an explicit degraded state, not a
+			// reason to construct a default one here; the timestamp fallback
+			// below keeps requests identifiable.
+			if tokens != nil {
+				requestID, _ = tokens.NewOpaqueToken(12)
+			}
 			if requestID == "" {
 				requestID = "req-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 			}

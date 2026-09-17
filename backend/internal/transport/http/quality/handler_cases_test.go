@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/chenyme/grok2api/backend/internal/quality/court"
 	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/guard"
@@ -20,6 +18,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
@@ -41,13 +40,13 @@ func TestGetCasesIncludesParties(t *testing.T) {
 	}
 	// 被告账号 + 共同被冻结出口：验证案件当事方投影
 	// 账号档(hasAccount 分支)与出口档两条路径。
-	if err := reg.UpsertParty(ctx, registry.PartyRecord{
+	if err := reg.UpsertParty(ctx, model.PartyRecord{
 		CaseID: caseID, Kind: model.PartyAccount, AccountID: 42,
 		Role: model.RoleDefendant, Disposition: model.DispositionRemanded,
 	}); err != nil {
 		t.Fatalf("UpsertParty(account): %v", err)
 	}
-	if err := reg.UpsertParty(ctx, registry.PartyRecord{
+	if err := reg.UpsertParty(ctx, model.PartyRecord{
 		CaseID: caseID, Kind: model.PartyExit, NodeID: 7, Epoch: 3,
 		Role: model.RoleCoRemanded, Disposition: model.DispositionRemanded,
 	}); err != nil {
@@ -174,22 +173,22 @@ func TestGetCasesDoesNotExposeRetiredRemandDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.UpsertParty(ctx, registry.PartyRecord{
+	if err := reg.UpsertParty(ctx, model.PartyRecord{
 		CaseID: caseID, Kind: model.PartyAccount, AccountID: 42,
 		Role: model.RoleDefendant, Disposition: model.DispositionRemanded,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.UpsertParty(ctx, registry.PartyRecord{
+	if err := reg.UpsertParty(ctx, model.PartyRecord{
 		CaseID: caseID, Kind: model.PartyExit, NodeID: 7, Epoch: 0,
 		Role: model.RoleCoRemanded, Disposition: model.DispositionRemanded,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.TransitionAccount(ctx, registry.AccountTransitionRequest{AccountID: 42, To: model.AccountRemanded, CaseID: caseID}); err != nil {
+	if err := reg.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: 42, To: model.AccountRemanded, CaseID: caseID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 7, Epoch: 0, To: model.ExitRemanded, CaseID: caseID}); err != nil {
+	if err := reg.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 7, Epoch: 0, To: model.ExitRemanded, CaseID: caseID}); err != nil {
 		t.Fatal(err)
 	}
 	handler := &Handler{deps: Deps{Queries: testManagementQueries(t, reg, nil)}}
@@ -336,7 +335,7 @@ func TestOverviewSurfacesObservationDrops(t *testing.T) {
 // mustEvidence 在注册库同库上构建证据局(overview 聚合需要)。
 func mustEvidence(t *testing.T, reg *registry.Registry) *evidence.Store {
 	t.Helper()
-	store, err := evidence.New(context.Background(), reg.DB(), evidence.DefaultConfig())
+	store, err := evidence.New(context.Background(), reg.DB(), model.DefaultEvidenceConfig())
 	if err != nil {
 		t.Fatalf("evidence.New: %v", err)
 	}
@@ -450,7 +449,7 @@ func testManagementQueries(t *testing.T, reg *registry.Registry, configure func(
 	observations := mustEvidence(t, reg)
 	cfg := court.DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
-	service := court.New(cfg, reg, observations, nil)
+	service := court.New(cfg, reg, observations, nil, registry.NewProbeTaskStore(reg))
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	deps := management.QueryDependencies{Registry: reg, Evidence: observations, Court: service,
 		Probes: registry.NewProbeTaskStore(reg), Guard: guard.New(guard.DefaultConfig(), nil), Nodes: sqlTestNodeProfiles{reg.DB()}}

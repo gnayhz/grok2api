@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { settingsTestConfig } from "./settings-test-fixture.ts";
-import { settingsSchema, toSettingsDTO, toSettingsForm } from "./settings-model.ts";
+import { settingsSchema, toSettingsDTO, toSettingsForm } from "@/entities/settings/settings-form.ts";
 
 test("gateway edits do not validate or write the guard read-only projection", () => {
   const config = settingsTestConfig();

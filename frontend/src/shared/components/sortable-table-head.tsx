@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { TableHead } from "@/components/ui/table";
+import { TableHead } from "@/shared/ui/table";
 import { cn } from "@/shared/lib/cn";
 import type { SortOrder } from "@/shared/lib/table-sort";
 

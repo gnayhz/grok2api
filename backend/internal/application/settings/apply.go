@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 )
 
 // ApplyTarget installs one consumer's hot configuration. It must be repeatable,
@@ -13,7 +13,7 @@ import (
 // effects; it is retried with the complete saved intent, never an inverse update.
 type ApplyTarget struct {
 	Name  string
-	Apply func(context.Context, config.Config) error
+	Apply func(context.Context, settingsdomain.Config) error
 }
 
 type ApplyStatus struct {
@@ -35,7 +35,7 @@ type NotificationStatus struct {
 
 // Caller holds updateMu across persistence and all effects. Snapshot readers use
 // only mu, so they can observe saved/pending while a consumer is applying.
-func (s *Service) runApply(ctx context.Context, cfg config.Config, revision uint64) {
+func (s *Service) runApply(ctx context.Context, cfg settingsdomain.Config, revision uint64) {
 	for i, target := range s.targets {
 		s.mu.RLock()
 		alreadyApplied := s.applyStates[i].AppliedRevision == revision
@@ -64,7 +64,7 @@ func (s *Service) runApply(ctx context.Context, cfg config.Config, revision uint
 	s.lastAppliedRevision = revision
 }
 
-func invokeApply(ctx context.Context, target ApplyTarget, cfg config.Config, revision uint64) (failure string) {
+func invokeApply(ctx context.Context, target ApplyTarget, cfg settingsdomain.Config, revision uint64) (failure string) {
 	defer func() {
 		if recover() != nil {
 			failure = "panic"

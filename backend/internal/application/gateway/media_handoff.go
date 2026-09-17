@@ -2,13 +2,14 @@ package gateway
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"sync"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // mediaHandoff owns a unary/streaming media body after account selection. The
@@ -83,7 +84,7 @@ func (d *mediaHandoff) cancel() {
 }
 
 func (d *mediaHandoff) result() *Result {
-	d.response.Body = &onceCloseBody{ReadCloser: d.response.Body}
+	d.response.Body = &selector.OnceCloseBody{ReadCloser: d.response.Body}
 	stopCancel := context.AfterFunc(d.ctx, d.cancel)
 	finalize := func(usage Usage, id, code string) { stopCancel(); d.finalize(usage, id, code) }
 	return &Result{

@@ -3,12 +3,13 @@ package account
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
 // This fixture is identical at G21 and G22. It includes M07 current-state reads,
@@ -27,7 +28,7 @@ func BenchmarkAccountMaintenanceOperationCost(b *testing.B) {
 					b.Fatal(err)
 				}
 				adapter := &credentialRefreshAdapter{billing: accountdomain.Billing{MonthlyLimit: 100, Used: 12}}
-				s := NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+				s := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 				b.ReportAllocs()
 				b.ResetTimer()
 				for b.Loop() {

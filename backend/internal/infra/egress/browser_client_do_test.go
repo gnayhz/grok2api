@@ -25,7 +25,7 @@ func TestBrowserClientDoRoundTrip(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := newBrowserClient("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+	client, err := newBrowserClientWithBudget("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36", nil)
 	if err != nil {
 		t.Fatalf("newBrowserClient: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestBrowserClientUncompressedTranslation(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := newBrowserClient("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+	client, err := newBrowserClientWithBudget("", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

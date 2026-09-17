@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"testing"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -36,7 +37,7 @@ func newAcquireBenchManagerSize(b *testing.B, size int) (*Manager, *e2eRepo) {
 		}
 		repo.nodes = append(repo.nodes, domain.Node{ID: i, Enabled: true, Health: 1, EncryptedProxyURL: encrypted})
 	}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	b.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return manager, repo
 }

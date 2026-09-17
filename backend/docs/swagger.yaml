@@ -169,6 +169,60 @@ info:
   title: Grok2API
   version: "1.0"
 paths:
+  /api/admin/v1/media/inputs/import:
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导入外部媒体为临时输入（管理端）
+      tags:
+      - Media
+  /api/admin/v1/media/inputs/upload:
+    post:
+      consumes:
+      - multipart/form-data
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "413":
+          description: Request Entity Too Large
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 上传临时媒体输入（multipart，管理端）
+      tags:
+      - Media
   /healthz:
     get:
       produces:
@@ -377,60 +431,6 @@ paths:
       summary: 获取归档图片
       tags:
       - Images
-  /v1/media/inputs/import:
-    post:
-      consumes:
-      - application/json
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            additionalProperties: true
-            type: object
-        "400":
-          description: Bad Request
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - BearerAuth: []
-      summary: 导入外部媒体为临时输入
-      tags:
-      - Media
-  /v1/media/inputs/upload:
-    post:
-      consumes:
-      - multipart/form-data
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            additionalProperties: true
-            type: object
-        "400":
-          description: Bad Request
-          schema:
-            additionalProperties: true
-            type: object
-        "413":
-          description: Request Entity Too Large
-          schema:
-            additionalProperties: true
-            type: object
-        "503":
-          description: Service Unavailable
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - BearerAuth: []
-      summary: 上传临时媒体输入（multipart）
-      tags:
-      - Media
   /v1/media/uploads/{token}:
     put:
       consumes:
@@ -774,6 +774,31 @@ paths:
       security:
       - BearerAuth: []
       summary: 查询异步视频任务
+      tags:
+      - Videos
+  /v1/videos/{request_id}/content:
+    get:
+      parameters:
+      - description: Request ID
+        in: path
+        name: request_id
+        required: true
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: file
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 下载异步视频产物
       tags:
       - Videos
   /v1/videos/edits:

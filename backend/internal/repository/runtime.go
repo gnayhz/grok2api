@@ -112,15 +112,14 @@ const (
 	// InvalidationAccountHealthChanged carries the exact request-path health
 	// mutation for one account. Unlike an arbitrary account state change, it can
 	// be applied as a small runtime overlay without rebuilding the provider pool.
-	InvalidationAccountHealthChanged      InvalidationKind = "account_health_changed"
-	InvalidationAccountCredentialChanged  InvalidationKind = "account_credential_changed"
-	InvalidationAccountCapabilityChanged  InvalidationKind = "account_capability_changed"
-	InvalidationAccountBillingChanged     InvalidationKind = "account_billing_changed"
-	InvalidationAccountQuotaChanged       InvalidationKind = "account_quota_changed"
-	InvalidationAccountRecoveryChanged    InvalidationKind = "account_recovery_changed"
-	InvalidationAccountEgressLeaseChanged InvalidationKind = "account_egress_lease_changed"
-	InvalidationAccountModelQuotaChanged  InvalidationKind = "account_model_quota_changed"
-	InvalidationClientKeyChanged          InvalidationKind = "client_key_changed"
+	InvalidationAccountHealthChanged     InvalidationKind = "account_health_changed"
+	InvalidationAccountCredentialChanged InvalidationKind = "account_credential_changed"
+	InvalidationAccountCapabilityChanged InvalidationKind = "account_capability_changed"
+	InvalidationAccountBillingChanged    InvalidationKind = "account_billing_changed"
+	InvalidationAccountQuotaChanged      InvalidationKind = "account_quota_changed"
+	InvalidationAccountRecoveryChanged   InvalidationKind = "account_recovery_changed"
+	InvalidationAccountModelQuotaChanged InvalidationKind = "account_model_quota_changed"
+	InvalidationClientKeyChanged         InvalidationKind = "client_key_changed"
 )
 
 type InvalidationLayer string
@@ -156,7 +155,7 @@ func (e InvalidationEvent) Layer() InvalidationLayer {
 		return InvalidationLayerRoute
 	case InvalidationModelBindingChanged, InvalidationAccountCapabilityChanged, InvalidationAccountModelQuotaChanged:
 		return InvalidationLayerOverlay
-	case InvalidationAccountStateChanged, InvalidationAccountHealthChanged, InvalidationAccountCredentialChanged, InvalidationAccountBillingChanged, InvalidationAccountQuotaChanged, InvalidationAccountRecoveryChanged, InvalidationAccountEgressLeaseChanged:
+	case InvalidationAccountStateChanged, InvalidationAccountHealthChanged, InvalidationAccountCredentialChanged, InvalidationAccountBillingChanged, InvalidationAccountQuotaChanged, InvalidationAccountRecoveryChanged:
 		return InvalidationLayerBase
 	case InvalidationClientKeyChanged:
 		return InvalidationLayerClientKey

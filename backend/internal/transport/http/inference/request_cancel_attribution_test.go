@@ -42,7 +42,7 @@ func TestHTTPRequestLifetimeCancellationDoesNotClaimClientDisconnect(t *testing.
 								<-r.Context().Done()
 								return true
 							}})
-							f.gateway.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: false, MaxAttempts: 1})
+							f.gateway.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: false, MaxAttempts: 1}))
 							serverCtx, cancelServer := context.WithCancel(context.Background())
 							if cause == "deadline" {
 								cancelServer()

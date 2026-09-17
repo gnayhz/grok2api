@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -21,7 +22,7 @@ func (s stubExitEligibility) ExitSchedulable(nodeID uint64) bool {
 // 租约收口点拦截质量轴不合格节点;直连(节点 0)放行。
 func TestExitEligibilitySeamBlocksLease(t *testing.T) {
 	ctx := context.Background()
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.SetExitEligibility(stubExitEligibility{ineligible: map[uint64]bool{7: true}})
 	node := egress.Node{ID: 7, Name: "seam-node", Enabled: true, Health: 1}
@@ -39,7 +40,7 @@ func TestExitEligibilitySeamBlocksLease(t *testing.T) {
 // TestExitEligibilityProbeBypass 锚定 B2 生产/探针双通道:取证上下文
 // 放行出口资格缝隙。
 func TestExitEligibilityProbeBypass(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.SetExitEligibility(stubExitEligibility{ineligible: map[uint64]bool{9: true}})
 	node := egress.Node{ID: 9, Name: "probe-node", Enabled: true, Health: 1}
@@ -51,7 +52,7 @@ func TestExitEligibilityProbeBypass(t *testing.T) {
 
 // TestExitEligibilityNilSeamUnchanged 缝隙未注入时恒放行(D2 剥离态)。
 func TestExitEligibilityNilSeamUnchanged(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	manager := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	node := egress.Node{ID: 11, Name: "free-node", Enabled: true, Health: 1}
 	if _, _, err := manager.leaseForNodeWithOptions(context.Background(), egress.ScopeBuild, "", "", false, node, clientOptions{}); errors.Is(err, ErrRoutingTargetUnavailable) {
@@ -62,7 +63,7 @@ func TestExitEligibilityNilSeamUnchanged(t *testing.T) {
 // TestDialerSeamSatisfiedByManager 编译期断言的行为面(D3-2):
 // Manager 满足拨号器缝隙接口——底座内建实现,批4 质量层可替换。
 func TestDialerSeamSatisfiedByManager(t *testing.T) {
-	var dialer Dialer = NewManager(egressRepositoryTestStub{}, nil)
+	var dialer Dialer = NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	if dialer == nil {
 		t.Fatal("Manager 必须满足 Dialer 缝隙接口")
 	}

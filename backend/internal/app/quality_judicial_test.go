@@ -26,7 +26,7 @@ func TestUpgradePreservesExistingQualityState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.TransitionAccount(ctx, qualityregistry.AccountTransitionRequest{
+	if err := reg.TransitionAccount(ctx, model.AccountTransitionRequest{
 		AccountID: 7, To: model.AccountRemanded, CaseID: caseID,
 	}); err != nil {
 		t.Fatal(err)

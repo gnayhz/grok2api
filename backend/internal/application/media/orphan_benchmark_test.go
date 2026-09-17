@@ -67,7 +67,7 @@ func BenchmarkOrphanSweepSharedMetadata(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	service := NewService(source, nil, disk, nil, Config{})
+	service := NewServiceWithTickets(source, nil, nil, disk, nil, Config{})
 	now := time.Now().UTC()
 	b.ReportAllocs()
 	b.ResetTimer()

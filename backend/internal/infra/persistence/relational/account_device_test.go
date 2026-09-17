@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"os"
 	"strconv"
 	"sync"
@@ -13,10 +14,10 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	redisclient "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -171,9 +172,9 @@ func TestAccountDeviceGrantCompletionAcrossSQLAndRuntime(t *testing.T) {
 							case "panic_releases_claim":
 								adapter.panics = true
 							}
-							registry := provider.NewRegistry(adapter)
-							owner := accountapp.NewService(ra, NewAuditRepository(a), store, nil, registry, cipher, nil)
-							peer := accountapp.NewService(rb, NewAuditRepository(b), second, nil, registry, cipher, nil)
+							registry := providerimpl.NewRegistry(adapter)
+							owner := accountapp.NewService(ra, NewAuditRepository(a), store, nil, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+							peer := accountapp.NewService(rb, NewAuditRepository(b), second, nil, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 							var callErr error
 							if adapter.entered != nil {
 								var once sync.Once

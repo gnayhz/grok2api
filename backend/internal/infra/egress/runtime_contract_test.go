@@ -64,7 +64,7 @@ func TestRuntimeRetiredActiveClientKeepsBudgetAndStream(t *testing.T) {
 
 func TestRuntimeCloseCancelsSharedSolveAndJoinsIt(t *testing.T) {
 	solver := &notifiedSolver{entered: make(chan struct{}), gate: make(chan struct{})}
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	m.clearance.solver = solver
 	m.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", Timeout: time.Minute})
 	done := make(chan error, 1)
@@ -95,7 +95,7 @@ func TestRuntimeCloseCancelsSharedSolveAndJoinsIt(t *testing.T) {
 
 func TestClearanceConfigChangeRejectsOldSolve(t *testing.T) {
 	solver := &notifiedSolver{entered: make(chan struct{}), gate: make(chan struct{})}
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	m.clearance.solver = solver
 	m.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", TargetURL: "https://first.test", Timeout: time.Second})
@@ -119,7 +119,7 @@ func TestClearanceConfigChangeRejectsOldSolve(t *testing.T) {
 }
 
 func TestLeaseObservationIgnoresBusinessAndDownstreamErrors(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	lease := &Lease{NodeID: 1, Scope: domain.ScopeBuild, clearanceManager: m, healthBaseline: domain.HealthState{Health: 1}}
 	for _, err := range []error{errors.New("invalid JSON"), errors.New("downstream write failed"), neterrorpkg.ErrUpstreamOutputLoop} {
@@ -148,7 +148,7 @@ func TestNodeEditDuringClientConstructionCannotPublishOldLease(t *testing.T) {
 	config := domain.DefaultOperationsConfig()
 	config.ScopeTargets = map[domain.Scope]domain.RoutingTarget{domain.ScopeBuild: {Mode: domain.RoutingTargetNode, NodeID: 7}}
 	repo.config = config
-	m := NewManager(repo, cipher)
+	m := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	defer m.Close(context.Background())
 	entered, gate := make(chan struct{}), make(chan struct{})
 	var builds atomic.Int32
@@ -227,14 +227,14 @@ func TestCanceledSharedLoadWaitersDoNotAccumulate(t *testing.T) {
 }
 
 func TestOldLeaseRejectionDoesNotInvalidateRefreshedClearance(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	c := m.clearance
-	if !c.cacheClearance("node:7", clearanceSolution{Cookies: "old", UserAgent: "UA"}, time.Now(), 0, "fingerprint", "binding", time.Minute) {
+	if _, ok := c.cacheClearanceSolution("node:7", clearanceSolution{Cookies: "old", UserAgent: "UA"}, time.Now(), 0, "fingerprint", "binding", time.Minute); !ok {
 		t.Fatal("cache old")
 	}
 	lease := &Lease{clearanceManager: m, clearanceKey: "node:7", clearanceGeneration: c.generationFor("node:7")}
-	if !c.cacheClearance("node:7", clearanceSolution{Cookies: "fresh", UserAgent: "UA"}, time.Now(), 0, "fingerprint", "binding", time.Minute) {
+	if _, ok := c.cacheClearanceSolution("node:7", clearanceSolution{Cookies: "fresh", UserAgent: "UA"}, time.Now(), 0, "fingerprint", "binding", time.Minute); !ok {
 		t.Fatal("cache fresh")
 	}
 	lease.InvalidateClearance()

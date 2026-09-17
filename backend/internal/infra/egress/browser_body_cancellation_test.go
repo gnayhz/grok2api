@@ -26,7 +26,7 @@ func TestBrowserBodyPreservesRequestCancellation(t *testing.T) {
 				close(serverDone)
 			}))
 			defer server.Close()
-			client, err := newBrowserClient("", DefaultUserAgent)
+			client, err := newBrowserClientWithBudget("", DefaultUserAgent, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +95,7 @@ func BenchmarkBrowserBodyCompletion(b *testing.B) {
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); _, _ = io.WriteString(w, payload) }))
 	defer server.Close()
-	client, err := newBrowserClient("", DefaultUserAgent)
+	client, err := newBrowserClientWithBudget("", DefaultUserAgent, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

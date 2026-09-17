@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,7 +14,6 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
 type webProfileCostAdapter struct{ calls int }
@@ -48,7 +49,7 @@ func BenchmarkAccountWebProfileCost(b *testing.B) {
 					b.Fatal(err)
 				}
 				adapter := &webProfileCostAdapter{}
-				service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+				service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 				var operations int
 				b.ReportAllocs()
 				b.ResetTimer()

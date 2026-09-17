@@ -9,10 +9,11 @@ import (
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/cfcookies"
 )
 
 func TestSanitizeCloudflareCookiesDropsControlsAndNonCloudflareValues(t *testing.T) {
-	value := SanitizeCloudflareCookies("CF_CLEARANCE=valid; __cf_bm=bad\r\nX-Leak: yes; sso=secret; cf_chl_test=ok")
+	value := cfcookies.Sanitize("CF_CLEARANCE=valid; __cf_bm=bad\r\nX-Leak: yes; sso=secret; cf_chl_test=ok")
 	if value != "cf_clearance=valid; cf_chl_test=ok" {
 		t.Fatalf("sanitized cookies = %q", value)
 	}
@@ -281,11 +282,70 @@ func TestPublicNodePoolModeMatchesDomainRule(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			public := s.publicNode(tc.node, nil)
-			if public.RotatingEndpoint != tc.want {
-				t.Fatalf("publicNode.RotatingEndpoint = %v, want %v", public.RotatingEndpoint, tc.want)
+			decrypted := ""
+			if tc.node.EncryptedProxyURL != "" {
+				decrypted, _ = cipher.Decrypt(tc.node.EncryptedProxyURL)
+			}
+			want := tc.node.IsPoolModeNode(decrypted)
+			if want != tc.want {
+				t.Fatalf("domain.IsPoolModeNode(%q) = %v, fixture expects %v", decrypted, want, tc.want)
+			}
+			if public.RotatingEndpoint != want {
+				t.Fatalf("publicNode.RotatingEndpoint = %v, want domain pool mode %v", public.RotatingEndpoint, want)
 			}
 			if public.ProxyPool != tc.wantRaw {
 				t.Fatalf("publicNode.ProxyPool = %v, want raw flag %v", public.ProxyPool, tc.wantRaw)
+			}
+		})
+	}
+}
+
+// 旋转端点的健康投影必须与 domain 唯一实现一致:应用层只提供节点状态,
+// 不得再写第二份 (1, 0, nil, "") 字面量。固定出口保留真实健康——隔离与
+// 冷却都必须在列表里可见,否则运维看不到降智出口。
+func TestPublicNodeHealthProjectionMatchesDomain(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateURL, err := cipher.Encrypt("http://{account}:secret@gw.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainURL, err := cipher.Encrypt("http://plain.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cooldown := time.Now().UTC().Add(time.Hour)
+	service := &Service{cipher: cipher}
+	cases := []struct {
+		name     string
+		node     domain.Node
+		rotating bool
+	}{
+		{"rotating endpoint hides health", domain.Node{
+			ID: 1, EncryptedProxyURL: templateURL,
+			Health: 0.05, FailureCount: 6, CooldownUntil: &cooldown, LastError: domain.LastErrorExitIPQuality,
+		}, true},
+		{"fixed endpoint keeps health", domain.Node{
+			ID: 2, EncryptedProxyURL: plainURL,
+			Health: 0.05, FailureCount: 6, CooldownUntil: &cooldown, LastError: domain.LastErrorTransport,
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			public := service.publicNode(tc.node, nil)
+			if public.RotatingEndpoint != tc.rotating {
+				t.Fatalf("RotatingEndpoint = %v, want %v", public.RotatingEndpoint, tc.rotating)
+			}
+			want := tc.node.HealthState()
+			if tc.rotating {
+				want = domain.RotatingEndpointHealth(want)
+			}
+			if public.Health != want.Health || public.FailureCount != want.FailureCount || public.CooldownUntil != want.CooldownUntil || public.LastError != want.LastError {
+				t.Fatalf("public health = (%v, %d, %v, %q), want domain projection (%v, %d, %v, %q)",
+					public.Health, public.FailureCount, public.CooldownUntil, public.LastError,
+					want.Health, want.FailureCount, want.CooldownUntil, want.LastError)
 			}
 		})
 	}

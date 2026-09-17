@@ -6,14 +6,8 @@ import (
 	"time"
 )
 
-// RunMaintenance keeps the compatibility entry while running its independent
-// passes concurrently. A slow subscription cannot delay a due health probe.
-func (s *Service) RunMaintenance(ctx context.Context) error {
-	results := make(chan error, 2)
-	go func() { results <- s.RunSubscriptionMaintenance(ctx) }()
-	go func() { results <- s.RunProbeMaintenance(ctx) }()
-	return errors.Join(<-results, <-results)
-}
+// RunSubscriptionMaintenance 同步到期订阅源。组合根(app/application.go)
+// 分别调度本方法与 RunProbeMaintenance,两条 pass 相互独立。
 func (s *Service) RunSubscriptionMaintenance(ctx context.Context) error {
 	if !s.subscriptionMaintenance.TryLock() {
 		return nil

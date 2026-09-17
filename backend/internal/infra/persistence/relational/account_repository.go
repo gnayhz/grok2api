@@ -4,10 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
@@ -50,101 +48,24 @@ const (
 	accountPaidBillingSignals   = `(` + accountPaidPlanSignal + ` OR billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0)`
 	accountPaidBillingPredicate = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountPaidBillingSignals + `)`
 	// 仅 grok_build 的管理员确认 Super entitlement；与 domain.IsBuildSuper 对齐。
-	accountBuildSuperEntitledPredicate        = `(provider_accounts.provider = 'grok_build' AND provider_accounts.build_super_entitled = TRUE)`
-	accountBuildSuperPredicate                = `(` + accountPaidBillingPredicate + ` OR ` + accountBuildSuperEntitledPredicate + `)`
-	accountInferredFreeBillingSignal          = `(TRIM(billing.plan_code) = '' AND TRIM(billing.plan_name) = '' AND billing.synced_at IS NOT NULL AND billing.monthly_limit = 0 AND billing.used = 0 AND billing.on_demand_cap = 0 AND billing.on_demand_used = 0 AND billing.prepaid_balance = 0 AND billing.credit_usage_percent = 0)`
-	accountFreeBillingSignal                  = `(` + accountFreePlanSignal + ` OR ` + accountInferredFreeBillingSignal + `)`
-	accountFreeSignalPredicate                = `(provider_accounts.provider = 'grok_build' AND (LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountFreeBillingSignal + `)))`
-	accountRecoveryPredicate                  = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
-	providerQuotaExhaustedPredicate           = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console' AND quota.remaining > 0)))`
-	accountTypeSortExpression                 = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountBuildSuperPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
-	accountStatusSortExpression               = `CASE WHEN provider_accounts.risk_status <> '' THEN 6 WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	accountBuildSuperEntitledPredicate = `(provider_accounts.provider = 'grok_build' AND provider_accounts.build_super_entitled = TRUE)`
+	accountBuildSuperPredicate         = `(` + accountPaidBillingPredicate + ` OR ` + accountBuildSuperEntitledPredicate + `)`
+	accountInferredFreeBillingSignal   = `(TRIM(billing.plan_code) = '' AND TRIM(billing.plan_name) = '' AND billing.synced_at IS NOT NULL AND billing.monthly_limit = 0 AND billing.used = 0 AND billing.on_demand_cap = 0 AND billing.on_demand_used = 0 AND billing.prepaid_balance = 0 AND billing.credit_usage_percent = 0)`
+	accountFreeBillingSignal           = `(` + accountFreePlanSignal + ` OR ` + accountInferredFreeBillingSignal + `)`
+	accountFreeSignalPredicate         = `(provider_accounts.provider = 'grok_build' AND (LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountFreeBillingSignal + `)))`
+	accountRecoveryPredicate           = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
+	// providerQuotaExhaustedPredicate 与 domain/account.QuotaWindowControlsRouting
+	// 的 weekly/console 分类对齐:SQL 侧为管理列表/状态投影的权威写,语义
+	// 演变必须两处同步(与上方 IsBuildSuper 对齐注释同款约束)。
+	providerQuotaExhaustedPredicate = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console' AND quota.remaining > 0)))`
+	accountTypeSortExpression       = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountBuildSuperPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
+	accountStatusSortExpression     = `CASE WHEN provider_accounts.risk_status <> '' THEN 6 WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	// accountUnclassifiedRefreshReauthPredicate 表达"未分类刷新失败且未
+	// 标记永久失败的账号不得被自动清理"的资格规则;业务口径归
+	// domain/account,此处是它的 SQL 投影(清理年龄归 application)。
 	accountUnclassifiedRefreshReauthPredicate = `NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.refresh_permanent = FALSE AND credential.refresh_unclassified_auth_failures > 0)`
 	missingConsoleAccountPredicate            = `NOT EXISTS (SELECT 1 FROM provider_accounts AS console_account WHERE console_account.provider = ? AND console_account.source_key = ('console-' || provider_accounts.source_key))`
 )
-
-func (r *AccountRepository) List(ctx context.Context, input repository.AccountListQuery) ([]account.Credential, int64, error) {
-	var total int64
-	query := r.db.db.WithContext(ctx).Model(&accountModel{})
-	if input.Filter.Provider != "" {
-		query = query.Where("provider = ?", input.Filter.Provider)
-	}
-	if search := strings.TrimSpace(input.Page.Search); search != "" {
-		if id, err := strconv.ParseUint(strings.TrimPrefix(search, "#"), 10, 64); strings.HasPrefix(search, "#") && err == nil && id > 0 {
-			// #ID 是管理端名单使用的内部精确查询形式，走主键索引且不改变
-			// 原有纯数字名称的模糊搜索语义。
-			query = query.Where("provider_accounts.id = ?", id)
-		} else {
-			pattern := "%" + strings.ToLower(search) + "%"
-			query = query.Where("LOWER(name) LIKE ? OR LOWER(email) LIKE ? OR LOWER(user_id) LIKE ? OR LOWER(team_id) LIKE ?", pattern, pattern, pattern, pattern)
-		}
-	}
-	switch input.Filter.QuotaType {
-	case "free":
-		// Super（Billing paid 或 BuildSuperEntitled）不得落入 free；与 IsKnownFreeBuild / QuotaView 一致。
-		query = query.Where("NOT " + accountBuildSuperPredicate + " AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.kind = 'free') OR " + accountFreeSignalPredicate + ")")
-	case "paid":
-		query = query.Where(accountBuildSuperPredicate)
-	case "unknown":
-		query = query.Where("NOT " + accountRecoveryPredicate + " AND NOT " + accountBuildSuperPredicate + " AND NOT " + accountFreeSignalPredicate)
-	case "auto", "basic", "super", "heavy":
-		query = query.Where("EXISTS (SELECT 1 FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id AND profile.tier = ?)", input.Filter.QuotaType)
-	}
-	query = applyAccountStatusFilter(query, input.Filter.Status, input.Filter.Now)
-	if input.Filter.Refreshable != nil {
-		if *input.Filter.Refreshable {
-			query = query.Where("EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.encrypted_refresh <> '')")
-		} else {
-			query = query.Where("NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.encrypted_refresh <> '')")
-		}
-	}
-	switch input.Filter.Risk {
-	case "flagged":
-		query = query.Where("(EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2)) OR provider_accounts.risk_status <> '')")
-	case "normal":
-		query = query.Where("NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.build_bot_flag_source IN (1,2)) AND provider_accounts.risk_status = ''")
-	}
-	query = applyWebAgreementFilter(query, input.Filter.Agreement)
-	query = applyAssociationFilter(query, input.Filter.Provider, input.Filter.Association)
-	if input.Filter.RestrictIDs {
-		if len(input.Filter.AccountIDs) == 0 {
-			query = query.Where("1 = 0")
-		} else {
-			query = query.Where("provider_accounts.id IN ?", input.Filter.AccountIDs)
-		}
-	}
-	if len(input.Filter.ExcludeIDs) > 0 {
-		query = query.Where("provider_accounts.id NOT IN ?", input.Filter.ExcludeIDs)
-	}
-	if input.Filter.AfterID > 0 {
-		query = query.Where("provider_accounts.id > ?", input.Filter.AfterID)
-	}
-	if input.Filter.ThroughID > 0 {
-		query = query.Where("provider_accounts.id <= ?", input.Filter.ThroughID)
-	}
-	if err := query.Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-	var rows []accountModel
-	query = applyStableSort(query, input.Page.Sort, map[string]sortSpec{
-		"id":        {expression: "provider_accounts.id"},
-		"name":      {expression: "LOWER(provider_accounts.name)"},
-		"type":      {expression: accountTypeSortExpression},
-		"status":    {expression: accountStatusSortExpression},
-		"createdAt": {expression: "provider_accounts.created_at", defaultDirection: repository.SortDescending},
-	}, sortSpec{expression: "provider_accounts.created_at", defaultDirection: repository.SortDescending}, "provider_accounts.id")
-	if err := query.Preload("Credential").Preload("WebProfile").Offset(input.Page.Offset).Limit(input.Page.Limit).Find(&rows).Error; err != nil {
-		return nil, 0, err
-	}
-	out := make([]account.Credential, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, toAccountDomain(row))
-	}
-	if err := r.attachAccountLinks(ctx, out); err != nil {
-		return nil, 0, err
-	}
-	return out, total, nil
-}
 
 func (r *AccountRepository) ListProviderAccountBatch(ctx context.Context, providerValue account.Provider, afterID uint64, limit int) ([]account.Credential, int64, error) {
 	if limit < 1 {
@@ -174,16 +95,6 @@ func (r *AccountRepository) ListProviderAccountBatch(ctx context.Context, provid
 }
 
 // CountProviderAccountsByIDs 只校验账号主表归属，不加载额度、关联或审计数据。
-func (r *AccountRepository) CountProviderAccountsByIDs(ctx context.Context, providerValue account.Provider, ids []uint64) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	var count int64
-	err := r.db.db.WithContext(ctx).Model(&accountModel{}).
-		Where("provider = ? AND id IN ?", providerValue, ids).
-		Count(&count).Error
-	return count, err
-}
 
 // CountAvailableAmong counts IDs that currently match Summarize's available predicate.
 func (r *AccountRepository) CountAvailableAmong(ctx context.Context, providerValue account.Provider, ids []uint64, now time.Time) (int64, error) {
@@ -324,275 +235,15 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 }
 
 // ListRoutingCandidates 批量加载账号、额度、恢复状态和目标模型能力，避免推理热路径按账号逐条查询。
-func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string) ([]account.RoutingCandidate, error) {
-	values, err := r.listRoutingCredentials(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	bound := make(map[uint64]bool)
-	if strings.TrimSpace(upstreamModel) != "" {
-		boundIDs, loadErr := r.listRoutingBoundAccountIDs(ctx, provider, modelRouteID, upstreamModel)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		if len(boundIDs) > 0 {
-			for _, id := range boundIDs {
-				bound[id] = true
-			}
-			filtered := values[:0]
-			for _, value := range values {
-				if bound[value.ID] {
-					filtered = append(filtered, value)
-				}
-			}
-			values = filtered
-		}
-	}
-	billings, err := r.getRoutingBillings(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	recoveries, err := r.getRoutingQuotaRecoveries(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	quotaWindows, err := r.getRoutingQuotaWindows(ctx, provider, quotaMode, values, 0)
-	if err != nil {
-		return nil, err
-	}
-	egressLeaseBlocks, err := r.getRoutingEgressLeaseBlocks(ctx, provider, values, time.Now().UTC())
-	if err != nil {
-		return nil, err
-	}
-	known := make(map[uint64]bool, len(values))
-	supported := make(map[uint64]bool, len(values))
-	modelQuotaBlocks := make(map[uint64]account.ModelQuotaBlock, len(values))
-	if strings.TrimSpace(upstreamModel) != "" && len(values) > 0 {
-		var states []accountModelSyncStateModel
-		if err := r.db.db.WithContext(ctx).
-			Table("account_model_sync_states AS state").
-			Select("state.*").
-			Joins("JOIN provider_accounts AS account ON account.id = state.account_id").
-			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND state.last_success_at IS NOT NULL", provider, true, account.AuthStatusActive).
-			Find(&states).Error; err != nil {
-			return nil, err
-		}
-		for _, state := range states {
-			known[state.AccountID] = true
-		}
-		var capabilities []accountModelCapabilityModel
-		if err := r.db.db.WithContext(ctx).
-			Table("account_model_capabilities AS capability").
-			Select("capability.*").
-			Joins("JOIN provider_accounts AS account ON account.id = capability.account_id").
-			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND capability.upstream_model = ?", provider, true, account.AuthStatusActive, upstreamModel).
-			Find(&capabilities).Error; err != nil {
-			return nil, err
-		}
-		for _, capability := range capabilities {
-			supported[capability.AccountID] = true
-		}
-		var blockRows []accountModelQuotaBlockModel
-		if err := r.db.db.WithContext(ctx).
-			Table("account_model_quota_blocks AS block").
-			Select("block.*").
-			Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
-			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND block.upstream_model = ? AND block.cooldown_until > ?", provider, true, account.AuthStatusActive, upstreamModel, time.Now().UTC()).
-			Find(&blockRows).Error; err != nil {
-			return nil, err
-		}
-		for _, row := range blockRows {
-			modelQuotaBlocks[row.AccountID] = account.DominantModelRestriction(modelQuotaBlocks[row.AccountID], modelRestrictionDomain(row))
-		}
-	}
-	sharedSuperBuildModel := false
-	if provider == account.ProviderBuild && len(bound) == 0 {
-		for _, value := range values {
-			if !supported[value.ID] {
-				continue
-			}
-			var billing *account.Billing
-			if snapshot, exists := billings[value.ID]; exists {
-				billing = &snapshot
-			}
-			if account.IsBuildSuper(value, billing) {
-				sharedSuperBuildModel = true
-				break
-			}
-		}
-	}
-	result := make([]account.RoutingCandidate, 0, len(values))
-	for _, value := range values {
-		var billing *account.Billing
-		if snapshot, exists := billings[value.ID]; exists {
-			billing = &snapshot
-		}
-		capabilityKnown, supportsModel := routingModelCapability(provider, quotaMode, len(bound) > 0, sharedSuperBuildModel, value, billing, known[value.ID], supported[value.ID])
-		candidate := account.RoutingCandidate{Credential: value, ModelCapabilityKnown: capabilityKnown, SupportsModel: supportsModel}
-		if billing, ok := billings[value.ID]; ok {
-			candidate.Billing = &billing
-		}
-		if recovery, ok := recoveries[value.ID]; ok {
-			candidate.QuotaRecovery = &recovery
-		}
-		if window, ok := quotaWindows[value.ID]; ok {
-			candidate.QuotaWindow = &window
-		}
-		if block, ok := modelQuotaBlocks[value.ID]; ok {
-			candidate.ModelQuotaBlock = &block
-		}
-		if block, ok := egressLeaseBlocks[value.ID]; ok {
-			candidate.EgressLeaseBlock = &block
-		}
-		result = append(result, candidate)
-	}
-	return result, nil
-}
-
-func (r *AccountRepository) ListRoutingAccountBases(ctx context.Context, provider account.Provider, quotaMode string) ([]account.RoutingAccountBase, error) {
-	values, err := r.listRoutingCredentials(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	billings, err := r.getRoutingBillings(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	recoveries, err := r.getRoutingQuotaRecoveries(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	quotaWindows, err := r.getRoutingQuotaWindows(ctx, provider, quotaMode, values, 0)
-	if err != nil {
-		return nil, err
-	}
-	egressLeaseBlocks, err := r.getRoutingEgressLeaseBlocks(ctx, provider, values, time.Now().UTC())
-	if err != nil {
-		return nil, err
-	}
-	result := make([]account.RoutingAccountBase, 0, len(values))
-	for _, value := range values {
-		base := account.RoutingAccountBase{Credential: value}
-		if billing, ok := billings[value.ID]; ok {
-			base.Billing = &billing
-		}
-		if recovery, ok := recoveries[value.ID]; ok {
-			base.QuotaRecovery = &recovery
-		}
-		if window, ok := quotaWindows[value.ID]; ok {
-			base.QuotaWindow = &window
-		}
-		if block, ok := egressLeaseBlocks[value.ID]; ok {
-			base.EgressLeaseBlock = &block
-		}
-		result = append(result, base)
-	}
-	return result, nil
-}
-
-func (r *AccountRepository) getRoutingEgressLeaseBlocks(ctx context.Context, provider account.Provider, values []account.Credential, now time.Time) (map[uint64]account.EgressLeaseBlock, error) {
-	result := make(map[uint64]account.EgressLeaseBlock)
-	if len(values) == 0 {
-		return result, nil
-	}
-	var rows []accountEgressLeaseBlockModel
-	if err := r.db.db.WithContext(ctx).
-		Table("account_egress_lease_blocks AS block").
-		Select("block.*").
-		Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
-		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND account.egress_node_id = block.node_id AND block.cooldown_until > ?", provider, true, account.AuthStatusActive, now.UTC()).
-		Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		result[row.AccountID] = egressLeaseBlockFromModel(row)
-	}
-	return result, nil
-}
 
 // listRoutingCredentials loads only the account state required to decide which
 // account to use. Provider secrets deliberately stay in account_credentials
 // until a selected account is hydrated for the upstream call.
-func (r *AccountRepository) listRoutingCredentials(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	rows, err := r.listActiveProviderAccountRows(ctx, provider, routingCredentialMetadataColumns)
-	if err != nil {
-		return nil, err
-	}
-	values := make([]account.Credential, 0, len(rows))
-	for _, row := range rows {
-		values = append(values, toAccountDomain(row))
-	}
-	if err := r.attachRoutingEgressIdentities(ctx, provider, values); err != nil {
-		return nil, err
-	}
-	return values, nil
-}
 
 // listActiveProviderAccountRows avoids GORM association preloads for complete
 // provider pools. Preload expands every parent key into an IN list and exceeds
 // SQLite's variable limit for large pools. The fixed-shape JOIN queries below
 // remain valid for both SQLite and PostgreSQL regardless of pool size.
-func (r *AccountRepository) listActiveProviderAccountRows(ctx context.Context, provider account.Provider, credentialColumns []string) ([]accountModel, error) {
-	var rows []accountModel
-	if err := r.db.db.WithContext(ctx).
-		Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).
-		Order("priority DESC, id ASC").
-		Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	if len(rows) == 0 {
-		return rows, nil
-	}
-	positions := make(map[uint64]int, len(rows))
-	for index := range rows {
-		positions[rows[index].ID] = index
-	}
-
-	credentialSelect := "credential.*"
-	if len(credentialColumns) > 0 {
-		credentialSelect = qualifiedColumnList("credential", credentialColumns)
-	}
-	var credentials []accountCredentialModel
-	if err := r.db.db.WithContext(ctx).
-		Table("account_credentials AS credential").
-		Select(credentialSelect).
-		Joins("JOIN provider_accounts AS account ON account.id = credential.account_id").
-		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
-		Find(&credentials).Error; err != nil {
-		return nil, err
-	}
-	for index := range credentials {
-		if position, ok := positions[credentials[index].AccountID]; ok {
-			rows[position].Credential = &credentials[index]
-		}
-	}
-
-	if provider == account.ProviderWeb {
-		var profiles []webAccountProfileModel
-		if err := r.db.db.WithContext(ctx).
-			Table("web_account_profiles AS profile").
-			Select("profile.*").
-			Joins("JOIN provider_accounts AS account ON account.id = profile.account_id").
-			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
-			Find(&profiles).Error; err != nil {
-			return nil, err
-		}
-		for index := range profiles {
-			if position, ok := positions[profiles[index].AccountID]; ok {
-				rows[position].WebProfile = &profiles[index]
-			}
-		}
-	}
-	return rows, nil
-}
-
-func qualifiedColumnList(alias string, columns []string) string {
-	qualified := make([]string, 0, len(columns))
-	for _, column := range columns {
-		qualified = append(qualified, alias+"."+column)
-	}
-	return strings.Join(qualified, ", ")
-}
 
 // routingCredentialMetadataColumns contains all credential fields used for
 // routing and execution decisions, but deliberately excludes the encrypted
@@ -606,23 +257,6 @@ var routingBillingColumns = []string{
 	"account_id", "plan_code", "plan_name", "monthly_limit", "used", "on_demand_cap", "on_demand_used", "prepaid_balance",
 	"credit_usage_percent", "is_unified_billing_user", "on_demand_enabled", "top_up_method", "usage_period_type",
 	"usage_period_start", "usage_period_end", "billing_period_start", "billing_period_end", "synced_at",
-}
-
-func (r *AccountRepository) getRoutingBillings(ctx context.Context, provider account.Provider) (map[uint64]account.Billing, error) {
-	result := make(map[uint64]account.Billing)
-	var rows []billingModel
-	if err := r.db.db.WithContext(ctx).
-		Table("account_billing_snapshots AS billing").
-		Select(qualifiedColumnList("billing", routingBillingColumns)).
-		Joins("JOIN provider_accounts AS account ON account.id = billing.account_id").
-		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
-		Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		result[row.AccountID] = toRoutingBillingDomain(row)
-	}
-	return result, nil
 }
 
 func (r *AccountRepository) getRoutingQuotaRecoveries(ctx context.Context, provider account.Provider) (map[uint64]account.QuotaRecovery, error) {
@@ -732,7 +366,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 	}
 	boundIDs, err := r.listRoutingBoundAccountIDs(ctx, provider, modelRouteID, upstreamModel)
 	if err != nil {
-		return account.RoutingOverlaySnapshot{}, err
+		return account.RoutingOverlaySnapshot{}, mapError(err)
 	}
 	values := make(map[uint64]account.RoutingAccountOverlay)
 	for _, id := range boundIDs {
@@ -745,7 +379,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 		Joins("JOIN provider_accounts AS account ON account.id = state.account_id").
 		Where("account.provider = ? AND account.enabled = TRUE AND state.last_success_at IS NOT NULL", provider).
 		Find(&states).Error; err != nil {
-		return account.RoutingOverlaySnapshot{}, err
+		return account.RoutingOverlaySnapshot{}, mapError(err)
 	}
 	for _, state := range states {
 		overlay := values[state.AccountID]
@@ -760,7 +394,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 		Joins("JOIN provider_accounts AS account ON account.id = capability.account_id").
 		Where("account.provider = ? AND account.enabled = TRUE AND capability.upstream_model = ?", provider, upstreamModel).
 		Find(&capabilities).Error; err != nil {
-		return account.RoutingOverlaySnapshot{}, err
+		return account.RoutingOverlaySnapshot{}, mapError(err)
 	}
 	for _, capability := range capabilities {
 		overlay := values[capability.AccountID]
@@ -775,7 +409,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 		Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
 		Where("account.provider = ? AND account.enabled = TRUE AND block.upstream_model = ? AND block.cooldown_until > ?", provider, upstreamModel, time.Now().UTC()).
 		Find(&blockRows).Error; err != nil {
-		return account.RoutingOverlaySnapshot{}, err
+		return account.RoutingOverlaySnapshot{}, mapError(err)
 	}
 	for _, row := range blockRows {
 		overlay := values[row.AccountID]
@@ -815,21 +449,6 @@ func (r *AccountRepository) routingBindingsQuery(ctx context.Context, provider a
 	return query
 }
 
-func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	rows, err := r.listActiveProviderAccountRows(ctx, provider, nil)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]account.Credential, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, toAccountDomain(row))
-	}
-	if err := r.attachRoutingEgressIdentities(ctx, provider, out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (r *AccountRepository) ListEnabledAccountIDs(ctx context.Context, provider account.Provider, refreshableOnly bool) ([]uint64, error) {
 	query := r.db.db.WithContext(ctx).
 		Table("provider_accounts AS account").
@@ -857,43 +476,6 @@ func (r *AccountRepository) ListEnabledCredentialRefreshAccountIDs(ctx context.C
 	}
 	var ids []uint64
 	err := query.Order("account.id ASC").Scan(&ids).Error
-	return ids, err
-}
-
-// LinkedWebAccountID returns the Web SSO identity linked to a Build account.
-func (r *AccountRepository) LinkedWebAccountID(ctx context.Context, buildAccountID uint64) (uint64, bool, error) {
-	if buildAccountID == 0 {
-		return 0, false, nil
-	}
-	var webID uint64
-	err := r.db.db.WithContext(ctx).Model(&accountProviderLinkModel{}).
-		Where("build_account_id = ?", buildAccountID).Limit(1).Pluck("web_account_id", &webID).Error
-	if err != nil {
-		return 0, false, err
-	}
-	return webID, webID != 0, nil
-}
-
-// LinkedBuildAccountIDs returns every Build account sharing a Web identity.
-func (r *AccountRepository) LinkedBuildAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
-	if webAccountID == 0 {
-		return nil, nil
-	}
-	var ids []uint64
-	err := r.db.db.WithContext(ctx).Model(&accountProviderLinkModel{}).
-		Where("web_account_id = ?", webAccountID).Pluck("build_account_id", &ids).Error
-	return ids, err
-}
-
-// LinkedConsoleAccountIDs returns every Console account sharing a Web identity.
-// SSO patrol denials fan out to this group; request-path attribution does not.
-func (r *AccountRepository) LinkedConsoleAccountIDs(ctx context.Context, webAccountID uint64) ([]uint64, error) {
-	if webAccountID == 0 {
-		return nil, nil
-	}
-	var ids []uint64
-	err := r.db.db.WithContext(ctx).Model(&webConsoleAccountLinkModel{}).
-		Where("web_account_id = ?", webAccountID).Pluck("console_account_id", &ids).Error
 	return ids, err
 }
 
@@ -1002,28 +584,6 @@ func (r *AccountRepository) ListMissingConsoleSyncBatch(ctx context.Context, aft
 		values = append(values, toAccountDomain(row))
 	}
 	return values, total, skipped, nil
-}
-
-func (r *AccountRepository) HasActive(ctx context.Context, provider account.Provider) (bool, error) {
-	var row struct{ ID uint64 }
-	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("id").Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
-	return row.ID > 0, err
-}
-
-func (r *AccountRepository) Get(ctx context.Context, id uint64) (account.Credential, error) {
-	var row accountModel
-	if err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").First(&row, id).Error; err != nil {
-		return account.Credential{}, mapError(err)
-	}
-	value := toAccountDomain(row)
-	values := []account.Credential{value}
-	if err := r.attachAccountLinks(ctx, values); err != nil {
-		return account.Credential{}, err
-	}
-	return values[0], nil
 }
 
 // GetCredentialMaterial hydrates the encrypted provider data for one account
@@ -1226,14 +786,6 @@ func (r *AccountRepository) UpsertByIdentity(ctx context.Context, value account.
 }
 
 // UpsertManyByIdentity imports material without an existing source account.
-func (r *AccountRepository) UpsertManyByIdentity(ctx context.Context, values []account.Credential) ([]repository.AccountUpsertResult, error) {
-	inputs := make([]repository.AccountImport, len(values))
-	for i, value := range values {
-		inputs[i].Credential = value
-	}
-	return r.ImportAccounts(ctx, inputs)
-}
-
 func (r *AccountRepository) ImportAccounts(ctx context.Context, inputs []repository.AccountImport) ([]repository.AccountUpsertResult, error) {
 	if len(inputs) == 0 {
 		return []repository.AccountUpsertResult{}, nil
@@ -1393,9 +945,6 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 		if err := tx.Save(&row).Error; err != nil {
 			return repository.AccountUpsertResult{}, accountModel{}, err
 		}
-		if _, err := deleteInvalidEgressLeaseBlocksForAccount(tx, row); err != nil {
-			return repository.AccountUpsertResult{}, accountModel{}, err
-		}
 		if err := resetWebProfileForChangedIdentity(tx, value.Provider, row.ID, existing.UserID, row.UserID); err != nil {
 			return repository.AccountUpsertResult{}, accountModel{}, err
 		}
@@ -1524,11 +1073,6 @@ func (r *AccountRepository) UpdateMany(ctx context.Context, providerValue accoun
 			}
 			updated += result.RowsAffected
 		}
-		if providerValue == account.ProviderBuild && updates.Enabled != nil && !*updates.Enabled {
-			if err := tx.Where("account_id IN ?", ids).Delete(&accountEgressLeaseBlockModel{}).Error; err != nil {
-				return err
-			}
-		}
 		return nil
 	})
 	if err != nil {
@@ -1538,98 +1082,6 @@ func (r *AccountRepository) UpdateMany(ctx context.Context, providerValue accoun
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged})
 	}
 	return updated, nil
-}
-
-// UpdateEgressBindings assigns one egress node to multiple accounts of one
-// provider. A nil node clears the binding and restores normal pool selection.
-func (r *AccountRepository) UpdateEgressBindings(ctx context.Context, providerValue account.Provider, ids []uint64, nodeID *uint64, mode account.EgressAssignmentMode, assignedAt time.Time) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	values := map[string]any{
-		"egress_node_id": nodeID,
-	}
-	if nodeID == nil {
-		values["egress_assignment_mode"] = ""
-		values["egress_assigned_at"] = nil
-	} else {
-		values["egress_assignment_mode"] = string(mode)
-		values["egress_assigned_at"] = assignedAt.UTC()
-	}
-	var updated int64
-	var clearedLeaseBlocks int64
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&accountModel{}).Where("provider = ? AND id IN ?", providerValue, ids).Updates(values)
-		if result.Error != nil {
-			return result.Error
-		}
-		updated = result.RowsAffected
-		if providerValue != account.ProviderBuild {
-			return nil
-		}
-		query := tx.Where("account_id IN ?", ids)
-		if nodeID != nil {
-			query = query.Where("node_id <> ?", *nodeID)
-		}
-		deleted := query.Delete(&accountEgressLeaseBlockModel{})
-		if deleted.Error != nil {
-			return deleted.Error
-		}
-		clearedLeaseBlocks = deleted.RowsAffected
-		return nil
-	})
-	if err == nil && clearedLeaseBlocks > 0 {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountEgressLeaseChanged, Provider: providerValue})
-	}
-	return updated, mapError(err)
-}
-
-// ListEgressAssignments returns all accounts for one provider with their
-// binding metadata. It deliberately includes disabled accounts so capacity
-// reporting reflects every account that reserves a proxy slot.
-func (r *AccountRepository) ListEgressAssignments(ctx context.Context, providerValue account.Provider) ([]account.Credential, error) {
-	var rows []accountModel
-	if err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").
-		Where("provider = ?", providerValue).Order("id ASC").Find(&rows).Error; err != nil {
-		return nil, mapError(err)
-	}
-	values := make([]account.Credential, 0, len(rows))
-	for _, row := range rows {
-		values = append(values, toAccountDomain(row))
-	}
-	return values, nil
-}
-
-func (r *AccountRepository) ListEgressBindingProviders(ctx context.Context, nodeID uint64) ([]account.Provider, error) {
-	if nodeID == 0 {
-		return []account.Provider{}, nil
-	}
-	return r.listEgressBindingProviders(r.db.db.WithContext(ctx).Model(&accountModel{}).Where("egress_node_id = ?", nodeID))
-}
-
-func (r *AccountRepository) ListEgressSourceBindingProviders(ctx context.Context, sourceID uint64) ([]account.Provider, error) {
-	if sourceID == 0 {
-		return []account.Provider{}, nil
-	}
-	query := r.db.db.WithContext(ctx).Model(&accountModel{}).
-		Joins("JOIN egress_nodes ON egress_nodes.id = provider_accounts.egress_node_id").
-		Where("egress_nodes.source_id = ?", sourceID)
-	return r.listEgressBindingProviders(query)
-}
-
-func (r *AccountRepository) listEgressBindingProviders(query *gorm.DB) ([]account.Provider, error) {
-	var raw []string
-	if err := query.Distinct("provider_accounts.provider").Order("provider_accounts.provider ASC").Pluck("provider_accounts.provider", &raw).Error; err != nil {
-		return nil, mapError(err)
-	}
-	result := make([]account.Provider, 0, len(raw))
-	for _, value := range raw {
-		provider := account.Provider(value)
-		if provider.IsValid() {
-			result = append(result, provider)
-		}
-	}
-	return result, nil
 }
 
 func (r *AccountRepository) Delete(ctx context.Context, id uint64) error {
@@ -1685,95 +1137,6 @@ func (r *AccountRepository) DeleteMany(ctx context.Context, ids []uint64) (int64
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged})
 	}
 	return deleted, err
-}
-
-func (r *AccountRepository) ListAutoCleanReauthCandidates(ctx context.Context, markedBefore time.Time, includeDisabled bool, afterID uint64, limit int) ([]uint64, error) {
-	if limit < 1 {
-		limit = 100
-	}
-	query := r.db.db.WithContext(ctx).Model(&accountModel{}).
-		Select("id").
-		Where("auth_status = ? AND reauth_marked_at IS NOT NULL AND reauth_marked_at < ?", account.AuthStatusReauthRequired, markedBefore.UTC()).
-		Where(accountUnclassifiedRefreshReauthPredicate).
-		Where("NOT EXISTS (SELECT 1 FROM media_jobs job WHERE job.account_id = provider_accounts.id AND job.status IN ?)", []string{string(media.StatusQueued), string(media.StatusInProgress)})
-	if afterID > 0 {
-		query = query.Where("id > ?", afterID)
-	}
-	if !includeDisabled {
-		query = query.Where("enabled = ?", true)
-	}
-	var candidates []uint64
-	err := query.Order("id ASC").Limit(limit).Pluck("id", &candidates).Error
-	return candidates, err
-}
-
-func (r *AccountRepository) DeleteAutoCleanReauthCandidates(ctx context.Context, markedBefore time.Time, includeDisabled bool, candidateIDs []uint64) ([]uint64, error) {
-	if len(candidateIDs) == 0 {
-		return []uint64{}, nil
-	}
-	deletedIDs := make([]uint64, 0, len(candidateIDs))
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockAccountLinkMutation(tx); err != nil {
-			return err
-		}
-		deletable, err := excludeAccountsWithActiveMediaJobs(tx, candidateIDs)
-		if err != nil {
-			return err
-		}
-		if len(deletable) == 0 {
-			return nil
-		}
-
-		var lockedIDs []uint64
-		lockQuery := tx.Model(&accountModel{}).Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id IN ? AND auth_status = ? AND reauth_marked_at IS NOT NULL AND reauth_marked_at < ?", deletable, account.AuthStatusReauthRequired, markedBefore.UTC()).
-			Where(accountUnclassifiedRefreshReauthPredicate)
-		if !includeDisabled {
-			lockQuery = lockQuery.Where("enabled = ?", true)
-		}
-		if err := lockQuery.Pluck("id", &lockedIDs).Error; err != nil {
-			return err
-		}
-		// lock 后再过滤活动视频任务，避免 list 与 delete 之间的 TOCTOU。
-		lockedIDs, err = excludeAccountsWithActiveMediaJobs(tx, lockedIDs)
-		if err != nil {
-			return err
-		}
-		if len(lockedIDs) == 0 {
-			return nil
-		}
-		deletion := tx.Where("id IN ? AND auth_status = ? AND reauth_marked_at IS NOT NULL AND reauth_marked_at < ?", lockedIDs, account.AuthStatusReauthRequired, markedBefore.UTC()).
-			Where(accountUnclassifiedRefreshReauthPredicate)
-		if !includeDisabled {
-			deletion = deletion.Where("enabled = ?", true)
-		}
-		result := deletion.Delete(&accountModel{})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == int64(len(lockedIDs)) {
-			deletedIDs = append(deletedIDs, lockedIDs...)
-			return nil
-		}
-		var remaining []uint64
-		if err := tx.Model(&accountModel{}).Where("id IN ?", lockedIDs).Pluck("id", &remaining).Error; err != nil {
-			return err
-		}
-		remainingSet := make(map[uint64]struct{}, len(remaining))
-		for _, id := range remaining {
-			remainingSet[id] = struct{}{}
-		}
-		for _, id := range lockedIDs {
-			if _, exists := remainingSet[id]; !exists {
-				deletedIDs = append(deletedIDs, id)
-			}
-		}
-		return nil
-	})
-	if err == nil && len(deletedIDs) > 0 {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged})
-	}
-	return deletedIDs, err
 }
 
 // excludeAccountsWithActiveMediaJobs 返回无 queued/in_progress 视频任务的账号 ID（顺序保持输入顺序）。
@@ -2052,25 +1415,6 @@ func riskAttributionFields(attr repository.RiskAttribution) map[string]any {
 	return fields
 }
 
-func (r *AccountRepository) UpdateRiskAttribution(ctx context.Context, id uint64, attr repository.RiskAttribution) error {
-	if id == 0 {
-		return repository.ErrNotFound
-	}
-	fields := riskAttributionFields(attr)
-	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Updates(fields)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	var providerRow struct{ Provider string }
-	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("provider").Where("id = ?", id).Take(&providerRow).Error; err != nil {
-		return mapError(err)
-	}
-	// 方言差异：MySQL 对同值更新可能报 RowsAffected==0。以存在性为准：
-	// 账号在即视为幂等成功（启动对账重放同值写入必须零错误）。
-	r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: account.Provider(providerRow.Provider), AccountID: id})
-	return nil
-}
-
 func (r *AccountRepository) TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error {
 	if id == 0 || usedAt.IsZero() {
 		return repository.ErrNotFound
@@ -2083,181 +1427,6 @@ func (r *AccountRepository) TouchLastUsed(ctx context.Context, id uint64, usedAt
 		return repository.ErrNotFound
 	}
 	return nil
-}
-
-func egressLeaseBlockFromModel(row accountEgressLeaseBlockModel) account.EgressLeaseBlock {
-	return account.EgressLeaseBlock{
-		AccountID: row.AccountID, NodeID: row.NodeID, Reason: row.Reason, Version: row.Version,
-		CooldownUntil: row.CooldownUntil.UTC(), UpdatedAt: row.UpdatedAt.UTC(),
-	}
-}
-
-// ListEgressLeaseBlocks returns the durable guard-owned lease state, including
-// expired rows. The sidecar uses expired rows for recovery reconciliation; the
-// selector independently ignores them after CooldownUntil as a fail-safe.
-func (r *AccountRepository) ListEgressLeaseBlocks(ctx context.Context, limit int, after *account.EgressLeaseBlockCursor) ([]account.EgressLeaseBlock, error) {
-	if limit <= 0 || limit > 1001 {
-		return nil, repository.ErrConflict
-	}
-	var rows []accountEgressLeaseBlockModel
-	query := r.db.db.WithContext(ctx).
-		Table("account_egress_lease_blocks AS block").Select("block.*").
-		Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
-		Joins("JOIN egress_nodes AS node ON node.id = block.node_id").
-		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND account.egress_node_id = block.node_id AND node.enabled = ? AND node.scope = ?", account.ProviderBuild, true, account.AuthStatusActive, true, "grok_build").
-		Order("block.cooldown_until ASC, block.account_id ASC, block.node_id ASC").Limit(limit)
-	if after != nil {
-		cursorTime := after.CooldownUntil.UTC()
-		query = query.Where(
-			"block.cooldown_until > ? OR (block.cooldown_until = ? AND (block.account_id > ? OR (block.account_id = ? AND block.node_id > ?)))",
-			cursorTime, cursorTime, after.AccountID, after.AccountID, after.NodeID,
-		)
-	}
-	if err := query.Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	values := make([]account.EgressLeaseBlock, 0, len(rows))
-	for _, row := range rows {
-		values = append(values, egressLeaseBlockFromModel(row))
-	}
-	return values, nil
-}
-
-func deleteInvalidEgressLeaseBlocksForAccount(tx *gorm.DB, row accountModel) (int64, error) {
-	if account.Provider(row.Provider) != account.ProviderBuild {
-		return 0, nil
-	}
-	query := tx.Where("account_id = ?", row.ID)
-	if row.Enabled && account.AuthStatus(row.AuthStatus) == account.AuthStatusActive && row.EgressNodeID != nil {
-		query = query.Where("node_id <> ?", *row.EgressNodeID)
-	}
-	result := query.Delete(&accountEgressLeaseBlockModel{})
-	return result.RowsAffected, result.Error
-}
-
-func (r *AccountRepository) PruneInvalidEgressLeaseBlocks(ctx context.Context, limit int) (int64, error) {
-	if limit < 1 || limit > 1000 {
-		return 0, repository.ErrConflict
-	}
-	var rows []accountEgressLeaseBlockModel
-	err := r.db.db.WithContext(ctx).
-		Table("account_egress_lease_blocks AS block").Select("block.*").
-		Joins("LEFT JOIN provider_accounts AS account ON account.id = block.account_id").
-		Joins("LEFT JOIN egress_nodes AS node ON node.id = block.node_id").
-		Where("account.id IS NULL OR account.provider <> ? OR account.enabled <> ? OR account.auth_status <> ? OR account.egress_node_id IS NULL OR account.egress_node_id <> block.node_id OR node.id IS NULL OR node.enabled <> ? OR node.scope <> ?", account.ProviderBuild, true, account.AuthStatusActive, true, "grok_build").
-		Order("block.cooldown_until ASC, block.account_id ASC, block.node_id ASC").Limit(limit).Find(&rows).Error
-	if err != nil || len(rows) == 0 {
-		return 0, err
-	}
-	var deleted int64
-	err = r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for start := 0; start < len(rows); start += 400 {
-			end := min(start+400, len(rows))
-			pairs := make([][]any, 0, end-start)
-			for _, row := range rows[start:end] {
-				pairs = append(pairs, []any{row.AccountID, row.NodeID})
-			}
-			result := tx.Where("(account_id, node_id) IN ?", pairs).Delete(&accountEgressLeaseBlockModel{})
-			if result.Error != nil {
-				return result.Error
-			}
-			deleted += result.RowsAffected
-		}
-		return nil
-	})
-	if err == nil && deleted > 0 {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountEgressLeaseChanged, Provider: account.ProviderBuild})
-	}
-	return deleted, err
-}
-
-func (r *AccountRepository) DeleteEgressLeaseBlocksByNodes(ctx context.Context, nodeIDs []uint64) (int64, error) {
-	if len(nodeIDs) == 0 {
-		return 0, nil
-	}
-	result := r.db.db.WithContext(ctx).Where("node_id IN ?", nodeIDs).Delete(&accountEgressLeaseBlockModel{})
-	if result.Error == nil && result.RowsAffected > 0 {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountEgressLeaseChanged, Provider: account.ProviderBuild})
-	}
-	return result.RowsAffected, result.Error
-}
-
-// UpsertEgressLeaseBlock atomically verifies that the Build account is still
-// bound to the requested node. A shorter concurrent hold cannot replace a
-// longer one or rotate its CAS version.
-func (r *AccountRepository) UpsertEgressLeaseBlock(ctx context.Context, value account.EgressLeaseBlock) (account.EgressLeaseBlock, error) {
-	value.Reason = strings.TrimSpace(value.Reason)
-	value.Version = strings.TrimSpace(value.Version)
-	if value.AccountID == 0 || value.NodeID == 0 || value.Reason == "" || len(value.Version) < 16 || len(value.Version) > 64 || value.CooldownUntil.IsZero() {
-		return account.EgressLeaseBlock{}, repository.ErrConflict
-	}
-	value.Reason = truncate(value.Reason, 100)
-	value.CooldownUntil = value.CooldownUntil.UTC()
-	value.UpdatedAt = time.Now().UTC()
-	stored := value
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var owner accountModel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "provider", "enabled", "auth_status", "egress_node_id").First(&owner, value.AccountID).Error; err != nil {
-			return mapError(err)
-		}
-		if account.Provider(owner.Provider) != account.ProviderBuild || !owner.Enabled || account.AuthStatus(owner.AuthStatus) != account.AuthStatusActive || owner.EgressNodeID == nil || *owner.EgressNodeID != value.NodeID {
-			return repository.ErrConflict
-		}
-		var existing accountEgressLeaseBlockModel
-		load := tx.Where("account_id = ? AND node_id = ?", value.AccountID, value.NodeID).Limit(1).Find(&existing)
-		if load.Error != nil {
-			return load.Error
-		}
-		if load.RowsAffected > 0 && existing.CooldownUntil.After(value.CooldownUntil) {
-			stored = egressLeaseBlockFromModel(existing)
-			return nil
-		}
-		row := accountEgressLeaseBlockModel{
-			AccountID: value.AccountID, NodeID: value.NodeID, Reason: value.Reason, Version: value.Version,
-			CooldownUntil: value.CooldownUntil, UpdatedAt: value.UpdatedAt,
-		}
-		created := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "account_id"}, {Name: "node_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"reason", "version", "cooldown_until", "updated_at"}),
-			Where: clause.Where{Exprs: []clause.Expression{clause.Expr{
-				SQL: "account_egress_lease_blocks.cooldown_until <= excluded.cooldown_until",
-			}}},
-		}).Create(&row)
-		if created.Error != nil {
-			return created.Error
-		}
-		if created.RowsAffected == 0 {
-			if err := tx.Where("account_id = ? AND node_id = ?", value.AccountID, value.NodeID).First(&existing).Error; err != nil {
-				return err
-			}
-			stored = egressLeaseBlockFromModel(existing)
-			return nil
-		}
-		stored = egressLeaseBlockFromModel(row)
-		return nil
-	})
-	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountEgressLeaseChanged, Provider: account.ProviderBuild, AccountID: value.AccountID})
-	}
-	return stored, err
-}
-
-// DeleteEgressLeaseBlock uses the opaque version as a compare-and-swap token,
-// so a stale recovery probe cannot clear a newer quarantine.
-func (r *AccountRepository) DeleteEgressLeaseBlock(ctx context.Context, accountID, nodeID uint64, version string) (bool, error) {
-	version = strings.TrimSpace(version)
-	if accountID == 0 || nodeID == 0 || version == "" {
-		return false, repository.ErrConflict
-	}
-	result := r.db.db.WithContext(ctx).Where("account_id = ? AND node_id = ? AND version = ?", accountID, nodeID, version).Delete(&accountEgressLeaseBlockModel{})
-	if result.Error != nil {
-		return false, result.Error
-	}
-	if result.RowsAffected == 1 {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountEgressLeaseChanged, Provider: account.ProviderBuild, AccountID: accountID})
-		return true, nil
-	}
-	return false, nil
 }
 
 func (r *AccountRepository) PruneExpiredModelQuotaBlocks(ctx context.Context, now time.Time, limit int) (int64, error) {
@@ -2292,29 +1461,6 @@ func saveBilling(tx *gorm.DB, value account.Billing) error {
 	}
 	row := billingModel{AccountID: value.AccountID, PlanCode: truncate(value.PlanCode, 100), PlanName: truncate(value.PlanName, 160), MonthlyLimit: value.MonthlyLimit, Used: value.Used, OnDemandCap: value.OnDemandCap, OnDemandUsed: value.OnDemandUsed, PrepaidBalance: value.PrepaidBalance, CreditUsagePercent: value.CreditUsagePercent, IsUnifiedBillingUser: value.IsUnifiedBillingUser, OnDemandEnabled: value.OnDemandEnabled, TopUpMethod: truncate(value.TopUpMethod, 100), UsagePeriodType: truncate(value.UsagePeriodType, 100), UsagePeriodStart: truncate(value.UsagePeriodStart, 64), UsagePeriodEnd: truncate(value.UsagePeriodEnd, 64), BillingPeriodStart: truncate(value.BillingPeriodStart, 64), BillingPeriodEnd: truncate(value.BillingPeriodEnd, 64), HistoryJSON: string(history), SyncedAt: value.SyncedAt}
 	return tx.Save(&row).Error
-}
-
-func (r *AccountRepository) GetBilling(ctx context.Context, accountID uint64) (account.Billing, error) {
-	var row billingModel
-	if err := r.db.db.WithContext(ctx).First(&row, "account_id = ?", accountID).Error; err != nil {
-		return account.Billing{}, mapError(err)
-	}
-	return toBillingDomain(row), nil
-}
-
-func (r *AccountRepository) GetBillings(ctx context.Context, accountIDs []uint64) (map[uint64]account.Billing, error) {
-	result := make(map[uint64]account.Billing, len(accountIDs))
-	if len(accountIDs) == 0 {
-		return result, nil
-	}
-	var rows []billingModel
-	if err := r.db.db.WithContext(ctx).Where("account_id IN ?", accountIDs).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		result[row.AccountID] = toBillingDomain(row)
-	}
-	return result, nil
 }
 
 func (r *AccountRepository) GetQuotaRecovery(ctx context.Context, accountID uint64) (account.QuotaRecovery, error) {
@@ -2510,34 +1656,95 @@ func (r *AccountRepository) ExhaustQuotaWindow(ctx context.Context, accountID ui
 	return err
 }
 
-func (r *AccountRepository) ListDueQuotaWindows(ctx context.Context, now time.Time, limit int) ([]account.QuotaWindow, error) {
+// ListDueQuotaWindows 返回"已到期"窗口的原始行。SQL 只表达粗略的到期上界
+// （已耗尽且 reset_at 已过），是否值得安排恢复由调用方按 domain owner 的
+// QuotaWindowControlsRouting 判定——这里不重复资格规则。
+// Provider 随行返回，跨账号查询的调用方无法从窗口本身推导它。
+func (r *AccountRepository) ListDueQuotaWindows(ctx context.Context, now time.Time, input repository.DueQuotaWindowQuery) ([]account.QuotaWindow, error) {
+	limit := input.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	var rows []quotaWindowModel
-	if err := r.db.db.WithContext(ctx).Where("remaining = 0 AND reset_at IS NOT NULL AND reset_at <= ?", now).Order("reset_at ASC, account_id ASC").Limit(limit).Find(&rows).Error; err != nil {
+	var rows []struct {
+		Window   quotaWindowModel `gorm:"embedded"`
+		Provider string
+	}
+	query := r.db.db.WithContext(ctx).Table("account_quota_windows AS w").
+		Select("w.*, a.provider").Joins("JOIN provider_accounts AS a ON a.id = w.account_id").
+		Where("w.remaining = 0 AND w.reset_at IS NOT NULL AND w.reset_at <= ?", now)
+	if input.Provider != "" {
+		query = query.Where("a.provider = ?", input.Provider)
+	}
+	if after := input.After; after != nil {
+		query = query.Where("w.reset_at > ? OR (w.reset_at = ? AND (w.account_id > ? OR (w.account_id = ? AND w.mode > ?)))",
+			after.ResetAt, after.ResetAt, after.AccountID, after.AccountID, after.Mode)
+	}
+	if err := query.Order("w.reset_at ASC, w.account_id ASC, w.mode ASC").Limit(limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	values := make([]account.QuotaWindow, 0, len(rows))
 	for _, row := range rows {
-		values = append(values, toQuotaWindowDomain(row))
+		window := toQuotaWindowDomain(row.Window)
+		window.Provider = account.Provider(row.Provider)
+		values = append(values, window)
 	}
 	return values, nil
 }
 
+// ListQuotaRecoveryWindows 返回恢复候选窗口的原始行：只做 remaining <= 0 这一
+// 粗略超集过滤(domain owner 的 QuotaWindowDeservesRecovery 同样要求该条件)，恢复
+// 资格由调用方按 owner 规则判定。这里有意不过滤 provider/mode 或 reset_at——
+// Console 非用量计费快照与没有 reset 期限的用量窗口都在候选范围内。Provider 随行
+// 返回以便调用方判定资格；缺失账号只会留下空 Provider，不会让候选行消失。
 func (r *AccountRepository) ListQuotaRecoveryWindows(ctx context.Context, limit int) ([]account.QuotaWindow, error) {
 	if limit <= 0 || limit > 100000 {
 		limit = 100000
 	}
 	var rows []quotaWindowModel
-	if err := r.db.db.WithContext(ctx).Where("remaining = 0 AND reset_at IS NOT NULL").Order("reset_at ASC, account_id ASC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := r.db.db.WithContext(ctx).Where("remaining <= 0").Order("reset_at ASC, account_id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	providers, err := r.quotaWindowProviders(ctx, rows)
+	if err != nil {
 		return nil, err
 	}
 	values := make([]account.QuotaWindow, 0, len(rows))
 	for _, row := range rows {
-		values = append(values, toQuotaWindowDomain(row))
+		value := toQuotaWindowDomain(row)
+		value.Provider = account.Provider(providers[row.AccountID])
+		values = append(values, value)
 	}
 	return values, nil
+}
+
+// quotaWindowProviders 按块读取候选窗口账号的 Provider：候选集合可能覆盖整个号池，
+// 单条 IN 列表会超过 SQLite/PostgreSQL 的绑定参数上限。
+func (r *AccountRepository) quotaWindowProviders(ctx context.Context, rows []quotaWindowModel) (map[uint64]string, error) {
+	const providerBatchSize = 1000
+	ids := make([]uint64, 0, len(rows))
+	seen := make(map[uint64]bool, len(rows))
+	for _, row := range rows {
+		if seen[row.AccountID] {
+			continue
+		}
+		seen[row.AccountID] = true
+		ids = append(ids, row.AccountID)
+	}
+	providers := make(map[uint64]string, len(ids))
+	for start := 0; start < len(ids); start += providerBatchSize {
+		end := min(start+providerBatchSize, len(ids))
+		var accounts []struct {
+			ID       uint64
+			Provider string
+		}
+		if err := r.db.db.WithContext(ctx).Table("provider_accounts").Select("id, provider").Where("id IN ?", ids[start:end]).Scan(&accounts).Error; err != nil {
+			return nil, err
+		}
+		for _, value := range accounts {
+			providers[value.ID] = value.Provider
+		}
+	}
+	return providers, nil
 }
 
 // ListStaleWebQuotaAccountIDs 返回缺失或长期未同步额度的 Web 账号，供重启后的低优先级追赶任务使用。

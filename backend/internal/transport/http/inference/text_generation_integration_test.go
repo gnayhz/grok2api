@@ -17,12 +17,12 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/gin-gonic/gin"
 )
@@ -80,7 +80,7 @@ func TestWithheldTextUsageRetainsActualAccounts(t *testing.T) {
 							}
 						}
 						fx.service.UpdateMaxAttempts(2)
-						fx.service.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2})
+						fx.service.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2, GuardedModels: []string{"grok-4.5", "grok-chat-fast"}}))
 						payload := map[string]any{"model": fx.publicModel, "stream": stream}
 						path := "/v1/responses"
 						if operation == audit.OperationResponses {
@@ -264,7 +264,7 @@ func TestCanonicalTextUsagePresenceAndBounds(t *testing.T) {
 			})
 			defer up.Close()
 			fx := newProviderCompletionFixture(t, up.URL, "grok-4.5", account.ProviderConsole, nil, nil)
-			fx.service.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: false})
+			fx.service.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: false}))
 			body := []byte(fmt.Sprintf(`{"model":%q,"input":"synthetic"}`, fx.publicModel))
 			result, err := fx.service.CreateResponse(context.Background(), gateway.Input{RequestID: "usage-presence", ClientKey: fx.created.Key, PublicModel: fx.publicModel, Body: body})
 			if err != nil {
@@ -364,7 +364,7 @@ func TestTextGenerationBeforeDeliveryMatrix(t *testing.T) {
 							}
 						}
 						fx := newProviderCompletionFixture(t, endpoint, model, kind, nil, wrap)
-						fx.service.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2})
+						fx.service.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: true, MaxAttempts: 2, GuardedModels: []string{"grok-4.5", "grok-chat-fast"}}))
 						if stage == "admission_receipt" {
 							fx.service.SetQualityEventRecorder(textAdmissionFault{})
 						}

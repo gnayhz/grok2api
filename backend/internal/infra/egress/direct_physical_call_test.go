@@ -2,6 +2,8 @@ package egress
 
 import (
 	"context"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"net/http"
 	"testing"
 
@@ -24,7 +26,7 @@ func swapPhysicalMetrics(t *testing.T) (*perfmetrics.Registry, *perfmetrics.Regi
 func TestRecordDirectPhysicalCallDelegation(t *testing.T) {
 	registry, _ := swapPhysicalMetrics(t)
 
-	ctx := WithPhysicalCallTrace(context.Background(), "grok_build", "responses")
+	ctx := physical.WithPhysicalCallTrace(context.Background(), testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_build", "responses")
 	RecordDirectPhysicalCall(ctx, &http.Response{StatusCode: http.StatusForbidden}, nil)
 
 	samples := registry.CollectAndReset()

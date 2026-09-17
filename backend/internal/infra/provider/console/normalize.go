@@ -7,13 +7,9 @@ import (
 	"strings"
 
 	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
-
-func normalizeRequest(body []byte, spec ModelSpec) ([]byte, error) {
-	return normalizeRequestWithMetadata(body, spec, nil)
-}
 
 func normalizeRequestWithMetadata(body []byte, spec ModelSpec, metadata *provider.NormalizedRequestMetadata) ([]byte, error) {
 	var payload map[string]any
@@ -292,19 +288,6 @@ func hasConsoleFunctionTool(tools []any, target string) bool {
 		}
 	}
 	return false
-}
-
-func toolIdentity(value any) string {
-	tool, ok := value.(map[string]any)
-	if !ok {
-		return ""
-	}
-	typeName, _ := tool["type"].(string)
-	if typeName != "function" {
-		return typeName
-	}
-	name, _ := tool["name"].(string)
-	return typeName + ":" + name
 }
 
 func parseConsoleRateLimitMetadata(body []byte) *provider.RateLimitMetadata {

@@ -3,6 +3,11 @@ package gateway
 import (
 	"context"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -18,9 +23,9 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
@@ -78,6 +83,7 @@ type ownedResourceFixture struct {
 	key         clientkey.Key
 	saved       inferencedomain.ResponseOwnership
 	adapter     *ownedResourceAdapter
+	concurrency repository.ConcurrencyLimiter
 }
 
 func newOwnedResourceFixture(t *testing.T, authType account.AuthType) *ownedResourceFixture {
@@ -115,19 +121,19 @@ func newOwnedResourceFixture(t *testing.T, authType account.AuthType) *ownedReso
 		t.Fatal(err)
 	}
 	a := &ownedResourceAdapter{scriptedBuildAdapter: &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}}
-	registry := provider.NewRegistry(a)
+	registry := providerimpl.NewRegistry(a)
 	sticky := memory.NewStickyStore()
 	concurrency := memory.NewConcurrencyLimiter()
-	maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
 	store := &resourceFaultStore{ResponseRepository: relational.NewResponseRepository(db)}
-	selector := NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(models, audits, maintenance, clientkeyapp.NewService("resource", nil, nil, nil, 120, 4, nil), registry, selector, store, 2)
+	sel := selector.NewSelector(accounts, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(models, audits, maintenance, clientkeyapp.NewService("resource", nil, nil, nil, 120, 4, nil, security.RandomTokenSource{}), registry, sel, historyapp.NewResponseResources(store), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 	now := time.Now().UTC()
 	saved := inferencedomain.ResponseOwnership{ResponseID: "resource", AccountID: c.ID, ClientKeyID: key.ID, ModelRouteID: route.ID, Provider: c.Provider, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now}
 	if err = store.Save(ctx, saved); err != nil {
 		t.Fatal(err)
 	}
-	return &ownedResourceFixture{service, store, accounts, c, key, saved, a}
+	return &ownedResourceFixture{service, store, accounts, c, key, saved, a, concurrency}
 }
 func (f *ownedResourceFixture) input() ResourceInput {
 	return ResourceInput{ClientKey: f.key, ResponseID: f.saved.ResponseID}
@@ -136,7 +142,7 @@ func (f *ownedResourceFixture) noLease(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		n, err := f.service.selector.concurrency.Current(context.Background(), accountConcurrencyKey(f.credential.ID))
+		n, err := f.concurrency.Current(context.Background(), repository.AccountConcurrencyKey(f.credential.ID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +199,7 @@ func TestOwnedResourceDeletionRequiresLocalCommitAndRecovers(t *testing.T) {
 			var bodies []*countedBody
 			if status == 0 {
 				f.adapter.unsupported = true
-				f.service.providers = provider.NewRegistry(f.adapter)
+				f.service.providers = providerimpl.NewRegistry(f.adapter)
 			}
 			f.adapter.forward = func(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
 				calls++

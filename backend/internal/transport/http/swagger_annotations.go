@@ -1,5 +1,11 @@
 package httpserver
 
+// 本文件是 swag 注释的载体(make swagger 以 `swag init -d cmd/grok2api,
+// internal/transport/http --parseInternal` 扫描本文件注释生成 docs/ 契约)。
+// 文中的空 swagger* 函数与 Swagger* DTO 类型没有任何运行时调用方,静态
+// 可达性工具(deadcode 等)报告其"不可达"属预期——删除会直接丢失公开
+// API 契约文档,勿按工具报告清理。
+
 // SwaggerMessage 表示 Chat Completions 请求中的一条消息。
 type SwaggerMessage struct {
 	Role    string `json:"role" example:"user"`
@@ -268,6 +274,17 @@ func swaggerExtendVideo() {}
 // @Router /v1/videos/{request_id} [get]
 func swaggerGetVideo() {}
 
+// swaggerGetVideoContent godoc
+// @Summary 下载异步视频产物
+// @Tags Videos
+// @Security BearerAuth
+// @Produce octet-stream
+// @Param request_id path string true "Request ID"
+// @Success 200 {file} binary
+// @Failure 404 {object} map[string]any
+// @Router /v1/videos/{request_id}/content [get]
+func swaggerGetVideoContent() {}
+
 // swaggerTTS godoc
 // @Summary 文本转语音（OpenAI 兼容）
 // @Tags Audio
@@ -375,18 +392,18 @@ func swaggerRealtime() {}
 func swaggerMediaUpload() {}
 
 // swaggerMediaImport godoc
-// @Summary 导入外部媒体为临时输入
+// @Summary 导入外部媒体为临时输入（管理端）
 // @Tags Media
 // @Security BearerAuth
 // @Accept json
 // @Produce json
 // @Success 201 {object} map[string]any
 // @Failure 400 {object} map[string]any
-// @Router /v1/media/inputs/import [post]
+// @Router /api/admin/v1/media/inputs/import [post]
 func swaggerMediaImport() {}
 
 // swaggerMediaInputUpload godoc
-// @Summary 上传临时媒体输入（multipart）
+// @Summary 上传临时媒体输入（multipart，管理端）
 // @Tags Media
 // @Security BearerAuth
 // @Accept multipart/form-data
@@ -395,5 +412,5 @@ func swaggerMediaImport() {}
 // @Failure 400 {object} map[string]any
 // @Failure 413 {object} map[string]any
 // @Failure 503 {object} map[string]any
-// @Router /v1/media/inputs/upload [post]
+// @Router /api/admin/v1/media/inputs/upload [post]
 func swaggerMediaInputUpload() {}

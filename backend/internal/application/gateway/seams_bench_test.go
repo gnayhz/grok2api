@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,7 +15,7 @@ import (
 
 // benchmarkSeamDB 预置 32 个可调度账号(批2 热路径基准:资格谓词缝隙
 // 在候选过滤循环中的每选择成本)。
-func benchmarkSeamDB(b *testing.B) (*Selector, func()) {
+func benchmarkSeamDB(b *testing.B) (*selector.Selector, func()) {
 	b.Helper()
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(b.TempDir(), "seam-bench.db"))
@@ -33,21 +35,27 @@ func benchmarkSeamDB(b *testing.B) (*Selector, func()) {
 			b.Fatal(err)
 		}
 	}
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	return selector, func() { _ = database.Close() }
+	sel := selector.NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	return sel, func() { _ = database.Close() }
 }
 
 func benchmarkSeamAcquire(b *testing.B, withSeam bool) {
-	selector, cleanup := benchmarkSeamDB(b)
+	sel, cleanup := benchmarkSeamDB(b)
 	defer cleanup()
 	if withSeam {
-		selector.SetQualityEligibility(stubAccountEligibility{ineligible: map[uint64]bool{}})
+		sel.SetQualityEligibility(stubAccountEligibility{ineligible: map[uint64]bool{}})
 	}
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		lease, err := selector.Acquire(ctx, account.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, true)
+		lease, err := func() (*selector.Lease, error) {
+			session, sessionErr := sel.BeginSelectionSessionForKey(ctx, account.ProviderBuild, 0, "grok-test", "", "", map[uint64]bool{}, true, clientkeydomain.AccountScope{})
+			if sessionErr != nil {
+				return nil, sessionErr
+			}
+			return session.Acquire(ctx, map[uint64]bool{}, true)
+		}()
 		if err != nil {
 			b.Fatal(err)
 		}

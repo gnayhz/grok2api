@@ -9,6 +9,7 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
 )
 
 // WebSocket owns one upgraded physical exchange. The body byte count is the
@@ -19,7 +20,7 @@ type WebSocket struct {
 	conn     *websocket.Conn
 	ctx      context.Context
 	id       attemptmeta.Identity
-	ledger   *physicalLedger
+	journal  physical.Journal
 	stop     func() bool
 	readMu   sync.Mutex
 	once     sync.Once
@@ -27,10 +28,7 @@ type WebSocket struct {
 }
 
 func newPhysicalWebSocket(ctx context.Context, conn *websocket.Conn) *WebSocket {
-	w := &WebSocket{conn: conn, ctx: ctx, id: attemptmeta.FromContext(ctx)}
-	if trace := physicalCallFromContext(ctx).trace; trace != nil {
-		w.ledger = &trace.ledger
-	}
+	w := &WebSocket{conn: conn, ctx: ctx, id: attemptmeta.FromContext(ctx), journal: physical.JournalFromContext(ctx)}
 	w.stop = context.AfterFunc(ctx, func() { _ = w.close("canceled") })
 	return w
 }
@@ -75,16 +73,8 @@ func (w *WebSocket) WriteJSON(value any) error {
 }
 
 func (w *WebSocket) observe(n int, outcome string) {
-	if w.ledger == nil {
-		return
-	}
-	w.ledger.mu.Lock()
-	defer w.ledger.mu.Unlock()
-	if entry := w.ledger.calls[w.id.ID]; entry != nil && !entry.persisted && !entry.finalized {
-		entry.fact.BodyBytes += int64(n)
-		if outcome != "" && entry.fact.BodyOutcome == "pending" {
-			entry.fact.BodyOutcome = outcome
-		}
+	if w.journal != nil {
+		w.journal.ObserveBody(w.id.ID, n, outcome)
 	}
 }
 
@@ -100,22 +90,10 @@ func (w *WebSocket) Close() error {
 func (w *WebSocket) close(outcome string) error {
 	w.once.Do(func() {
 		w.closeErr = w.conn.Close()
-		// Close interrupts an outstanding read before taking its lock; byte and
-		// error observations must finish before the fact becomes publishable.
 		w.readMu.Lock()
 		defer w.readMu.Unlock()
-		if w.ledger == nil {
-			return
-		}
-		w.ledger.mu.Lock()
-		defer w.ledger.mu.Unlock()
-		if entry := w.ledger.calls[w.id.ID]; entry != nil && !entry.persisted {
-			if entry.fact.BodyOutcome == "pending" {
-				entry.fact.BodyOutcome = outcome
-			}
-			entry.fact.At = time.Now().UTC()
-			entry.fact.DurationMS = time.Since(w.id.StartedAt).Milliseconds()
-			entry.finalized = true
+		if w.journal != nil {
+			w.journal.FinalizeBody(w.id.ID, outcome, w.id.StartedAt)
 		}
 	})
 	return w.closeErr
@@ -131,16 +109,10 @@ func recordWebSocketHandshake(ctx context.Context, endpoint string, response *fh
 		}
 	}
 	if err == nil && response != nil && response.StatusCode == http.StatusSwitchingProtocols {
-		if trace := physicalCallFromContext(ctx).trace; trace != nil {
-			trace.ledger.mu.Lock()
-			if entry := trace.ledger.calls[attemptmeta.FromContext(ctx).ID]; entry != nil {
-				entry.fact.HeaderOutcome, entry.fact.Status = "upgraded", http.StatusSwitchingProtocols
-			}
-			trace.ledger.mu.Unlock()
+		if journal := physical.JournalFromContext(ctx); journal != nil {
+			journal.MarkUpgraded(attemptmeta.FromContext(ctx).ID)
 		}
 	} else {
-		// A non-101 handshake has an ordinary HTTP rejection body. Record that
-		// response status separately from a failure to establish transport.
 		observationErr := err
 		if response != nil {
 			observationErr = nil
@@ -148,6 +120,13 @@ func recordWebSocketHandshake(ctx context.Context, endpoint string, response *fh
 		recordPhysicalExchange(ctx, standard, observationErr)
 		if response != nil && standard != nil {
 			response.Body = standard.Body
+		}
+		// A rejected handshake still owns its body bytes; wrap it so the
+		// journal observes drain/close outcomes exactly like HTTP calls.
+		if journal := physical.JournalFromContext(ctx); journal != nil && response != nil && response.Body != nil {
+			if id := attemptmeta.FromContext(ctx); id.ID != "" {
+				response.Body = &physicalBody{ReadCloser: response.Body, journal: journal, id: id.ID, ctx: ctx}
+			}
 		}
 	}
 	observationErr := err

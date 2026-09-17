@@ -13,13 +13,6 @@ import (
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 )
 
-func (m *clientRegistry) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool, accountIdentity string) (cachedClient, error) {
-	return m.clientForWithOptions(id, scope, proxyURL, userAgent, cookies, sticky, accountIdentity, clientOptions{})
-}
-
-func (m *clientRegistry) clientForWithOptions(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool, accountIdentity string, options clientOptions) (cachedClient, error) {
-	return m.clientForContext(context.Background(), id, scope, proxyURL, userAgent, cookies, sticky, accountIdentity, options)
-}
 func (m *clientRegistry) clientForContext(ctx context.Context, id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool, accountIdentity string, options clientOptions) (cachedClient, error) {
 	if m.closed.Load() {
 		return cachedClient{}, ErrRuntimeClosed
@@ -259,14 +252,6 @@ func (m *clientRegistry) constructClient(scope domain.Scope, proxyURL, userAgent
 		return cachedClient{}, err
 	}
 	return cachedClient{client: client, browser: client}, nil
-}
-
-func newBuildRequestClient(proxyURL string, responseHeaderTimeout time.Duration) (requestClient, error) {
-	return newBuildClient(proxyURL, responseHeaderTimeout)
-}
-
-func newBuildEnvironmentRequestClient(responseHeaderTimeout time.Duration) (requestClient, error) {
-	return newBuildEnvironmentClient(responseHeaderTimeout)
 }
 
 func (m *clientRegistry) cleanupClientCacheLocked(now time.Time) []requestClient {

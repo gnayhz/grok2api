@@ -55,7 +55,7 @@ export type AuditUsageInput = {
   durationMs: number;
 };
 
-export function auditTokenUsageAvailable(audit: Pick<AuditUsageInput, "usageSource">): boolean {
+function auditTokenUsageAvailable(audit: Pick<AuditUsageInput, "usageSource">): boolean {
   return audit.usageSource !== "none";
 }
 
@@ -64,7 +64,7 @@ export function auditCachedUsageAvailable(audit: Pick<AuditUsageInput, "usageSou
     (audit.cachedInputTokensReported === undefined && audit.cachedInputTokens > 0));
 }
 
-export function formatAuditTokenValue(value: number, available: boolean, formatNumber: (value: number) => string): string {
+function formatAuditTokenValue(value: number, available: boolean, formatNumber: (value: number) => string): string {
   if (!available) {
     return MISSING_AUDIT_USAGE_PLACEHOLDER;
   }

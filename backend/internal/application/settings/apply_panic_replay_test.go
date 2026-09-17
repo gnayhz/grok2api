@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 )
 
 // TestUpdateApplyPanicDoesNotAdvanceRevision：apply 回调 panic 时不推进
@@ -15,7 +15,7 @@ import (
 func TestUpdateApplyPanicDoesNotAdvanceRevision(t *testing.T) {
 	repository := &runtimeSettingsRepositoryStub{}
 	applies := 0
-	service := newTestService(testConfig(t), time.Time{}, 0, repository, nil, func(next config.Config) {
+	service := newTestService(testConfig(t), time.Time{}, 0, repository, nil, func(next settingsdomain.Config) {
 		applies++
 		if applies == 1 {
 			panic("first apply explodes")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	fhttp "github.com/bogdanfinn/fhttp"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ func TestHTTPRejectsLegacyUnsupportedModelCapabilityBeforeUpstream(t *testing.T)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(500) }))
 			defer upstream.Close()
 			fx := newProviderCompletionFixture(t, upstream.URL, tc.up, tc.kind, nil, nil)
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			// A literal Provider-prefixed public name must retain its invalid configured
 			// meaning instead of falling through to a valid historical qualified name.
 			_, err := fx.models.Create(ctx, model.Route{Provider: tc.kind, PublicID: tc.kind.ModelNamespace() + "/legacy", UpstreamModel: tc.up, Capability: map[account.Provider]model.Capability{account.ProviderBuild: model.CapabilityResponses, account.ProviderWeb: model.CapabilityChat, account.ProviderConsole: model.CapabilityResponses}[tc.kind], Enabled: true}, []uint64{fx.account.ID})
@@ -133,7 +134,7 @@ func TestLegacyBuildVideoCapabilityPreservesSubmittedWork(t *testing.T) {
 			if err := fx.jobs.CreateMediaJob(ctx, job); err != nil {
 				t.Fatal(err)
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 				t.Fatal(err)
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +36,7 @@ func (s *notifiedSolver) Solve(ctx context.Context, _ ClearanceConfig, _ string)
 
 func TestClearanceCancellationDoesNotBlockOrCancelSharedSolve(t *testing.T) {
 	solver := &notifiedSolver{entered: make(chan struct{}), gate: make(chan struct{})}
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	m.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", Timeout: time.Second})
 	m.clearance.solver = solver
@@ -77,7 +78,7 @@ func TestBrowserPoolDoesNotReplaySubmittedPOST(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer server.Close()
-	client, err := newBrowserClient("", DefaultUserAgent)
+	client, err := newBrowserClientWithBudget("", DefaultUserAgent, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestBrowserPoolDoesNotReplaySubmittedPOST(t *testing.T) {
 }
 
 func TestClientCreationRejectsGenerationAlias(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	m.transport.clientVersions[7] = 1
 	entered, gate := make(chan struct{}), make(chan struct{})
@@ -108,7 +109,10 @@ func TestClientCreationRejectsGenerationAlias(t *testing.T) {
 		return noopRequestClient{}, nil
 	}
 	done := make(chan error, 1)
-	go func() { _, err := m.transport.clientFor(7, domain.ScopeBuild, "", "", "", false, ""); done <- err }()
+	go func() {
+		_, err := m.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "", clientOptions{})
+		done <- err
+	}()
 	<-entered
 	m.transport.clientMu.Lock()
 	m.transport.invalidateAllClientVersionsLocked()
@@ -123,13 +127,13 @@ func TestClientCreationRejectsGenerationAlias(t *testing.T) {
 }
 
 func TestSessionInsertDoesNotEvictFullSharedBudget(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	now := time.Now()
 	for i := range maxCachedClients {
 		m.transport.clients[clientCacheKey{nodeID: uint64(i + 1), scope: domain.ScopeBuild}] = cachedClient{client: noopRequestClient{}, lastUsed: now}
 	}
-	_, err := m.transport.clientForWithOptions(1, domain.ScopeBuild, "", "", "", false, "", clientOptions{sessionKey: "session"})
+	_, err := m.transport.clientForContext(context.Background(), 1, domain.ScopeBuild, "", "", "", false, "", clientOptions{sessionKey: "session"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,20 +143,20 @@ func TestSessionInsertDoesNotEvictFullSharedBudget(t *testing.T) {
 }
 
 func TestSessionPinsRespectCapacityWithinSweepWindow(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	m.routing.sessionPinSweep = time.Now()
 	for i := range maxSessionPinnedNodes + 10 {
 		m.routing.sessionPins[fmt.Sprint(i)] = sessionNodePin{lastUsed: time.Now()}
 	}
-	m.sweepSessionPinsLocked(time.Now())
+	m.routing.sweepSessionPinsLocked(time.Now())
 	if len(m.routing.sessionPins) > maxSessionPinnedNodes {
 		t.Fatalf("pin budget bypassed: %d", len(m.routing.sessionPins))
 	}
 }
 
 func TestLeaseConcurrentReleaseIsIdempotent(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	lease, _, err := m.leaseForNode(context.Background(), domain.ScopeBuild, "", "", false, domain.Node{})
 	if err != nil {
@@ -163,13 +167,13 @@ func TestLeaseConcurrentReleaseIsIdempotent(t *testing.T) {
 		wg.Go(lease.Release)
 	}
 	wg.Wait()
-	if count := m.inflightCount(0); count != 0 {
+	if count := m.routing.inflightCount(0); count != 0 {
 		t.Fatalf("inflight after concurrent release: %d", count)
 	}
 }
 
 func TestCanceledLeaseReleasesRetiredClientWithoutBodyConsumer(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	ctx, cancel := context.WithCancel(context.Background())
 	lease, err := m.AcquireBuildEnvironmentDirect(ctx, "")
@@ -187,21 +191,21 @@ func TestCanceledLeaseReleasesRetiredClientWithoutBodyConsumer(t *testing.T) {
 	}
 	lease.Release()
 	lease.Release()
-	if s := m.RuntimeStats(); s.Network.Clients != 0 || s.RetiredClients != 0 || m.inflightCount(0) != 0 {
+	if s := m.RuntimeStats(); s.Network.Clients != 0 || s.RetiredClients != 0 || m.routing.inflightCount(0) != 0 {
 		t.Fatalf("canceled lease retained resource ownership: %+v", s)
 	}
 }
 
 func TestFixedNodeCounterChurnRetainsActiveLeasesWithinCapacity(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	m.incrementInflight(1)
 	for id := uint64(2); id < 20000; id++ {
 		m.incrementInflight(id)
 		m.decrementInflight(id)
 	}
-	if m.routing.inflightEntries > maxRetainedInflightCounters || m.inflightCount(1) != 1 {
-		t.Fatalf("counter churn: entries=%d active=%d", m.routing.inflightEntries, m.inflightCount(1))
+	if m.routing.inflightEntries > maxRetainedInflightCounters || m.routing.inflightCount(1) != 1 {
+		t.Fatalf("counter churn: entries=%d active=%d", m.routing.inflightEntries, m.routing.inflightCount(1))
 	}
 	m.decrementInflight(1)
 }

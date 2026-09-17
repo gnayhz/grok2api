@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"path/filepath"
 	"testing"
@@ -36,7 +37,7 @@ func TestResolvePublicModelRoutesDistinguishesNoAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 真实关系仓储作为 resolver（HasEnabledRouteByPublicID 走真实 SQL）。
-	service := &Service{models: modelRepo, logger: nil}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), models: modelRepo, logger: nil}
 
 	if _, _, err := service.resolvePublicModelRoutes(ctx, "grok-4.20-0309-reasoning", true); !errorsIs(err, ErrNoAvailableAccount) {
 		t.Fatalf("无账号路由应返回 ErrNoAvailableAccount（503 语义），得到 %v", err)

@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -13,10 +15,10 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -47,7 +49,7 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 	cloudflareCookie := "cf_clearance=shared-clearance; __cf_bm=shared-bm"
 	webAccount, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
-		Name: "Grok Web primary", SourceKey: "sso:" + security.HashToken(token),
+		Name: "Grok Web primary", SourceKey: "sso:" + tokenhash.HashToken(token),
 		EncryptedAccessToken: encrypt(token), EncryptedCloudflareCookie: encrypt(cloudflareCookie),
 		Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
@@ -66,10 +68,10 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 		t.Fatal(err)
 	}
 	var parseCalls atomic.Int64
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(consoleSSOCodecAdapter{parseCalls: &parseCalls}), cipher, memory.NewLockStore())
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(consoleSSOCodecAdapter{parseCalls: &parseCalls}), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 	var observed []uint64
 	var progress [][2]int
-	first, err := service.SyncWebAccountsToConsoleWithProgress(ctx, []uint64{webAccount.ID}, func(accountID uint64) error {
+	first, err := service.SyncWebAccountsToConsoleWithStrategy(ctx, []uint64{webAccount.ID}, WebConsoleSyncAll, func(accountID uint64) error {
 		observed = append(observed, accountID)
 		return nil
 	}, func(completed, total int) error {
@@ -104,7 +106,7 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 		t.Fatalf("console Cloudflare cookie = %q, want %q", consoleCookie, cloudflareCookie)
 	}
 
-	second, err := service.SyncAllWebAccountsToConsoleWithProgress(ctx, nil, nil)
+	second, err := service.SyncAllWebAccountsToConsoleWithStrategy(ctx, WebConsoleSyncAll, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 	secondToken := "missing-sso-token"
 	missingWeb, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
-		Name: "Grok Web missing", SourceKey: "sso:" + security.HashToken(secondToken),
+		Name: "Grok Web missing", SourceKey: "sso:" + tokenhash.HashToken(secondToken),
 		EncryptedAccessToken: encrypt(secondToken), Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
@@ -190,16 +192,16 @@ func TestSyncWebAccountsToConsoleWrapsTokenAsDeterministicJSON(t *testing.T) {
 	accounts := relational.NewAccountRepository(database)
 	webAccount, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
-		Name: "Grok Web weird", SourceKey: "sso:" + security.HashToken(weirdToken),
+		Name: "Grok Web weird", SourceKey: "sso:" + tokenhash.HashToken(weirdToken),
 		EncryptedAccessToken: encrypted, Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var captured []byte
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(consoleSSOCodecAdapter{lastPayload: &captured}), cipher, memory.NewLockStore())
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(consoleSSOCodecAdapter{lastPayload: &captured}), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 
-	result, err := service.SyncWebAccountsToConsoleWithProgress(ctx, []uint64{webAccount.ID}, nil, nil)
+	result, err := service.SyncWebAccountsToConsoleWithStrategy(ctx, []uint64{webAccount.ID}, WebConsoleSyncAll, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,15 +242,15 @@ func TestSyncWebAccountsToConsoleRoundTripsThroughRealAdapter(t *testing.T) {
 	accounts := relational.NewAccountRepository(database)
 	webAccount, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
-		Name: "Grok Web weird", SourceKey: "sso:" + security.HashToken(weirdToken),
+		Name: "Grok Web weird", SourceKey: "sso:" + tokenhash.HashToken(weirdToken),
 		EncryptedAccessToken: encrypted, Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(consoleprovider.NewAdapter(consoleprovider.Config{}, nil, nil, nil)), cipher, memory.NewLockStore())
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(consoleprovider.NewAdapter(consoleprovider.Config{}, nil, nil, nil)), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 
-	first, err := service.SyncWebAccountsToConsoleWithProgress(ctx, []uint64{webAccount.ID}, nil, nil)
+	first, err := service.SyncWebAccountsToConsoleWithStrategy(ctx, []uint64{webAccount.ID}, WebConsoleSyncAll, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,10 +266,10 @@ func TestSyncWebAccountsToConsoleRoundTripsThroughRealAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 真实 adapter 的 SourceKey 必须与原纯文本路径一致（"console-sso:"+hash(token)），否则存量账号会重复创建。
-	if decrypted != weirdToken || consoleAccount.SourceKey != "console-sso:"+security.HashToken(weirdToken) {
+	if decrypted != weirdToken || consoleAccount.SourceKey != "console-sso:"+tokenhash.HashToken(weirdToken) {
 		t.Fatalf("console account token=%q sourceKey=%q", decrypted, consoleAccount.SourceKey)
 	}
-	second, err := service.SyncWebAccountsToConsoleWithProgress(ctx, []uint64{webAccount.ID}, nil, nil)
+	second, err := service.SyncWebAccountsToConsoleWithStrategy(ctx, []uint64{webAccount.ID}, WebConsoleSyncAll, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,15 +301,15 @@ func TestSyncWebAccountsToConsoleRejectsInvalidUTF8Token(t *testing.T) {
 	accounts := relational.NewAccountRepository(database)
 	webAccount, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
-		Name: "Grok Web broken", SourceKey: "sso:" + security.HashToken(brokenToken),
+		Name: "Grok Web broken", SourceKey: "sso:" + tokenhash.HashToken(brokenToken),
 		EncryptedAccessToken: encrypted, Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(consoleSSOCodecAdapter{}), cipher, memory.NewLockStore())
+	service := NewService(accounts, nil, nil, nil, providerimpl.NewRegistry(consoleSSOCodecAdapter{}), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 
-	if _, err := service.SyncWebAccountsToConsoleWithProgress(ctx, []uint64{webAccount.ID}, nil, nil); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+	if _, err := service.SyncWebAccountsToConsoleWithStrategy(ctx, []uint64{webAccount.ID}, WebConsoleSyncAll, nil, nil); err == nil || !strings.Contains(err.Error(), "UTF-8") {
 		t.Fatalf("error = %v, want invalid UTF-8 rejection", err)
 	}
 }
@@ -327,14 +329,14 @@ func TestSyncAllWebAccountsToConsoleProcessesMoreThanLegacyLimitInBatches(t *tes
 		}
 		values = append(values, accountdomain.Credential{
 			ID: uint64(index), Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
-			Name: fmt.Sprintf("Grok Web %d", index), SourceKey: "sso:" + security.HashToken(token),
+			Name: fmt.Sprintf("Grok Web %d", index), SourceKey: "sso:" + tokenhash.HashToken(token),
 			EncryptedAccessToken: encrypted, Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 		})
 	}
 	repository := &webConsoleBatchRepository{values: values}
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(consoleSSOCodecAdapter{}), cipher, memory.NewLockStore())
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(consoleSSOCodecAdapter{}), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 	progress := make([][2]int, 0, totalAccounts+1)
-	result, err := service.SyncAllWebAccountsToConsoleWithProgress(context.Background(), nil, func(completed, total int) error {
+	result, err := service.SyncAllWebAccountsToConsoleWithStrategy(context.Background(), WebConsoleSyncAll, nil, func(completed, total int) error {
 		progress = append(progress, [2]int{completed, total})
 		return nil
 	})
@@ -408,7 +410,7 @@ func (a consoleSSOCodecAdapter) ParseImportedCredentials(data []byte) ([]provide
 	}
 	return []provider.CredentialSeed{{
 		Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO,
-		Name: "Grok Console " + security.HashToken(token)[:8], SourceKey: "console-sso:" + security.HashToken(token), AccessToken: token,
+		Name: "Grok Console " + tokenhash.HashToken(token)[:8], SourceKey: "console-sso:" + tokenhash.HashToken(token), AccessToken: token,
 	}}, nil
 }
 

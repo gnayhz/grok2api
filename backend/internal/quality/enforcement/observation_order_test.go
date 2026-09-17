@@ -32,7 +32,9 @@ func TestPollEpochsRejectsDelayedObservation(t *testing.T) {
 	}
 	nodes := memNodes{profiles: []proxy.NodeProfile{{ID: 5, Enabled: true}}}
 	a := New(DefaultConfig(), r, nil, nil, nil)
+	go a.Run(context.Background())
 	b := New(DefaultConfig(), r, nil, nil, nil)
+	go b.Run(context.Background())
 	old := controlledIPObservation{ip: "192.0.2.1", revision: 1, read: make(chan struct{}), resume: make(chan struct{})}
 	a.nodes, a.ipSource = nodes, old
 	b.nodes, b.ipSource = nodes, controlledIPObservation{ip: "192.0.2.2", revision: 2}

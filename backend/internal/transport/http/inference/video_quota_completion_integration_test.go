@@ -4,6 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -100,7 +105,7 @@ func TestVideoQuotaHandoffRecoversWithoutRegeneration(t *testing.T) {
 				}
 				jobFault := &videoQuotaFaultJobs{MediaJobRepository: fx.jobs, ackLost: fault == "marker_ack_lost"}
 				jobFault.active.Store(fault == "marker_failed" || fault == "marker_ack_lost")
-				fx.service.ConfigureMedia(jobFault, 1)
+				fx.service.ConfigureMedia(jobFault, mediaapp.NewVideoResources(jobFault, nil), 1)
 				job := createVideoAuthorizationJob(t, fx)
 				workerCtx, stop := context.WithCancel(ctx)
 				done := make(chan struct{})
@@ -149,12 +154,12 @@ func TestVideoQuotaHandoffRecoversWithoutRegeneration(t *testing.T) {
 				defer db.Close()
 				accounts, jobs := relational.NewAccountRepository(db), relational.NewMediaJobRepository(db)
 				concurrency, sticky := memory.NewConcurrencyLimiter(), memory.NewStickyStore()
-				accountService := accountapp.NewService(accounts, fx.audits, memory.NewDeviceSessionStore(), sticky, fx.registry, nil, nil)
-				clients := clientkeyapp.NewService("test-owner", fx.clients, memory.NewRateLimiter(), concurrency, 120, 4, nil)
+				accountService := accountapp.NewService(accounts, fx.audits, memory.NewDeviceSessionStore(), sticky, fx.registry, nil, security.RandomTokenSource{}, nil, nil, nil)
+				clients := clientkeyapp.NewService("test-owner", fx.clients, memory.NewRateLimiter(), concurrency, 120, 4, nil, security.RandomTokenSource{})
 				defer closeClientKeyService(t, clients)
-				selector := gateway.NewSelector(accounts, concurrency, sticky, fx.registry, time.Hour, time.Second, time.Minute)
-				restarted := gateway.NewService(fx.models, fx.audits, accountService, clients, fx.registry, selector, relational.NewResponseRepository(db), 1)
-				restarted.ConfigureMedia(jobs, 1)
+				selector := selector.NewSelector(accounts, concurrency, sticky, fx.registry, time.Hour, time.Second, time.Minute)
+				restarted := gateway.NewService(fx.models, fx.audits, accountService, clients, fx.registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 1)
+				restarted.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 				for range 3 {
 					if err := restarted.RecoverVideoJobs(ctx); err != nil {
 						t.Fatal(err)
@@ -182,7 +187,7 @@ func TestVideoQuotaHandoffRecoversWithoutRegeneration(t *testing.T) {
 				if fault == "new_snapshot" {
 					// A further account owner starts with an empty queue and no shared
 					// Redis demand; recovery must discover the SQL pending receipt.
-					fresh := accountapp.NewService(accounts, fx.audits, memory.NewDeviceSessionStore(), memory.NewStickyStore(), fx.registry, nil, nil)
+					fresh := accountapp.NewService(accounts, fx.audits, memory.NewDeviceSessionStore(), memory.NewStickyStore(), fx.registry, nil, security.RandomTokenSource{}, nil, nil, nil)
 					refreshCtx, stopRefresh := context.WithCancel(ctx)
 					refreshDone := make(chan struct{})
 					go func() { fresh.RunQuotaRefresh(refreshCtx); close(refreshDone) }()
@@ -266,7 +271,7 @@ func TestVideoGeneratedArchiveFailureConsumesQuota(t *testing.T) {
 			if err := saveQuotaWindowsFixture(fx.accounts, ctx, fx.account.ID, account.WebTierBasic, time.Now().UTC(), []account.QuotaWindow{{Mode: mode, Remaining: 20, Total: 20}}); err != nil {
 				t.Fatal(err)
 			}
-			fx.service.ConfigureMedia(fx.jobs, 1)
+			fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 			job := createVideoAuthorizationJob(t, fx)
 			workerCtx, stop := context.WithCancel(ctx)
 			done := make(chan struct{})

@@ -6,6 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,8 +28,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
@@ -81,8 +86,8 @@ func TestGetVideoExposesOnlyReadableResultAsset(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := &Service{mediaJobs: &videoUsageRepository{job: completed}, mediaAssets: test.store}
-			service.ConfigureMedia(service.mediaJobs, 1)
+			service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), mediaJobs: &videoUsageRepository{job: completed}, mediaAssets: test.store}
+			service.ConfigureMedia(service.mediaJobs, mediaapp.NewVideoResources(&videoUsageRepository{job: completed}, nil), 1)
 			job, err := service.GetVideo(context.Background(), completed.ID, clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: completed.ClientKeyID})
 			if err != nil {
 				t.Fatal(err)
@@ -99,14 +104,14 @@ func TestOpenVideoContentKeepsLocalAssetFastPath(t *testing.T) {
 		ID: "video_content", ClientKeyID: 7, Status: media.StatusCompleted,
 		ResultAssetID: "vid_local", UpstreamURL: "https://assets.grok.com/video.mp4",
 	}
-	service := &Service{
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(),
 		mediaJobs: &videoUsageRepository{job: completed},
 		mediaAssets: &videoAssetStoreStub{
 			openAsset: media.Asset{ID: "vid_local", Kind: "video", MIMEType: "video/mp4", SizeBytes: 5},
 			openData:  []byte("video"),
 		},
 	}
-	service.ConfigureMedia(service.mediaJobs, 1)
+	service.ConfigureMedia(service.mediaJobs, mediaapp.NewVideoResources(&videoUsageRepository{job: completed}, nil), 1)
 	body, contentType, size, err := service.OpenVideoContent(context.Background(), completed.ID, clientkey.Key{ModelScope: clientkey.ModelScopeAll, ID: completed.ClientKeyID})
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +135,7 @@ func TestRecoverVideoJobsRetriesUsageWithoutRegeneratingVideo(t *testing.T) {
 		Seconds: 8, Quality: "720p", Status: media.StatusCompleted, InputImageCount: 2, CreatedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt,
 	}}
 	recorder := &durableVideoAuditRecorder{failures: 1}
-	service := &Service{mediaJobs: repository, audits: recorder}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), mediaJobs: repository, audits: recorder}
 	if err := service.RecoverVideoJobs(context.Background()); err == nil {
 		t.Fatal("first durable audit failure was ignored")
 	}
@@ -245,13 +250,14 @@ func TestCreateVideoAppliesRouteConstraintsAfterKeyEligibilityAndBeforeInputIO(t
 	}
 	jobs := &videoUsageRepository{}
 	assets := &videoAssetStoreStub{inputID: "unused", inputData: []byte("unused")}
-	service := &Service{
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(),
 		models:     &aliasRouteResolver{byPublic: map[string][]model.Route{"shared-video": routes}},
-		clientKeys: clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil),
-		providers:  provider.NewRegistry(consoleVideoAdmissionAdapter{}),
-		mediaJobs:  jobs, mediaAssets: assets, mediaQueue: make(chan string, 1), mediaQueued: make(map[string]struct{}),
+		clientKeys: clientkeyapp.NewService("test-owner", nil, nil, nil, 60, 4, nil, security.RandomTokenSource{}),
+		providers:  providerimpl.NewRegistry(consoleVideoAdmissionAdapter{}),
+		mediaJobs:  jobs, mediaAssets: assets,
 		logger: slog.Default(),
 	}
+	service.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 4)
 	references := make([]string, provider.ConsoleVideoMaxReferenceImages+1)
 	for index := range references {
 		references[index] = VideoInputFileReference(fmt.Sprintf("unused_%d", index))
@@ -267,8 +273,8 @@ func TestCreateVideoAppliesRouteConstraintsAfterKeyEligibilityAndBeforeInputIO(t
 	if !errors.Is(err, ErrVideoParameterInvalid) {
 		t.Fatalf("CreateVideo error = %v", err)
 	}
-	if assets.openInputCalls != 0 || jobs.createCalls != 0 || len(service.mediaQueue) != 0 || len(service.mediaQueued) != 0 {
-		t.Fatalf("side effects: input opens=%d job creates=%d queue=%d queued-set=%d", assets.openInputCalls, jobs.createCalls, len(service.mediaQueue), len(service.mediaQueued))
+	if assets.openInputCalls != 0 || jobs.createCalls != 0 || len(service.background.queue) != 0 || len(service.background.queued) != 0 {
+		t.Fatalf("side effects: input opens=%d job creates=%d queue=%d queued-set=%d", assets.openInputCalls, jobs.createCalls, len(service.background.queue), len(service.background.queued))
 	}
 }
 
@@ -285,10 +291,10 @@ func TestVideo1080pValidationUsesResolvedUpstreamModel(t *testing.T) {
 }
 
 func TestValidateVideoReferenceAudios(t *testing.T) {
-	if err := validateVideoReferenceAudios([]string{"eve", ""}); err == nil {
+	if err := media.ValidateVideoReferenceAudios([]string{"eve", ""}); err == nil {
 		t.Fatal("blank reference voice was accepted")
 	}
-	if err := validateVideoReferenceAudios([]string{"a", "b", "c", "d"}); err == nil {
+	if err := media.ValidateVideoReferenceAudios([]string{"a", "b", "c", "d"}); err == nil {
 		t.Fatal("too many reference voices were accepted")
 	}
 }
@@ -305,7 +311,7 @@ func TestRecoverVideoJobsRecordsFailedAuditWithEgress(t *testing.T) {
 		InputJSON: `{}`, CreatedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt,
 	}}
 	recorder := &durableVideoAuditRecorder{}
-	service := &Service{mediaJobs: repository, audits: recorder}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), mediaJobs: repository, audits: recorder}
 	if err := service.RecoverVideoJobs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +336,7 @@ func TestRecoverVideoJobsRecordsDetachedAccountSnapshot(t *testing.T) {
 		InputJSON: `{}`, CreatedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt,
 	}}
 	recorder := &durableVideoAuditRecorder{}
-	service := &Service{mediaJobs: repository, audits: recorder}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), mediaJobs: repository, audits: recorder}
 	if err := service.RecoverVideoJobs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +347,7 @@ func TestRecoverVideoJobsRecordsDetachedAccountSnapshot(t *testing.T) {
 
 func TestLogVideoGenerationFailurePreservesUpstreamDiagnostic(t *testing.T) {
 	var output bytes.Buffer
-	service := &Service{logger: slog.New(slog.NewTextHandler(&output, nil))}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), logger: slog.New(slog.NewTextHandler(&output, nil))}
 	nodeID := uint64(7)
 	service.logVideoGenerationFailure(media.Job{
 		ID: "video_failure", RequestID: "request-failure", UpstreamModel: "grok-imagine-video",
@@ -376,18 +382,18 @@ func (e videoStatusError) Error() string       { return e.message }
 func (e videoStatusError) HTTPStatusCode() int { return e.status }
 
 func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
-	service := &Service{}
-	service.ConfigureMedia(&videoUsageRepository{}, 1)
-	capacity := cap(service.mediaQueue)
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
+	service.ConfigureMedia(&videoUsageRepository{}, mediaapp.NewVideoResources(&videoUsageRepository{}, nil), 1)
+	capacity := cap(service.background.queue)
 	for index := range capacity {
-		if !service.enqueueVideoJob(fmt.Sprintf("video_%d", index)) {
+		if !service.background.Enqueue(fmt.Sprintf("video_%d", index)) {
 			t.Fatalf("enqueue %d failed before capacity", index)
 		}
 	}
-	if !service.enqueueVideoJob("video_0") {
+	if !service.background.Enqueue("video_0") {
 		t.Fatal("duplicate queued job should be treated as accepted")
 	}
-	if service.enqueueVideoJob("video_overflow") {
+	if service.background.Enqueue("video_overflow") {
 		t.Fatal("queue accepted a job beyond its capacity")
 	}
 }
@@ -395,7 +401,7 @@ func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 func TestPersistRemoteVideoRetriesSameResultWithoutRegeneration(t *testing.T) {
 	adapter := &videoPersistAdapter{failures: 1}
 	store := &videoAssetStoreStub{}
-	service := &Service{mediaAssets: store}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), mediaAssets: store}
 	credential := account.Credential{ID: 42, Provider: account.ProviderWeb}
 	result, err := service.persistRemoteVideo(context.Background(), "video_job", adapter, credential, provider.VideoResult{URL: "https://assets.grok.com/video.mp4", ContentType: "video/mp4"})
 	if err != nil {
@@ -413,7 +419,7 @@ func TestResolveVideoInputFileReferenceToDataURI(t *testing.T) {
 	raw := []byte("png-bytes")
 	inputID := "input_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	store := &videoAssetStoreStub{inputID: inputID, inputData: raw}
-	service := &Service{mediaAssets: store}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(), mediaAssets: store}
 	reference := VideoInputFileReference(inputID)
 	if err := service.validateVideoInputReferences(context.Background(), []string{reference}, "image"); err != nil {
 		t.Fatal(err)
@@ -439,8 +445,8 @@ func TestResolveVideoInputFileReferenceToDataURI(t *testing.T) {
 }
 
 func TestVideoInputMaterializationHasIndependentBulkhead(t *testing.T) {
-	service := &Service{}
-	service.ConfigureMedia(nil, 64)
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
+	service.ConfigureMedia(nil, mediaapp.NewVideoResources(nil, nil), 64)
 	reference := VideoInputFileReference("input_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	releases := make([]func(), 0, videoInputMaterializeConcurrency)
 	for range videoInputMaterializeConcurrency {
@@ -655,7 +661,7 @@ func TestResolveVideoAuditStatusCodePrefersUpstream429(t *testing.T) {
 }
 
 func TestVideoAttemptPolicyStandaloneAndUnlimited(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	service.UpdateMaxAttempts(3)
 	service.UpdateVideoMaxAttempts(0)
 	policy := service.videoAttemptPolicy()
@@ -780,12 +786,12 @@ func TestVideoWebForbiddenRetriesPinnedAccountOnceThenFailsOver(t *testing.T) {
 		failures: map[uint64]int{first.ID: 2},
 		status:   http.StatusForbidden,
 	}
-	registry := provider.NewRegistry(adapter)
+	registry := providerimpl.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
-	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", keyRepo, nil, nil, 60, 4, nil), registry, selector, nil, 3)
-	service.ConfigureMedia(mediaRepo, 1)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), security.RandomTokenSource{}, nil, nil, nil)
+	sel := selector.NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService("test-owner", keyRepo, nil, nil, 60, 4, nil, security.RandomTokenSource{}), registry, sel, nil, security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 3)
+	service.ConfigureMedia(mediaRepo, mediaapp.NewVideoResources(mediaRepo, nil), 1)
 	service.UpdateVideoMaxAttempts(10)
 
 	now := time.Now().UTC()

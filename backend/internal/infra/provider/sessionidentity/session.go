@@ -4,24 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/browserheaders"
+	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/browserheaders"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
 const responseBodyLimit = 64 << 10
 
 // Fetch 通过 Grok Web Session 接口读取 SSO 账号的稳定身份元数据。
 // Web 与 Console 共用该链路，确保代理、Cookie、UA 和 Resin 身份一致。
-func Fetch(ctx context.Context, baseURL string, credential account.Credential, egress *infraegress.Manager, cipher security.Cryptor) (provider.AccountIdentity, error) {
+func Fetch(ctx context.Context, baseURL string, credential account.Credential, egress infraegress.CredentialLeaser, cipher security.Cryptor) (provider.AccountIdentity, error) {
 	if credential.AuthType != account.AuthTypeSSO || (credential.Provider != account.ProviderWeb && credential.Provider != account.ProviderConsole) {
 		return provider.AccountIdentity{}, fmt.Errorf("仅 Grok Web 与 Console SSO 账号支持身份同步")
 	}
@@ -42,14 +42,14 @@ func Fetch(ctx context.Context, baseURL string, credential account.Credential, e
 		return provider.AccountIdentity{}, err
 	}
 	defer lease.Release()
-	return FetchWithLease(ctx, baseURL, token, lease, egress)
+	return FetchWithLease(ctx, baseURL, token, lease)
 }
 
 // FetchWithLease resolves Session identity through an already selected Web
 // egress lease. It keeps just-in-time Gateway identity resolution on the same
 // physical exit, browser fingerprint, and Clearance as the following request.
-func FetchWithLease(ctx context.Context, baseURL, token string, lease *infraegress.Lease, egress *infraegress.Manager) (provider.AccountIdentity, error) {
-	if lease == nil || egress == nil {
+func FetchWithLease(ctx context.Context, baseURL, token string, lease *infraegress.Lease) (provider.AccountIdentity, error) {
+	if lease == nil {
 		return provider.AccountIdentity{}, fmt.Errorf("Session 身份同步租约未初始化")
 	}
 	if strings.TrimSpace(token) == "" {
@@ -119,9 +119,9 @@ func Parse(body []byte) (provider.AccountIdentity, error) {
 		return provider.AccountIdentity{}, fmt.Errorf("%w: session status blocked", provider.ErrUnauthorized)
 	}
 	identity := provider.AccountIdentity{
-		UserID: firstNonEmpty(value.Session.UserID, value.User.ID, value.User.UserID, value.User.Sub, value.ID, value.UserID, value.Sub),
-		Email:  firstNonEmpty(value.Session.Email, value.User.Email, value.Email),
-		TeamID: firstNonEmpty(value.Session.OrganizationID, value.User.TeamID, value.TeamID),
+		UserID: texts.FirstNonEmpty(value.Session.UserID, value.User.ID, value.User.UserID, value.User.Sub, value.ID, value.UserID, value.Sub),
+		Email:  texts.FirstNonEmpty(value.Session.Email, value.User.Email, value.Email),
+		TeamID: texts.FirstNonEmpty(value.Session.OrganizationID, value.User.TeamID, value.TeamID),
 	}
 	identity.UserID = strings.TrimSpace(identity.UserID)
 	identity.Email = strings.TrimSpace(identity.Email)
@@ -138,27 +138,20 @@ func browserHeaders(token, origin string, lease *infraegress.Lease) http.Header 
 		userAgent = infraegress.DefaultUserAgent
 	}
 	value := http.Header{}
-	value.Set("Accept", "*/*")
-	value.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	value.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	value.Set("Cache-Control", "no-cache")
-	value.Set("Cookie", infraegress.BuildSSOCookie(token, lease.CFCookies))
-	value.Set("Pragma", "no-cache")
-	value.Set("Priority", "u=1, i")
-	value.Set("Referer", origin+"/")
-	value.Set("Sec-Fetch-Dest", "empty")
-	value.Set("Sec-Fetch-Mode", "cors")
-	value.Set("Sec-Fetch-Site", "same-origin")
-	value.Set("User-Agent", userAgent)
-	browserheaders.ApplyChromiumClientHints(value, userAgent)
+	browserheaders.ApplyBrowserRequestHeaders(value, userAgent,
+		infraegress.BuildSSOCookie(token, lease.CFCookies), "", origin+"/")
 	return value
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
+// SanitizeSSOToken 清洗导入文本中的 SSO token：去掉 sso= 前缀、按分号截断
+// cookie 尾部并移除控制字符。Console 与 Web 导入路径共用，语义不得分叉。
+func SanitizeSSOToken(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "sso=") {
+		value = strings.TrimSpace(value[len("sso="):])
 	}
-	return ""
+	if token, _, found := strings.Cut(value, ";"); found {
+		value = token
+	}
+	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(value))
 }

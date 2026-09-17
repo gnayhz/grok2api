@@ -1,10 +1,10 @@
 import { Cake, FileCheck2, Settings2, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { DropdownMenuItem, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
-import { Spinner } from "@/components/ui/spinner";
-import type { AccountDTO } from "@/features/accounts/accounts-api";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/shared/ui/alert-dialog";
+import { DropdownMenuItem, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/shared/ui/dropdown-menu";
+import { Spinner } from "@/shared/ui/spinner";
+import type { AccountDTO } from "@/entities/account/account-api";
 
 export type WebAccountConfirmationAction = "acceptTerms" | "setBirthDate" | "enableNSFW";
 

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"io"
 	"net/http"
 	"strings"
@@ -10,18 +11,18 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestGuardConversionFailureNeverCommitsOrDeliversRawProtocol(t *testing.T) {
 	for _, empty := range []bool{false, true} {
 		adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
-		service, credentials := newGuardLoopService(t, adapter, "convert-failure")
+		service, credentials, limiter := newGuardLoopServiceWithLimiter(t, adapter, "convert-failure")
 		accepted := false
 		var events []QualityObservation
 		service.SetQualityEventRecorder(eventRecorderFunc(func(ctx context.Context, obs QualityObservation, _ time.Duration) error {
 			if obs.Outcome == QualityObservedInterrupted {
-				if count, _ := service.selector.concurrency.Current(ctx, accountConcurrencyKey(credentials[0].ID)); count != 0 {
+				if count, _ := limiter.Current(ctx, repository.AccountConcurrencyKey(credentials[0].ID)); count != 0 {
 					t.Error("conversion failure retained account lease during receipt")
 				}
 			}
@@ -59,12 +60,12 @@ func TestGuardRescueRequiresSuccessfulDelivery(t *testing.T) {
 		service, credentials := newGuardLoopService(t, adapter, "rescue-first", "rescue-second")
 		adapter.responses[credentials[0].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: "data: {\"choices\":[{\"delta\":{\"content\":\"bare\"}}]}\n\n"}}
 		adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n"}}
-		before := findGuardSignalStat(t, GuardStatsSnapshotForAPI(), GuardSignalWithhold)
+		before := findGuardSignalStat(t, processGuardStatsSnapshot(), GuardSignalWithhold)
 		result, err := service.CreateChatCompletion(context.Background(), guardLoopInput("rescue-delivery", true))
 		if err != nil {
 			t.Fatal(err)
 		}
-		pending := findGuardSignalStat(t, GuardStatsSnapshotForAPI(), GuardSignalWithhold)
+		pending := findGuardSignalStat(t, processGuardStatsSnapshot(), GuardSignalWithhold)
 		if pending.Rescued != before.Rescued || pending.Failed != before.Failed {
 			t.Error("request was classified as completed before delivery finalized")
 		}
@@ -72,7 +73,7 @@ func TestGuardRescueRequiresSuccessfulDelivery(t *testing.T) {
 		finishTestResult(t, result, Usage{}, "", outcome)
 		result.Finalize(Usage{}, "", outcome)
 		_ = result.Body.Close()
-		after := findGuardSignalStat(t, GuardStatsSnapshotForAPI(), GuardSignalWithhold)
+		after := findGuardSignalStat(t, processGuardStatsSnapshot(), GuardSignalWithhold)
 		wantRescued, wantFailed := int64(0), int64(1)
 		if outcome == "" {
 			wantRescued, wantFailed = 1, 0

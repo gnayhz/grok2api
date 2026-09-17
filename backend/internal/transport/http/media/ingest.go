@@ -10,7 +10,7 @@ import (
 
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 

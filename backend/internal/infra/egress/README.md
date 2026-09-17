@@ -2,7 +2,7 @@
 
 This document describes runtime ownership and invariants. For cross-module boundaries and extension work, start with the [architecture](../../../../ARCHITECTURE.md) and [development guide](../../../../DEVELOPMENT.md).
 
-`Manager` is the compatibility facade. The request path resolves routing, applies authoritative quality admission, prepares the browser session if needed, and acquires a client handle. Providers own business retries and response parsing; the runtime owns connection resources, cancellation and completion observations.
+`Manager` is the compatibility facade for external callers (providers and the composition root); internal runtime code holds `*routingRuntime` and its components directly, so new forwarding wrappers must not be added to Manager. The request path resolves routing, applies authoritative quality admission, prepares the browser session if needed, and acquires a client handle. Providers own business retries and response parsing; the runtime owns connection resources, cancellation and completion observations.
 
 ## State ownership
 

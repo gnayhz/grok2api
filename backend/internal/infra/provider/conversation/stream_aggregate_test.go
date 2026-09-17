@@ -28,7 +28,7 @@ func TestAggregateTextRecoveredWithoutDuplicateDeltas(t *testing.T) {
 						want += "second"
 					}
 					frames.WriteString(`data: {"type":"response.completed","response":{"status":"completed","output":[` + output + `]},"padding":"` + strings.Repeat("x", padding) + `"}` + "\n\n")
-					body := ConvertResponseStream(io.NopCloser(strings.NewReader(frames.String())), operation)
+					body := ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(frames.String())), operation, ResponseOptions{})
 					defer body.Close()
 					raw, err := io.ReadAll(body)
 					if err != nil {

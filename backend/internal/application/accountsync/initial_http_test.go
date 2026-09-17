@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
@@ -35,7 +36,7 @@ func TestInitialSyncImportHTTPJoinsCancellationAndKeepsCommittedImport(t *testin
 			})
 			t.Cleanup(unblock)
 			router := gin.New()
-			accounthttp.NewHandler(f.maintenance, f.service).Register(router.Group("/api/admin/v1"))
+			accounthttp.NewHandler(accounthttp.Dependencies{Administration: f.maintenance, Credentials: f.maintenance, Maintenance: f.maintenance, Onboarding: accountsyncapp.NewOnboarding(f.maintenance, f.maintenance, f.service)}).Register(router.Group("/api/admin/v1"))
 			handled := make(chan struct{}, 2)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { router.ServeHTTP(w, r); handled <- struct{}{} }))
 			t.Cleanup(server.Close)
@@ -80,8 +81,8 @@ func TestInitialSyncImportHTTPJoinsCancellationAndKeepsCommittedImport(t *testin
 			if err := awaitInitial(t, done); err == nil {
 				t.Fatal("canceled import client unexpectedly completed")
 			}
-			// The transport's Finish(abort) joins its actual initial-sync workers before
-			// returning. No detached HTTP/SQL operation may outlive this handler.
+			// The onboarding use case joins its initial-sync workers before returning.
+			// No detached HTTP/SQL operation may outlive this handler.
 			awaitInitial(t, handled)
 			if state := f.pool.Snapshot(); state.Active != 0 || state.Queued != 0 {
 				t.Fatalf("handler returned with pool work: %+v", state)

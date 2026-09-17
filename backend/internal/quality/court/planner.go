@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
-	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 type planningProgress struct {
@@ -46,10 +45,6 @@ func (c *replacementCandidates) nodes(ctx context.Context, s *Service) (map[uint
 	return c.nodeIDs, nil
 }
 
-func summarizePlanningProgress(tasks []registry.ProbeTaskView) planningProgress {
-	r := assessExperiment(tasks, policyFor(DefaultConfig(), time.Time{}))
-	return planningProgressFor(r)
-}
 func planningProgressFor(r ExperimentReport) planningProgress {
 	return planningProgress{JuryTasks: r.Exit.Attempts, JuryTotal: r.Exit.Clean + r.Exit.ConfirmedDegraded,
 		JuryClean: r.Exit.Clean, JuryDegraded: r.Exit.ConfirmedDegraded, JuryFailed: r.Exit.Transport + r.Exit.Unavailable,
@@ -75,7 +70,7 @@ func maxJuryAttempts(target int) int {
 // node that already produced valid degraded evidence. The baseline is also
 // excluded. This preserves the task history while ensuring a transport error
 // does not consume the evidence slot forever.
-func (s *Service) replaceAccountComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config, available *replacementCandidates) (int, error) {
+func (s *Service) replaceAccountComparisons(ctx context.Context, record model.CaseRecord, parties []model.PartyRecord, tasks []model.ProbeTaskView, summary planningProgress, cfg Config, available *replacementCandidates) (int, error) {
 	if s.dispatcher == nil || summary.DiffTasks >= maxDifferentialAttempts(cfg.AccountNeedExits) {
 		return 0, nil
 	}
@@ -114,6 +109,12 @@ func (s *Service) replaceAccountComparisons(ctx context.Context, record registry
 		if _, seen := seenNodes[candidate.NodeID]; seen {
 			continue
 		}
+		// A replacement known to share the baseline's real egress would spend
+		// one of the bounded replacement attempts on a probe that the live
+		// path check must discard, so it is skipped here as well.
+		if s.excludesKnownSameExit(ctx, baseline.NodeID, candidate.NodeID) {
+			continue
+		}
 		seenNodes[candidate.NodeID] = struct{}{}
 		replacements = append(replacements, candidate)
 		if len(replacements) == needed {
@@ -149,7 +150,7 @@ func (s *Service) replaceAccountComparisons(ctx context.Context, record registry
 // differential exits. This is not needed for a clean four-account jury, but it
 // replaces incomplete controls without discarding the original measurements. Identity-group and quality eligibility rules are
 // applied again, so a replacement is an independent Build witness.
-func (s *Service) replaceExitComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config, available *replacementCandidates) (int, error) {
+func (s *Service) replaceExitComparisons(ctx context.Context, record model.CaseRecord, parties []model.PartyRecord, tasks []model.ProbeTaskView, summary planningProgress, cfg Config, available *replacementCandidates) (int, error) {
 	if s.dispatcher == nil || summary.JuryTasks >= maxJuryAttempts(cfg.ExitNeedN) || summary.JuryTotal >= cfg.ExitNeedN {
 		return 0, nil
 	}
@@ -221,7 +222,7 @@ func (s *Service) replaceExitComparisons(ctx context.Context, record registry.Ca
 	return dispatched, nil
 }
 
-func (s *Service) replaceMissingComparisons(ctx context.Context, record registry.CaseRecord, parties []registry.PartyRecord, tasks []registry.ProbeTaskView, summary planningProgress, cfg Config) (int, error) {
+func (s *Service) replaceMissingComparisons(ctx context.Context, record model.CaseRecord, parties []model.PartyRecord, tasks []model.ProbeTaskView, summary planningProgress, cfg Config) (int, error) {
 	available := &replacementCandidates{}
 	differential, err := s.replaceAccountComparisons(ctx, record, parties, tasks, summary, cfg, available)
 	if err != nil {
@@ -250,7 +251,7 @@ func (s *Service) reassertInvestigationHolds(ctx context.Context, defendant uint
 	if accountHeld {
 		switch account.State {
 		case model.AccountActive:
-			if err := s.registry.TransitionAccount(ctx, registry.AccountTransitionRequest{
+			if err := s.registry.TransitionAccount(ctx, model.AccountTransitionRequest{
 				AccountID: defendant, To: model.AccountRemanded, CaseID: caseID,
 			}); err != nil {
 				return err
@@ -269,7 +270,7 @@ func (s *Service) reassertInvestigationHolds(ctx context.Context, defendant uint
 	entry := s.registry.ExitStateOfCurrentEpoch(exit.NodeID)
 	switch entry.State {
 	case model.ExitAvailable:
-		return s.registry.TransitionExit(ctx, registry.ExitTransitionRequest{
+		return s.registry.TransitionExit(ctx, model.ExitTransitionRequest{
 			NodeID: exit.NodeID, Epoch: exit.Epoch, To: model.ExitRemanded, CaseID: caseID,
 		})
 	case model.ExitRemanded:
@@ -289,7 +290,7 @@ func (s *Service) reassertExistingHolds(ctx context.Context, caseID, defendant u
 	return s.reassertInvestigationHolds(ctx, defendant, exit, caseID)
 }
 
-func caseDefendant(parties []registry.PartyRecord) uint64 {
+func caseDefendant(parties []model.PartyRecord) uint64 {
 	for _, party := range parties {
 		if party.Kind == model.PartyAccount && party.Role == model.RoleDefendant {
 			return party.AccountID
@@ -298,7 +299,7 @@ func caseDefendant(parties []registry.PartyRecord) uint64 {
 	return 0
 }
 
-func partyBaseline(parties []registry.PartyRecord) model.EpochKey {
+func partyBaseline(parties []model.PartyRecord) model.EpochKey {
 	for _, party := range parties {
 		if party.Kind == model.PartyExit && party.NodeID != 0 {
 			return model.EpochKey{NodeID: party.NodeID, Epoch: party.Epoch}
@@ -307,7 +308,7 @@ func partyBaseline(parties []registry.PartyRecord) model.EpochKey {
 	return model.EpochKey{}
 }
 
-func caseBaseline(record registry.CaseRecord, parties []registry.PartyRecord) model.EpochKey {
+func caseBaseline(record model.CaseRecord, parties []model.PartyRecord) model.EpochKey {
 	if record.EvidenceJSON != "" {
 		var opening struct {
 			Exit *struct {

@@ -3,12 +3,9 @@ package egress
 import (
 	"context"
 	"encoding/base64"
-	"errors"
-	"io"
-	"net"
+	netfetch "github.com/chenyme/grok2api/backend/internal/testsupport/netfetch"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -241,190 +238,13 @@ proxies:
 	}
 }
 
-func TestFetchProxySubscriptionUsesClashUserAgent(t *testing.T) {
-	var userAgent string
-	proxy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		userAgent = request.Header.Get("User-Agent")
-		_, _ = writer.Write([]byte("http://proxy.example:8080\n"))
-	}))
-	defer proxy.Close()
-
-	body, err := fetchProxySubscription(context.Background(), "http://1.1.1.1/subscription", proxy.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if userAgent != "Clash.Meta" || !strings.Contains(string(body), "proxy.example") {
-		t.Fatalf("User-Agent=%q body=%q", userAgent, body)
-	}
-}
-
-func TestClashRealityPreservesSupportedClientFingerprints(t *testing.T) {
-	content := `
-proxies:
-  - type: vless
-    server: chrome.example
-    port: 443
-    uuid: 123e4567-e89b-12d3-a456-426614174000
-    flow: xtls-rprx-vision
-    client-fingerprint: chrome
-    reality-opts: &reality
-      public-key: SOW7P-17ibm_-kz-QUQwGGyitSbsa5wOmRGAigGvDH8
-      short-id: 0123456789abcdef
-  - type: vless
-    server: edge.example
-    port: 443
-    uuid: 123e4567-e89b-12d3-a456-426614174000
-    flow: xtls-rprx-vision
-    client-fingerprint: edge
-    reality-opts: *reality
-  - type: vless
-    server: safari.example
-    port: 443
-    uuid: 123e4567-e89b-12d3-a456-426614174000
-    flow: xtls-rprx-vision
-    client-fingerprint: safari
-    reality-opts: *reality
-`
-	entries, skipped, err := parseProxySubscription(content)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 3 || skipped != 0 {
-		t.Fatalf("entries=%d skipped=%d", len(entries), skipped)
-	}
-	fingerprints := make(map[string]bool)
-	for _, entry := range entries {
-		config, parseErr := tunnelproxy.Parse(entry.ProxyURL)
-		if parseErr != nil {
-			t.Fatal(parseErr)
-		}
-		fingerprints[config.ClientFingerprint] = true
-	}
-	for _, fingerprint := range []string{"chrome", "edge", "safari"} {
-		if !fingerprints[fingerprint] {
-			t.Fatalf("missing client fingerprint %q", fingerprint)
-		}
-	}
-}
-
-func TestIsPublicAddressRejectsNonPublicRanges(t *testing.T) {
-	for _, raw := range []string{
-		"0.0.0.1", "10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.10.1",
-		"192.0.0.1", "192.0.2.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "240.0.0.1",
-		"::1", "fc00::1", "2001:db8::1", "::ffff:127.0.0.1",
-	} {
-		if isPublicAddress(netip.MustParseAddr(raw)) {
-			t.Fatalf("non-public address accepted: %s", raw)
-		}
-	}
-	if !isPublicAddress(netip.MustParseAddr("1.1.1.1")) {
-		t.Fatal("public address rejected")
-	}
-}
-
-func TestValidatePublicSubscriptionTargetRejectsPrivateAddresses(t *testing.T) {
-	for _, value := range []string{
-		"http://127.0.0.1/subscription",
-		"http://10.0.0.1/subscription",
-		"http://169.254.169.254/latest/meta-data",
-		"http://[::1]/subscription",
-	} {
-		if err := validatePublicSubscriptionTarget(context.Background(), value); err == nil {
-			t.Fatalf("private subscription target accepted: %s", value)
-		}
-	}
-	for _, value := range []string{"https://1.1.1.1/subscription", "https://[2606:4700:4700::1111]/subscription"} {
-		if err := validatePublicSubscriptionTarget(context.Background(), value); err != nil {
-			t.Fatalf("public subscription target rejected: %s: %v", value, err)
-		}
-	}
-}
-
-func TestSubscriptionSOCKSCancellationClosesRealHandshakeSocket(t *testing.T) {
-	for _, scheme := range []string{"socks4a", "socks5"} {
-		t.Run(scheme, func(t *testing.T) {
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close()
-			entered, closed := make(chan struct{}), make(chan struct{})
-			go func() {
-				defer close(closed)
-				conn, err := listener.Accept()
-				if err != nil {
-					return
-				}
-				defer conn.Close()
-				_ = conn.SetDeadline(time.Now().Add(time.Second))
-				var greeting [32]byte
-				if _, err = conn.Read(greeting[:]); err != nil {
-					return
-				}
-				close(entered)
-				_, _ = io.Copy(io.Discard, conn)
-			}()
-			transport, err := subscriptionTransport(scheme + "://" + listener.Addr().String())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer transport.CloseIdleConnections()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan error, 1)
-			go func() {
-				conn, err := transport.DialContext(ctx, "tcp", "example.com:443")
-				if conn != nil {
-					_ = conn.Close()
-				}
-				done <- err
-			}()
-			select {
-			case <-entered:
-			case <-time.After(time.Second):
-				t.Fatal("handshake did not start")
-			}
-			cancel()
-			select {
-			case err := <-done:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("cancel error: %v", err)
-				}
-			case <-time.After(500 * time.Millisecond):
-				t.Fatal("SOCKS caller stayed blocked")
-			}
-			select {
-			case <-closed:
-			case <-time.After(500 * time.Millisecond):
-				t.Fatal("canceled SOCKS socket remains open")
-			}
-		})
-	}
-}
-
-func TestSubscriptionTransportSupportsConfiguredProxyProtocols(t *testing.T) {
-	for _, proxyURL := range []string{
-		"http://127.0.0.1:8080",
-		"https://127.0.0.1:8443",
-		"socks4://127.0.0.1:1080",
-		"socks4a://127.0.0.1:1080",
-		"socks5://127.0.0.1:1080",
-		"socks5h://127.0.0.1:1080",
-	} {
-		transport, err := subscriptionTransport(proxyURL)
-		if err != nil {
-			t.Fatalf("proxy %s: %v", proxyURL, err)
-		}
-		transport.CloseIdleConnections()
-	}
-}
-
 func TestSubscriptionFetchProxyRejectsCorruptSourceSecret(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := &Service{cipher: cipher}
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	if _, err := service.subscriptionFetchProxy(domain.SubscriptionSource{EncryptedProxyURL: "not-ciphertext"}); err == nil {
 		t.Fatal("corrupt per-source subscription proxy was accepted")
 	}
@@ -462,6 +282,7 @@ func TestSyncSourceUsesItsOwnFetchProxy(t *testing.T) {
 	}
 	repository := &subscriptionSyncRepositoryStub{nodes: make(map[uint64][]domain.Node)}
 	service := &Service{cipher: cipher}
+	service.SetSubscriptionFetcher(netfetch.NewEgressSubscriptionFetcher(nil, NormalizeSubscriptionURL))
 	for id, fixture := range map[uint64]*proxyFixture{1: firstProxy, 2: secondProxy} {
 		encryptedProxyURL, encryptErr := cipher.Encrypt(fixture.server.URL)
 		if encryptErr != nil {

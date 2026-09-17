@@ -6,7 +6,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -21,7 +21,7 @@ type RouteLookup interface {
 // ResolvePublicRoutes preserves configured-name ownership before trying stable
 // compatibility names and opt-in effort aliases. It does not authorize a key or
 // select an account; those remain M08 and M06 decisions.
-func ResolvePublicRoutes(ctx context.Context, lookup RouteLookup, providers *provider.Registry, name string, allowAliases bool) ([]modeldomain.Route, string, error) {
+func ResolvePublicRoutes(ctx context.Context, lookup RouteLookup, providers provider.Registry, name string, allowAliases bool) ([]modeldomain.Route, string, error) {
 	routes, err := lookup.GetByPublicIDCandidates(ctx, name)
 	if err == nil {
 		return routes, "", nil

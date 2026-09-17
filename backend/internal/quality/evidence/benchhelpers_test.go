@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	glebarezsqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -22,7 +23,7 @@ func openTestStoreB(b *testing.B) *Store {
 			_ = sqlDB.Close()
 		}
 	})
-	store, err := New(context.Background(), db, DefaultConfig())
+	store, err := New(context.Background(), db, qualitymodel.DefaultEvidenceConfig())
 	if err != nil {
 		b.Fatal(err)
 	}

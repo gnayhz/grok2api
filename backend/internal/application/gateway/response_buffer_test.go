@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestDeferredJSONBorrowsAdmissionBufferAcrossOwnership(t *testing.T) {
@@ -22,8 +23,8 @@ func TestDeferredJSONBorrowsAdmissionBufferAcrossOwnership(t *testing.T) {
 	_, _ = buf.Write([]byte(raw))
 	body := buf.Body()
 	original, release, _ := body.BorrowBytes()
-	_, owner := newAttemptResources(context.Background())
-	response := &provider.Response{Body: owner.own(body), ConvertJSON: func(data []byte) ([]byte, error) {
+	_, owner := selector.NewAttemptResources(context.Background())
+	response := &provider.Response{Body: owner.Own(body), ConvertJSON: func(data []byte) ([]byte, error) {
 		if &data[0] != &original[0] {
 			t.Fatal("conversion copied/re-read the admission buffer")
 		}
@@ -35,7 +36,7 @@ func TestDeferredJSONBorrowsAdmissionBufferAcrossOwnership(t *testing.T) {
 	if err := applyDeferredStreamConversion(response); err != nil {
 		t.Fatal(err)
 	}
-	owner.close()
+	owner.Close()
 	release()
 	data, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()

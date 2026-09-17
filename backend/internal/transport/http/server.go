@@ -9,8 +9,6 @@ import (
 	"time"
 
 	_ "github.com/chenyme/grok2api/backend/docs"
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	adminauthapp "github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
@@ -20,9 +18,8 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
-	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
@@ -30,11 +27,13 @@ import (
 	dashboardhttp "github.com/chenyme/grok2api/backend/internal/transport/http/dashboard"
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
 	guardstatshttp "github.com/chenyme/grok2api/backend/internal/transport/http/guardstats"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/inference"
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
 	qualityhttp "github.com/chenyme/grok2api/backend/internal/transport/http/quality"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
 	systemhttp "github.com/chenyme/grok2api/backend/internal/transport/http/system"
 	"github.com/gin-gonic/gin"
@@ -43,33 +42,35 @@ import (
 )
 
 type Dependencies struct {
-	EgressRuntimeStats func() infraegress.RuntimeStats
+	EgressLiveStats    egressapp.LiveStats
 	Logger             *slog.Logger
 	RequestTimeout     time.Duration
 	MaxBodyBytes       int64
 	TrustedProxies     []string
 	ConcurrencyGate    *middleware.ConcurrencyGate
+	RequestTokens      portcrypto.TokenSource
 	SecureCookies      bool
 	SwaggerEnabled     bool
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
-	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness     func(context.Context) ReadinessSnapshot
-	Ready         func(context.Context) bool
-	TrafficReady  func() bool
-	AdminAuth     *adminauthapp.Service
-	Accounts      *accountapp.Service
-	AccountSync   *accountsyncapp.Service
-	Models        *modelapp.Service
-	ClientKeys    *clientkeyapp.Service
-	Audits        *auditapp.Service
-	Dashboard     *dashboardapp.Service
-	Gateway       *gateway.Service
-	Media         *mediaapp.Service
-	MediaImporter *mediaapp.ImageInputImporter
-	Settings      *settingsapp.Service
-	Egress        *egressapp.Service
-	Updates       *updatecheckapp.Service
+	// Readiness 返回可观测的分层就绪状态。
+	Readiness    func(context.Context) ReadinessSnapshot
+	TrafficReady func() bool
+	AdminAuth    *adminauthapp.Service
+	Accounts     accounthttp.Dependencies
+	Models       *modelapp.Service
+	ClientKeys   clientkeyapp.Administration
+	// ClientAuthKeys 是公开推理入口的认证/授权能力（同一具体服务的
+	// 另一消费面）。
+	ClientAuthKeys clientkeyapp.Authorization
+	Audits         auditapp.Queries
+	Dashboard      *dashboardapp.Service
+	Gateway        *gateway.Service
+	Media          *mediaapp.Service
+	MediaImporter  *mediaapp.ImageInputImporter
+	Settings       *settingsapp.Service
+	Egress         *egressapp.Service
+	Updates        systemhttp.UpdateChecks
 	// Quality 是新质量层管理面(重写批5:四入口 HTTP/DTO)。
 	Quality *qualityhttp.Deps
 	// EgressQualityStates 节点质量状态注入(批8 可见性整改:节点列表
@@ -134,7 +135,7 @@ func New(deps Dependencies) *gin.Engine {
 	// 访问日志走专用异步 logger(有界队列+批量刷写):同步 JSON stdout 写
 	// 的全局互斥锁与每请求一次 write 系统调用是高 QPS 下的入口串行点。
 	// deps.Logger 仍供业务日志使用(同步、不丢关键错误)。
-	router.Use(gin.Recovery(), middleware.RequestID(), middleware.ClientIP(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.Gzip(), middleware.AccessLog(middleware.AsyncAccessLogger()))
+	router.Use(gin.Recovery(), middleware.RequestID(deps.RequestTokens), middleware.ClientIP(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.Gzip(), middleware.AccessLog(middleware.AsyncAccessLogger()))
 	// 错误方法此前落到 gin 默认 NoRoute（404 裸文本）：API 消费方无法区分
 	// 「路径不存在」与「方法不对」。405 + 统一信封让两类错误可判别。
 	router.HandleMethodNotAllowed = true
@@ -150,17 +151,29 @@ func New(deps Dependencies) *gin.Engine {
 			c.JSON(status, snapshot)
 			return
 		}
-		if deps.Ready != nil && deps.Ready(c.Request.Context()) {
-			c.JSON(http.StatusOK, gin.H{"ready": true, "state": "ready"})
-			return
-		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{"ready": false, "state": "not_ready"})
 	})
 	if deps.SwaggerEnabled {
 		router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
+	// trafficReady 是启动恢复期的流量门:恢复完成前对所有流量返回 503。
+	// 它是纯内存标记检查, 成本为零, 因此公开面(媒体资源读取/上传)与 v1
+	// 推理面共用同一道门, 不因鉴权方式不同而放行。
+	trafficReady := func(c *gin.Context) {
+		if deps.TrafficReady == nil || deps.TrafficReady() {
+			c.Next()
+			return
+		}
+		httphelpers.WriteOpenAIError(c, http.StatusServiceUnavailable, "service_reconciling", "服务正在完成启动恢复，请稍后重试")
+	}
+
+	// 公开媒体面不走 ClientAuth(票据/资源 ID 本身即授权), 但仍受就绪门约束:
+	// 恢复期间读取或上传媒体资产没有意义, 且此前该面在 v1 之前挂载, 完全绕过
+	// 了就绪门与并发闸门。
+	mediaPublic := router.Group("/v1/media")
+	mediaPublic.Use(trafficReady)
 	mediaHandler := mediahttp.NewHandler(deps.Media, deps.MediaImporter)
-	mediaHandler.RegisterPublic(router)
+	mediaHandler.RegisterPublic(mediaPublic)
 
 	adminRoot := router.Group("/api/admin/v1")
 	authHandler := adminauthhttp.NewHandler(deps.AdminAuth, deps.SecureCookies)
@@ -168,7 +181,7 @@ func New(deps Dependencies) *gin.Engine {
 	adminProtected := adminRoot.Group("")
 	adminProtected.Use(middleware.AdminAuth(deps.AdminAuth))
 	authHandler.RegisterAuthenticated(adminProtected)
-	accountHandler := accounthttp.NewHandler(deps.Accounts, deps.AccountSync, deps.Logger)
+	accountHandler := accounthttp.NewHandler(deps.Accounts, deps.Logger)
 	accountHandler.Register(adminProtected)
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
@@ -179,7 +192,7 @@ func New(deps Dependencies) *gin.Engine {
 	settingsHandler := settingshttp.NewHandler(deps.Settings)
 	settingsHandler.Register(adminProtected)
 	egressHandler := egresshttp.NewHandler(deps.Egress, deps.Logger)
-	egressHandler.SetRuntimeStats(deps.EgressRuntimeStats)
+	egressHandler.SetLiveStats(deps.EgressLiveStats)
 	if deps.EgressQualityStates != nil {
 		egressHandler.SetQualityStates(deps.EgressQualityStates)
 	}
@@ -201,21 +214,11 @@ func New(deps Dependencies) *gin.Engine {
 	v1 := router.Group("/v1")
 	// 就绪门最前:启动恢复期间对所有流量(含未鉴权)返回 503, 语义与既有
 	// 流量拒绝测试一致; 也是纯内存标记检查, 成本为零。
-	if deps.TrafficReady != nil {
-		v1.Use(func(c *gin.Context) {
-			if deps.TrafficReady() {
-				c.Next()
-				return
-			}
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-				"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
-			}})
-		})
-	}
+	v1.Use(trafficReady)
 	// 鉴权先于并发闸门:闸门在鉴权前会为每个伪造 key 占住一个全局并发槽,
 	// 无凭据流量即可把 1024 个槽耗尽, 令所有合法推理请求 503。先 401 伪请求,
 	// 闸门槽位只留给已通过鉴权的流量。per-key 的 RPM/并发租约在 ClientAuth 中取得，返回时释放。
-	v1.Use(middleware.ClientAuth(deps.ClientKeys))
+	v1.Use(middleware.ClientAuth(deps.ClientAuthKeys))
 	v1.Use(deps.ConcurrencyGate.Middleware())
 	v1.Use(middleware.ObserveBodyMemory())
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes, deps.PublicAPIBaseURL)
@@ -232,17 +235,14 @@ func New(deps Dependencies) *gin.Engine {
 // response.Error（含 requestId，便于日志关联）。非后端路径不经过此函数。
 func writeRouteError(c *gin.Context, status int) {
 	if strings.HasPrefix(path.Clean("/"+c.Request.URL.Path), "/v1/") || c.Request.URL.Path == "/v1" {
-		errorType := "invalid_request_error"
-		if status >= 500 {
-			errorType = "server_error"
-		}
 		code := "not_found"
 		message := "未知请求路径: " + c.Request.URL.Path
 		if status == http.StatusMethodNotAllowed {
 			code = "method_not_allowed"
 			message = "请求方法不被允许: " + c.Request.Method + " " + c.Request.URL.Path
 		}
-		c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": errorType, "code": code, "param": nil}})
+		// 仅以 404/405 调用；type 由状态码推导，与 middleware 同口径。
+		httphelpers.WriteOpenAIError(c, status, code, message)
 		return
 	}
 	code, message := "notFound", "请求路径不存在: "+c.Request.URL.Path

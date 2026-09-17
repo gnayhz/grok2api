@@ -11,7 +11,7 @@ import (
 	"time"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	portcrypto "github.com/chenyme/grok2api/backend/internal/port/crypto"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -148,7 +148,7 @@ type rotationURLWriter interface {
 
 // resolveRotationTemplate substitutes {name}/{host}/{port} for one node. The
 // second return is false when the template needs a port the proxy URL lacks.
-func resolveRotationTemplate(template string, node domain.Node, cipher security.Cryptor) (string, bool) {
+func resolveRotationTemplate(template string, node domain.Node, cipher portcrypto.Cryptor) (string, bool) {
 	proxyURL := ""
 	if cipher != nil && strings.TrimSpace(node.EncryptedProxyURL) != "" {
 		if decrypted, err := cipher.Decrypt(node.EncryptedProxyURL); err == nil {

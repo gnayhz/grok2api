@@ -9,7 +9,7 @@ import (
 func TestHugeReasoningDoneSuppressedAfterStop(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	converter := newStreamConverter(&out, OperationMessages, ResponseOptions{AnthropicThinking: true, StopSequences: []string{"STOP"}})
+	converter := newStreamConverterWithBudget(&out, OperationMessages, ResponseOptions{AnthropicThinking: true, StopSequences: []string{"STOP"}}, nil)
 	if err := converter.handle("response.output_item.added", []byte("{\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\"}}")); err != nil {
 		t.Fatal(err)
 	}

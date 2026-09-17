@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"math"
 	"net/http/httptest"
 	"path/filepath"
@@ -68,11 +71,11 @@ func TestPricingRangePreservesGenerationAndLedger(t *testing.T) {
 									t.Error(err)
 								}
 							})
-							service := gateway.NewService(fx.models, writer, fx.accountService, fx.clientService, fx.registry, fx.selector, relational.NewResponseRepository(db), 1)
-							service.UpdateQualityRetry(gateway.QualityRetryRuntime{Enabled: false})
+							service := gateway.NewService(fx.models, writer, fx.accountService, fx.clientService, fx.registry, fx.selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 1)
+							service.SetGuardSnapshotSource(gateway.StaticGuardSnapshotSource(gateway.QualityRetryRuntime{Enabled: false}))
 							service.SetQualityEventRecorder(fx.receipts)
 							router := gin.New()
-							router.Use(middleware.RequestID(), middleware.ClientAuth(fx.clientService))
+							router.Use(middleware.RequestID(nil), middleware.ClientAuth(fx.clientService))
 							NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 							path := "/v1/responses"
 							payload := map[string]any{"model": fx.publicModel, "stream": stream, "store": false}

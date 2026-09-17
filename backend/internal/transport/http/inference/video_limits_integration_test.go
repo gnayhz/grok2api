@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"net/http"
 	"strings"
@@ -15,10 +17,10 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -89,7 +91,7 @@ func TestVideoPhysicalReceiptsAndFixedDeadline(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 				job := createVideoAuthorizationJob(t, fx)
 				if exhausted {
 					limit := uint32(2)
@@ -130,7 +132,7 @@ func TestVideoPhysicalReceiptsAndFixedDeadline(t *testing.T) {
 					t.Fatal(err)
 				}
 				recovered.Store(true)
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 				if err := fx.service.RecoverVideoJobs(ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -290,7 +292,7 @@ func TestVideoExecutionLimitFailureBoundaries(t *testing.T) {
 				if stage == "confirm_ack_lost" {
 					registry = useVideoPhysicalJournal(t, fx)
 				}
-				fx.service.ConfigureMedia(jobs, 1)
+				fx.service.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 				fx.service.UpdateVideoMaxAttempts(3)
 				job := createVideoAuthorizationJob(t, fx)
 				if stage == "exhausted_before_first" {
@@ -405,7 +407,7 @@ func (a *videoPollingObserver) GenerateVideo(ctx context.Context, request provid
 	progress := request.Progress
 	request.Progress = func(value int) {
 		a.observed.Add(1)
-		retained := int32(len(egress.PhysicalObservations(ctx)))
+		retained := int32(len(physical.PhysicalObservations(ctx)))
 		for current := a.peak.Load(); retained > current; current = a.peak.Load() {
 			if a.peak.CompareAndSwap(current, retained) {
 				break
@@ -453,7 +455,7 @@ func TestVideoLongPollingUsesBoundedPhysicalReceipts(t *testing.T) {
 	if _, err := fx.accounts.UpdateAdministration(ctx, credential.ID, repository.AccountAdminPatch{BuildSuperEntitled: &credential.BuildSuperEntitled, BuildRouteMode: &credential.BuildRouteMode}); err != nil {
 		t.Fatal(err)
 	}
-	fx.service.ConfigureMedia(fx.jobs, 1)
+	fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 	job := createVideoAuthorizationJob(t, fx)
 	workerCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -574,7 +576,7 @@ func TestVideoCredentialsAndDownloadsSharePhysicalBudget(t *testing.T) {
 				_, _ = w.Write(payload)
 			}))
 			jobs := &videoLimitsFaultRepository{MediaJobRepository: fx.jobs, reserve: tc.stage == "oauth_store_failure"}
-			fx.service.ConfigureMedia(jobs, 1)
+			fx.service.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 			fx.service.ConfigureMediaAssets(fx.media)
 			job := createVideoAuthorizationJob(t, fx)
 			if tc.stage == "download_exhausted" {
@@ -685,9 +687,9 @@ type videoJournalReceiptSink struct {
 }
 
 func (s *videoJournalReceiptSink) RecordPhysicalEvents(ctx context.Context, facts []attemptmeta.PhysicalFact) error {
-	events := make([]journal.Event, 0, len(facts))
+	events := make([]qualitymodel.Event, 0, len(facts))
 	for _, fact := range facts {
-		events = append(events, journal.Event{Attempt: fact.Attempt, Stage: "exchange", Outcome: "observed", At: fact.At, Physical: &fact})
+		events = append(events, qualitymodel.Event{Attempt: fact.Attempt, Stage: "exchange", Outcome: "observed", At: fact.At, Physical: &fact})
 	}
 	if err := s.store.RecordMany(ctx, events); err != nil {
 		return err

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
 import type { EgressOperationsValue } from "./operations-shared.ts";
-import type { EgressOperationsConfigDTO } from "@/features/settings/settings-api";
+import type { EgressOperationsConfigDTO } from "@/entities/egress/egress-api";
 
 let dom: JSDOM;
 let react: typeof import("react");

@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"io"
 	"log/slog"
 	"testing"
@@ -76,7 +78,7 @@ func TestSessionHintRespectsEveryPoolStrategy(t *testing.T) {
 					}
 					// Exclusions and qualification are applied before any pin.
 					m.SetExitEligibility(stubExitEligibility{ineligible: map[uint64]bool{2: true}})
-					lease := acquire(WithNodeExclusions(ctx, map[uint64]struct{}{3: {}}), "B")
+					lease := acquire(physical.WithNodeExclusions(ctx, map[uint64]struct{}{3: {}}), "B")
 					defer lease.Release()
 					if lease.NodeID != 1 {
 						t.Fatalf("hint bypassed exclusions/eligibility: %d", lease.NodeID)
@@ -150,7 +152,7 @@ func TestSessionHintDoesNotOverrideFixedTargetOrClearAutoPin(t *testing.T) {
 	for i := range nodes {
 		nodes[i].EncryptedProxyURL = encryptedProxy(t, cipher, fmt.Sprintf("http://127.0.0.1:%d", 13001+i))
 	}
-	m := NewManager(egressRepositoryTestStub{nodes: nodes}, cipher)
+	m := NewManagerWithLimits(egressRepositoryTestStub{nodes: nodes}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	ctx := WithBuildSession(context.Background(), "same-history")
 	first, err := m.Acquire(ctx, domain.ScopeBuild, "A")

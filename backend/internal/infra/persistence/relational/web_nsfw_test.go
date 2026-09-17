@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"testing"
 	"time"
 
@@ -51,10 +52,10 @@ func TestWebNSFWMarkerPersistsAcrossAccountUpserts(t *testing.T) {
 	if _, err := repo.ApplyWebProfile(ctx, credential.CredentialRef(), account.WebProfileObservation{Kind: account.WebProfileBirthDateSet, OccurredAt: first.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.UpsertManyByIdentity(ctx, []account.Credential{{
+	if _, err := repo.ImportAccounts(ctx, testsupport.AccountImports([]account.Credential{{
 		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO,
 		Name: "web renamed", SourceKey: "web-nsfw", EncryptedAccessToken: "encrypted-new", Enabled: true, AuthStatus: account.AuthStatusActive,
-	}}); err != nil {
+	}})); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.InitializeSchema(ctx); err != nil {

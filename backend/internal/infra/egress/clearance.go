@@ -337,11 +337,6 @@ func (m *clearanceRuntime) loadPersistedClearance(ctx context.Context, nodeID ui
 	return clearanceSolution{Cookies: cookies, UserAgent: userAgent}, *latest.ClearanceRefreshedAt, true
 }
 
-func (m *clearanceRuntime) cacheClearance(key string, solution clearanceSolution, refreshedAt time.Time, version uint64, fingerprint, bindingFingerprint string, interval time.Duration) bool {
-	_, ok := m.cacheClearanceSolution(key, solution, refreshedAt, version, fingerprint, bindingFingerprint, interval)
-	return ok
-}
-
 func (m *clearanceRuntime) cacheClearanceSolution(key string, solution clearanceSolution, refreshedAt time.Time, version uint64, fingerprint, bindingFingerprint string, interval time.Duration) (clearanceSolution, bool) {
 	m.clearanceMu.Lock()
 	if version != m.clearanceVersion {
@@ -647,6 +642,10 @@ func (m *clearanceRuntime) RefreshDueClearances(ctx context.Context, force bool)
 	return errors.Join(refreshErrors...)
 }
 
+// isGrokWebScope 判定 scope 是否走 Grok Web/Console 浏览器通道。
+// 「需要浏览器 clearance」与「grok-web 系 scope」是同一谓词：Build 走 CLI
+// 通道、Console 资产走公共媒体主机，二者都不携带账号/节点 clearance cookie
+// （向其它 origin 转发凭据只会暴露 cookie，并让匿名下载依赖 cookie 存储）。
 func isGrokWebScope(scope domain.Scope) bool {
 	return scope == domain.ScopeWeb || scope == domain.ScopeWebAsset || scope == domain.ScopeConsole
 }

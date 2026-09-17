@@ -21,7 +21,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	dialect "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/xaitools"
@@ -30,6 +30,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type Config struct {
@@ -42,13 +43,13 @@ type Config struct {
 type Adapter struct {
 	mu     sync.RWMutex
 	cfg    Config
-	egress *infraegress.Manager
+	egress infraegress.CredentialLeaser
 	cipher security.Cryptor
 	assets provider.ImageAssetStore
 	dpop   *dpopSessionManager
 }
 
-func NewAdapter(cfg Config, egress *infraegress.Manager, cipher security.Cryptor, assets provider.ImageAssetStore) *Adapter {
+func NewAdapter(cfg Config, egress infraegress.CredentialLeaser, cipher security.Cryptor, assets provider.ImageAssetStore) *Adapter {
 	cfg = normalizedConfig(cfg)
 	return &Adapter{cfg: cfg, egress: egress, cipher: cipher, assets: assets, dpop: newDPoPSessionManager()}
 }
@@ -296,7 +297,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 // shouldInvalidateConsoleClearance keeps account-level and protocol-level
 // rejections from being misclassified as a broken browser/egress binding.
 func shouldInvalidateConsoleClearance(body []byte) bool {
-	return !provider.IsDefinitiveAccountBlockBody(body) && !provider.IsDPoPProofRequiredBody(body)
+	return !dialect.IsDefinitiveAccountBlockBody(body) && !dialect.IsDPoPProofRequiredBody(body)
 }
 
 func normalizeConversationError(data []byte, operation string, status int) []byte {

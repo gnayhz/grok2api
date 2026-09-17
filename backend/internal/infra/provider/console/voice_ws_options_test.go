@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestVoiceWebSocketPreparationOwnsOptionsWithoutNetwork(t *testing.T) {

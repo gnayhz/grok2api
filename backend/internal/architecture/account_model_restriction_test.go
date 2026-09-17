@@ -34,7 +34,7 @@ func TestModelRestrictionHasOneAtomicPolicyOwner(t *testing.T) {
 							t.Errorf("%s evaluates model policy outside the locked owner", path)
 						}
 					case "ApplyModelRestriction":
-						if path != "../application/gateway/selector.go" && path != "../application/account/build_detect.go" && path != "../testsupport/account.go" {
+						if path != "../application/selector/selector.go" && path != "../application/account/build_detect.go" && path != "../testsupport/account.go" {
 							t.Errorf("%s bypasses model outcome owners", path)
 						}
 					}

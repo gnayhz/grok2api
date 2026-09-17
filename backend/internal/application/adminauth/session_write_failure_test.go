@@ -58,7 +58,7 @@ func TestSessionWriteFailureIsUnavailable(t *testing.T) {
 			if err := db.InitializeSchema(ctx); err != nil {
 				t.Fatal(err)
 			}
-			service := NewService(relational.NewAdminRepository(db), failingSessionWrite{relational.NewAdminSessionRepository(db), operation}, security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+			service := NewService(relational.NewAdminRepository(db), failingSessionWrite{relational.NewAdminSessionRepository(db), operation}, security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 			if err := service.Bootstrap(ctx, "admin", "original-password"); err != nil {
 				t.Fatal(err)
 			}

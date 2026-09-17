@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { caseDecoder, matrixDecoder, nodeDecoder, probeDecoder, settingsDecoder, qualitySettingsWrite } from "./quality-api.ts";
+import { caseDecoder, nodeDecoder, probeDecoder, settingsDecoder, qualitySettingsWrite } from "@/entities/guard/quality-api";
 
 // 契约测试(批8 教训:端点验证≠面板验证):用 8003 真实响应夹具验证
 // 前端解码器与后端包络/字段形状一致——解码失败=面板静默空列表的
@@ -45,19 +45,6 @@ test("quality settings fixture decodes (仲裁庭参数数据流)", () => {
 	const decoded = settingsDecoder(fixture("settings-versioned"));
 	if (!decoded.account_need_exits || !decoded.exit_need_n || !decoded.probe_budget) {
 		throw new Error("settings fixture missing required fields");
-	}
-});
-
-test("quality matrix fixture decodes (证据矩阵数据流)", () => {
-	const decoded = matrixDecoder(fixture("matrix"));
-	if (decoded.accounts.length === 0 || decoded.exits.length === 0) {
-		throw new Error("matrix fixture is empty — recapture while observations exist");
-	}
-	const known = new Set(decoded.accounts.map((account) => account.id));
-	for (const cell of decoded.cells) {
-		if (!known.has(cell.a)) {
-			throw new Error("matrix cell references unknown account");
-		}
 	}
 });
 

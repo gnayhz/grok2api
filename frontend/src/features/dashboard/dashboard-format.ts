@@ -1,17 +1,3 @@
-import { usdTicksToValue } from "@/shared/lib/usd";
-
-export function formatUSD(ticks: number, locale: string): string {
-  return formatUSDValue(usdTicksToValue(ticks), locale);
-}
-
-export function formatUSDValue(value: number, locale: string): string {
-  return `$${new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
-}
-
-export function formatCompactUSD(value: number, locale: string): string {
-  return `$${new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(value)}`;
-}
-
-export function formatCompactNumber(value: number, locale: string): string {
-  return new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(value);
-}
+// 薄 re-export:通用数字/USD 格式化统一收在 shared/lib/format,
+// dashboard 侧仅保留原导入路径,避免各视图散落重复实现。
+export { formatUSD, formatUSDValue, formatCompactUSD, formatCompactNumber } from "@/shared/lib/format";

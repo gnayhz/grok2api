@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"sync"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ var routingReaders = map[string]func(context.Context, *Manager) (string, error){
 		return n[0].Name, nil
 	},
 	"target": func(ctx context.Context, m *Manager) (string, error) {
-		n, _, err := m.cachedRoutingTargetNode(ctx, 1)
+		n, _, err := m.routing.cachedRoutingTargetNode(ctx, 1)
 		return n.Name, err
 	},
 	"pool": func(ctx context.Context, m *Manager) (string, error) {
@@ -101,7 +102,7 @@ func TestRoutingReadersCancelWhileSharedLoadContinues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := newRoutingGateRepo()
 			defer close(r.gate)
-			m := NewManager(r, nil)
+			m := NewManagerWithLimits(r, nil, netbudget.Limits{})
 			t.Cleanup(func() { _ = m.Close(context.Background()) })
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -125,7 +126,7 @@ func TestRoutingInvalidationRejectsInflightSnapshots(t *testing.T) {
 	for name, read := range routingReaders {
 		t.Run(name, func(t *testing.T) {
 			r := newRoutingGateRepo()
-			m := NewManager(r, nil)
+			m := NewManagerWithLimits(r, nil, netbudget.Limits{})
 			t.Cleanup(func() { _ = m.Close(context.Background()) })
 			done := make(chan string, 1)
 			go func() { value, err := read(context.Background(), m); done <- fmt.Sprintf("%s/%v", value, err) }()
@@ -163,7 +164,7 @@ func TestNodeMutationInvalidatesAllRoutingViews(t *testing.T) {
 		t.Run(invalidate.name, func(t *testing.T) {
 			r := newRoutingGateRepo()
 			close(r.gate)
-			m := NewManager(r, nil)
+			m := NewManagerWithLimits(r, nil, netbudget.Limits{})
 			t.Cleanup(func() { _ = m.Close(context.Background()) })
 			for _, name := range []string{"nodes", "target", "pool"} {
 				_, _ = routingReaders[name](context.Background(), m)
@@ -182,7 +183,7 @@ func TestNodeMutationInvalidatesAllRoutingViews(t *testing.T) {
 }
 
 func TestAffinityDistributesSequentialNodeIDs(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	nodes := make([]domain.Node, 16)
 	for i := range nodes {

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	dashboardapp "github.com/chenyme/grok2api/backend/internal/application/dashboard"
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
 	invalidationapp "github.com/chenyme/grok2api/backend/internal/application/invalidation"
@@ -29,22 +32,23 @@ import (
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/mediafetch"
 	"github.com/chenyme/grok2api/backend/internal/infra/observability"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	updatecheckinfra "github.com/chenyme/grok2api/backend/internal/infra/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
 	qualityenforcement "github.com/chenyme/grok2api/backend/internal/quality/enforcement"
 	"github.com/chenyme/grok2api/backend/internal/quality/events"
@@ -57,6 +61,7 @@ import (
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
+	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	httpmiddleware "github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	qualityhttp "github.com/chenyme/grok2api/backend/internal/transport/http/quality"
 )
@@ -96,7 +101,7 @@ type Application struct {
 	invalidations      *invalidationapp.Service
 	accountRepo        repository.AccountRepository
 	modelRepo          repository.ModelRepository
-	providers          *provider.Registry
+	providers          provider.Registry
 	web                *webprovider.Adapter
 	egress             *infraegress.Manager
 	egressOps          *egressapp.Service
@@ -117,6 +122,18 @@ type Application struct {
 	qualityEvents    *events.Service
 	qualityJournal   *journal.Store
 	qualityGuard     *qualityguard.Service
+}
+
+// installCourtReleaseNotification 把法院的"账号已被本案释放"事实接到账号轴的
+// 质量解除上。法院只报告事实,清除质量标记与瞬态冷却是账号应用层的规则。
+// 单独成函数,使测试能在不重建整个组合根的前提下锚定同一条接线。
+func installCourtReleaseNotification(court *qualitycourt.Service, accounts *accountapp.Service) {
+	if court == nil || accounts == nil {
+		return
+	}
+	court.SetAccountReleased(func(ctx context.Context, accountID uint64) error {
+		return accounts.ClearQualityHold(ctx, accountID)
+	})
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
@@ -176,10 +193,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	mediaUploadTicketRepo := relational.NewMediaUploadTicketRepository(database)
 	// 文件基线在持久化覆盖前留存，供设置「恢复文件默认」使用。
 	fileCfg := cfg
-	if err := settingsapp.MigrateLegacyQualityRotation(ctx, cfg, runtimeSettingsRepo); err != nil {
+	if err := settingsapp.MigrateLegacyQualityRotation(ctx, config.ToRuntimeSettings(cfg), runtimeSettingsRepo); err != nil {
 		return nil, fmt.Errorf("migrate quality rotation capacity: %w", err)
 	}
-	loadedConfig, settingsUpdatedAt, settingsRevision, err := settingsapp.LoadPersisted(ctx, cfg, runtimeSettingsRepo)
+	loadedConfig, settingsUpdatedAt, settingsRevision, err := loadRuntimeSettings(ctx, cfg, runtimeSettingsRepo)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +279,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
 	egressManager.UpdateBuildStreamIdleTimeout(cfg.Provider.Build.StreamIdleTimeout.Value())
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
-		BaseURL: cfg.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(cfg.Provider.Build.FallbackBaseURL),
+		BaseURL: cfg.Provider.Build.BaseURL, FallbackBaseURL: settingsdomain.NormalizeBuildFallbackBaseURL(cfg.Provider.Build.FallbackBaseURL),
 		ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier,
 		TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent,
 		ResponseHeaderTimeout: cfg.Provider.Build.ResponseHeaderTimeout.Value(),
@@ -289,69 +306,37 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	webAdapter := webprovider.NewAdapter(webProviderConfig(cfg), egressManager, cipher, historyapp.NewResponseResources(responseRepo), mediaService)
 	webAdapter.SetLogger(logger)
 	consoleAdapter := consoleprovider.NewAdapter(consoleProviderConfig(cfg), egressManager, cipher, mediaService)
-	providers := provider.NewRegistry(cliAdapter, webAdapter, consoleAdapter)
+	providers := providerimpl.NewRegistry(cliAdapter, webAdapter, consoleAdapter)
 	if err := providers.Validate(); err != nil {
 		return nil, fmt.Errorf("校验 Provider 注册表: %w", err)
 	}
-	adminService := adminauth.NewService(adminRepo, sessionRepo, security.NewTokenService(cfg.Secrets.JWTSecret), cfg.Auth.AccessTokenTTL.Value(), cfg.Auth.RefreshTokenTTL.Value())
+	adminService := adminauth.NewService(adminRepo, sessionRepo, security.NewTokenService(cfg.Secrets.JWTSecret), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, cfg.Auth.AccessTokenTTL.Value(), cfg.Auth.RefreshTokenTTL.Value())
 	adminService.SetLoginRateLimiter(rateLimiter)
 	if err := adminService.Bootstrap(ctx, cfg.BootstrapAdmin.Username, cfg.BootstrapAdmin.Password); err != nil {
 		return nil, err
 	}
 	bulkPool := batch.NewSharedPool(maxBatchConcurrency(cfg.Batch), concurrency, "bulk:upstream")
-	importPool := batch.NewSharedChildPool(cfg.Batch.ImportConcurrency, concurrency, "bulk:import", bulkPool)
-	conversionPool := batch.NewSharedChildPool(cfg.Batch.ConversionConcurrency, concurrency, "bulk:conversion", bulkPool)
-	syncPool := batch.NewSharedChildPool(cfg.Batch.SyncConcurrency, concurrency, "bulk:sync", bulkPool)
-	refreshPool := batch.NewSharedChildPool(cfg.Batch.RefreshConcurrency, concurrency, "bulk:refresh", bulkPool)
-	// detectPool 固定 32 并发，与额度同步/续期隔离，避免全量探测挤占维护任务。
-	detectPool := batch.NewSharedChildPool(32, concurrency, "bulk:detect", bulkPool)
-	for _, pool := range []*batch.Pool{importPool, conversionPool, syncPool, refreshPool, detectPool} {
-		pool.UpdateJitter(cfg.Batch.RandomDelay.Value())
-	}
-	accountService := accountapp.NewService(accountRepo, auditRepo, deviceSessions, sticky, providers, cipher, refreshLock)
-	cliAdapter.SetFallbackMarker(accountService)
-	accountService.SetLogger(logger)
-	accountService.UpdateAutoCleanConfig(accountAutoCleanConfig(cfg.Accounts))
-	accountService.SetConcurrencyLimiter(concurrency)
-	accountService.SetQuotaRecoveryQueue(quotaQueue)
-	accountService.SetQuotaRefreshCoordinator(quotaRefreshState)
-	accountService.SetObservedModelStore(observedModelStore)
-	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
-	accountService.SetDetectPool(detectPool)
-	if err := accountService.RebuildBuildBotFlagIndex(ctx); err != nil {
-		return nil, fmt.Errorf("重建 Build 风控路由索引: %w", err)
-	}
-	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
+	accountLayerResult, err := bootstrapAccountLayer(ctx, accountLayerDeps{cfg: cfg, logger: logger, accountRepo: accountRepo, modelRepo: modelRepo, auditRepo: auditRepo, deviceSessions: deviceSessions, sticky: sticky, providers: providers, cipher: cipher, refreshLock: refreshLock, concurrency: concurrency, bulkPool: bulkPool, quotaQueue: quotaQueue, quotaRefreshState: quotaRefreshState, observedModelStore: observedModelStore, cliAdapter: cliAdapter})
 	if err != nil {
-		return nil, fmt.Errorf("加载 Web 额度恢复事件: %w", err)
-	}
-	for _, window := range windows {
-		if window.ResetAt != nil {
-			if err := quotaQueue.ScheduleQuotaRecovery(ctx, account.QuotaRecoveryEvent{AccountID: window.AccountID, Mode: window.Mode, DueAt: *window.ResetAt}); err != nil {
-				return nil, fmt.Errorf("恢复 Web 额度事件: %w", err)
-			}
-		}
-	}
-	modelService := modelapp.NewService(modelRepo, accountRepo, accountService, providers)
-	owned.models = modelService
-	modelService.SetBulkPool(syncPool)
-	modelService.SetLogger(logger)
-	if err := modelService.PublishCatalogs(ctx); err != nil {
 		return nil, err
 	}
-	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
-	accountSyncService.SetBulkPool(importPool)
-	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
+	importPool, conversionPool, syncPool, refreshPool, detectPool := accountLayerResult.importPool, accountLayerResult.conversionPool, accountLayerResult.syncPool, accountLayerResult.refreshPool, accountLayerResult.detectPool
+	accountService, modelService, accountSyncService := accountLayerResult.accountService, accountLayerResult.modelService, accountLayerResult.accountSync
 	egressService := egressapp.NewService(egressRepo, cipher)
 	owned.egressOps = egressService
-	egressService.SetHTTPTransportOwner(egressManager)
-	egressService.SetRotationCoordination(refreshLock, rateLimiter.(repository.RollingRateLimiter))
+	egressService.SetWebhookExecutor(infraegress.NewRotationWebhookExecutor(egressManager))
+	egressService.SetSubscriptionFetcher(infraegress.NewSubscriptionFetcher(egressManager, egressapp.NormalizeSubscriptionURL))
+	rollingLimiter, rollingOK := rateLimiter.(repository.RollingRateLimiter)
+	if !rollingOK {
+		return nil, fmt.Errorf("限流实现缺少滚动窗口能力: %T", rateLimiter)
+	}
+	egressService.SetRotationCoordination(refreshLock, rollingLimiter)
 	egressService.SetClearanceManager(egressManager)
 	egressService.SetNodeProber(egressManager)
 	egressService.SetOperationsConfigInvalidator(egressManager)
 	egressService.SetPoolCacheInvalidator(egressManager)
 	egressManager.SetFailureProber(egressService.TestNode)
-	clientKeyService := clientkeyapp.NewService(fmt.Sprintf("%x", identity[:16]), clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
+	clientKeyService := clientkeyapp.NewService(fmt.Sprintf("%x", identity[:16]), clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher, security.RandomTokenSource{})
 	owned.clientKeys = clientKeyService
 	// 媒体作业预检/清理：删除 key 前处置 media_jobs 的 RESTRICT 外键引用
 	// qualityQuarantiner 现仅承载死出口传输冷却(probe_dead),质量隔离态已删。
@@ -366,7 +351,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	auditService.UpdateLedgerConfig(auditLedgerConfig(cfg.Audit))
 	auditService.SetBillingObserver(clientKeyService)
 	dashboardService := dashboardapp.NewService(dashboardRepo)
-	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
+	selector := selector.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
 	selector.SetLogger(logger)
 	selector.UpdatePreferFreeBuild(cfg.Routing.PreferFreeBuild)
 	selector.UpdateSegmentedSelector(cfg.Routing.SegmentedSelectorEnabled, cfg.Routing.SegmentedMinCandidates, cfg.Routing.SegmentedWindowSize)
@@ -383,7 +368,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	}
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
-	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
+	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, historyapp.NewResponseResources(responseRepo), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), providerimpl.NewRateLimitInterpreter(), cfg.Routing.MaxAttempts)
 	// This synthetic scanner diagnostic has no instance configuration. Actual
 	// requests receive the kernel and policy from the guard snapshot below.
 	if err := gateway.GuardSelfCheck(); err != nil {
@@ -408,6 +393,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 		_, err := accountService.Get(ctx, accountID)
 		return !errors.Is(err, accountapp.ErrNotFound)
 	})
+	// 同出口排除集(建议性前置过滤):差分比对候选若已知与 baseline 共享
+	// 真实出口,在派发前跳过,避免白耗一次探针并少一条可采证据。判定只是
+	// 预筛——gateway.verifySecondPath 的活体出口核实仍是可采性的唯一权威。
+	qualityCourtService.SetSameExit(managerExitIPResolver{Manager: egressManager}.KnownSameExit)
+	// 无罪即恢复:法院确认出口有过错、账号被洗清后,账号轴的质量标记与随之而来
+	// 的瞬态冷却立即解除,不必再等它自然到期。
+	installCourtReleaseNotification(qualityCourtService, accountService)
 	qualityEvents := events.New(qualityJournal, qualityEvidenceStore, qualityCourtService)
 	gatewayService.SetQualityEventRecorder(&qualityEventSink{Service: qualityEvents})
 	// 执行所(重写批4):epoch 检测+台账;台账接仲裁庭立案(G8)。
@@ -449,8 +441,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	gatewayService.SetLogger(logger)
 	gatewayService.UpdateBuildForbiddenReauthPolicy(cfg.Accounts.MarkBuildForbiddenReauth, cfg.Accounts.BuildForbiddenReauthCodes)
 	gatewayService.UpdateRequestTimeout(cfg.Server.RequestTimeout.Value())
-	gatewayService.ConfigureMedia(mediaJobRepo, cfg.Provider.Web.MediaConcurrency)
-	gatewayService.ConfigureMediaAssets(mediaService)
+	gatewayService.ConfigureMedia(mediaJobRepo, mediaapp.NewVideoResources(mediaJobRepo, mediaService), cfg.Provider.Web.MediaConcurrency)
 	quotaRecoveryService := quotarecoveryapp.NewService(logger, quotaQueue, accountService, cfg.Provider.Web.RecoveryBackoffBase.Value(), cfg.Provider.Web.RecoveryBackoffMax.Value())
 	quotaRecoveryService.SetBulkPool(syncPool)
 	inferenceConcurrency := httpmiddleware.NewConcurrencyGate(cfg.Server.MaxConcurrentRequests)
@@ -466,12 +457,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 			}
 		}
 	}
-	settingsService := settingsapp.NewService(cfg, settingsUpdatedAt, settingsRevision, runtimeSettingsRepo, publishSettings, []settingsapp.ApplyTarget{
-		{Name: "inference_capacity", Apply: func(_ context.Context, next config.Config) error {
+	settingsService := settingsapp.NewService(config.ToRuntimeSettings(cfg), settingsUpdatedAt, settingsRevision, runtimeSettingsRepo, publishSettings, []settingsapp.ApplyTarget{
+		{Name: "inference_capacity", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			inferenceConcurrency.UpdateLimit(next.Server.MaxConcurrentRequests)
 			return nil
-		}},
-		{Name: "batch", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "batch", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			bulkPool.UpdateLimit(maxBatchConcurrency(next.Batch))
 			importPool.UpdateLimit(next.Batch.ImportConcurrency)
 			conversionPool.UpdateLimit(next.Batch.ConversionConcurrency)
@@ -482,90 +473,97 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 				pool.UpdateJitter(next.Batch.RandomDelay.Value())
 			}
 			return nil
-		}},
-		{Name: "provider_build", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "provider_build", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			cliAdapter.UpdateConfig(cliprovider.Config{
-				BaseURL: next.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(next.Provider.Build.FallbackBaseURL),
+				BaseURL: next.Provider.Build.BaseURL, FallbackBaseURL: settingsdomain.NormalizeBuildFallbackBaseURL(next.Provider.Build.FallbackBaseURL),
 				ClientVersion: next.Provider.Build.ClientVersion, ClientIdentifier: next.Provider.Build.ClientIdentifier,
 				TokenAuth: next.Provider.Build.TokenAuth, UserAgent: next.Provider.Build.UserAgent,
 				ResponseHeaderTimeout: next.Provider.Build.ResponseHeaderTimeout.Value(),
 				StreamIdleTimeout:     next.Provider.Build.StreamIdleTimeout.Value(),
 			})
 			return nil
-		}},
-		{Name: "network", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "network", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			egressManager.UpdateBuildResponseHeaderTimeout(next.Provider.Build.ResponseHeaderTimeout.Value())
 			egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
 			egressManager.UpdateClearanceConfig(clearanceConfig(next))
 			egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
 			return nil
-		}},
-		{Name: "provider_web", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "provider_web", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			webAdapter.UpdateConfig(webProviderConfig(next))
 			return nil
-		}},
-		{Name: "provider_console", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "provider_console", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			consoleAdapter.UpdateConfig(consoleProviderConfig(next))
 			return nil
-		}},
-		{Name: "media", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "media", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			mediaService.UpdateConfig(mediaConfig(next))
 			return nil
-		}},
-		{Name: "quota_recovery", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "quota_recovery", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			quotaRecoveryService.UpdateConfig(next.Provider.Web.RecoveryBackoffBase.Value(), next.Provider.Web.RecoveryBackoffMax.Value())
 			return nil
-		}},
-		{Name: "account_sync", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "account_sync", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
 			return nil
-		}},
-		{Name: "selector", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "selector", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 			selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
 			selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
 			selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 			return nil
-		}},
-		{Name: "egress_rotation", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "egress_rotation", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			egressService.SetRotationConfig(egressRotationConfig(next))
 			return nil
-		}},
-		{Name: "accounts", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "accounts", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 			accountService.UpdateAutoCleanConfig(accountAutoCleanConfig(next.Accounts))
 			return nil
-		}},
-		{Name: "conversation", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "conversation", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			reasoningReplay.UpdateConfig(historyapp.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
 			return nil
-		}},
-		{Name: "gateway", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "gateway", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
 			gatewayService.UpdateVideoMaxAttempts(next.Routing.VideoMaxAttempts)
 			gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
 			gatewayService.UpdateBuildForbiddenReauthPolicy(next.Accounts.MarkBuildForbiddenReauth, next.Accounts.BuildForbiddenReauthCodes)
 			return nil
-		}},
-		{Name: "audit", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "audit", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			auditService.UpdateWriterConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value(), next.Audit.CommitDelay.Value())
 			auditService.UpdateLedgerConfig(auditLedgerConfig(next.Audit))
 			return nil
-		}},
-		{Name: "client_keys", Apply: func(_ context.Context, next config.Config) error {
+		})},
+		{Name: "client_keys", Apply: settingsApply(fileCfg, func(next config.Config) error {
 			clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
 			return nil
-		}},
+		})},
 	})
-	settingsService.SetRequestRetryProjection(func() config.RequestRetryConfig {
+	settingsService.SetRequestRetryProjection(func() settingsdomain.RequestRetryConfig {
 		current := qualityGuardService.Config()
-		return config.RequestRetryConfig{Enabled: current.Enabled, MaxAttempts: current.MaxAttempts,
+		return settingsdomain.RequestRetryConfig{Enabled: current.Enabled, MaxAttempts: current.MaxAttempts,
 			OnExhausted: "fail_closed", GuardedModels: current.GuardedModels,
-			EvidenceTimeout: config.Duration(current.EvidenceTimeout), CreatedTimeout: config.Duration(current.CreatedTimeout),
-			AccountCooldown: config.Duration(current.AccountCooldown), IdleAccountCooldown: config.Duration(current.IdleAccountCooldown)}
+			EvidenceTimeout: current.EvidenceTimeout, CreatedTimeout: current.CreatedTimeout,
+			AccountCooldown: current.AccountCooldown, IdleAccountCooldown: current.IdleAccountCooldown}
 	})
-	settingsService.SetFileConfig(fileCfg)
-	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
+	settingsService.SetRuntimeValidator(func(runtime settingsdomain.Config) error {
+		_, err := config.ApplyRuntimeSnapshot(fileCfg, runtime)
+		return err
+	})
+	settingsService.SetPersistedResolver(func(runtime settingsdomain.Config) (settingsdomain.Config, error) {
+		return config.ResolveRuntimeSettings(fileCfg, runtime)
+	})
+	settingsService.SetFileConfig(config.ToRuntimeSettings(fileCfg))
+	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), updatecheckinfra.NewGitHubSource(nil))
 	// Quality owns parameter policy; composition supplies persistence, apply and notification ports.
 	qualityTunables := qualitymanagement.New(
 		relational.NewSettingsDocumentRepository(database, qualitymanagement.SettingsKey),
@@ -584,11 +582,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 		ObservationDrops: func() int64 { return 0 },
 	})
 
-	startup := newStartupState(len(windows))
+	startup := newStartupState(accountLayerResult.quotaRecoveries)
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, MediaImporter: mediaImporter, Settings: settingsService, Egress: egressService, EgressRuntimeStats: egressManager.RuntimeStats, Updates: updateService, Quality: &qualityhttp.Deps{Queries: qualityQueries, Court: qualityCourtService, Enforcement: qualityEnforcementService, Guard: qualityGuardService, DialerDistribution: qualityDialerPolicy.SelectionDistribution, Tunables: qualityTunables, RotationCapacity: func() int { return egressService.RotationConfig().MaxGlobalPerHour }}, EgressQualityStates: egressQualityStatesProvider{registry: qualityRegistry}.states, AccountQualityStates: accountQualityStatesProvider{registry: qualityRegistry}.states})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTokens: security.RandomTokenSource{}, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accounthttp.Dependencies{Administration: accountService, Credentials: accountService, Maintenance: accountService, Onboarding: accountsyncapp.NewOnboarding(accountService, accountService, accountSyncService), DeviceOnboarding: accountSyncService, ModelSyncUpdates: accountSyncService}, Models: modelService, ClientKeys: clientKeyService, ClientAuthKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, MediaImporter: mediaImporter, Settings: settingsService, Egress: egressService, EgressLiveStats: liveEgressStats(egressManager), Updates: updateService, Quality: &qualityhttp.Deps{Queries: qualityQueries, Court: qualityCourtService, Enforcement: qualityEnforcementService, Guard: qualityGuardService, DialerDistribution: qualityDialerPolicy.SelectionDistribution, Tunables: qualityTunables, RotationCapacity: func() int { return egressService.RotationConfig().MaxGlobalPerHour }}, EgressQualityStates: egressQualityStatesProvider{registry: qualityRegistry}.states, AccountQualityStates: accountQualityStatesProvider{registry: qualityRegistry}.states})
 	logSecureCookiesHint(logger, cfg)
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	constructed = true
@@ -602,115 +600,6 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 		qualityEnforcement: qualityEnforcementService, qualityProbeExec: qualityProbeExecutorService,
 		qualityEvents: qualityEvents, qualityJournal: qualityJournal, qualityGuard: qualityGuardService,
 	}, nil
-}
-
-// serverUpdateCheckEnabled 解析出网检查开关:nil 保持默认开启, 显式 false 关闭。
-func serverUpdateCheckEnabled(cfg config.Config) bool {
-	if cfg.Server.UpdateCheckEnabled == nil {
-		return true
-	}
-	return *cfg.Server.UpdateCheckEnabled
-}
-
-func invalidationSourceInstance(cfg config.Config) string {
-	if value := strings.TrimSpace(cfg.Deployment.InstanceID); value != "" {
-		return value
-	}
-	return fmt.Sprintf("process-%d", time.Now().UnixNano())
-}
-
-// bootstrapQualityLayer 构建新质量层地基(重写批1:羁押登记处+证据局)
-// 与底座同库、自带连接池。请求观测由durable events队列接收。
-func bootstrapQualityLayer(ctx context.Context, cfg config.Config, logger *slog.Logger, links qualityregistry.AccountLinks) (*qualityregistry.Registry, *qualityevidence.Store, error) {
-	opts := qualityregistry.Options{Logger: logger, AccountLinks: links}
-	switch cfg.Database.Driver {
-	case "postgres":
-		opts.Driver, opts.PostgresDSN = "postgres", cfg.Database.Postgres.DSN
-	default:
-		opts.Driver, opts.SQLitePath = "sqlite", cfg.Database.SQLite.Path
-	}
-	registry, err := qualityregistry.Open(ctx, opts)
-	if err != nil {
-		return nil, nil, err
-	}
-	evidenceStore, err := qualityevidence.New(ctx, registry.DB(), qualityevidence.DefaultConfig())
-	if err != nil {
-		_ = registry.Close()
-		return nil, nil, err
-	}
-	return registry, evidenceStore, nil
-}
-
-// egressRotationConfig maps file config onto the rotation scheduler.
-func egressRotationConfig(cfg config.Config) egressapp.RotationConfig {
-	return egressapp.RotationConfig{
-		Enabled:                  cfg.Egress.Rotation.Enabled,
-		MaxAttemptsPerQuarantine: cfg.Egress.Rotation.MaxAttemptsPerQuarantine,
-		MinNodeInterval:          cfg.Egress.Rotation.MinNodeInterval.Value(),
-		MaxGlobalPerHour:         cfg.Egress.Rotation.MaxGlobalPerHour,
-		WebhookTimeout:           cfg.Egress.Rotation.WebhookTimeout.Value(),
-		WebhookRetries:           cfg.Egress.Rotation.WebhookRetries,
-		SettleDelay:              cfg.Egress.Rotation.SettleDelay.Value(),
-		ProbeTimeout:             cfg.Egress.Rotation.ProbeTimeout.Value(),
-		ProbeInterval:            cfg.Egress.Rotation.ProbeInterval.Value(),
-	}
-}
-
-func maxBatchConcurrency(value config.BatchConfig) int {
-	return max(value.ImportConcurrency, value.ConversionConcurrency, value.SyncConcurrency, value.RefreshConcurrency)
-}
-
-func webProviderConfig(cfg config.Config) webprovider.Config {
-	return webprovider.Config{
-		BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeout: cfg.Provider.Web.QuotaTimeout.Value(),
-		StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
-		StatsigSignerURL: cfg.Provider.Web.StatsigSignerURL,
-		ChatTimeout:      cfg.Provider.Web.ChatTimeout.Value(), StreamIdleTimeout: cfg.Provider.Web.StreamIdleTimeout.Value(),
-		ImageTimeout: cfg.Provider.Web.ImageTimeout.Value(),
-		VideoTimeout: cfg.Provider.Web.VideoTimeout.Value(), MaxInputImageBytes: cfg.Media.MaxImageBytes,
-		AllowNSFW: cfg.Provider.Web.AllowNSFW,
-	}
-}
-
-func clearanceConfig(cfg config.Config) infraegress.ClearanceConfig {
-	return infraegress.ClearanceConfig{
-		Mode: cfg.Provider.Web.ClearanceMode, FlareSolverrURL: cfg.Provider.Web.FlareSolverrURL,
-		TargetURL: cfg.Provider.Web.BaseURL, Timeout: cfg.Provider.Web.ClearanceTimeout.Value(),
-		RefreshInterval: cfg.Provider.Web.ClearanceRefresh.Value(),
-	}
-}
-
-func consoleProviderConfig(cfg config.Config) consoleprovider.Config {
-	return consoleprovider.Config{
-		BaseURL: cfg.Provider.Console.BaseURL, SessionBaseURL: cfg.Provider.Web.BaseURL,
-		Timeout: cfg.Provider.Console.ChatTimeout.Value(), StreamIdleTimeout: cfg.Provider.Console.StreamIdleTimeout.Value(),
-	}
-}
-
-func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanConfig {
-	return accountapp.AutoCleanConfig{
-		Enabled:         value.AutoCleanReauthEnabled,
-		Interval:        value.AutoCleanReauthInterval.Value(),
-		MinAge:          value.AutoCleanReauthMinAge.Value(),
-		IncludeDisabled: value.AutoCleanIncludeDisabled,
-	}
-}
-
-func auditLedgerConfig(value config.AuditConfig) auditapp.LedgerConfig {
-	return auditapp.LedgerConfig{
-		Mode:                      auditapp.LedgerMode(value.LedgerMode),
-		FailureThreshold:          value.LedgerFailureThreshold,
-		UnhealthyGrace:            value.LedgerUnhealthyGrace.Value(),
-		QueueHighWatermarkPercent: value.LedgerQueueHighWatermarkPct,
-	}
-}
-
-func mediaConfig(cfg config.Config) mediaapp.Config {
-	return mediaapp.Config{
-		PublicBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(),
-		MaxImageBytes: cfg.Media.MaxImageBytes, MaxTotalBytes: cfg.Media.MaxTotalBytes,
-		CleanupThresholdPercent: cfg.Media.CleanupThresholdPercent, CleanupInterval: cfg.Media.CleanupInterval.Value(),
-	}
 }
 
 // Run 启动 HTTP 服务和本地后台维护任务。
@@ -943,6 +832,24 @@ func (a *Application) Run(ctx context.Context) (resultErr error) {
 	})
 	if a.qualityInvestigator != nil {
 		startBackground("quality_probe_projection", a.qualityInvestigator.RunProjections)
+	}
+	// 质量仲裁与执行所的循环由组合根显式启动(构造不再隐式起循环)。
+	// Run 为非阻塞 API(内部自起循环 goroutine 并由 Close 取消),监督器
+	// 期待任务阻塞到取消——此处持有任务槽直到 ctx 结束,避免把立即返回
+	// 误判为"意外退出"而无限重启。
+	if a.qualityCourt != nil {
+		startBackground("quality_court_evaluator", func(taskCtx context.Context) error {
+			a.qualityCourt.Run(taskCtx)
+			<-taskCtx.Done()
+			return nil
+		})
+	}
+	if a.qualityEnforcement != nil {
+		startBackground("quality_enforcement_loop", func(taskCtx context.Context) error {
+			a.qualityEnforcement.Run(taskCtx)
+			<-taskCtx.Done()
+			return nil
+		})
 	}
 	startBackground("quality_probe_worker", func(taskCtx context.Context) error {
 		return a.runQualityProbeWorker(taskCtx)

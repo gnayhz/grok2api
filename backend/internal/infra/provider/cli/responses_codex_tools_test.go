@@ -8,11 +8,11 @@ import (
 )
 
 func TestLegacyLocalShellUsesNativeLocalShellAndRestoresJSON(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"show cwd",
 		"tools":[{"type":"local_shell"}],
 		"tool_choice":{"type":"local_shell"}
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,12 +52,12 @@ func TestLegacyLocalShellUsesNativeLocalShellAndRestoresJSON(t *testing.T) {
 }
 
 func TestLegacyLocalShellHistoryBecomesStructuredShellHistory(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","tools":[{"type":"local_shell"}],"input":[
 			{"type":"local_shell_call","id":"sh_1","call_id":"call_1","status":"completed","action":{"type":"exec","command":["printf","a b"],"working_directory":"/workspace","env":{"MODE":"test"}}},
 			{"type":"local_shell_call_output","call_id":"call_1","status":"failed","exit_code":7,"output":"failure"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,13 +79,13 @@ func TestLegacyLocalShellHistoryBecomesStructuredShellHistory(t *testing.T) {
 }
 
 func TestNativeShellOutputHistoryIsSanitizedForBuild(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","tools":[{"type":"shell","environment":{"type":"local"}}],"input":[
 			{"type":"shell_call_output","call_id":"call_1","status":"completed","output":[
 				{"command":"pwd","stdout":"/workspace\n","stderr":"","outcome":{"type":"exit","exitCode":0}}
 			],"max_output_length":2048}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,11 @@ func TestNativeShellOutputHistoryIsSanitizedForBuild(t *testing.T) {
 }
 
 func TestFunctionCallOutputHistoryEncodesStructuredOutput(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","tools":[{"type":"function","name":"shell_command","parameters":{"type":"object"}}],"input":[
 			{"type":"function_call_output","call_id":"call_1","status":"completed","output":{"exit_code":0,"stdout":"ok","stderr":""}}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestFunctionCallOutputHistoryEncodesStructuredOutput(t *testing.T) {
 }
 
 func TestFunctionCallOutputHistoryPreservesContentBlocks(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}],"input":[
 			{"type":"function_call_output","call_id":"call_1","status":"completed","output":[
 				{"type":"input_text","text":"Read image file: screenshot.png"},
@@ -131,7 +131,7 @@ func TestFunctionCallOutputHistoryPreservesContentBlocks(t *testing.T) {
 				{"type":"input_file","file_id":"file_document_1","filename":"notes.txt"}
 			]}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +172,9 @@ func TestFunctionCallOutputHistoryKeepsStructuredArraysAsJSON(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			normalized, _, err := normalizeResponsesRequest([]byte(`{
+			normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 				"model":"public","input":[{"type":"function_call_output","call_id":"call_1","output":`+test.output+`}]
-			}`), "grok-4.5")
+			}`), "grok-4.5", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +208,7 @@ func TestFunctionCallOutputHistoryRejectsInvalidContentBlocks(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := []byte(`{"model":"public","input":[{"type":"function_call_output","call_id":"call_1","output":` + test.output + `}]}`)
-			_, _, err := normalizeResponsesRequest(body, "grok-4.5")
+			_, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 			requestErr, ok := err.(*responsesRequestError)
 			if !ok || requestErr.Param != test.wantParam || requestErr.Code != test.wantCode {
 				t.Fatalf("error = %#v", err)
@@ -218,12 +218,12 @@ func TestFunctionCallOutputHistoryRejectsInvalidContentBlocks(t *testing.T) {
 }
 
 func TestMessageImageDetailUsesSameCompatibilityPolicy(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[{"type":"message","role":"user","content":[
 			{"type":"input_image","image_url":"data:image/png;base64,AA=="},
 			{"type":"input_image","detail":"original","file_id":"file_1"}
 		]}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,12 +241,12 @@ func TestMessageImageDetailUsesSameCompatibilityPolicy(t *testing.T) {
 }
 
 func TestCustomToolCallOutputHistoryStillEncodesArrayAsString(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[{"type":"custom_tool_call_output","call_id":"call_1","output":[
 			{"type":"input_text","text":"custom output"},
 			{"type":"input_image","detail":"auto","image_url":"data:image/png;base64,AA=="}
 		]}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestFunctionCallOutputHistoryPreservesFortyTwoImagesAtThirtyTwoMiB(t *testi
 	if len(body) < totalPayloadSize {
 		t.Fatalf("fixture size = %d", len(body))
 	}
-	normalized, _, err := normalizeResponsesRequest(body, "grok-4.5")
+	normalized, _, err := normalizeResponsesRequestWithMetadata(body, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestFunctionCallOutputHistoryPreservesFortyTwoImagesAtThirtyTwoMiB(t *testi
 }
 
 func TestAssistantOutputMessageHistoryUsesEasyMessageText(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"message","role":"system","content":"system instruction"},
 			{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[
@@ -314,7 +314,7 @@ func TestAssistantOutputMessageHistoryUsesEasyMessageText(t *testing.T) {
 			]},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"继续"}]}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,13 +339,13 @@ func TestAssistantOutputMessageHistoryUsesEasyMessageText(t *testing.T) {
 }
 
 func TestRoleMissingTypeBecomesMessageAndFunctionCallIsAllowlisted(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"role":"user","content":"hello"},
 			{"type":"function_call","id":"fc_1","status":"completed","call_id":"call_1","name":"shell_command","arguments":"{}","namespace":"","internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
 			{"type":"function_call_output","id":"fco_1","status":"completed","call_id":"call_1","output":"ok"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestRoleMissingTypeBecomesMessageAndFunctionCallIsAllowlisted(t *testing.T)
 }
 
 func TestNativeBuildHistoryItemsArePreservedAndSanitized(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"Grok Build","sources":null},"phase":"commentary"},
 			{"type":"shell_call","id":null,"call_id":"call_1","status":"completed","action":{"commands":["pwd"],"timeout_ms":null,"internal_chat_message_metadata_passthrough":{"turn_id":"t1"}}},
@@ -377,7 +377,7 @@ func TestNativeBuildHistoryItemsArePreservedAndSanitized(t *testing.T) {
 			{"type":"code_interpreter_call","id":"ci_1","container_id":"container_1","status":"completed","code":"print(1)","outputs":null},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,13 +405,13 @@ func TestNativeBuildHistoryItemsArePreservedAndSanitized(t *testing.T) {
 }
 
 func TestReasoningWithoutEncryptedContentRemainsNative(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"reasoning","id":"rs_1","status":"completed","summary":[{"type":"summary_text","text":"who am I"}],"content":null,"encrypted_content":null,"internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"嗯"}]}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,12 +434,12 @@ func TestReasoningWithoutEncryptedContentRemainsNative(t *testing.T) {
 }
 
 func TestUnsupportedResponsesHistoryItemBecomesBoundary(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"future_codex_item","id":"future_1","status":"completed"},
 			{"type":"message","role":"user","content":"continue"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,12 +456,12 @@ func TestUnsupportedResponsesHistoryItemBecomesBoundary(t *testing.T) {
 }
 
 func TestMessageImageAndFileNullFieldsAreRemoved(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[{"type":"message","role":"user","content":[
 			{"type":"input_image","image_url":"https://example.com/image.png","detail":null,"file_id":null},
 			{"type":"input_file","file_id":"file_1","file_url":null,"filename":null}
 		]}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ func TestMessageImageAndFileNullFieldsAreRemoved(t *testing.T) {
 }
 
 func TestCodexPrivateMetadataIsStrippedFromHistory(t *testing.T) {
-	normalized, _, err := normalizeResponsesRequest([]byte(`{
+	normalized, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":[
 			{"type":"reasoning","id":"rs_1","status":"completed","summary":[{"type":"summary_text","text":"plan"}],"encrypted_content":"cipher","internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
 			{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell_command","arguments":"{}","internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
@@ -487,7 +487,7 @@ func TestCodexPrivateMetadataIsStrippedFromHistory(t *testing.T) {
 			{"type":"custom_tool_call_output","id":"ctco_1","call_id":"call_2","output":"done","internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
 			{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"hi"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t1"}}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,10 +514,10 @@ func TestCodexPrivateMetadataIsStrippedFromHistory(t *testing.T) {
 }
 
 func TestRequestRejectsAmbiguousShellDeclarations(t *testing.T) {
-	_, _, err := normalizeResponsesRequest([]byte(`{
+	_, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"hello",
 		"tools":[{"type":"shell","environment":{"type":"local"}},{"type":"local_shell"}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	requestErr, ok := err.(*responsesRequestError)
 	if !ok || requestErr.Code != "invalid_parameter" || requestErr.Param != "tools[1].type" {
 		t.Fatalf("error = %#v", err)
@@ -525,11 +525,11 @@ func TestRequestRejectsAmbiguousShellDeclarations(t *testing.T) {
 }
 
 func TestOptionalCompatibilityControlsAreIgnored(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public",
 		"tools":[{"type":"local_shell","display_width":120},{"type":"apply_patch","mode":"auto"}],
 		"input":[{"type":"additional_tools","role":"user","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,11 +552,11 @@ func TestOptionalCompatibilityControlsAreIgnored(t *testing.T) {
 }
 
 func TestApplyPatchToolRequestHistoryAndJSONResponse(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"edit file",
 		"tools":[{"type":"apply_patch"}],
 		"tool_choice":{"type":"apply_patch"}
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,12 +594,12 @@ func TestApplyPatchToolRequestHistoryAndJSONResponse(t *testing.T) {
 		t.Fatalf("visible tools = %#v", response["tools"])
 	}
 
-	history, _, err := normalizeResponsesRequest([]byte(`{
+	history, _, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","tools":[{"type":"apply_patch"}],"input":[
 			{"type":"apply_patch_call","id":"apc_1","call_id":"call_1","status":"completed","operation":{"type":"delete_file","path":"old.txt"}},
 			{"type":"apply_patch_call_output","call_id":"call_1","status":"failed","output":"permission denied"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,9 +616,9 @@ func TestApplyPatchToolRequestHistoryAndJSONResponse(t *testing.T) {
 }
 
 func TestApplyPatchStreamBuffersFunctionProtocolAndRestoresItems(t *testing.T) {
-	_, compatibility, err := normalizeResponsesRequest([]byte(`{
+	_, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","input":"edit","stream":true,"tools":[{"type":"apply_patch"}]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,14 +656,14 @@ func TestApplyPatchStreamBuffersFunctionProtocolAndRestoresItems(t *testing.T) {
 }
 
 func TestAdditionalToolsAndRemoteCompactionTrigger(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+	normalized, compatibility, err := normalizeResponsesRequestWithMetadata([]byte(`{
 		"model":"public","tools":[{"type":"function","name":"lookup","description":"old","parameters":{"type":"object"}}],
 		"input":[
 			{"type":"additional_tools","role":"developer","tools":[{"type":"function","name":"lookup","description":"new","parameters":{"type":"object"}},{"type":"apply_patch"}]},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},
 			{"type":"compaction_trigger"}
 		]
-	}`), "grok-4.5")
+	}`), "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

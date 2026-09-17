@@ -36,7 +36,7 @@ func TestPoolStatsRecordAndReset(t *testing.T) {
 	}
 	// 失败按节点计数,快照合并展示:同属两池的节点失败一次,两池快照都显示 1
 	// (节点级计数,不伪装成池归因 — Feedback 路径无池上下文)。
-	RecordPoolNodeFailure(1)
+	recordPoolNodeFailures(1, 1)
 	items101, _ := PoolStatsSnapshot(101)
 	items102, _ := PoolStatsSnapshot(102)
 	var fail101, fail102 uint64
@@ -81,7 +81,7 @@ func TestPoolStatsCapacityEviction(t *testing.T) {
 	for i := 0; i < poolStatsMaxEntries+100; i++ {
 		RecordPoolSelection(uint64(i%10), uint64(i))
 	}
-	RecordPoolNodeFailure(1)
+	recordPoolNodeFailures(1, 1)
 	// 手工把一半条目回拨为"最旧", 模拟长时运行下的陈旧分布。
 	poolNodeStats.mu.Lock()
 	i := 0
@@ -133,9 +133,9 @@ func TestPoolStatsResetIsolationAndGlobalFailureMerge(t *testing.T) {
 	RecordPoolSelection(1, shared) // 池 A: 共享节点
 	RecordPoolSelection(2, shared) // 池 B: 同一共享节点
 	RecordPoolSelection(2, onlyB)  // 池 B 独有节点
-	RecordPoolNodeFailure(shared)
-	RecordPoolNodeFailure(shared)
-	RecordPoolNodeFailure(onlyB)
+	recordPoolNodeFailures(shared, 1)
+	recordPoolNodeFailures(shared, 1)
+	recordPoolNodeFailures(onlyB, 1)
 
 	beforeB, sinceB := PoolStatsSnapshot(2)
 	if len(beforeB) != 2 {

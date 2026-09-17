@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	infraimport "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
 const (
@@ -144,7 +145,7 @@ func parsePlainTextRefreshTokens(value string) ([]importedCredentialEntry, error
 }
 
 func parseImportedCredentialJSONSequence(data []byte) ([]importedCredentialEntry, error) {
-	return provider.DecodeCredentialJSONEntries[importedCredentialEntry](data, credentialImportProvider, maxCredentialImportAccounts)
+	return infraimport.DecodeCredentialJSONEntries[importedCredentialEntry](data, credentialImportProvider, maxCredentialImportAccounts)
 }
 
 func parseImportedCredentialJSONValue(data []byte) ([]importedCredentialEntry, error) {
@@ -261,20 +262,20 @@ func normalizeImportedCredential(entry importedCredentialEntry) (provider.Creden
 		return provider.CredentialSeed{}, fmt.Errorf("暂不支持 token_type %q", entry.TokenType)
 	}
 
-	claims := decodeJWTClaims(firstNonEmpty(entry.IDToken, accessToken))
-	userID := firstNonEmpty(entry.UserID, entry.PrincipalID, entry.Subject, stringClaim(claims, "sub"))
-	email := firstNonEmpty(entry.Email, stringClaim(claims, "email"))
-	teamID := firstNonEmpty(entry.TeamID, stringClaim(claims, "team_id"))
+	claims := decodeJWTClaims(texts.FirstNonEmptyTrimmed(entry.IDToken, accessToken))
+	userID := texts.FirstNonEmptyTrimmed(entry.UserID, entry.PrincipalID, entry.Subject, stringClaim(claims, "sub"))
+	email := texts.FirstNonEmptyTrimmed(entry.Email, stringClaim(claims, "email"))
+	teamID := texts.FirstNonEmptyTrimmed(entry.TeamID, stringClaim(claims, "team_id"))
 	expiresAt, err := importedCredentialExpiry(entry, claims)
 	if err != nil {
 		return provider.CredentialSeed{}, err
 	}
-	clientID := firstNonEmpty(entry.ClientID, defaultOAuthClientID)
-	identity := firstNonEmpty(userID, strings.ToLower(email), teamID, refreshToken, accessToken)
+	clientID := texts.FirstNonEmptyTrimmed(entry.ClientID, defaultOAuthClientID)
+	identity := texts.FirstNonEmptyTrimmed(userID, strings.ToLower(email), teamID, refreshToken, accessToken)
 	sourceKey := "import:" + security.HashToken(strings.Join([]string{providerName, clientID, identity}, "|"))
 
 	return provider.CredentialSeed{
-		Name: firstNonEmpty(entry.Name, email, userID, "Grok Build account"), Email: email, UserID: userID, TeamID: teamID,
+		Name: texts.FirstNonEmptyTrimmed(entry.Name, email, userID, "Grok Build account"), Email: email, UserID: userID, TeamID: teamID,
 		SourceKey: sourceKey, OIDCClientID: clientID, AccessToken: accessToken, RefreshToken: refreshToken, ExpiresAt: expiresAt,
 	}, nil
 }

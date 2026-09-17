@@ -7,7 +7,7 @@ import (
 
 	dashboardapp "github.com/chenyme/grok2api/backend/internal/application/dashboard"
 	dashboarddomain "github.com/chenyme/grok2api/backend/internal/domain/dashboard"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 

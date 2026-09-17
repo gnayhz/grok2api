@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"encoding/json"
+	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,7 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -102,7 +103,7 @@ func TestVideoWorkerReleasesAccountOnEveryExit(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				fx.service.ConfigureMedia(fx.jobs, 1)
+				fx.service.ConfigureMedia(fx.jobs, mediaapp.NewVideoResources(fx.jobs, nil), 1)
 				fx.service.UpdateVideoMaxAttempts(1)
 				// Use the production HTTP admission, including the finite Key's
 				// reservation, before starting the independent persistent worker.

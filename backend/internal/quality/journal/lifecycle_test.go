@@ -1,4 +1,4 @@
-package journal_test
+package journal
 
 import (
 	"context"
@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/quality/journal"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 func TestAdmittedCompletionSurvivesFullIncidentQueue(t *testing.T) {
 	r, store := setup(t)
 	ctx, now := context.Background(), time.Now().UTC()
-	if err := r.DB().Create(&journal.CapacityRow{ID: 1, Limit: 1}).Error; err != nil {
+	if err := r.Create(&CapacityRow{ID: 1, Limit: 1}).Error; err != nil {
 		t.Fatal(err)
 	}
 	admission := event("admitted", now)
@@ -24,7 +24,7 @@ func TestAdmittedCompletionSurvivesFullIncidentQueue(t *testing.T) {
 	if err := store.Record(ctx, event("incident", now)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CheckCapacity(ctx); !errors.Is(err, journal.ErrBacklogFull) {
+	if err := store.CheckCapacity(ctx); !errors.Is(err, ErrBacklogFull) {
 		t.Fatalf("admission should be full: %v", err)
 	}
 	completion := admission
@@ -39,7 +39,7 @@ func TestAdmittedCompletionSurvivesFullIncidentQueue(t *testing.T) {
 	if err := store.Record(ctx, completion); err != nil {
 		t.Fatal(err)
 	}
-	if claims, err := store.Claim(ctx, "worker", now, time.Minute, 10); err != nil || len(claims) != 1 || claims[0].Event.Attempt.ID != "incident" {
+	if claims, err := store.claim(ctx, "worker", now, time.Minute, 10); err != nil || len(claims) != 1 || claims[0].Event.Attempt.ID != "incident" {
 		t.Fatalf("archival facts required consumption: %+v %v", claims, err)
 	}
 }
@@ -52,8 +52,8 @@ func TestCompletionRecoveryDistinguishesLiveOwnerAndLateResult(t *testing.T) {
 	if err := live.Record(ctx, admission); err != nil {
 		t.Fatal(err)
 	}
-	other := journal.New(r.DB())
-	later := now.Add(journal.CompletionLease + time.Second)
+	other := New(r)
+	later := now.Add(CompletionLease + time.Second)
 	if err := live.RenewCompletions(ctx, later); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestCompletionRecoveryDistinguishesLiveOwnerAndLateResult(t *testing.T) {
 		t.Fatalf("live request reclaimed: %+v %v", stats, err)
 	}
 	// No heartbeat from the original owner: another instance cannot renew it.
-	later = later.Add(journal.CompletionLease + time.Second)
+	later = later.Add(CompletionLease + time.Second)
 	if err := other.RenewCompletions(ctx, later); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestCompletionRecoveryDistinguishesLiveOwnerAndLateResult(t *testing.T) {
 		t.Fatalf("late real fact lost: %v", err)
 	}
 	var facts int64
-	if err := r.DB().Model(&journal.EventRow{}).Count(&facts).Error; err != nil || facts != 3 {
+	if err := r.Model(&EventRow{}).Count(&facts).Error; err != nil || facts != 3 {
 		t.Fatalf("facts=%d err=%v", facts, err)
 	}
 }
@@ -98,17 +98,17 @@ func TestFailedCompletionStopsHeartbeatAndRemainsRecoverable(t *testing.T) {
 	if err := store.Record(ctx, e); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.DB().Exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON q_guard_event WHEN NEW.stage = 'completion' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+	if err := r.Exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON q_guard_event WHEN NEW.stage = 'completion' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
 		t.Fatal(err)
 	}
 	e.Stage, e.Outcome = "completion", "completed"
 	if err := store.Record(ctx, e); err == nil {
 		t.Fatal("injected failure was ignored")
 	}
-	if err := r.DB().Exec("DROP TRIGGER fail_terminal").Error; err != nil {
+	if err := r.Exec("DROP TRIGGER fail_terminal").Error; err != nil {
 		t.Fatal(err)
 	}
-	later := now.Add(journal.CompletionLease + time.Second)
+	later := now.Add(CompletionLease + time.Second)
 	if err := store.RenewCompletions(ctx, later); err != nil {
 		t.Fatal(err)
 	}
@@ -129,14 +129,14 @@ func TestTransientCompletionFailureRetriesExactFact(t *testing.T) {
 	if err := store.Record(ctx, e); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.DB().Exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON q_guard_event WHEN NEW.stage = 'completion' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+	if err := r.Exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON q_guard_event WHEN NEW.stage = 'completion' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
 		t.Fatal(err)
 	}
 	e.Stage, e.Outcome = "completion", "completed"
 	if err := store.Record(ctx, e); err == nil {
 		t.Fatal("failure ignored")
 	}
-	if err := r.DB().Exec("DROP TRIGGER fail_terminal").Error; err != nil {
+	if err := r.Exec("DROP TRIGGER fail_terminal").Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RetryCompletions(ctx, now.Add(time.Second)); err != nil {
@@ -157,7 +157,7 @@ func TestRetentionDrainsMultipleBatchesPreservingPendingAndActive(t *testing.T) 
 	ctx, now := context.Background(), time.Now().UTC()
 	old := now.Add(-8 * 24 * time.Hour)
 	for start := 0; start < 2005; start += 100 {
-		var batch []journal.Event
+		var batch []qualitymodel.Event
 		for n := start; n < min(start+100, 2005); n++ {
 			e := event(fmt.Sprintf("archive-%04d", n), old)
 			e.Stage, e.Outcome, e.HoldUntil = "completion", "completed", time.Time{}
@@ -178,8 +178,8 @@ func TestRetentionDrainsMultipleBatchesPreservingPendingAndActive(t *testing.T) 
 	if err := store.Sweep(ctx, now); err != nil {
 		t.Fatal(err)
 	}
-	var rows []journal.EventRow
-	if err := r.DB().Order("id").Find(&rows).Error; err != nil {
+	var rows []EventRow
+	if err := r.Order("id").Find(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 2 || rows[0].AttemptID != "active" || rows[1].AttemptID != "pending" {

@@ -5,7 +5,7 @@ import (
 	"math"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type observedVoiceWebSocket struct {

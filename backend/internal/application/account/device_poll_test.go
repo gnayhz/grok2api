@@ -3,12 +3,14 @@ package account
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"testing"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // round 70 回归：Device OAuth 轮询状态机的全部转换此前只有活体验证，
@@ -36,7 +38,7 @@ func TestPollDeviceLoginStateMachine(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewDeviceSessionStore()
 	adapter := &deviceStateAdapter{}
-	service := NewService(nil, nil, store, nil, provider.NewRegistry(adapter), nil, nil)
+	service := NewService(nil, nil, store, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 
 	// 未知会话 -> ErrDeviceDenied（等价于过期，不泄露存在性）。
 	if _, err := service.PollDeviceLogin(ctx, "no-such-session"); !errors.Is(err, ErrDeviceDenied) {

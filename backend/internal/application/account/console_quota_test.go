@@ -24,26 +24,6 @@ func TestPreserveActiveLocalQuotaWindowsUntilReset(t *testing.T) {
 	}
 }
 
-func TestQuotaRecoveryDueAtSchedulesUnknownRemoteWindowProbe(t *testing.T) {
-	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.UTC)
-	window := accountdomain.QuotaWindow{Mode: "console", Remaining: 0, Source: accountdomain.QuotaSourceUpstream}
-	dueAt := quotaRecoveryDueAt(window, now, true)
-	if dueAt == nil || !dueAt.Equal(now.Add(consolePredictedQuotaProbeDelay)) {
-		t.Fatalf("Console predicted dueAt = %v", dueAt)
-	}
-	if value := quotaRecoveryDueAt(window, now, false); value != nil {
-		t.Fatalf("available window dueAt = %v", value)
-	}
-	window = accountdomain.QuotaWindow{Mode: "fast", Remaining: 0, Source: accountdomain.QuotaSourceDefault}
-	if value := quotaRecoveryDueAt(window, now, true); value != nil {
-		t.Fatalf("unknown local window dueAt = %v", value)
-	}
-	window.Source = accountdomain.QuotaSourceUpstream
-	if value := quotaRecoveryDueAt(window, now, true); value == nil || !value.Equal(now.Add(unknownRemoteQuotaProbeDelay)) {
-		t.Fatalf("generic remote dueAt = %v", value)
-	}
-}
-
 func TestCompleteConsoleUsageSnapshotRejectsLegacyAndPartialWindows(t *testing.T) {
 	now := time.Now().UTC()
 	legacy := []accountdomain.QuotaWindow{{Mode: "console", Source: accountdomain.QuotaSourceDefault, SyncedAt: &now}}
@@ -64,13 +44,18 @@ func TestCompleteConsoleUsageSnapshotRejectsLegacyAndPartialWindows(t *testing.T
 }
 
 func TestConsoleQuotaWindowsControlTheirMatchingRoutes(t *testing.T) {
+	now := time.Now().UTC()
 	for _, mode := range []string{"console", "console_image", "console_video"} {
 		if !quotaWindowControlsRouting(accountdomain.ProviderConsole, mode) {
 			t.Fatalf("%s must control its matching Console route", mode)
 		}
 		window := accountdomain.QuotaWindow{Mode: mode, Remaining: 0, Source: accountdomain.QuotaSourceUpstream}
-		if dueAt := quotaRecoveryDueAt(window, time.Now().UTC(), true); dueAt == nil {
+		if !accountdomain.QuotaWindowDeservesRecovery(accountdomain.ProviderConsole, window, now) {
 			t.Fatalf("%s must schedule a predicted recovery probe", mode)
+		}
+		deadline, ok := accountdomain.QuotaWindowProbeAt(window, now)
+		if !ok || !deadline.Equal(now.Add(accountdomain.ConsolePredictedQuotaProbeDelay)) {
+			t.Fatalf("%s deadline = %v, ok = %v", mode, deadline, ok)
 		}
 	}
 	if quotaWindowControlsRouting(accountdomain.ProviderConsole, "unknown") {

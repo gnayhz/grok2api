@@ -57,7 +57,7 @@ func TestLocalRelayLatencyDistribution(t *testing.T) {
 				ctx, _ := gin.CreateTestContext(w)
 				ctx.Request = r
 				ctx.Header("Content-Type", "text/event-stream")
-				if _, err := copyStream(ctx.Writer, source, tc.protocol, nil); err != nil {
+				if _, err := copyStreamWithCompletion(ctx.Writer, source, tc.protocol, nil, "", nil); err != nil {
 					t.Error(err)
 				}
 			}))
@@ -114,7 +114,7 @@ func BenchmarkResponseRelay64Frames(b *testing.B) {
 				}
 				recorder := httptest.NewRecorder()
 				ctx, _ := gin.CreateTestContext(recorder)
-				_, err := copyStream(ctx.Writer, source, tc.protocol, nil)
+				_, err := copyStreamWithCompletion(ctx.Writer, source, tc.protocol, nil, "", nil)
 				source.Close()
 				if err != nil {
 					b.Fatal(err)

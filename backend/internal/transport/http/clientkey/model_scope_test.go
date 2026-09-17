@@ -39,7 +39,7 @@ func TestModelScopeHTTPCommandsPreserveExplicitRestrictions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := clientkeyapp.NewService("test", keys, nil, nil, 0, 0, cipher)
+	service := clientkeyapp.NewService("test", keys, nil, nil, 0, 0, cipher, security.RandomTokenSource{})
 	defer service.Close(ctx)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

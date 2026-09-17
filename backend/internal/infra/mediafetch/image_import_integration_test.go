@@ -121,11 +121,11 @@ func TestImageImportHTTPUsesApplicationPolicyAndActualStorage(t *testing.T) {
 				if scenario == "capacity" {
 					cfg.MaxTotalBytes = int64(len(picture) - 1)
 				}
-				service := mediaapp.NewService(assetPort, relational.NewMediaJobRepository(db), objects, nil, cfg)
+				service := mediaapp.NewServiceWithTickets(assetPort, relational.NewMediaJobRepository(db), nil, objects, nil, cfg)
 				importer := mediaapp.NewImageInputImporter(service, network.source)
 				handler := mediahttp.NewHandler(service, importer)
 				router := gin.New()
-				handler.RegisterPublic(router)
+				handler.RegisterPublic(router.Group("/v1/media"))
 				handler.RegisterAdmin(router.Group("/api/admin/v1"))
 				target := "https://example.com/image"
 				if scenario == "invalid_url" {
@@ -225,7 +225,7 @@ func TestImageImportHTTPCancellationReleasesNetworkAndUploadSlots(t *testing.T) 
 		t.Fatal(err)
 	}
 	assets := relational.NewMediaAssetRepository(db)
-	service := mediaapp.NewService(assets, nil, objects, nil, mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80})
+	service := mediaapp.NewServiceWithTickets(assets, nil, nil, objects, nil, mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80})
 	router := gin.New()
 	mediahttp.NewHandler(service, mediaapp.NewImageInputImporter(service, network.source)).RegisterAdmin(router.Group("/api/admin/v1"))
 	request := func(ctx context.Context) *httptest.ResponseRecorder {

@@ -7,15 +7,15 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { useNow } from "@/features/guard/quality-hooks";
-import { nodeCondition } from "@/features/operations/operations-data";
+import { Badge } from "@/shared/ui/badge";
+import { useNow } from "@/shared/lib/use-now";
+import { nodeCondition } from "@/entities/egress/node-condition";
 import {
 	type EgressNodeDTO,
 	type EgressPoolDTO,
 	type EgressRoutingScope,
 	type EgressTrafficClass,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 import { cn } from "@/shared/lib/cn";
 
 import { resolveEffectiveTarget } from "./effective-target";
@@ -26,7 +26,7 @@ import {
 	trafficClassLabelKeys,
 	useEgressOperations,
 } from "./operations-shared";
-import { maskIP } from "./proxy-format";
+import { maskIP } from "@/shared/lib/mask-ip";
 
 export function ProxyRouteSimulator({
 	nodes,

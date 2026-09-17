@@ -15,7 +15,6 @@ type PathStatus string
 const (
 	PathUnknown    PathStatus = "unknown"
 	PathRegistered PathStatus = "registered"
-	PathVerified   PathStatus = "verified"
 	PathDirect     PathStatus = "direct"
 )
 

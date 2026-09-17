@@ -68,7 +68,7 @@ func TestPasswordChangeFencesEarlierPasswordVerification(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = b.Close() })
 				ra, rb := relational.NewAdminRepository(a), relational.NewAdminRepository(b)
-				hash, err := security.HashPassword("original-password")
+				hash, err := security.NewBCryptPasswordHasher().HashPassword("original-password")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -79,8 +79,8 @@ func TestPasswordChangeFencesEarlierPasswordVerification(t *testing.T) {
 				}
 				paused := &pausedPasswordRead{AdminRepository: ra, byName: action == "login", read: make(chan struct{}), release: make(chan struct{})}
 				tokens := security.NewTokenService("12345678901234567890123456789012")
-				first := NewService(paused, relational.NewAdminSessionRepository(a), tokens, time.Minute, time.Hour)
-				second := NewService(rb, relational.NewAdminSessionRepository(b), tokens, time.Minute, time.Hour)
+				first := NewService(paused, relational.NewAdminSessionRepository(a), tokens, security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
+				second := NewService(rb, relational.NewAdminSessionRepository(b), tokens, security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 				var release sync.Once
 				unblock := func() { release.Do(func() { close(paused.release) }) }
 				defer unblock()
@@ -137,7 +137,7 @@ func TestLogoutRevokesConcurrentlyRotatedFamily(t *testing.T) {
 	if err := db.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(relational.NewAdminRepository(db), relational.NewAdminSessionRepository(db), security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+	svc := NewService(relational.NewAdminRepository(db), relational.NewAdminSessionRepository(db), security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	if err := svc.Bootstrap(ctx, "admin", "original-password"); err != nil {
 		t.Fatal(err)
 	}

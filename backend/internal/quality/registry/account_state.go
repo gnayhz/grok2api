@@ -16,14 +16,14 @@ func (r *Registry) AccountEligible(accountID uint64) bool {
 }
 
 // AccountState returns the quality state; an absent row means active.
-func (r *Registry) AccountState(accountID uint64) AccountEntry {
+func (r *Registry) AccountState(accountID uint64) model.AccountEntry {
 	return r.accountState(accountID)
 }
 
 // CurrentAccountStates returns the sparse non-active quality projection.
-func (r *Registry) CurrentAccountStates() map[uint64]AccountEntry {
+func (r *Registry) CurrentAccountStates() map[uint64]model.AccountEntry {
 	snap := r.snapshot.load()
-	states := make(map[uint64]AccountEntry, len(snap.accounts))
+	states := make(map[uint64]model.AccountEntry, len(snap.accounts))
 	for accountID, entry := range snap.accounts {
 		if accountID != 0 && entry.State != model.AccountActive {
 			states[accountID] = entry
@@ -32,24 +32,17 @@ func (r *Registry) CurrentAccountStates() map[uint64]AccountEntry {
 	return states
 }
 
-func (r *Registry) accountState(accountID uint64) AccountEntry {
+func (r *Registry) accountState(accountID uint64) model.AccountEntry {
 	snap := r.snapshot.load()
 	if entry, ok := snap.accounts[accountID]; ok {
 		return entry
 	}
-	return AccountEntry{State: model.AccountActive}
-}
-
-// AccountTransitionRequest describes one direct-loop state transition.
-type AccountTransitionRequest struct {
-	AccountID uint64
-	To        model.AccountState
-	CaseID    uint64
+	return model.AccountEntry{State: model.AccountActive}
 }
 
 // TransitionAccount persists a direct-loop account state before publishing
 // the immutable cache snapshot. Every non-active state is case-backed.
-func (r *Registry) TransitionAccount(ctx context.Context, req AccountTransitionRequest) error {
+func (r *Registry) TransitionAccount(ctx context.Context, req model.AccountTransitionRequest) error {
 	if !r.inTransition {
 		return r.withTransition(ctx, func(w *Registry) error { return w.TransitionAccount(ctx, req) })
 	}
@@ -60,7 +53,7 @@ func (r *Registry) TransitionAccount(ctx context.Context, req AccountTransitionR
 	defer func() { <-r.transitionMu }()
 
 	snap := r.snapshot.load()
-	current := AccountEntry{State: model.AccountActive}
+	current := model.AccountEntry{State: model.AccountActive}
 	hasRow := false
 	if entry, ok := snap.accounts[req.AccountID]; ok {
 		current, hasRow = entry, true
@@ -93,7 +86,7 @@ func (r *Registry) TransitionAccount(ctx context.Context, req AccountTransitionR
 		return err
 	}
 	next := snap.clone()
-	next.accounts[req.AccountID] = AccountEntry{
+	next.accounts[req.AccountID] = model.AccountEntry{
 		State: req.To, StateSince: now, CurrentCaseID: req.CaseID,
 	}
 	r.snapshot.store(next)
@@ -104,7 +97,7 @@ func (r *Registry) TransitionAccount(ctx context.Context, req AccountTransitionR
 // compatibility name for callers that explicitly perform an acquittal; it
 // does not represent a second state machine.
 func (r *Registry) ReleaseAccountErase(ctx context.Context, accountID uint64) error {
-	return r.TransitionAccount(ctx, AccountTransitionRequest{AccountID: accountID, To: model.AccountActive})
+	return r.TransitionAccount(ctx, model.AccountTransitionRequest{AccountID: accountID, To: model.AccountActive})
 }
 
 // ReleaseAccountIfUnheld removes a temporary hold after its case party has

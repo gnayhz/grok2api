@@ -8,12 +8,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// IncidentKey names one frozen account/exit baseline, including direct traffic.
-type IncidentKey struct {
-	AccountID uint64
-	Exit      model.EpochKey
-}
-
 // qIncidentClosureModel is a point-lookup projection of the latest closure.
 // It is not loaded into state snapshots, and survives removal of old case
 // details so delayed observations cannot resurrect an already settled event.
@@ -57,10 +51,10 @@ func (r *Registry) migrateIncidentClosures(ctx context.Context) error {
 
 // LastClosedAtForIncidents fetches only requested keys. Batches bound SQL size
 // and allocations independently of the retained case/epoch history.
-func (r *Registry) LastClosedAtForIncidents(ctx context.Context, incidents []IncidentKey) (map[IncidentKey]time.Time, error) {
-	out := make(map[IncidentKey]time.Time)
-	seen := make(map[IncidentKey]bool, len(incidents))
-	keys := make([]IncidentKey, 0, len(incidents))
+func (r *Registry) LastClosedAtForIncidents(ctx context.Context, incidents []model.IncidentKey) (map[model.IncidentKey]time.Time, error) {
+	out := make(map[model.IncidentKey]time.Time)
+	seen := make(map[model.IncidentKey]bool, len(incidents))
+	keys := make([]model.IncidentKey, 0, len(incidents))
 	for _, key := range incidents {
 		if key.AccountID != 0 && !seen[key] {
 			seen[key] = true
@@ -82,7 +76,7 @@ func (r *Registry) LastClosedAtForIncidents(ctx context.Context, incidents []Inc
 			return nil, err
 		}
 		for _, row := range rows {
-			out[IncidentKey{AccountID: row.AccountID, Exit: model.EpochKey{NodeID: row.NodeID, Epoch: row.Epoch}}] = row.ClosedAt
+			out[model.IncidentKey{AccountID: row.AccountID, Exit: model.EpochKey{NodeID: row.NodeID, Epoch: row.Epoch}}] = row.ClosedAt
 		}
 	}
 	return out, nil

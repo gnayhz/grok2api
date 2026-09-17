@@ -34,7 +34,7 @@ func TestAdminUploadCreatesHiddenTransientInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := mediaapp.NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, mediaapp.Config{
+	service := mediaapp.NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, mediaapp.Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: time.Minute,
 	})
@@ -54,7 +54,7 @@ func TestAdminUploadCreatesHiddenTransientInput(t *testing.T) {
 
 	handler := NewHandler(service, nil)
 	router := gin.New()
-	handler.RegisterPublic(router)
+	handler.RegisterPublic(router.Group("/v1/media"))
 	handler.RegisterAdmin(router.Group("/api/admin/v1"))
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/media/inputs/upload", &requestBody)
 	request.Header.Set("Content-Type", writer.FormDataContentType())

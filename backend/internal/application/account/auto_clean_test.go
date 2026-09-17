@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
+
+// runAutoCleanNow 以当前快照(配置+revision)执行一轮 reauth 清理，等价于旧的
+// runAutoCleanReauth 测试入口；生产调度走 RunAccountAutoClean 的 timer 循环。
+func runAutoCleanNow(ctx context.Context, service *Service) error {
+	cfg, revision := service.autoCleanSnapshot()
+	return service.runAutoCleanReauthRevision(ctx, cfg, revision)
+}
 
 func TestAutoCleanReauthRespectsMinAgeAndIncludeDisabled(t *testing.T) {
 	ctx := context.Background()
@@ -56,7 +64,7 @@ func TestAutoCleanReauthRespectsMinAgeAndIncludeDisabled(t *testing.T) {
 	service.UpdateAutoCleanConfig(AutoCleanConfig{
 		Enabled: false, Interval: 10 * time.Minute, MinAge: time.Hour,
 	})
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertPresent(t, repo, aged.ID)
@@ -67,7 +75,7 @@ func TestAutoCleanReauthRespectsMinAgeAndIncludeDisabled(t *testing.T) {
 	service.UpdateAutoCleanConfig(AutoCleanConfig{
 		Enabled: true, Interval: 10 * time.Minute, MinAge: time.Hour, IncludeDisabled: false,
 	})
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, repo, aged.ID)
@@ -80,7 +88,7 @@ func TestAutoCleanReauthRespectsMinAgeAndIncludeDisabled(t *testing.T) {
 	service.UpdateAutoCleanConfig(AutoCleanConfig{
 		Enabled: true, Interval: 10 * time.Minute, MinAge: time.Hour, IncludeDisabled: true,
 	})
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, repo, disabledAged.ID)
@@ -90,7 +98,7 @@ func TestAutoCleanReauthRespectsMinAgeAndIncludeDisabled(t *testing.T) {
 
 	// Advance clock past minAge for the remaining fresh reauth.
 	service.now = func() time.Time { return now.Add(2 * time.Hour) }
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, repo, fresh.ID)
@@ -175,7 +183,7 @@ func TestAutoCleanReauthMultiBatch(t *testing.T) {
 	service.UpdateAutoCleanConfig(AutoCleanConfig{
 		Enabled: true, Interval: 10 * time.Minute, MinAge: time.Hour,
 	})
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range ids {
@@ -262,7 +270,7 @@ func newAutoCleanTestService(t *testing.T, now time.Time) (*Service, *relational
 		t.Fatal(err)
 	}
 	repo := relational.NewAccountRepository(database)
-	service := NewService(repo, nil, nil, memory.NewStickyStore(), nil, nil, nil)
+	service := NewService(repo, nil, nil, memory.NewStickyStore(), nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.now = func() time.Time { return now }
 	return service, repo
 }
@@ -313,14 +321,14 @@ func TestUpdateAutoCleanConfigClamps(t *testing.T) {
 	service.UpdateAutoCleanConfig(AutoCleanConfig{
 		Enabled: true, Interval: 30 * time.Second, MinAge: 10 * time.Second, IncludeDisabled: true,
 	})
-	cfg := service.autoCleanConfig()
+	cfg, _ := service.autoCleanSnapshot()
 	if cfg.Interval != time.Minute || cfg.MinAge != time.Minute || !cfg.IncludeDisabled || !cfg.Enabled {
 		t.Fatalf("low clamp = %#v", cfg)
 	}
 	service.UpdateAutoCleanConfig(AutoCleanConfig{
 		Enabled: false, Interval: 2 * time.Hour, MinAge: 40 * 24 * time.Hour,
 	})
-	cfg = service.autoCleanConfig()
+	cfg, _ = service.autoCleanSnapshot()
 	if cfg.Interval != time.Hour || cfg.MinAge != 30*24*time.Hour || cfg.Enabled {
 		t.Fatalf("high clamp = %#v", cfg)
 	}
@@ -348,12 +356,12 @@ func TestAutoCleanSkipsActiveInferenceLease(t *testing.T) {
 		t.Fatalf("acquire lease: acquired=%v err=%v", acquired, err)
 	}
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: time.Minute, MinAge: time.Hour})
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertPresent(t, repo, value.ID)
 	release()
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, repo, value.ID)
@@ -363,14 +371,14 @@ func TestAutoCleanConfigRevisionRejectsOldTimerAndUnchangedUpdateDoesNotWake(t *
 	service, _ := newAutoCleanTestService(t, time.Date(2026, 7, 20, 23, 0, 0, 0, time.UTC))
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: 5 * time.Minute, MinAge: time.Hour})
 	select {
-	case <-service.autoCleanWake:
+	case <-service.maintenance.wakeChan():
 	default:
 		t.Fatal("initial config update did not wake scheduler")
 	}
 	cfg, revision := service.autoCleanSnapshot()
 	service.UpdateAutoCleanConfig(cfg)
 	select {
-	case <-service.autoCleanWake:
+	case <-service.maintenance.wakeChan():
 		t.Fatal("unchanged config woke scheduler")
 	default:
 	}
@@ -397,7 +405,7 @@ func TestAutoCleanSkipsWhenDistributedLockIsHeld(t *testing.T) {
 		ReauthMarkedAt: ptrTime(now.Add(-2 * time.Hour)),
 	})
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: time.Minute, MinAge: time.Hour})
-	if err := service.runAutoCleanReauth(ctx, service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(ctx, service); err != nil {
 		t.Fatal(err)
 	}
 	assertPresent(t, repo, value.ID)
@@ -427,9 +435,9 @@ func (r *endlessAutoCleanRepository) DeleteAutoCleanReauthCandidates(_ context.C
 
 func TestAutoCleanLimitsWorkPerTick(t *testing.T) {
 	repo := &endlessAutoCleanRepository{}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: time.Minute, MinAge: time.Hour})
-	if err := service.runAutoCleanReauth(context.Background(), service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(context.Background(), service); err != nil {
 		t.Fatal(err)
 	}
 	if repo.listCalls != autoCleanReauthMaxDeletes || repo.deleteCalls != autoCleanReauthMaxDeletes {
@@ -467,14 +475,14 @@ func (l *activeKeyConcurrency) CurrentMany(_ context.Context, keys []string) (ma
 
 func TestAutoCleanActiveOnlyPagesDoNotConsumeDeleteBudget(t *testing.T) {
 	repo := &endlessAutoCleanRepository{}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	active := make(map[string]struct{}, 2*autoCleanReauthBatchSize)
 	for id := uint64(1); id <= 2*autoCleanReauthBatchSize; id++ {
 		active[repository.AccountConcurrencyKey(id)] = struct{}{}
 	}
 	service.SetConcurrencyLimiter(&activeKeyConcurrency{active: active})
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: time.Minute, MinAge: time.Hour})
-	if err := service.runAutoCleanReauth(context.Background(), service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(context.Background(), service); err != nil {
 		t.Fatal(err)
 	}
 	if repo.listCalls != autoCleanReauthMaxDeletes+2 || repo.deleteCalls != autoCleanReauthMaxDeletes {
@@ -487,10 +495,10 @@ func TestAutoCleanActiveOnlyPagesDoNotConsumeDeleteBudget(t *testing.T) {
 
 func TestAutoCleanActiveOnlySourceIsBoundedByScanBudget(t *testing.T) {
 	repo := &endlessAutoCleanRepository{}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.SetConcurrencyLimiter(&activeKeyConcurrency{all: true})
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: time.Minute, MinAge: time.Hour})
-	if err := service.runAutoCleanReauth(context.Background(), service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(context.Background(), service); err != nil {
 		t.Fatal(err)
 	}
 	if repo.listCalls != autoCleanReauthMaxScans || repo.deleteCalls != 0 {
@@ -517,10 +525,10 @@ func (c *configChangingConcurrency) Current(context.Context, string) (int, error
 
 func TestAutoCleanPolicyChangeAbortsBeforeDelete(t *testing.T) {
 	repo := &endlessAutoCleanRepository{}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	service.SetConcurrencyLimiter(&configChangingConcurrency{service: service})
 	service.UpdateAutoCleanConfig(AutoCleanConfig{Enabled: true, Interval: 5 * time.Minute, MinAge: time.Hour})
-	if err := service.runAutoCleanReauth(context.Background(), service.autoCleanConfig()); err != nil {
+	if err := runAutoCleanNow(context.Background(), service); err != nil {
 		t.Fatal(err)
 	}
 	if repo.deleteCalls != 0 {

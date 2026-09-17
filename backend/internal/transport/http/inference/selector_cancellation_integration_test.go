@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,7 +28,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
@@ -86,7 +89,7 @@ func waitHTTPRoutingFollower(t *testing.T, goroutine string) {
 			continue
 		}
 		for _, stack := range strings.Split(string(buffer[:n]), "\n\n") {
-			if strings.HasPrefix(stack, goroutine+" [select]:\n") && strings.Contains(stack, "/gateway.(*routingLoadGroup).Do(") {
+			if strings.HasPrefix(stack, goroutine+" [select]:\n") && strings.Contains(stack, "/selector.(*routingLoadGroup).Do(") {
 				return
 			}
 		}
@@ -166,10 +169,10 @@ func runHTTPSelectorReadDisconnect(t *testing.T, stage, backend string) {
 					var generated atomic.Int32
 					upstream := completionHTTPUpstream(t, model, &generated)
 					defer upstream.Close()
-					registry := provider.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher))
+					registry := providerimpl.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: upstream.URL + "/v1"}, cipher))
 					concurrency, sticky := httpSelectorCancellationLimiter(t, backend), memory.NewStickyStore()
-					accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-					clients := clientkeyapp.NewService("selector-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 120, 4, cipher)
+					accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+					clients := clientkeyapp.NewService("selector-owner", relational.NewClientKeyRepository(db), memory.NewRateLimiter(), concurrency, 120, 4, cipher, security.RandomTokenSource{})
 					defer closeClientKeyService(t, clients)
 					created, err := clients.Create(ctx, clientkeyapp.CreateInput{Name: "routing", Enabled: true, RPMLimit: 120, MaxConcurrent: 4})
 					if err != nil {
@@ -185,11 +188,11 @@ func runHTTPSelectorReadDisconnect(t *testing.T, stage, backend string) {
 					}
 					var release sync.Once
 					unblock := func() { release.Do(func() { close(gate.resume) }) }
-					selector := gateway.NewSelector(selectorAccounts, selectorConcurrency, sticky, registry, time.Hour, time.Second, time.Minute)
-					service := gateway.NewService(models, audits, accountService, clients, registry, selector, relational.NewResponseRepository(db), 2)
+					selector := selector.NewSelector(selectorAccounts, selectorConcurrency, sticky, registry, time.Hour, time.Second, time.Minute)
+					service := gateway.NewService(models, audits, accountService, clients, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
 					gin.SetMode(gin.TestMode)
 					router := gin.New()
-					router.Use(middleware.RequestID(), middleware.ClientAuth(clients))
+					router.Use(middleware.RequestID(nil), middleware.ClientAuth(clients))
 					NewHandler(service, nil, 1<<20).Register(router.Group("/v1"))
 					started := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
 					finished := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}

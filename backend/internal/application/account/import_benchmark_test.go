@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"io"
 	"log/slog"
 	"net/url"
@@ -14,8 +16,8 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type importCostAdapter struct{ seeds []provider.CredentialSeed }
@@ -102,9 +104,9 @@ func BenchmarkAccountImportDeleteCost(b *testing.B) {
 						emails[i] = fmt.Sprintf("cost-%d@example.test", i)
 						seeds[i] = provider.CredentialSeed{Provider: accountdomain.ProviderBuild, AuthType: accountdomain.AuthTypeOAuth, Name: fmt.Sprint(i), SourceKey: fmt.Sprint(i), Email: emails[i], AccessToken: "synthetic", RefreshToken: "synthetic"}
 					}
-					s := NewService(repo, nil, nil, nil, provider.NewRegistry(importCostAdapter{seeds: seeds}), cipher, nil)
+					s := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(importCostAdapter{seeds: seeds}), cipher, security.RandomTokenSource{}, nil, nil, nil)
 					s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-					if out, err := s.ImportCredentials(ctx, []byte("synthetic")); err != nil || out.Created != count {
+					if out, err := s.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("synthetic")}, nil, nil); err != nil || out.Created != count {
 						b.Fatalf("seed: %+v, %v", out, err)
 					}
 					values := make([]accountdomain.Credential, count)
@@ -116,18 +118,31 @@ func BenchmarkAccountImportDeleteCost(b *testing.B) {
 					}
 					b.ReportAllocs()
 					b.ResetTimer()
+					iteration := 0
 					for b.Loop() {
 						if operation == "import" {
-							if out, err := s.ImportCredentials(ctx, []byte("synthetic")); err != nil || out.Updated != count {
+							if out, err := s.ImportCredentialDocumentsWithProgress(ctx, [][]byte{[]byte("synthetic")}, nil, nil); err != nil || out.Updated != count {
 								b.Fatalf("import: %+v, %v", out, err)
 							}
 							continue
 						}
 						b.StopTimer()
-						if _, err := repo.ClearTombstones(ctx, emails); err != nil {
-							b.Fatal(err)
+						// 上一轮删除按 email 留下墓碑;每轮使用新 email 段重建
+						// 账号,避免与墓碑冲突(等价于曾经的显式清墓碑准备步)。
+						iteration++
+						iterSeeds := make([]provider.CredentialSeed, count)
+						for i := range seeds {
+							iterSeeds[i] = seeds[i]
+							iterSeeds[i].Email = fmt.Sprintf("cost-%d-iter%d@example.test", i, iteration)
 						}
-						out, err := repo.UpsertManyByIdentity(ctx, values)
+						iterValues := make([]accountdomain.Credential, count)
+						for i := range iterSeeds {
+							iterValues[i], err = s.credentialFromSeed(iterSeeds[i])
+							if err != nil {
+								b.Fatal(err)
+							}
+						}
+						out, err := repo.ImportAccounts(ctx, testsupport.AccountImports(iterValues))
 						if err != nil {
 							b.Fatal(err)
 						}

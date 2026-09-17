@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"errors"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"io"
 	"net/http"
 	"strings"
@@ -15,8 +17,8 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const completionJSON = `{"id":"resp_completion","model":"grok-4.6","status":"completed","output":[{"type":"reasoning","summary":[{"text":"plan"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}],"usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25,"output_tokens_details":{"reasoning_tokens":2}}}`
@@ -30,11 +32,11 @@ func (r completionOwnershipStore) Record(ctx context.Context, value inferencedom
 	return r.save(ctx, value)
 }
 
-func completionService(t *testing.T, customize func(*provider.Response)) (*Service, *relational.AuditRepository) {
+func completionService(t *testing.T, customize func(*provider.Response)) (*Service, *relational.AuditRepository, repository.ConcurrencyLimiter) {
 	t.Helper()
 	base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
-	s, _, records := newGuardLoopServiceWithDB(t, base, "completion")
-	s.providers = provider.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
+	s, _, records, limiter := newGuardLoopServiceWithDB(t, base, "completion")
+	s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
 		physicalCtx := attemptmeta.Begin(ctx, attemptmeta.Path{})
 		if err := infraegress.BeginDirectPhysicalCall(physicalCtx); err != nil {
 			return nil, err
@@ -47,7 +49,7 @@ func completionService(t *testing.T, customize func(*provider.Response)) (*Servi
 		}
 		return response, nil
 	}})
-	return s, records
+	return s, records, limiter
 }
 
 func readCompletion(t *testing.T, result *Result) {
@@ -70,7 +72,7 @@ func TestCompletionSeparatesRequiredCommitFailures(t *testing.T) {
 	for _, stage := range []string{"none", "history", "state", "ownership", "ownership_without_history"} {
 		t.Run(stage, func(t *testing.T) {
 			var historyWrites, stateWrites, ownershipWrites atomic.Int32
-			s, records := completionService(t, func(response *provider.Response) {
+			s, records, _ := completionService(t, func(response *provider.Response) {
 				if stage != "ownership_without_history" {
 					response.CommitOutput = func() error {
 						historyWrites.Add(1)
@@ -138,7 +140,7 @@ func TestCompletionSeparatesRequiredCommitFailures(t *testing.T) {
 }
 
 func TestCancellationCannotFinalizeClaimedDeliveryWithEmptyUsage(t *testing.T) {
-	s, records := completionService(t, nil)
+	s, records, limiter := completionService(t, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result, err := s.CreateChatCompletion(ctx, guardLoopInput("cancel-observed", false))
@@ -154,7 +156,7 @@ func TestCancellationCannotFinalizeClaimedDeliveryWithEmptyUsage(t *testing.T) {
 	// transport finalization remains outstanding. No sleep guesses the race.
 	deadline := time.Now().Add(time.Second)
 	for {
-		count, err := s.selector.concurrency.Current(context.Background(), accountConcurrencyKey(1))
+		count, err := limiter.Current(context.Background(), repository.AccountConcurrencyKey(1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,7 +182,7 @@ func TestCancellationCannotFinalizeClaimedDeliveryWithEmptyUsage(t *testing.T) {
 
 func TestCancellationAfterCommitKeepsHistoryAndUsage(t *testing.T) {
 	var writes atomic.Int32
-	s, records := completionService(t, func(response *provider.Response) { response.CommitOutput = func() error { writes.Add(1); return nil } })
+	s, records, _ := completionService(t, func(response *provider.Response) { response.CommitOutput = func() error { writes.Add(1); return nil } })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result, err := s.CreateChatCompletion(ctx, guardLoopInput("cancel-after-commit", false))
@@ -218,7 +220,7 @@ func (r *failCompletionReceipts) RecordQualityEvent(_ context.Context, observati
 
 func TestReceiptFailureDoesNotRewriteGenerationOrDelivery(t *testing.T) {
 	var accepted atomic.Int32
-	s, records := completionService(t, func(response *provider.Response) { response.AcceptOutput = func() { accepted.Add(1) } })
+	s, records, _ := completionService(t, func(response *provider.Response) { response.AcceptOutput = func() { accepted.Add(1) } })
 	recorder := new(failCompletionReceipts)
 	s.SetQualityEventRecorder(recorder)
 	result, err := s.CreateChatCompletion(context.Background(), guardLoopInput("receipt-independent", false))
@@ -241,7 +243,7 @@ func TestReceiptFailureDoesNotRewriteGenerationOrDelivery(t *testing.T) {
 
 func TestConcurrentCompletionAndCloseKeepAcknowledgedCommit(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
-	s, records := completionService(t, func(response *provider.Response) {
+	s, records, _ := completionService(t, func(response *provider.Response) {
 		response.CommitOutput = func() error { close(started); <-release; return nil }
 	})
 	result, err := s.CreateChatCompletion(context.Background(), guardLoopInput("commit-close-race", false))
@@ -271,7 +273,7 @@ func TestCompletionRejectsSyntheticOrMissingResourceIdentity(t *testing.T) {
 	for _, native := range []string{"", "different-native"} {
 		t.Run(native, func(t *testing.T) {
 			var saved atomic.Int32
-			s, records := completionService(t, nil)
+			s, records, _ := completionService(t, nil)
 			s.responses = completionOwnershipStore{responseHistory: s.responses, save: func(context.Context, inferencedomain.ResponseOwnership) error { saved.Add(1); return nil }}
 			input := guardLoopInput("native-required", false)
 			input.Body = []byte(`{"model":"grok-4.6","input":"hello"}`)
@@ -295,7 +297,7 @@ func TestCompletionRejectsSyntheticOrMissingResourceIdentity(t *testing.T) {
 }
 
 func TestUnclaimedCancellationFinalizesAndClosesBody(t *testing.T) {
-	s, records := completionService(t, nil)
+	s, records, _ := completionService(t, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	result, err := s.CreateChatCompletion(ctx, guardLoopInput("unclaimed-cancel", false))
 	if err != nil {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/quality/management"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 

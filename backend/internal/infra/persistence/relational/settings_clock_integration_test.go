@@ -12,6 +12,7 @@ import (
 	"time"
 
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -91,7 +92,7 @@ func settingsServiceOn(t *testing.T, db *Database, base config.Config, notify fu
 		t.Fatal(err)
 	}
 	repo := NewRuntimeSettingsRepository(db, cipher)
-	loaded, stamp, revision, err := settingsapp.LoadPersisted(context.Background(), base, repo)
+	loaded, stamp, revision, err := loadSettingsConfig(context.Background(), base, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +102,17 @@ func settingsServiceOn(t *testing.T, db *Database, base config.Config, notify fu
 	}
 	var targets []settingsapp.ApplyTarget
 	if apply != nil {
-		targets = []settingsapp.ApplyTarget{{Name: "test", Apply: func(_ context.Context, next config.Config) error { apply(next); return nil }}}
+		targets = []settingsapp.ApplyTarget{{Name: "test", Apply: func(_ context.Context, next settingsdomain.Config) error {
+			cfg, err := config.ApplyRuntimeSettings(base, next)
+			if err != nil {
+				return err
+			}
+			apply(cfg)
+			return nil
+		}}}
 	}
-	service := settingsapp.NewService(loaded, stamp, revision, repo, publish, targets)
-	service.SetFileConfig(base)
+	service := settingsapp.NewService(config.ToRuntimeSettings(loaded), stamp, revision, repo, publish, targets)
+	service.SetFileConfig(config.ToRuntimeSettings(base))
 	return service
 }
 

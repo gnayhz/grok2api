@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"encoding/base64"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,7 +85,7 @@ func TestStickyAccountTemplatePoolMemberLifecycle(t *testing.T) {
 		{ID: 10, Name: "resin-a", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, cipher, templateA)},
 		{ID: 20, Name: "resin-b", Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy(t, cipher, templateB)},
 	}
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	repo.nodes = repo.member[1]
 

@@ -2,6 +2,7 @@ package account
 
 import (
 	"encoding/json"
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -42,7 +43,7 @@ func TestRunWebAccountScriptsRejectsInvalidRequestsBeforeSSE(t *testing.T) {
 
 func TestRunWebAccountScriptsRejectsOversizedSelectionBeforeSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ids := make([]string, maxWebAccountScriptRequestIDs+1)
+	ids := make([]string, accountapp.MaxWebAccountScriptAccounts+1)
 	for index := range ids {
 		ids[index] = strconv.Itoa(index + 1)
 	}

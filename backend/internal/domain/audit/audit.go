@@ -144,8 +144,7 @@ type Record struct {
 	// QualityFailOpen: 请求经质量守卫判定降级但按 fail-open 策略交付。
 	QualityFailOpen bool
 	// QualityExempt: 守卫未介入该请求的豁免原因 token（disabled/skip_input/
-	// operation/compaction/provider/model_out_of_scope/messages_thinking_off/
-	// model_no_reasoning）。空串=守卫介入。历史事故复盘需容器日志与内存计数器
+	// operation/compaction/provider/model_out_of_scope/model_no_reasoning）。空串=守卫介入。历史事故复盘需容器日志与内存计数器
 	// 交叉才能复原"守卫为何不在场"，该字段让审计行自带答案。
 	QualityExempt string
 	// QualityRule: 守卫介入时最终交付尝试的判决指纹规则（thinking/item_done/

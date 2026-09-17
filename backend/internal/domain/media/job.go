@@ -1,6 +1,10 @@
 package media
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 type Status string
 
@@ -18,8 +22,53 @@ const MaxInputJSONBytes = 32 << 20
 // MaxInputImages is the maximum number of reference images accepted for a video job.
 const MaxInputImages = 8
 
+// MaxReferenceAudios is the maximum number of reference audio tracks accepted
+// for a video job.
+const MaxReferenceAudios = 3
+
 // MaxInputAssetBytes limits each temporary image or video input to 20 MiB.
 const MaxInputAssetBytes = 20 << 20
+
+// ValidateVideoGenerationInput 是视频生成输入组合约束的唯一规则
+// (transport 的协议级 400 快速拒绝与 gateway 的用例校验共用;错误文本
+// 即对外消息)。resolution 为空或任意大小写形式。
+func ValidateVideoGenerationInput(imagePresent bool, referenceImages, referenceAudios int, promptPresent bool, resolution string) error {
+	hasReferenceMode := referenceImages > 0 || referenceAudios > 0
+	if imagePresent && hasReferenceMode {
+		return fmt.Errorf("image 不能与 reference_images/reference_audios 同时使用")
+	}
+	if referenceAudios > MaxReferenceAudios {
+		return fmt.Errorf("reference_audios 最多 %d 个", MaxReferenceAudios)
+	}
+	if referenceImages > MaxInputImages {
+		return fmt.Errorf("reference_images 不能超过 %d 张", MaxInputImages)
+	}
+	if hasReferenceMode {
+		if !promptPresent {
+			return fmt.Errorf("参考图/参考音频视频必须提供 prompt")
+		}
+		if strings.EqualFold(strings.TrimSpace(resolution), "1080p") {
+			return fmt.Errorf("参考图视频 resolution 最高 720p")
+		}
+	}
+	if !promptPresent && !imagePresent && !hasReferenceMode {
+		return fmt.Errorf("文本生视频必须提供 prompt；图片生视频可以省略 prompt")
+	}
+	return nil
+}
+
+// ValidateVideoReferenceAudios 校验参考音频声轨:数量上限与逐条非空。
+func ValidateVideoReferenceAudios(values []string) error {
+	if len(values) > MaxReferenceAudios {
+		return fmt.Errorf("reference_audios 最多 %d 个", MaxReferenceAudios)
+	}
+	for _, raw := range values {
+		if strings.TrimSpace(raw) == "" {
+			return fmt.Errorf("reference_audios.voice_id 不能为空")
+		}
+	}
+	return nil
+}
 
 type VideoOperation string
 

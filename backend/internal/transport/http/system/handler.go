@@ -1,12 +1,13 @@
 package system
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -20,15 +21,18 @@ type versionResponse struct {
 
 type Handler struct {
 	publicAPIBaseURL func() string
-	updates          *updatecheckapp.Service
+	updates          UpdateChecks
 }
 
-func NewHandler(publicAPIBaseURL func() string, updates *updatecheckapp.Service) *Handler {
+// UpdateChecks 是系统端点所需的更新检查能力(HTTP 消费面)。
+type UpdateChecks interface {
+	Snapshot() updatecheckapp.Snapshot
+	Check(ctx context.Context) updatecheckapp.Snapshot
+}
+
+func NewHandler(publicAPIBaseURL func() string, updates UpdateChecks) *Handler {
 	if publicAPIBaseURL == nil {
 		publicAPIBaseURL = func() string { return "" }
-	}
-	if updates == nil {
-		updates = updatecheckapp.NewService("dev", nil)
 	}
 	return &Handler{publicAPIBaseURL: publicAPIBaseURL, updates: updates}
 }

@@ -42,8 +42,8 @@ func settingsHTTPFixture(t *testing.T, targets ...settingsapp.ApplyTarget) (*set
 		t.Fatal(err)
 	}
 	repo := relational.NewRuntimeSettingsRepository(db, cipher)
-	service := settingsapp.NewService(base, time.Time{}, 0, repo, nil, targets)
-	service.SetFileConfig(base)
+	service := settingsapp.NewService(config.ToRuntimeSettings(base), time.Time{}, 0, repo, nil, targets)
+	service.SetFileConfig(config.ToRuntimeSettings(base))
 	router := gin.New()
 	NewHandler(service).Register(router.Group("/"))
 	return service, repo, router

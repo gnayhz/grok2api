@@ -14,6 +14,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/streampipe"
+	portprovider "github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const (
@@ -24,15 +25,9 @@ const (
 	// JSON（通常是 encrypted_content）Unmarshal 进 map/结构体。
 	maxParsedSSEJSONBytes = 64 << 10
 
-	// ThinkingEvidenceComment 是转换器在「客户端未请求 thinking 的
-	// Messages 流式请求」上看到上游可见思考文本时写入的内部 SSE 注释。
-	// 推理模型对每个回答都会思考（语料复核：未指定强度的
-	// 首轮 36/36、续写轮 136/153 均产生思考），未请求 thinking 时转换器
-	// 不转发任何思考增量，质量守卫将失去区分健康与降智（零思考直接
-	// 正文）的唯一证据通道。该注释语义等同 thinking_delta，由 gateway
-	// 扫描器（quality_retry_scan.go）计为思考证据，并由 transport 层
-	// 剥离，不进入客户端流量。
-	ThinkingEvidenceComment = ": grok2api-thinking-evidence"
+	// ThinkingEvidenceComment 与 port/provider 同一字节合同，避免转换器
+	// 与扫描器/剥离层各写一份标记。
+	ThinkingEvidenceComment = portprovider.ThinkingEvidenceComment
 
 	// contentDoomLoopThreshold 连续重复同一可见内容增量时终止流。真正的
 	// 内容循环会消耗配额和客户端上下文，因此远低于推理上限；但仍需容纳
@@ -45,11 +40,6 @@ const (
 	// 有效的深度推理响应。
 	reasoningDoomLoopThreshold = 256
 )
-
-// ConvertResponseStream 将 Responses SSE 转换为 Chat Completions 或 Anthropic Messages SSE。
-func ConvertResponseStream(source io.ReadCloser, operation string) io.ReadCloser {
-	return ConvertResponseStreamWithOptions(source, operation, ResponseOptions{})
-}
 
 // ConvertResponseStreamWithOptions 按下游协议选项生成 Chat 或 Anthropic SSE。
 func ConvertResponseStreamWithOptions(source io.ReadCloser, operation string, options ResponseOptions) io.ReadCloser {
@@ -72,9 +62,6 @@ func ConvertResponseStreamWithOptions(source io.ReadCloser, operation string, op
 // Event data is borrowed only for the duration of Handle.
 type ResponseStreamEncoder struct{ converter *streamConverter }
 
-func NewResponseStreamEncoder(writer io.Writer, operation string, options ResponseOptions) *ResponseStreamEncoder {
-	return NewResponseStreamEncoderWithBudget(writer, operation, options, responsebuffer.NewRequest())
-}
 func NewResponseStreamEncoderWithBudget(writer io.Writer, operation string, options ResponseOptions, budget *responsebuffer.Budget) *ResponseStreamEncoder {
 	return &ResponseStreamEncoder{converter: newStreamConverterWithBudget(writer, operation, options, budget)}
 }
@@ -148,9 +135,6 @@ type reasoningStreamState struct {
 	anonymous bool
 }
 
-func newStreamConverter(writer io.Writer, operation string, options ResponseOptions) *streamConverter {
-	return newStreamConverterWithBudget(writer, operation, options, nil)
-}
 func newStreamConverterWithBudget(writer io.Writer, operation string, options ResponseOptions, budget *responsebuffer.Budget) *streamConverter {
 	return &streamConverter{
 		retention: responsebuffer.NewState(budget, maxConverterStateBytes), retainedIDs: make(map[string]struct{}),

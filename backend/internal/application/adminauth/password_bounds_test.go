@@ -24,13 +24,7 @@ func TestChangePasswordRejectsOverlongPasswordAsInvalid(t *testing.T) {
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(
-		relational.NewAdminRepository(database),
-		relational.NewAdminSessionRepository(database),
-		security.NewTokenService("12345678901234567890123456789012"),
-		15*time.Minute,
-		30*24*time.Hour,
-	)
+	service := NewService(relational.NewAdminRepository(database), relational.NewAdminSessionRepository(database), security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, 15*time.Minute, 30*24*time.Hour)
 	if err := service.Bootstrap(ctx, "admin", "password123"); err != nil {
 		t.Fatal(err)
 	}
@@ -61,13 +55,7 @@ func TestBootstrapRejectsOverlongPassword(t *testing.T) {
 	if err := database.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(
-		relational.NewAdminRepository(database),
-		relational.NewAdminSessionRepository(database),
-		security.NewTokenService("12345678901234567890123456789012"),
-		15*time.Minute,
-		30*24*time.Hour,
-	)
+	service := NewService(relational.NewAdminRepository(database), relational.NewAdminSessionRepository(database), security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, 15*time.Minute, 30*24*time.Hour)
 	if err := service.Bootstrap(ctx, "admin", string(make([]byte, 80))); !errors.Is(err, ErrBootstrapRequired) {
 		t.Fatalf("overlong bootstrap password must be rejected before hashing: %v", err)
 	}

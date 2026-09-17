@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,7 +12,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -39,7 +39,7 @@ func TestPublicDiscoveryUsesActualReasoningAndConfiguredIdentity(t *testing.T) {
 		modeldomain.Route{PublicID: "grok-4.5-low", Provider: account.ProviderBuild, UpstreamModel: "grok-build-0.1", Capability: modeldomain.CapabilityResponses},
 		modeldomain.Route{PublicID: "grok-4.20-multi-agent-0309", Provider: account.ProviderConsole, UpstreamModel: "grok-4.20-multi-agent-0309", Capability: modeldomain.CapabilityResponses},
 	)
-	service := &Service{providers: provider.NewRegistry(cli.NewAdapter(cli.Config{}, nil), console.NewAdapter(console.Config{}, nil, nil, nil))}
+	service := &Service{providers: providerimpl.NewRegistry(cli.NewAdapter(cli.Config{}, nil), console.NewAdapter(console.Config{}, nil, nil, nil))}
 	key := clientkeydomain.Key{ModelScope: clientkeydomain.ModelScopeAll, AllowModelAliases: true}
 	products, err := service.describeSnapshot(context.Background(), snapshot, &key)
 	if err != nil {
@@ -95,7 +95,7 @@ func TestPublicDiscoveryAliasPermissionMatchesFixedResolution(t *testing.T) {
 		modeldomain.Route{PublicID: "grok-4.3", Provider: account.ProviderBuild, UpstreamModel: "grok-4.3", Capability: modeldomain.CapabilityResponses},
 		modeldomain.Route{PublicID: "grok-4.3", Provider: account.ProviderConsole, UpstreamModel: "grok-4.3", Capability: modeldomain.CapabilityResponses},
 	)
-	service := &Service{providers: provider.NewRegistry(cli.NewAdapter(cli.Config{}, nil), console.NewAdapter(console.Config{}, nil, nil, nil))}
+	service := &Service{providers: providerimpl.NewRegistry(cli.NewAdapter(cli.Config{}, nil), console.NewAdapter(console.Config{}, nil, nil, nil))}
 	for _, tc := range []struct {
 		name string
 		key  clientkeydomain.Key
@@ -183,11 +183,11 @@ func TestPublicDiscoveryFailureDoesNotPublishPartialCatalog(t *testing.T) {
 }
 
 func TestSnapshotLookupMatchesSQLNameAndTargetContract(t *testing.T) {
-	service, _ := modelManagementPair(t)
+	service, _, repo := modelManagementPair(t)
 	ctx := context.Background()
 	credentials := map[account.Provider]uint64{}
 	for _, kind := range account.Providers() {
-		value, _, err := service.accounts.UpsertByIdentity(ctx, account.Credential{Provider: kind, Name: string(kind), SourceKey: string(kind), EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
+		value, _, err := repo.UpsertByIdentity(ctx, account.Credential{Provider: kind, Name: string(kind), SourceKey: string(kind), EncryptedAccessToken: "fixture", AuthStatus: account.AuthStatusActive})
 		if err != nil {
 			t.Fatal(err)
 		}

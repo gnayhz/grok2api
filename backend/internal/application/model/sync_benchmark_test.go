@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/base64"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,7 +11,6 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
@@ -40,8 +40,8 @@ func BenchmarkAccountCapabilitySync(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	registry := provider.NewRegistry(&modelCapabilityAdapter{models: map[uint64][]string{v.ID: {"model-a", "model-b", "model-c"}}})
-	as := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	registry := providerimpl.NewRegistry(&modelCapabilityAdapter{models: map[uint64][]string{v.ID: {"model-a", "model-b", "model-c"}}})
+	as := accountapp.NewService(accounts, relational.NewAuditRepository(db), memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
 	service := NewService(relational.NewModelRepository(db), accounts, as, registry)
 	if _, err := service.SyncAccount(ctx, v.ID); err != nil {
 		b.Fatal(err)

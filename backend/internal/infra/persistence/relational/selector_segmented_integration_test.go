@@ -3,6 +3,8 @@ package relational_test
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"os"
 	"strconv"
 	"strings"
@@ -10,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -56,7 +58,7 @@ func TestPostgresRedisSegmentedSelectorIntegration(t *testing.T) {
 			AuthStatus: account.AuthStatusActive, Priority: 1_000_000, MaxConcurrent: 1,
 		}
 	}
-	created, err := accounts.UpsertManyByIdentity(ctx, values)
+	created, err := accounts.ImportAccounts(ctx, testsupport.AccountImports(values))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,8 +97,8 @@ func TestPostgresRedisSegmentedSelectorIntegration(t *testing.T) {
 	defer store.Close()
 	limiter := redisruntime.NewConcurrencyLimiter(store)
 
-	newSelector := func() *gateway.Selector {
-		selector := gateway.NewSelector(accounts, limiter, store, nil, time.Hour, time.Second, time.Minute, 100*time.Millisecond)
+	newSelector := func() *selector.Selector {
+		selector := selector.NewSelector(accounts, limiter, store, nil, time.Hour, time.Second, time.Minute, 100*time.Millisecond)
 		selector.UpdateSegmentedSelector(true, 3000, 64)
 		return selector
 	}
@@ -113,7 +115,11 @@ func TestPostgresRedisSegmentedSelectorIntegration(t *testing.T) {
 
 	t.Run("continues to the next window", func(t *testing.T) {
 		saturate(t, 64)
-		lease, err := newSelector().Acquire(ctx, account.ProviderBuild, 0, "p4-model", "", "", nil, false)
+		session, sessionErr := newSelector().BeginSelectionSessionForKey(ctx, account.ProviderBuild, 0, "p4-model", "", "", nil, false, clientkeydomain.AccountScope{})
+		if sessionErr != nil {
+			t.Fatal(sessionErr)
+		}
+		lease, err := session.Acquire(ctx, nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +131,11 @@ func TestPostgresRedisSegmentedSelectorIntegration(t *testing.T) {
 
 	t.Run("falls back after four saturated windows", func(t *testing.T) {
 		saturate(t, 256)
-		lease, err := newSelector().Acquire(ctx, account.ProviderBuild, 0, "p4-model", "", "", nil, false)
+		session, sessionErr := newSelector().BeginSelectionSessionForKey(ctx, account.ProviderBuild, 0, "p4-model", "", "", nil, false, clientkeydomain.AccountScope{})
+		if sessionErr != nil {
+			t.Fatal(sessionErr)
+		}
+		lease, err := session.Acquire(ctx, nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +146,7 @@ func TestPostgresRedisSegmentedSelectorIntegration(t *testing.T) {
 	})
 
 	t.Run("shares atomic capacity across instances", func(t *testing.T) {
-		selectors := []*gateway.Selector{newSelector(), newSelector()}
+		selectors := []*selector.Selector{newSelector(), newSelector()}
 		const workers = 32
 		type result struct {
 			accountID uint64
@@ -148,15 +158,18 @@ func TestPostgresRedisSegmentedSelectorIntegration(t *testing.T) {
 		var wait sync.WaitGroup
 		for index := range workers {
 			wait.Add(1)
-			go func(selector *gateway.Selector) {
+			go func(selector *selector.Selector) {
 				defer wait.Done()
 				<-start
-				lease, err := selector.Acquire(ctx, account.ProviderBuild, 0, "p4-model", "", "", nil, false)
-				if err != nil {
-					results <- result{err: err}
+				if session, sessionErr := selector.BeginSelectionSessionForKey(ctx, account.ProviderBuild, 0, "p4-model", "", "", nil, false, clientkeydomain.AccountScope{}); sessionErr != nil {
+					results <- result{err: sessionErr}
 					return
+				} else if lease, acquireErr := session.Acquire(ctx, nil, false); acquireErr != nil {
+					results <- result{err: acquireErr}
+					return
+				} else {
+					results <- result{accountID: lease.Credential.ID, release: lease.Release}
 				}
-				results <- result{accountID: lease.Credential.ID, release: lease.Release}
 			}(selectors[index%len(selectors)])
 		}
 		close(start)

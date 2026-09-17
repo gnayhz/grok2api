@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"io"
 	"net/http"
 	"strings"
@@ -166,7 +167,7 @@ func TestAttemptLoopFailClosedAuditCarriesRule(t *testing.T) {
 	ctx := context.Background()
 	degraded := `{"id":"chatcmpl-rule","choices":[{"message":{"content":"SECRET_DEGRADED_PAYLOAD"}}]}`
 	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
-	service, credentials, database := newGuardLoopServiceWithDB(t, adapter, "nonstream-rule-one", "nonstream-rule-two")
+	service, credentials, database, _ := newGuardLoopServiceWithDB(t, adapter, "nonstream-rule-one", "nonstream-rule-two")
 	adapter.responses[credentials[0].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
 	adapter.responses[credentials[1].ID] = []scriptedBuildResponse{{status: http.StatusOK, body: degraded}}
 
@@ -234,7 +235,7 @@ func TestAttemptLoopConcurrentLeasesReleased(t *testing.T) {
 				succeeded++
 				results = append(results, result)
 			default:
-				var selection *SelectionUnavailableError
+				var selection *selector.SelectionUnavailableError
 				if errors.As(err, &selection) {
 					limited++
 				} else {

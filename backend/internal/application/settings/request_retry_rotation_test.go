@@ -18,7 +18,7 @@ func TestRequestRetryAndEgressRotationRuntimeOverride(t *testing.T) {
 	cfg.RequestRetry.Enabled = true
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 
 	input := service.Get().Config
 	if !input.RequestRetry.Enabled {
@@ -117,7 +117,7 @@ func TestGuardedModelsStayOnFileBaselineAcrossAdminRoundtrip(t *testing.T) {
 
 	repository := &runtimeSettingsRepositoryStub{}
 	var applied config.Config
-	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next config.Config) { applied = next })
+	service := newTestService(cfg, time.Time{}, 0, repository, nil, func(next settingsdomain.Config) { applied = applyInfra(cfg, next) })
 
 	input := service.Get().Config
 	if !input.RequestRetryProvided {

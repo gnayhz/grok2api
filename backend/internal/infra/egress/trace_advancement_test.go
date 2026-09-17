@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"testing"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -13,7 +14,7 @@ import (
 // 尝试不会污染归属。若未来把失败获取也记入 trace,此不变式破坏,降智归因
 // 将指向未承流的出口。
 func TestTraceSelectionOnlyAdvancesOnSuccessfulAcquisition(t *testing.T) {
-	ctx, trace := WithTrace(context.Background())
+	ctx, trace := physical.WithTrace(context.Background())
 
 	// 第一次选择:节点 11。
 	recordSelection(ctx, Selection{Scope: domain.ScopeBuild, NodeID: 11, Proxied: true})

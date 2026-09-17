@@ -48,7 +48,7 @@ func TestBuildRecoveryHasOnePolicyAndObservedWrites(t *testing.T) {
 							t.Errorf("%s runs recovery policy outside the locked transaction", path)
 						}
 					}
-					if sel.Sel.Name == "ApplyQuotaRecovery" && path != "../application/account/build_detect.go" && path != "../application/account/service.go" && path != "../application/gateway/selector.go" && path != "../testsupport/account.go" {
+					if sel.Sel.Name == "ApplyQuotaRecovery" && path != "../application/account/build_detect.go" && path != "../application/account/service.go" && path != "../application/account/quota.go" && path != "../application/selector/selector.go" && path != "../testsupport/account.go" {
 						t.Errorf("%s bypasses recovery observation owners", path)
 					}
 				}

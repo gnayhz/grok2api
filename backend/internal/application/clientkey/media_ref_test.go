@@ -3,6 +3,7 @@ package clientkey
 import (
 	"context"
 	"errors"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func TestBatchDeleteHandlesMediaJobReferences(t *testing.T) {
 	}
 	keyRepo := relational.NewClientKeyRepository(database)
 	mediaRepo := relational.NewMediaJobRepository(database)
-	service := NewService("test-owner", keyRepo, nil, nil, 60, 5, testCipher(t))
+	service := NewService("test-owner", keyRepo, nil, nil, 60, 5, testCipher(t), security.RandomTokenSource{})
 
 	created, err := service.Create(ctx, CreateInput{Name: "mr", Enabled: true})
 	if err != nil {

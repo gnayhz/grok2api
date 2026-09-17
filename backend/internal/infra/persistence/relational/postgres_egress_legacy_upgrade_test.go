@@ -80,9 +80,10 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 	if err := database.db.WithContext(ctx).Raw("SELECT id FROM egress_pools WHERE scope = 'grok_console' AND name = ?", "pg-shared-pool-"+unique).Scan(&consolePoolID).Error; err != nil || consolePoolID == 0 {
 		t.Fatalf("console pool id=%d err=%v", consolePoolID, err)
 	}
-	// provider_accounts 绑定列是活功能（模型保留、升级后必须在且数据无损），
-	// 无需造旧形状；egress_nodes/pools/sources 的旧列退化已在上方完成。
+	// provider_accounts 的 egress_node_id 是活功能（模型保留、升级后必须在且
+	// 数据无损）；已退役的分配模式列仍保留旧值，避免重构删除历史数据。
 	exec("UPDATE egress_nodes SET pool_id = ?, scope = 'grok_build', account_capacity = 5 WHERE id = ?", buildPoolID, fixedNode.ID)
+	exec("ALTER TABLE provider_accounts ADD COLUMN egress_assignment_mode text NOT NULL DEFAULT ''")
 	exec("UPDATE provider_accounts SET egress_assignment_mode = 'auto' WHERE id = ?", credential.ID)
 	exec("ALTER TABLE egress_subscription_sources ADD COLUMN scope text NOT NULL DEFAULT 'grok_build', ADD COLUMN default_account_capacity int NOT NULL DEFAULT 0, ADD COLUMN pool_id bigint NOT NULL DEFAULT 0")
 	routeRules := `[{"scope":"grok_build","class":"inference","targetMode":"pool","targetPoolId":` + strconv.FormatUint(buildPoolID, 10) + `,"enabled":true},` +
@@ -122,11 +123,13 @@ func TestPostgresEgressLegacySchemaUpgrade(t *testing.T) {
 			}
 		}
 	}
-	// 账号-出口绑定列是活功能面：升级后必须仍然存在且数据无损。
-	for _, column := range []string{"egress_node_id", "egress_assignment_mode", "egress_assigned_at"} {
-		if !migrator.HasColumn("provider_accounts", column) {
-			t.Errorf("live binding column provider_accounts.%s missing after upgrade", column)
-		}
+	// egress_node_id 是活功能面：升级后必须仍然存在且数据无损。
+	if !migrator.HasColumn("provider_accounts", "egress_node_id") {
+		t.Errorf("live binding column provider_accounts.egress_node_id missing after upgrade")
+	}
+	var assignmentMode string
+	if err := database.db.Raw("SELECT egress_assignment_mode FROM provider_accounts WHERE id = ?", credential.ID).Scan(&assignmentMode).Error; err != nil || assignmentMode != "auto" {
+		t.Fatalf("assignment history lost: mode=%q err=%v", assignmentMode, err)
 	}
 
 	// 单池绑定回填为成员关系。

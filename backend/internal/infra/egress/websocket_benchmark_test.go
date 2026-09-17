@@ -3,6 +3,8 @@ package egress
 import (
 	"context"
 	"fmt"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"strings"
 	"testing"
 	"time"
@@ -35,14 +37,14 @@ func BenchmarkWebSocketRoundTrip(b *testing.B) {
 				}
 			}))
 			defer upstream.Close()
-			client, err := newBrowserClient("", "")
+			client, err := newBrowserClientWithBudget("", "", nil)
 			if err != nil {
 				b.Fatal(err)
 			}
 			defer client.CloseIdleConnections()
 			lease := &Lease{browser: client}
-			ctx, _ := WithTrace(context.Background())
-			ctx = WithPhysicalCallTrace(attemptmeta.WithRequest(ctx, "benchmark", 0, "", nil), "console", "realtime")
+			ctx, _ := physical.WithTrace(context.Background())
+			ctx = physical.WithPhysicalCallTrace(attemptmeta.WithRequest(ctx, "benchmark", 0, "", nil), testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "console", "realtime")
 			conn, _, err := lease.DialWebSocket(ctx, "ws"+strings.TrimPrefix(upstream.URL, "http"), nil, time.Second)
 			if err != nil {
 				b.Fatal(err)

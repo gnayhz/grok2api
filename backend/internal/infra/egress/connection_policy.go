@@ -5,27 +5,18 @@ import (
 	"strings"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
 )
 
-// SessionReuseDecision describes how networking used a soft connection hint.
-// It says nothing about historical continuity or upstream cache hits.
-type SessionReuseDecision string
+type SessionReuseDecision = physical.SessionReuseDecision
+type ConnectionPolicy = physical.ConnectionPolicy
 
 const (
-	SessionReuseNotRequested SessionReuseDecision = "not_requested"
-	SessionReuseAccepted     SessionReuseDecision = "accepted"
-	SessionReuseFresh        SessionReuseDecision = "rejected_fresh_connection"
-	SessionReuseUnsupported  SessionReuseDecision = "unsupported_scope"
+	SessionReuseNotRequested = physical.SessionReuseNotRequested
+	SessionReuseAccepted     = physical.SessionReuseAccepted
+	SessionReuseFresh        = physical.SessionReuseFresh
+	SessionReuseUnsupported  = physical.SessionReuseUnsupported
 )
-
-// ConnectionPolicy is the immutable policy of an acquired lease. Isolation
-// partitions all reusable clients, including session clients. A policy update
-// retires old clients for new acquisitions; existing leases drain normally.
-type ConnectionPolicy struct {
-	AccountIsolated bool
-	Fresh           bool
-	SessionReuse    SessionReuseDecision
-}
 
 func (l *Lease) ConnectionPolicy() ConnectionPolicy {
 	if l == nil {

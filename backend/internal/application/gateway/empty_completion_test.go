@@ -8,15 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestEmptyJSONCompletionRetriesOnlyBeforeSafeDelivery(t *testing.T) {
 	for _, unsafe := range []bool{false, true} {
 		adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 		service, accounts := newGuardLoopService(t, adapter, "empty-first", "answer-second")
-		service.UpdateQualityRetry(QualityRetryRuntime{Enabled: false})
+		service.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: false}))
 		accepted := false
 		adapter.responses[accounts[0].ID] = []scriptedBuildResponse{{status: 200, body: `{"status":"completed","output":[{"type":"reasoning","summary":[{"text":"plan"}]}]}`, acceptOutput: func() { accepted = true }}}
 		adapter.responses[accounts[1].ID] = []scriptedBuildResponse{{status: 200, body: `{"id":"good","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"answer"}]}]}`}}

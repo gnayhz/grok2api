@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"os"
 	"sync"
@@ -25,7 +26,7 @@ func TestFinalReviewLate403PreservesNewerTransportCooldown(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = repo.DeleteEgressNode(context.Background(), node.ID) })
-	m := infraegress.NewManager(repo, service.cipher)
+	m := infraegress.NewManagerWithLimits(repo, service.cipher, netbudget.Limits{})
 	defer m.Close(context.Background())
 	old, err := m.Acquire(ctx, domain.ScopeWeb, "old-request")
 	if err != nil {
@@ -66,7 +67,7 @@ func TestFinalReviewDelayedFailureDoesNotShortenConfirmedDeadCooldown(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = repo.DeleteEgressNode(context.Background(), node.ID) })
-	m := infraegress.NewManager(repo, service.cipher)
+	m := infraegress.NewManagerWithLimits(repo, service.cipher, netbudget.Limits{})
 	defer m.Close(context.Background())
 	oldTime := time.Now().UTC().Add(-time.Minute)
 	until := time.Now().UTC().Add(10 * time.Minute)

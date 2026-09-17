@@ -10,17 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-
-	"net/http"
-	"net/http/httptest"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-
 	fhttp "github.com/bogdanfinn/fhttp"
 	fhttptest "github.com/bogdanfinn/fhttp/httptest"
 	"github.com/bogdanfinn/websocket"
@@ -30,15 +19,29 @@ import (
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/browserheaders"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"github.com/golang-jwt/jwt/v5"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
@@ -85,7 +88,7 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 	if len(aliases) != 14 {
 		t.Fatalf("aliases = %d, want 14", len(aliases))
 	}
-	registry := provider.NewRegistry(NewAdapter(Config{}, nil, nil, nil))
+	registry := providerimpl.NewRegistry(NewAdapter(Config{}, nil, nil, nil))
 	if registry.SupportsStoredResponses(account.ProviderConsole) {
 		t.Fatal("console must not advertise stored Responses support")
 	}
@@ -240,10 +243,10 @@ func TestVoiceWebSocketRefreshesDPoPOnceAfterUnauthorized(t *testing.T) {
 			adapter, credential := newConsoleTestAdapter(t, server.URL)
 			ctx := attemptmeta.WithRequest(context.Background(), "voice-budget", 1, "rules", nil)
 			ctx = attemptmeta.WithAccount(ctx, credential.ID, "grok_console", "grok-voice-latest")
-			ctx = infraegress.WithPhysicalCallTrace(ctx, "grok_console", "realtime")
+			ctx = physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), "grok_console", "realtime")
 			budget := inferencedomain.NewAttemptBudget(limit)
 			defer budget.Close()
-			ctx = infraegress.WithPhysicalCallBudget(ctx, budget)
+			ctx = physical.WithPhysicalCallBudget(ctx, budget)
 			connection, cleanup, err := adapter.DialVoiceWebSocket(ctx, provider.VoiceWebSocketRequest{
 				Credential: credential, Path: "/realtime", Model: "grok-voice-latest",
 			})
@@ -263,7 +266,7 @@ func TestVoiceWebSocketRefreshesDPoPOnceAfterUnauthorized(t *testing.T) {
 			if tokenRequests.Load() != expectedTokens || websocketRequests.Load() != expectedSockets {
 				t.Fatalf("requests token=%d websocket=%d limit=%d", tokenRequests.Load(), websocketRequests.Load(), limit)
 			}
-			facts := infraegress.PhysicalFacts(ctx)
+			facts := physical.PhysicalFacts(ctx)
 			if len(facts) != limit || budget.Remaining() != 0 {
 				t.Fatalf("missing physical budget receipts: remaining=%d facts=%+v", budget.Remaining(), facts)
 			}
@@ -302,7 +305,8 @@ func TestSyncAccountIdentityUsesWebSessionWithConsoleCredential(t *testing.T) {
 	}
 	token, _ := cipher.Encrypt("test-sso")
 	cookies, _ := cipher.Encrypt("cf_clearance=clear")
-	adapter := NewAdapter(Config{SessionBaseURL: server.URL}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher, nil)
+	manager := infraegress.NewManagerWithLimits(consoleEgressRepositoryStub{}, cipher, netbudget.Limits{})
+	adapter := NewAdapter(Config{SessionBaseURL: server.URL}, manager, cipher, nil)
 	identity, err := adapter.SyncAccountIdentity(context.Background(), account.Credential{
 		ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO,
 		EncryptedAccessToken: token, EncryptedCloudflareCookie: cookies,
@@ -985,7 +989,7 @@ func TestAdapterDoesNotPenalizeEgressForBlockedAccount(t *testing.T) {
 			repository := &recordingConsoleEgressRepository{node: egressdomain.Node{
 				ID: 1, Name: "console", Enabled: true, Health: 1,
 			}}
-			manager := infraegress.NewManager(repository, cipher)
+			manager := infraegress.NewManagerWithLimits(repository, cipher, netbudget.Limits{})
 			t.Cleanup(func() { _ = manager.Close(context.Background()) })
 			adapter := NewAdapter(Config{BaseURL: server.URL, Timeout: 5 * time.Second}, manager, cipher, nil)
 			credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}
@@ -1004,7 +1008,7 @@ func TestAdapterDoesNotPenalizeEgressForBlockedAccount(t *testing.T) {
 			if response.StatusCode != http.StatusForbidden || string(body) != test.body {
 				t.Fatalf("status=%d body=%s", response.StatusCode, body)
 			}
-			if err := adapter.egress.FlushFeedback(context.Background()); err != nil {
+			if err := manager.FlushFeedback(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if updates := repository.UpdateCount(); updates != test.wantUpdates {
@@ -1163,7 +1167,7 @@ func TestConsoleStreamingReadReturnsIdleTimeout(t *testing.T) {
 
 func TestApplyChromiumClientHintsSkipsNonChromiumUserAgent(t *testing.T) {
 	header := make(http.Header)
-	applyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/18.0 Safari/605.1.15")
+	browserheaders.ApplyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/18.0 Safari/605.1.15")
 	for name := range header {
 		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Sec-Ch-Ua") {
 			t.Fatalf("unexpected client hint %q", name)
@@ -1539,7 +1543,7 @@ func TestConsoleImageGenerationForwardsStandardDPoPRequest(t *testing.T) {
 	t.Cleanup(server.Close)
 	store := &consoleImageAssetStoreStub{}
 	adapter, credential := newConsoleTestAdapterWithAssets(t, server.URL, store)
-	ctx, trace := infraegress.WithTrace(context.Background())
+	ctx, trace := physical.WithTrace(context.Background())
 	response, err := adapter.GenerateImage(ctx, provider.ImageGenerationRequest{
 		Credential: credential, Model: "grok-imagine-image-quality", Prompt: "draw", Count: 2,
 		Size: "1536x1024", Resolution: "2k", ResponseFormat: "url",
@@ -2136,7 +2140,7 @@ func newConsoleTestAdapterWithAssets(t *testing.T, baseURL string, assets provid
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := infraegress.NewManager(consoleEgressRepositoryStub{}, cipher)
+	manager := infraegress.NewManagerWithLimits(consoleEgressRepositoryStub{}, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	adapter := NewAdapter(Config{BaseURL: baseURL, Timeout: 5 * time.Second}, manager, cipher, assets)
 	credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}

@@ -1,3 +1,5 @@
+import { usdTicksToValue } from "@/shared/lib/usd";
+
 const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
 const compactDateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
 const numberFormatters = new Map<string, Intl.NumberFormat>();
@@ -79,4 +81,20 @@ export function toDateTimeLocal(value: string | null | undefined): string {
   const date = new Date(value);
   const offset = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 19);
+}
+
+export function formatUSD(ticks: number, locale: string): string {
+  return formatUSDValue(usdTicksToValue(ticks), locale);
+}
+
+export function formatUSDValue(value: number, locale: string): string {
+  return `$${new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
+}
+
+export function formatCompactUSD(value: number, locale: string): string {
+  return `$${new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(value)}`;
+}
+
+export function formatCompactNumber(value: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }

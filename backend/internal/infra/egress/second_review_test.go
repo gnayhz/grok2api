@@ -25,7 +25,7 @@ import (
 
 // Regression coverage for the second architecture review.
 func TestSecondReviewBuildSessionPreservesEnvironmentProxy(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	for _, session := range []string{"", "conversation"} {
 		ctx := WithBuildSession(context.Background(), session)
@@ -118,16 +118,16 @@ func TestSecondReviewBrowserCapacityIsNotProxyFailure(t *testing.T) {
 }
 
 func TestSecondReviewOld403CannotInvalidateNewClearanceViaFeedback(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	m.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr"})
 	c := m.clearance
 	version := c.clearanceVersion
-	if !c.cacheClearance("direct", clearanceSolution{Cookies: "old", UserAgent: "UA"}, time.Now(), version, "fingerprint", "binding", time.Minute) {
+	if _, ok := c.cacheClearanceSolution("direct", clearanceSolution{Cookies: "old", UserAgent: "UA"}, time.Now(), version, "fingerprint", "binding", time.Minute); !ok {
 		t.Fatal("cache old")
 	}
 	lease := &Lease{NodeID: 0, Scope: domain.ScopeWeb, clearanceManager: m, clearanceKey: "direct", clearanceGeneration: c.generationFor("direct"), healthBaseline: domain.HealthState{Health: 1}}
-	if !c.cacheClearance("direct", clearanceSolution{Cookies: "fresh", UserAgent: "UA"}, time.Now(), version, "fingerprint", "binding", time.Minute) {
+	if _, ok := c.cacheClearanceSolution("direct", clearanceSolution{Cookies: "fresh", UserAgent: "UA"}, time.Now(), version, "fingerprint", "binding", time.Minute); !ok {
 		t.Fatal("cache fresh")
 	}
 	lease.InvalidateClearance()
@@ -165,7 +165,7 @@ func TestSecondReviewBuildEnvironmentPolicyMatrix(t *testing.T) {
 	for _, isolated := range []bool{false, true} {
 		for _, session := range []string{"", "conversation"} {
 			t.Run(fmt.Sprintf("isolated=%t/session=%s", isolated, session), func(t *testing.T) {
-				m := NewManager(egressRepositoryTestStub{}, nil)
+				m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 				defer m.Close(context.Background())
 				m.transport.accountIsolated.Store(isolated)
 				lease, err := m.AcquireBuildEnvironmentDirect(WithBuildSession(context.Background(), session), "account")
@@ -227,14 +227,14 @@ func TestSecondReviewClearanceGenerationTravelsWithCookie(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(egressRepositoryTestStub{}, cipher)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, cipher, netbudget.Limits{})
 	defer m.Close(context.Background())
 	cfg := ClearanceConfig{Mode: "flaresolverr", TargetURL: "https://grok.com", RefreshInterval: time.Hour}
 	m.UpdateClearanceConfig(cfg)
 	c := m.clearance
 	cache := func(cookie string) {
 		t.Helper()
-		if !c.cacheClearance("direct", clearanceSolution{Cookies: cookie, UserAgent: DefaultUserAgent}, time.Now(), c.clearanceVersion, clearanceFingerprint(cfg, ""), clearanceBindingFingerprint(cfg, ""), time.Hour) {
+		if _, ok := c.cacheClearanceSolution("direct", clearanceSolution{Cookies: cookie, UserAgent: DefaultUserAgent}, time.Now(), c.clearanceVersion, clearanceFingerprint(cfg, ""), clearanceBindingFingerprint(cfg, ""), time.Hour); !ok {
 			t.Fatal("cache failed")
 		}
 	}
@@ -308,12 +308,12 @@ func TestSecondReviewLateClearanceRejectionsAreIsolated(t *testing.T) {
 		pool   bool
 	}{{"direct", 0, false}, {"node:7", 7, false}, {"node:7:account:first", 7, true}} {
 		t.Run(tc.key, func(t *testing.T) {
-			m := NewManager(egressRepositoryTestStub{}, nil)
+			m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 			defer m.Close(context.Background())
 			m.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr"})
 			c := m.clearance
 			cache := func(cookie string) {
-				if !c.cacheClearance(tc.key, clearanceSolution{Cookies: cookie, UserAgent: "UA"}, time.Now(), c.clearanceVersion, "fp", "binding", time.Minute) {
+				if _, ok := c.cacheClearanceSolution(tc.key, clearanceSolution{Cookies: cookie, UserAgent: "UA"}, time.Now(), c.clearanceVersion, "fp", "binding", time.Minute); !ok {
 					t.Fatal("cache failed")
 				}
 			}
@@ -341,12 +341,12 @@ func TestSecondReviewLateClearanceRejectionsAreIsolated(t *testing.T) {
 }
 
 func TestSecondReviewQueued403DoesNotInvalidateRefresh(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	m.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr"})
 	c := m.clearance
 	cache := func(cookie string) {
-		if !c.cacheClearance("direct", clearanceSolution{Cookies: cookie, UserAgent: "UA"}, time.Now(), c.clearanceVersion, "fp", "binding", time.Minute) {
+		if _, ok := c.cacheClearanceSolution("direct", clearanceSolution{Cookies: cookie, UserAgent: "UA"}, time.Now(), c.clearanceVersion, "fp", "binding", time.Minute); !ok {
 			t.Fatal("cache failed")
 		}
 	}
@@ -393,7 +393,7 @@ func TestSecondReviewProbeOperationalFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := NewManager(egressRepositoryTestStub{}, cipher)
+			m := NewManagerWithLimits(egressRepositoryTestStub{}, cipher, netbudget.Limits{})
 			defer m.Close(context.Background())
 			ctx := context.Background()
 			var cause error
@@ -446,7 +446,7 @@ func TestSecondReviewProbeCancelAndShutdownReleaseOwnership(t *testing.T) {
 				<-r.Context().Done()
 			}))
 			defer server.Close()
-			m := NewManager(egressRepositoryTestStub{}, nil)
+			m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 			defer m.Close(context.Background())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -490,7 +490,7 @@ func TestSecondReviewProbeCancelAndShutdownReleaseOwnership(t *testing.T) {
 }
 
 func TestSecondReviewProxyPoolCapacityDoesNotRetryOrReportFailure(t *testing.T) {
-	m := NewManager(egressRepositoryTestStub{}, nil)
+	m := NewManagerWithLimits(egressRepositoryTestStub{}, nil, netbudget.Limits{})
 	defer m.Close(context.Background())
 	client := &scriptedRequestClient{do: func(_ int, _ *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("proxyconnect tcp: %w", netbudget.ErrCapacity)
@@ -511,4 +511,16 @@ func TestSecondReviewProxyPoolCapacityDoesNotRetryOrReportFailure(t *testing.T) 
 	if entries != 0 {
 		t.Fatal("capacity produced a health observation")
 	}
+}
+
+// generationFor 是测试专用缝:租约构造需要读取某 key 的当前 clearance
+// 世代号以构造「已取快照」的租约形态。生产路径经 release/续租内部直读,
+// 不暴露此访问器。
+func (m *clearanceRuntime) generationFor(key string) uint64 {
+	if key == "" {
+		return 0
+	}
+	m.clearanceMu.Lock()
+	defer m.clearanceMu.Unlock()
+	return m.clearances[key].generation
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,10 +16,10 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type accountOperationWaitContext struct {
@@ -91,7 +92,7 @@ func TestAccountBillingHTTPSharedOperationAcrossSQL(t *testing.T) {
 					}))
 					defer server.Close()
 					defer finish()
-					s := accountapp.NewService(ra, nil, nil, nil, provider.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: server.URL + "/v1"}, cipher)), cipher, nil)
+					s := accountapp.NewService(ra, nil, nil, nil, providerimpl.NewRegistry(cli.NewAdapter(cli.Config{BaseURL: server.URL + "/v1"}, cipher)), cipher, security.RandomTokenSource{}, nil, nil, nil)
 					ownerCtx, cancel := context.WithCancel(ctx)
 					defer cancel()
 					owner := make(chan error, 1)
@@ -219,9 +220,9 @@ func TestAccountCredentialSharedOperationOwnsRedisLockAcrossSQL(t *testing.T) {
 					var once sync.Once
 					finish := func() { once.Do(func() { close(adapter.release) }) }
 					defer finish()
-					registry := provider.NewRegistry(adapter)
-					first := accountapp.NewService(ra, nil, nil, nil, registry, nil, lockA)
-					second := accountapp.NewService(rb, nil, nil, nil, registry, nil, lockB)
+					registry := providerimpl.NewRegistry(adapter)
+					first := accountapp.NewService(ra, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lockA)
+					second := accountapp.NewService(rb, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lockB)
 					ownerCtx, cancel := context.WithCancel(ctx)
 					defer cancel()
 					owner := make(chan error, 1)

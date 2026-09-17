@@ -7,8 +7,7 @@ import (
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -28,7 +27,7 @@ func (s *Service) StartDeviceLogin(ctx context.Context) (DeviceStartResult, erro
 	if err != nil {
 		return DeviceStartResult{}, err
 	}
-	sessionID, err := security.NewOpaqueToken(18)
+	sessionID, err := s.tokens.NewOpaqueToken(18)
 	if err != nil {
 		return DeviceStartResult{}, err
 	}
@@ -50,7 +49,7 @@ func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (view V
 	}
 	pollCtx, cancelPoll := context.WithTimeout(ctx, devicePollTimeout)
 	defer cancelPoll()
-	token, err := security.NewOpaqueToken(18)
+	token, err := s.tokens.NewOpaqueToken(18)
 	if err != nil {
 		return View{}, err
 	}

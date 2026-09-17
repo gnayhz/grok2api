@@ -25,7 +25,7 @@ func TestQualityManagementProjectionKeepsEpochAndReadFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = reg.Close() })
-			observations, err := evidence.New(ctx, reg.DB(), evidence.DefaultConfig())
+			observations, err := evidence.New(ctx, reg.DB(), model.DefaultEvidenceConfig())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -47,7 +47,7 @@ func TestQualityManagementProjectionKeepsEpochAndReadFailure(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := reg.TransitionExit(ctx, registry.ExitTransitionRequest{NodeID: 7, Epoch: second, To: model.ExitRemanded, CaseID: 1}); err != nil {
+				if err := reg.TransitionExit(ctx, model.ExitTransitionRequest{NodeID: 7, Epoch: second, To: model.ExitRemanded, CaseID: 1}); err != nil {
 					t.Fatal(err)
 				}
 				if err := observations.Record(ctx, model.Observation{AccountID: 42, Exit: model.EpochKey{NodeID: 7, Epoch: second}, At: time.Now().UTC(), Source: model.SourceTraffic, Outcome: model.OutcomeDegraded}); err != nil {

@@ -1,4 +1,4 @@
-import type { AuditBillingBreakdownDTO, AuditDTO } from "./request-audits-api";
+import type { AuditBillingBreakdownDTO, AuditDTO } from "@/entities/audit/audit-api";
 
 export function auditProviderLabel(provider: AuditDTO["provider"]): string {
   return { grok_build: "Build", grok_web: "Web", grok_console: "Console" }[provider];

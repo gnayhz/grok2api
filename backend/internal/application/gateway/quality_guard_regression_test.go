@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,26 +73,23 @@ func TestGuardThinkingRequiresProtocolField(t *testing.T) {
 	}
 }
 
-func TestGuardRetryPolicyCannotReleaseWithhold(t *testing.T) {
-	for _, action := range []QualityRetryAction{QualityActionDeliver, "deliver_last", "", "invalid"} {
-		service := &Service{}
-		service.SetQualityRetryPolicy(stubRetryPolicy{action: action})
-		got := service.decideQualityCommit(QualityWithhold, 0, 2, true, qualityRetryFailClosed)
-		if got.KeepBody || got.Action != QualityActionReject {
-			t.Errorf("policy=%q: %+v", action, got)
-		}
+func TestGuardCommitCannotReleaseWithhold(t *testing.T) {
+	// 扣留判决永远不可释放响应体;预算内且有下一跳才允许重试,
+	// 耗尽或无下一跳一律 fail-closed 拒绝(G12)。
+	commit := commitQualityHold(QualityWithhold, 0, 2, true)
+	if commit.KeepBody || commit.Action != QualityActionRetry {
+		t.Fatalf("预算内首扣留应重试: %+v", commit)
 	}
-	service := &Service{}
-	service.SetQualityRetryPolicy(stubRetryPolicy{action: QualityActionRetry})
-	if got := service.decideQualityCommit(QualityWithhold, 1, 2, true, qualityRetryFailClosed); got.Action != QualityActionReject {
-		t.Fatalf("policy escaped attempt budget: %+v", got)
+	exhausted := commitQualityHold(QualityWithhold, 1, 2, false)
+	if exhausted.KeepBody || exhausted.Action != QualityActionReject {
+		t.Fatalf("无下一跳不得空转重试: %+v", exhausted)
 	}
 }
 
 func TestGuardRuntimeOwnsModelSnapshot(t *testing.T) {
-	service := &Service{}
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
 	cfg := QualityRetryRuntime{GuardedModels: []string{"grok-4.6"}}
-	service.UpdateQualityRetry(cfg)
+	service.SetGuardSnapshotSource(StaticGuardSnapshotSource(cfg))
 	cfg.GuardedModels[0] = "mutated"
 	if got := service.QualityRetryConfig().GuardedModels[0]; got != "grok-4.6" {
 		t.Fatalf("runtime aliased caller: %q", got)

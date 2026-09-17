@@ -4,6 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	historyapp "github.com/chenyme/grok2api/backend/internal/application/history"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	netbudget "github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +28,6 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	localmedia "github.com/chenyme/grok2api/backend/internal/infra/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -106,7 +110,7 @@ func TestHTTPVideoResourceFailureClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 			capacity, sticky := memory.NewConcurrencyLimiter(), memory.NewStickyStore()
-			clients := clientkeyapp.NewService("video-resources", keys, memory.NewRateLimiter(), capacity, 1000, 8, cipher)
+			clients := clientkeyapp.NewService("video-resources", keys, memory.NewRateLimiter(), capacity, 1000, 8, cipher, security.RandomTokenSource{})
 			t.Cleanup(func() { closeClientKeyService(t, clients) })
 			owner, err := clients.Create(ctx, clientkeyapp.CreateInput{Name: "owner", Enabled: true, RPMLimit: 1000, MaxConcurrent: 8})
 			if err != nil {
@@ -124,7 +128,7 @@ func TestHTTPVideoResourceFailureClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 			objects := &videoResourceObjectFault{MediaObjectStorage: disk, cause: cause}
-			local := mediaapp.NewService(assets, jobs, objects, nil, mediaapp.Config{MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute})
+			local := mediaapp.NewServiceWithTickets(assets, jobs, nil, objects, nil, mediaapp.Config{MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: time.Minute})
 			payload := append([]byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, bytes.Repeat([]byte{3}, 64)...)
 			asset, err := local.SaveVideo(ctx, "", "video/mp4", bytes.NewReader(payload))
 			if err != nil {
@@ -168,19 +172,19 @@ func TestHTTPVideoResourceFailureClassification(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			network := infraegress.NewManager(repo, cipher)
+			network := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 			t.Cleanup(func() { _ = network.Close(context.Background()) })
 			build := cli.NewAdapter(cli.Config{BaseURL: primary.URL + "/v1"}, cipher)
 			build.SetEgress(network)
-			registry := provider.NewRegistry(build)
-			maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, nil)
-			selector := gateway.NewSelector(accounts, capacity, sticky, registry, time.Hour, time.Second, time.Minute)
+			registry := providerimpl.NewRegistry(build)
+			maintenance := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), sticky, registry, cipher, security.RandomTokenSource{}, nil, nil, nil)
+			selector := selector.NewSelector(accounts, capacity, sticky, registry, time.Hour, time.Second, time.Minute)
 			buildRouter := func() *gin.Engine {
-				service := gateway.NewService(relational.NewModelRepository(db), audits, maintenance, clients, registry, selector, relational.NewResponseRepository(db), 2)
-				service.ConfigureMedia(jobs, 1)
+				service := gateway.NewService(relational.NewModelRepository(db), audits, maintenance, clients, registry, selector, historyapp.NewResponseResources(relational.NewResponseRepository(db)), security.RandomTokenSource{}, executionapp.NewPhysicalJournalFactory(), nil, 2)
+				service.ConfigureMedia(jobs, mediaapp.NewVideoResources(jobs, nil), 1)
 				service.ConfigureMediaAssets(local)
 				r := gin.New()
-				r.Use(middleware.RequestID(), middleware.ClientAuth(clients))
+				r.Use(middleware.RequestID(nil), middleware.ClientAuth(clients))
 				NewHandler(service, nil, 1<<20).Register(r.Group("/v1"))
 				return r
 			}

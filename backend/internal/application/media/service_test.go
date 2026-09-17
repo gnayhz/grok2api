@@ -39,7 +39,7 @@ func TestServicePersistsAndReopensImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, Config{
+	service := NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: 10 * time.Minute,
 	})
@@ -83,7 +83,7 @@ func TestTransientInputIsHiddenReadableAndExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	assets := relational.NewMediaAssetRepository(database)
-	service := NewService(assets, relational.NewMediaJobRepository(database), objects, nil, Config{
+	service := NewServiceWithTickets(assets, relational.NewMediaJobRepository(database), nil, objects, nil, Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,
 		CleanupThresholdPercent: 80, CleanupInterval: time.Minute,
 	})
@@ -152,7 +152,7 @@ func TestSaveInputImageReservesCleanupHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := base64.StdEncoding.DecodeString(onePixelPNG)
-	service := NewService(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), objects, nil, Config{
+	service := NewServiceWithTickets(relational.NewMediaAssetRepository(database), relational.NewMediaJobRepository(database), nil, objects, nil, Config{
 		MaxImageBytes: int64(len(raw)), MaxTotalBytes: 100,
 		CleanupThresholdPercent: 50, CleanupInterval: time.Minute,
 	})
@@ -165,7 +165,7 @@ func TestSaveInputImageReservesCleanupHeadroom(t *testing.T) {
 }
 
 func TestSaveInputImageEnforcesSharedInputAssetLimit(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, Config{
+	service := NewServiceWithTickets(nil, nil, nil, nil, nil, Config{
 		MaxImageBytes: mediadomain.MaxInputAssetBytes * 2,
 		MaxTotalBytes: mediadomain.MaxInputAssetBytes * 4,
 	})
@@ -303,7 +303,7 @@ func TestCleanupDeletesOldestAssetsAtThreshold(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service := NewService(repository, relational.NewMediaJobRepository(database), objects, nil, Config{
+	service := NewServiceWithTickets(repository, relational.NewMediaJobRepository(database), nil, objects, nil, Config{
 		PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20,
 		MaxTotalBytes: int64(len(raw) * 2), CleanupThresholdPercent: 50,
 		CleanupInterval: 10 * time.Minute,
@@ -644,7 +644,7 @@ func TestCleanupPreservesMetadataWhenLocalObjectIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	// total = 2n > threshold = n:必须越过孤儿行删掉可删资产才能回到阈值之下。
-	service := NewService(repository, relational.NewMediaJobRepository(database), objects, nil, Config{PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 2 * int64(len(raw)), CleanupThresholdPercent: 50, CleanupInterval: 10 * time.Minute})
+	service := NewServiceWithTickets(repository, relational.NewMediaJobRepository(database), nil, objects, nil, Config{PublicBaseURL: "https://api.example", MaxImageBytes: 32 << 20, MaxTotalBytes: 2 * int64(len(raw)), CleanupThresholdPercent: 50, CleanupInterval: 10 * time.Minute})
 	deleted, err := service.Cleanup(ctx)
 	if err != nil {
 		t.Fatalf("cleanup aborted on orphan metadata: %v", err)
@@ -661,7 +661,7 @@ func TestCleanupPreservesMetadataWhenLocalObjectIsMissing(t *testing.T) {
 }
 
 func TestPublicImageURLUsesHotReloadedBase(t *testing.T) {
-	service := NewService(nil, nil, nil, nil, Config{PublicBaseURL: "https://config.example/base/"})
+	service := NewServiceWithTickets(nil, nil, nil, nil, nil, Config{PublicBaseURL: "https://config.example/base/"})
 	if got := service.PublicImageURL("img_demo"); got != "https://config.example/base/v1/media/images/img_demo" {
 		t.Fatalf("configured URL = %q", got)
 	}

@@ -9,8 +9,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const (
@@ -357,31 +357,6 @@ type qualityAnthropicEvent struct {
 	} `json:"usage"`
 }
 
-// observeQualityChunk collects complete traces for diagnostic replay. The live
-// peek scans its retained prefix directly, avoiding a second frame buffer.
-func observeQualityChunk(state *qualityScanState, chunk []byte) {
-	if state == nil || len(chunk) == 0 {
-		return
-	}
-	previous := len(state.pending)
-	data := chunk
-	if previous > 0 {
-		if previous+len(chunk) > qualityHoldMaxBufferBytes {
-			state.pending = state.pending[:0]
-			return
-		}
-		state.pending = append(state.pending, chunk...)
-		data = state.pending
-	}
-	consumed, _, _ := scanQualityLines(state, data, previous, nil)
-	tail := data[consumed:]
-	if len(tail) > qualityHoldMaxBufferBytes {
-		state.pending = state.pending[:0]
-		return
-	}
-	state.pending = append(state.pending[:0], tail...)
-}
-
 // scanQualityLines scans only newly arrived bytes for line endings. data may
 // include an unfinished line whose first searched bytes end at searched. The
 // caller owns the backing storage and retains data[consumed:] for the next read.
@@ -409,7 +384,7 @@ func scanQualityLines(state *qualityScanState, data []byte, searched int, cfg *Q
 
 func observeQualityLine(state *qualityScanState, line []byte) {
 	line = bytes.TrimSpace(line)
-	if state.protocol == qualityProtocolAnthropic && bytes.Equal(line, []byte(conversation.ThinkingEvidenceComment)) {
+	if state.protocol == qualityProtocolAnthropic && bytes.Equal(line, []byte(provider.ThinkingEvidenceComment)) {
 		state.hasThinking = true
 		return
 	}
@@ -432,7 +407,9 @@ func (s *qualityScanState) streamVerdict(reasoningExpected bool) (QualityVerdict
 	if s.terminal && s.emptyEvidence() {
 		return s.emptyStreamVerdict(reasoningExpected)
 	}
-	return (QualityRetryRuntime{kernel: s.kernel}).classify(s.signals()), nil
+	cfg := QualityRetryRuntime{}
+	cfg.SetKernel(s.kernel)
+	return classifyQualityHold(cfg, s.signals()), nil
 }
 
 func observeQualityPayload(state *qualityScanState, payload []byte) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -76,8 +77,8 @@ func TestClientKeyRedisInvalidationFencesSQLReads(t *testing.T) {
 				held := &remoteAuthReadGate{ClientKeyRepository: NewClientKeyRepository(b), read: make(chan struct{}), resume: make(chan struct{})}
 				resume := sync.OnceFunc(func() { close(held.resume) })
 				defer resume()
-				serviceA := clientkeyapp.NewService("remote-test", keysA, nil, nil, 0, 0, nil)
-				serviceB := clientkeyapp.NewService("remote-test", held, nil, nil, 0, 0, nil)
+				serviceA := clientkeyapp.NewService("remote-test", keysA, nil, nil, 0, 0, nil, security.RandomTokenSource{})
+				serviceB := clientkeyapp.NewService("remote-test", held, nil, nil, 0, 0, nil, security.RandomTokenSource{})
 				defer func() {
 					closeCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 					defer stop()
@@ -127,8 +128,8 @@ func TestClientKeyRedisInvalidationFencesSQLReads(t *testing.T) {
 						t.Fatal(ctx.Err())
 					}
 				}
-				raw := security.FormatClientKey("abcdef123456", "synthetic-key")
-				seed := clientkey.Key{Name: "remote", Prefix: "abcdef123456", SecretHash: security.HashToken(raw), EncryptedSecret: "synthetic", Enabled: true}
+				raw := clientkey.FormatClientKey("abcdef123456", "synthetic-key")
+				seed := clientkey.Key{Name: "remote", Prefix: "abcdef123456", SecretHash: tokenhash.HashToken(raw), EncryptedSecret: "synthetic", Enabled: true}
 				var key clientkey.Key
 				waitForKey := func(id uint64) repository.InvalidationEvent {
 					for {

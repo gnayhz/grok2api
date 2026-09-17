@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"slices"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestBatchUpdateSupportsMoreThanAdminPageLimit(t *testing.T) {
 		ids[index] = uint64(index + 1)
 	}
 	repo := &batchUpdateRepository{}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	maxConcurrent := 3
 
 	updated, err := service.BatchUpdate(context.Background(), accountdomain.ProviderBuild, ids, UpdateInput{MaxConcurrent: &maxConcurrent})
@@ -51,7 +52,7 @@ func TestBatchUpdatePreservesProviderMismatchSemantics(t *testing.T) {
 		ids[index] = uint64(index + 1)
 	}
 	repo := &batchUpdateRepository{updateErr: repository.ErrAccountPoolMismatch}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	maxConcurrent := 3
 
 	_, err := service.BatchUpdate(context.Background(), accountdomain.ProviderBuild, ids, UpdateInput{MaxConcurrent: &maxConcurrent})
@@ -66,7 +67,7 @@ func TestBatchUpdateRetainsBoundedRequestSize(t *testing.T) {
 		ids[index] = uint64(index + 1)
 	}
 	repo := &batchUpdateRepository{}
-	service := NewService(repo, nil, nil, nil, nil, nil, nil)
+	service := NewService(repo, nil, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 	maxConcurrent := 3
 
 	_, err := service.BatchUpdate(context.Background(), accountdomain.ProviderBuild, ids, UpdateInput{MaxConcurrent: &maxConcurrent})

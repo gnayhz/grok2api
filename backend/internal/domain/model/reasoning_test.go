@@ -44,15 +44,15 @@ func TestSupportedReasoningEffortsPerModel(t *testing.T) {
 	if !SupportsReasoningEffort("grok-4.6", "xhigh") || !SupportsReasoningEffort("Build/grok-4.6-xhigh", "xhigh") {
 		t.Fatal("grok-4.6 must advertise xhigh")
 	}
-	if !SupportsReasoningEffortForProvider(account.ProviderBuild, "grok-4.6", "xhigh") ||
-		!SupportsReasoningEffortForProvider(account.ProviderConsole, "grok-4.6", "xhigh") {
+	if !supportedEffortForProvider(account.ProviderBuild, "grok-4.6", "xhigh") ||
+		!supportedEffortForProvider(account.ProviderConsole, "grok-4.6", "xhigh") {
 		t.Fatal("grok-4.6 xhigh must remain available through Build and Console")
 	}
 	if SupportsReasoningEffort("grok-4.6", "none") || SupportsReasoningEffort("grok-4.6", "max") {
 		t.Fatal("grok-4.6 must not advertise none/max")
 	}
-	if SupportsReasoningEffortForProvider(account.ProviderConsole, "grok-4.20-0309-reasoning", "low") ||
-		!SupportsReasoningEffortForProvider(account.ProviderBuild, "grok-4.20-0309-reasoning", "low") {
+	if supportedEffortForProvider(account.ProviderConsole, "grok-4.20-0309-reasoning", "low") ||
+		!supportedEffortForProvider(account.ProviderBuild, "grok-4.20-0309-reasoning", "low") {
 		t.Fatal("grok-4.20 reasoning effort restriction must remain Console-specific")
 	}
 	if !SupportsReasoningForProvider(account.ProviderConsole, "grok-4.20-0309-reasoning") {
@@ -105,26 +105,13 @@ func TestParseReasoningModelAlias(t *testing.T) {
 	}
 }
 
-func TestReasoningAliasPublicIDs(t *testing.T) {
-	if got := ReasoningAliasPublicIDs("grok-4.5"); len(got) != 3 || got[0] != "grok-4.5-low" || got[2] != "grok-4.5-high" {
-		t.Fatalf("grok-4.5 aliases = %#v", got)
+// supportedEffortForProvider 在测试内基于 SupportedReasoningEffortsForProvider
+// 组装按档位查询,替代已删除的 SupportsReasoningEffortForProvider 便利封装。
+func supportedEffortForProvider(providerValue account.Provider, publicModel, effort string) bool {
+	for _, level := range SupportedReasoningEffortsForProvider(providerValue, publicModel) {
+		if level == effort {
+			return true
+		}
 	}
-	if got := ReasoningAliasPublicIDs("grok-4.6"); len(got) != 4 || got[0] != "grok-4.6-low" || got[3] != "grok-4.6-xhigh" {
-		t.Fatalf("grok-4.6 aliases = %#v", got)
-	}
-	if got := ReasoningAliasPublicIDs("Build/grok-4.3"); len(got) != 4 || got[0] != "grok-4.3-none" {
-		t.Fatalf("grok-4.3 aliases = %#v", got)
-	}
-	if got := ReasoningAliasPublicIDs("grok-build-0.1"); len(got) != 0 {
-		t.Fatalf("single-level model should not expand aliases: %#v", got)
-	}
-	if got := ReasoningAliasPublicIDsForProvider(account.ProviderConsole, "grok-4.20-0309-reasoning"); len(got) != 0 {
-		t.Fatalf("fixed Console reasoning model must not expand aliases: %#v", got)
-	}
-	if got := ReasoningAliasPublicIDsForProvider(account.ProviderBuild, "grok-4.20-0309-reasoning"); len(got) != 3 {
-		t.Fatalf("Console restriction leaked into Build aliases: %#v", got)
-	}
-	if got := ReasoningAliasPublicIDsForProvider(account.ProviderConsole, "grok-4.6"); len(got) != 4 || got[3] != "grok-4.6-xhigh" {
-		t.Fatalf("Console grok-4.6 aliases = %#v", got)
-	}
+	return false
 }

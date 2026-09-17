@@ -13,6 +13,7 @@ import (
 
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -171,7 +172,7 @@ func TestIdleTimeoutReadCloserClose(t *testing.T) {
 }
 
 func TestEgressTransportScopesIdleTimeoutToEventStreams(t *testing.T) {
-	manager := infraegress.NewManager(emptyEgressRepository{}, nil)
+	manager := infraegress.NewManagerWithLimits(emptyEgressRepository{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateBuildStreamIdleTimeout(30 * time.Second)
 	transport := &egressTransport{manager: manager, fallback: http.DefaultTransport}
@@ -214,7 +215,7 @@ func TestEgressTransportIdleTimeoutCancelsHTTP2BodyRead(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 
-	manager := infraegress.NewManager(emptyEgressRepository{}, nil)
+	manager := infraegress.NewManagerWithLimits(emptyEgressRepository{}, nil, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	manager.UpdateBuildStreamIdleTimeout(30 * time.Millisecond)
 	transport := &egressTransport{manager: manager, fallback: server.Client().Transport}

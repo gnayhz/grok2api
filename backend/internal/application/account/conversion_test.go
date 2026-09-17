@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -11,9 +12,9 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -44,8 +45,8 @@ func TestConvertWebAccountsToBuildIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &buildConversionAdapter{}
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
-	first, err := service.ConvertWebAccountsToBuild(ctx, []uint64{webAccount.ID})
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
+	first, err := service.ConvertWebAccountsToBuildWithStrategy(ctx, []uint64{webAccount.ID}, BuildConversionMissing, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestConvertWebAccountsToBuildIsIdempotent(t *testing.T) {
 		t.Fatalf("first conversion = %#v", first)
 	}
 	var secondProgress [][2]int
-	second, err := service.ConvertWebAccountsToBuildWithProgress(ctx, []uint64{webAccount.ID}, nil, func(completed, total int) error {
+	second, err := service.ConvertWebAccountsToBuildWithStrategy(ctx, []uint64{webAccount.ID}, BuildConversionMissing, nil, func(completed, total int) error {
 		secondProgress = append(secondProgress, [2]int{completed, total})
 		return nil
 	})
@@ -102,8 +103,8 @@ func TestConvertWebAccountsToBuildAllRefreshesLinkedCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &buildConversionAdapter{}
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
-	first, err := service.ConvertWebAccountsToBuild(ctx, []uint64{webAccount.ID})
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
+	first, err := service.ConvertWebAccountsToBuildWithStrategy(ctx, []uint64{webAccount.ID}, BuildConversionMissing, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,13 +163,13 @@ func TestConvertAllWebAccountsToBuildUsesUnlinkedPool(t *testing.T) {
 	firstWeb := createWeb("web-1", "web-source-1")
 	createWeb("web-2", "web-source-2")
 	adapter := &buildConversionAdapter{}
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
-	if _, err := service.ConvertWebAccountsToBuild(ctx, []uint64{firstWeb.ID}); err != nil {
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
+	if _, err := service.ConvertWebAccountsToBuildWithStrategy(ctx, []uint64{firstWeb.ID}, BuildConversionMissing, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	observed := make([]uint64, 0, 1)
 	progress := make([][2]int, 0, 2)
-	result, err := service.ConvertAllWebAccountsToBuildWithProgress(ctx, func(accountID uint64) error {
+	result, err := service.ConvertAllWebAccountsToBuildWithStrategy(ctx, BuildConversionMissing, func(accountID uint64) error {
 		observed = append(observed, accountID)
 		return nil
 	}, func(completed, total int) error {
@@ -184,7 +185,7 @@ func TestConvertAllWebAccountsToBuildUsesUnlinkedPool(t *testing.T) {
 	if len(progress) != 2 || progress[0] != [2]int{0, 1} || progress[1] != [2]int{1, 1} {
 		t.Fatalf("progress = %#v", progress)
 	}
-	empty, err := service.ConvertAllWebAccountsToBuild(ctx)
+	empty, err := service.ConvertAllWebAccountsToBuildWithStrategy(ctx, BuildConversionMissing, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,9 +213,9 @@ func TestConvertAllWebAccountsToBuildProcessesMoreThanLegacyLimitInBatches(t *te
 	}
 	repository := &conversionBatchRepository{total: totalAccounts, encryptedSSO: encryptedSSO}
 	adapter := &buildConversionAdapter{}
-	service := NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, memory.NewLockStore())
+	service := NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, memory.NewLockStore())
 	progress := make([][2]int, 0, totalAccounts+1)
-	result, err := service.ConvertAllWebAccountsToBuildWithProgress(context.Background(), nil, func(completed, total int) error {
+	result, err := service.ConvertAllWebAccountsToBuildWithStrategy(context.Background(), BuildConversionMissing, nil, func(completed, total int) error {
 		progress = append(progress, [2]int{completed, total})
 		return nil
 	})

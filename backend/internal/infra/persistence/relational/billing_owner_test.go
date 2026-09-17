@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"errors"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,8 +23,8 @@ func TestOfflineAuditOwnerReservationCannotBeExpiredByAnotherInstance(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			ownerA := keyapp.NewService("owner-a", NewClientKeyRepository(a), nil, nil, 120, 8, nil)
-			ownerB := keyapp.NewService("owner-b", NewClientKeyRepository(b), nil, nil, 120, 8, nil)
+			ownerA := keyapp.NewService("owner-a", NewClientKeyRepository(a), nil, nil, 120, 8, nil, security.RandomTokenSource{})
+			ownerB := keyapp.NewService("owner-b", NewClientKeyRepository(b), nil, nil, 120, 8, nil, security.RandomTokenSource{})
 			value := settlementRecord(key.ID, "offline-owner", 30)
 			if ok, err := ownerA.ReserveBilling(ctx, keyValue, value.EventID, 80, time.Hour); err != nil || !ok {
 				t.Fatalf("reserve=%v %v", ok, err)
@@ -71,7 +72,7 @@ func TestOfflineAuditOwnerReservationCannotBeExpiredByAnotherInstance(t *testing
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			restoredOwner := keyapp.NewService("owner-a", keys, nil, nil, 120, 8, nil)
+			restoredOwner := keyapp.NewService("owner-a", keys, nil, nil, 120, 8, nil, security.RandomTokenSource{})
 			restoredWriter := auditapp.NewService(NewAuditRepository(a), reopened, nil, 1, time.Millisecond)
 			restoredWriter.SetBillingObserver(restoredOwner)
 			if err := restoredWriter.Start(ctx); err != nil {

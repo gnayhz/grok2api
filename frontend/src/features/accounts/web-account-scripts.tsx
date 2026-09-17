@@ -2,10 +2,10 @@ import { Cake, Handshake, VenusAndMars, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Spinner } from "@/components/ui/spinner";
-import type { AccountTaskProgressDTO, WebAccountScriptActions } from "@/features/accounts/accounts-api";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/shared/ui/alert-dialog";
+import { Checkbox } from "@/shared/ui/checkbox";
+import { Spinner } from "@/shared/ui/spinner";
+import type { AccountTaskProgressDTO, WebAccountScriptActions } from "@/entities/account/account-api";
 import { cn } from "@/shared/lib/cn";
 
 type Props = {

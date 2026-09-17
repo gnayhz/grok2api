@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
@@ -33,8 +34,8 @@ func TestClearCooldownForceContract(t *testing.T) {
 	}
 	repo := relational.NewAccountRepository(database)
 	audits := relational.NewAuditRepository(database)
-	service := accountapp.NewService(repo, audits, nil, nil, nil, nil, nil)
-	handler := NewHandler(service, nil)
+	service := accountapp.NewService(repo, audits, nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
+	handler := newTestHandler(service, nil)
 
 	created, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderBuild, Name: "force", SourceKey: "force",

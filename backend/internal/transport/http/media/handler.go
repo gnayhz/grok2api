@@ -10,7 +10,8 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/httphelpers"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,14 +25,16 @@ func NewHandler(service *mediaapp.Service, importer *mediaapp.ImageInputImporter
 	return &Handler{service: service, importer: importer, ingestSlots: make(chan struct{}, ingestConcurrency)}
 }
 
-// RegisterPublic 注册使用不可猜测资源 ID 的公开图片读取与视频上传接收端点。
+// RegisterPublic 在已挂好就绪门的 /v1/media 分组上注册公开媒体端点:
+// 使用不可猜测资源 ID 的图片/视频读取与视频上传接收。
 // 上传 PUT 不使用客户端 API key：xAI 无法携带，票据本身即授权。
-func (h *Handler) RegisterPublic(router *gin.Engine) {
-	router.GET("/v1/media/images/:assetId", h.getImage)
-	router.HEAD("/v1/media/images/:assetId", h.getImage)
-	router.GET("/v1/media/videos/:assetId", h.getVideo)
-	router.HEAD("/v1/media/videos/:assetId", h.getVideo)
-	router.PUT("/v1/media/uploads/:token", h.putVideoUpload)
+// 路径相对分组前缀给出；调用方决定该分组还叠加哪些中间件。
+func (h *Handler) RegisterPublic(router *gin.RouterGroup) {
+	router.GET("/images/:assetId", h.getImage)
+	router.HEAD("/images/:assetId", h.getImage)
+	router.GET("/videos/:assetId", h.getVideo)
+	router.HEAD("/videos/:assetId", h.getVideo)
+	router.PUT("/uploads/:token", h.putVideoUpload)
 }
 
 // RegisterAdmin 注册管理端媒体列表和统计端点。
@@ -133,7 +136,7 @@ func (h *Handler) putVideoUpload(c *gin.Context) {
 }
 
 func (h *Handler) listImages(c *gin.Context) {
-	page, pageSize := parsePagination(c)
+	page, pageSize := httphelpers.Pagination(c)
 	assets, total, err := h.service.AdminListImages(c.Request.Context(), page, pageSize, c.Query("search"))
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "mediaListImagesFailed", "读取图片列表失败")
@@ -178,7 +181,7 @@ func (h *Handler) deleteImages(c *gin.Context) {
 }
 
 func (h *Handler) listVideos(c *gin.Context) {
-	page, pageSize := parsePagination(c)
+	page, pageSize := httphelpers.Pagination(c)
 	jobs, total, err := h.service.AdminListVideoJobs(c.Request.Context(), page, pageSize, c.Query("search"), c.Query("status"), repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))})
 	if errors.Is(err, mediaapp.ErrInvalidFilter) {
 		response.Error(c, http.StatusBadRequest, "invalidFilter", err.Error())
@@ -238,10 +241,4 @@ func (h *Handler) deleteVideos(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
-}
-
-func parsePagination(c *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	return repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
 }

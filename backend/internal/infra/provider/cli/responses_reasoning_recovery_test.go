@@ -14,9 +14,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestRecoverReasoningDecodeFailureRetriesSameUpstreamOnce(t *testing.T) {

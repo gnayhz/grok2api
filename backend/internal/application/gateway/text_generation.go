@@ -7,11 +7,11 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // textGeneration is owned by request orchestration until handoff, then by the
@@ -60,7 +60,7 @@ func (g *textGeneration) begin(credential accountdomain.Credential, quotaMode st
 	g.mergePhysical()
 	g.selected = ""
 	g.currentAccount, g.responseAbsent, g.absentOwnership = credential.ID, false, false
-	for _, fact := range infraegress.PhysicalObservations(g.ctx) {
+	for _, fact := range portphysical.PhysicalObservations(g.ctx) {
 		g.ordinalFloor = max(g.ordinalFloor, fact.Attempt.Ordinal)
 	}
 	g.accounts[credential.ID] = textGenerationAccount{name: credential.Name, provider: credential.Provider, quotaMode: quotaMode, snapshotVersion: snapshotVersion}
@@ -103,7 +103,7 @@ func (g *textGeneration) observeJSON(response *provider.Response, data []byte) {
 	if v == nil {
 		return
 	}
-	infraegress.ObservePhysicalPayload(g.ctx, v.identity.ID, data)
+	portphysical.ObservePhysicalPayload(g.ctx, v.identity.ID, data)
 	// Only a root protocol usage object is eligible; user/tool content is not.
 	if raw := jsonpeek.RootRawValue(data, "usage"); len(raw) > 0 {
 		if parsed := jsonpeek.TokenUsageObject(raw); parsed.Found {
@@ -111,7 +111,7 @@ func (g *textGeneration) observeJSON(response *provider.Response, data []byte) {
 		}
 	}
 	v.outcome = responsecheck.JSONGeneration(data)
-	infraegress.ObservePhysicalGeneration(g.ctx, v.identity.ID, v.outcome)
+	portphysical.ObservePhysicalGeneration(g.ctx, v.identity.ID, v.outcome)
 	v.responseID = jsonpeek.RootStringFieldScan(data, "id")
 }
 
@@ -137,7 +137,7 @@ func (g *textGeneration) mergePhysical() {
 	if g == nil {
 		return
 	}
-	for _, fact := range infraegress.PhysicalObservations(g.ctx) {
+	for _, fact := range portphysical.PhysicalObservations(g.ctx) {
 		v := g.entries[fact.Attempt.ID]
 		if v == nil && (fact.Usage.Found || fact.GenerationOutcome != "") {
 			v = &textGenerationAttempt{quotaOwner: g.accounts[fact.Attempt.AccountID], identity: fact.Attempt, status: fact.Status, outcome: "unconfirmed", quotaUnits: 1}

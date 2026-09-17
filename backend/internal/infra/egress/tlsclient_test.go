@@ -3,6 +3,7 @@ package egress
 import (
 	"bytes"
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"io"
 	"net/http"
 	"strings"
@@ -27,7 +28,7 @@ func TestDialWebSocketPoolModeRetriesBoundedOnSafeFailure(t *testing.T) {
 		ID: 1, Name: "pool-ws", Enabled: true, ProxyPool: true, RotationEnabled: true, Health: 1,
 		EncryptedProxyURL: encryptedProxy(t, cipher, "socks5://127.0.0.1:1"),
 	}}
-	manager := NewManager(repository, cipher)
+	manager := NewManagerWithLimits(repository, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "acct")
 	if err != nil || lease == nil {

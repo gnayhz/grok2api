@@ -1,9 +1,9 @@
 import { AlertCircle, Inbox } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import { TableCell, TableRow } from "@/components/ui/table";
+import { Button } from "@/shared/ui/button";
+import { Spinner } from "@/shared/ui/spinner";
+import { TableCell, TableRow } from "@/shared/ui/table";
 import { cn } from "@/shared/lib/cn";
 
 export function LoadingState({ className }: { className?: string }) {

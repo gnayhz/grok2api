@@ -33,9 +33,13 @@ test("key editor preserves restricted-empty access and patches only changed fiel
   const { createRoot } = await import("react-dom/client");
   const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
   const { i18n } = await import("@/shared/i18n");
+  // keys 文案已迁 feature(R20):测试直接装载本 feature 的 en bundle,
+  // 保持 features 不依赖 app 的方向约束。
+  const { clientkeysEn } = await import("./keys-translations");
+  i18n.addResourceBundle("en", "translation", { keys: clientkeysEn }, true, true);
   await i18n.changeLanguage("en");
   const { ClientKeysPage } = await import("./client-keys-page.tsx");
-  const { TooltipProvider } = await import("@/components/ui/tooltip");
+  const { TooltipProvider } = await import("@/shared/ui/tooltip");
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
   const key = { id: "17", name: "restricted key", prefix: "fixture", enabled: true,

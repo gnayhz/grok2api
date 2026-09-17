@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"sync"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func newSharedReplicaManagers(t *testing.T) (*Manager, *Manager, *sharedCursorRe
 	repo := &sharedCursorRepo{}
 	repo.pool = map[uint64]domain.Pool{}
 	repo.member = map[uint64][]domain.Node{}
-	return NewManager(repo, cipher), NewManager(repo, cipher), repo
+	return NewManagerWithLimits(repo, cipher, netbudget.Limits{}), NewManagerWithLimits(repo, cipher, netbudget.Limits{}), repo
 }
 
 // 节点轮询游标:热游标进程内,持久游标 CAS 落共享库。副本 A 推进后,

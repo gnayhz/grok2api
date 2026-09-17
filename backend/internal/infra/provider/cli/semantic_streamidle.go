@@ -66,13 +66,6 @@ type semanticIdleReadCloser struct {
 	closeErr  error
 }
 
-func wrapBuildSemanticIdle(body io.ReadCloser, idle time.Duration) io.ReadCloser {
-	if body == nil || idle <= 0 {
-		return body
-	}
-	return &semanticIdleReadCloser{inner: body, idle: idle, remaining: idle}
-}
-
 func newBuildResponseStream(ctx context.Context, body io.ReadCloser, idle time.Duration) *responseflow.Stream {
 	if idle <= 0 {
 		return responsecheck.Stream(responseflow.New(body, responsebuffer.FromContext(ctx)))

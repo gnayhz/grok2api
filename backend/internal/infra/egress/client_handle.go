@@ -8,9 +8,10 @@ import (
 	"sync"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
 )
 
-var ErrClientRetired = errors.New("egress client binding retired")
+var ErrClientRetired = physical.ErrClientRetired
 
 // clientHandle keeps a retired client's budget until its last request ends.
 // Closing a cache entry only closes idle connections; active streams retain

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func TestRefreshReuseKillsTokenFamily(t *testing.T) {
 	defer backdoor.Close()
 
 	sessions := relational.NewAdminSessionRepository(database)
-	service := NewService(relational.NewAdminRepository(database), sessions, security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+	service := NewService(relational.NewAdminRepository(database), sessions, security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 	ctx := context.Background()
 	if err := service.Bootstrap(ctx, "admin", "password123"); err != nil {
 		t.Fatal(err)
@@ -61,7 +62,7 @@ func TestRefreshReuseKillsTokenFamily(t *testing.T) {
 	// 把该会话 last_used_at 回拨到宽限窗外，模拟窃取者轮换后受害者
 	// 超窗呈上旧 token。
 	backdate := time.Now().UTC().Add(-2 * refreshRotationGrace)
-	if _, err := backdoor.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE refresh_token_hash = ?", backdate, security.HashToken(survived.RefreshToken)); err != nil {
+	if _, err := backdoor.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE refresh_token_hash = ?", backdate, tokenhash.HashToken(survived.RefreshToken)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,7 +73,7 @@ func TestRefreshReuseKillsTokenFamily(t *testing.T) {
 	if _, err := service.Refresh(ctx, survived.RefreshToken); !errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("late reuse must kill the family (newest token died): %v", err)
 	}
-	if _, err := sessions.GetByTokenHash(ctx, security.HashToken(survived.RefreshToken)); !errors.Is(err, repository.ErrNotFound) {
+	if _, err := sessions.GetByTokenHash(ctx, tokenhash.HashToken(survived.RefreshToken)); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("session row must be revoked on late reuse, got err=%v", err)
 	}
 }

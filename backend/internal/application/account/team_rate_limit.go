@@ -2,11 +2,13 @@ package account
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokenhash"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // TeamModelRateLimit is an observed upstream throttle, independent of account
@@ -44,7 +46,7 @@ func rateLimitTeamFingerprint(teamID string) string {
 	if teamID == "" {
 		return ""
 	}
-	return security.HashToken(teamID)
+	return tokenhash.HashToken(teamID)
 }
 
 func shortTeamFingerprint(value string) string {
@@ -54,33 +56,45 @@ func shortTeamFingerprint(value string) string {
 	return value[:12]
 }
 
+// teamRateLimitTracker 拥有 Team 限流观察的全部可变状态:互斥、活跃标记、
+// 下次过期、模型窗口表与身份映射。Service 只经组件方法访问。
+type teamRateLimitTracker struct {
+	mu         sync.Mutex
+	active     atomic.Bool
+	nextExpiry atomic.Int64
+	limits     map[string]TeamModelRateLimit
+	teams      map[teamRateLimitIdentity]teamRateLimitObservation
+}
+
+func newTeamRateLimitTracker() *teamRateLimitTracker { return &teamRateLimitTracker{} }
+
 // ActiveTeamModelRateLimit checks the current material and its current team.
 // This process-local send throttle is not a replacement for shared quota state.
-func (s *Service) ActiveTeamModelRateLimit(credential accountdomain.Credential, upstreamModel string, now time.Time) (TeamModelRateLimit, bool) {
-	if !s.rateLimitActive.Load() {
+func (t *teamRateLimitTracker) lookupActiveTeamModelRateLimit(credential accountdomain.Credential, upstreamModel string, now time.Time) (TeamModelRateLimit, bool) {
+	if !t.active.Load() {
 		return TeamModelRateLimit{}, false
 	}
 	identity := teamLimitIdentity(credential)
 	credentialFingerprint := identity.LocalTeam
-	s.rateLimitMu.Lock()
-	defer s.rateLimitMu.Unlock()
-	if !s.rateLimitActive.Load() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.active.Load() {
 		return TeamModelRateLimit{}, false
 	}
-	nextExpiry := s.rateLimitNextExpiry.Load()
+	nextExpiry := t.nextExpiry.Load()
 	if nextExpiry <= 0 || now.UnixNano() >= nextExpiry {
-		s.pruneTeamModelRateLimitsLocked(now)
-		if len(s.rateLimits) == 0 {
+		t.pruneTeamModelRateLimitsLocked(now)
+		if len(t.limits) == 0 {
 			return TeamModelRateLimit{}, false
 		}
 	}
 	// Check the TeamID observed in an upstream response first, then current
 	// credential metadata. The fallback prevents a historical observation from
 	// permanently masking a later server-side team reassignment.
-	observation := s.rateLimitTeams[identity]
+	observation := t.teams[identity]
 	observedFingerprint := observation.Fingerprint
 	if observedFingerprint != "" && !now.Before(observation.ExpiresAt) {
-		delete(s.rateLimitTeams, identity)
+		delete(t.teams, identity)
 		observedFingerprint = ""
 	}
 	teamFingerprints := [2]string{observedFingerprint, credentialFingerprint}
@@ -94,13 +108,13 @@ func (s *Service) ActiveTeamModelRateLimit(credential accountdomain.Credential, 
 			continue
 		}
 		key := teamModelRateLimitKey(credential.Provider, teamFingerprint, upstreamModel)
-		value, ok := s.rateLimits[key]
+		value, ok := t.limits[key]
 		if !ok {
 			continue
 		}
 		if !now.Before(value.Until) {
-			delete(s.rateLimits, key)
-			s.refreshTeamModelRateLimitStateLocked()
+			delete(t.limits, key)
+			t.refreshTeamModelRateLimitStateLocked()
 			continue
 		}
 		return value, true
@@ -108,45 +122,45 @@ func (s *Service) ActiveTeamModelRateLimit(credential accountdomain.Credential, 
 	return TeamModelRateLimit{}, false
 }
 
-func (s *Service) pruneTeamModelRateLimitsLocked(now time.Time) {
-	for key, value := range s.rateLimits {
+func (t *teamRateLimitTracker) pruneTeamModelRateLimitsLocked(now time.Time) {
+	for key, value := range t.limits {
 		if !now.Before(value.Until) {
-			delete(s.rateLimits, key)
+			delete(t.limits, key)
 		}
 	}
-	for identity, observation := range s.rateLimitTeams {
+	for identity, observation := range t.teams {
 		if !now.Before(observation.ExpiresAt) {
-			delete(s.rateLimitTeams, identity)
+			delete(t.teams, identity)
 		}
 	}
-	s.refreshTeamModelRateLimitStateLocked()
+	t.refreshTeamModelRateLimitStateLocked()
 }
 
-func (s *Service) refreshTeamModelRateLimitStateLocked() {
-	if len(s.rateLimits) == 0 {
-		clear(s.rateLimitTeams)
-		s.rateLimitNextExpiry.Store(0)
-		s.rateLimitActive.Store(false)
+func (t *teamRateLimitTracker) refreshTeamModelRateLimitStateLocked() {
+	if len(t.limits) == 0 {
+		clear(t.teams)
+		t.nextExpiry.Store(0)
+		t.active.Store(false)
 		return
 	}
 	var nextExpiry time.Time
-	for _, value := range s.rateLimits {
+	for _, value := range t.limits {
 		if nextExpiry.IsZero() || value.Until.Before(nextExpiry) {
 			nextExpiry = value.Until
 		}
 	}
-	for _, observation := range s.rateLimitTeams {
+	for _, observation := range t.teams {
 		if nextExpiry.IsZero() || observation.ExpiresAt.Before(nextExpiry) {
 			nextExpiry = observation.ExpiresAt
 		}
 	}
-	s.rateLimitNextExpiry.Store(nextExpiry.UnixNano())
-	s.rateLimitActive.Store(true)
+	t.nextExpiry.Store(nextExpiry.UnixNano())
+	t.active.Store(true)
 }
 
 // ObserveTeamModelRateLimit accepts Provider facts for one attempted material.
 // RPS/RPM defaults, monotonic expiry and identity binding are owned here.
-func (s *Service) ObserveTeamModelRateLimit(credential accountdomain.Credential, upstreamModel string, metadata provider.RateLimitMetadata, now time.Time) (TeamModelRateLimit, bool) {
+func (t *teamRateLimitTracker) recordTeamModelRateLimitObservation(credential accountdomain.Credential, upstreamModel string, metadata provider.RateLimitMetadata, now time.Time) (TeamModelRateLimit, bool) {
 	teamID := strings.TrimSpace(metadata.TeamID)
 	if teamID == "" {
 		teamID = strings.TrimSpace(credential.TeamID)
@@ -168,42 +182,52 @@ func (s *Service) ObserveTeamModelRateLimit(credential accountdomain.Credential,
 	value := TeamModelRateLimit{TeamFingerprint: shortTeamFingerprint(teamFingerprint), Until: now.Add(retryAfter)}
 	key := teamModelRateLimitKey(credential.Provider, teamFingerprint, upstreamModel)
 	until := now.Add(retryAfter)
-	s.rateLimitMu.Lock()
-	s.rateLimitActive.Store(true)
-	if s.rateLimits == nil {
-		s.rateLimits = make(map[string]TeamModelRateLimit)
+	t.mu.Lock()
+	t.active.Store(true)
+	if t.limits == nil {
+		t.limits = make(map[string]TeamModelRateLimit)
 	}
-	if s.rateLimitTeams == nil {
-		s.rateLimitTeams = make(map[teamRateLimitIdentity]teamRateLimitObservation)
+	if t.teams == nil {
+		t.teams = make(map[teamRateLimitIdentity]teamRateLimitObservation)
 	}
 
-	for existingKey, value := range s.rateLimits {
+	for existingKey, value := range t.limits {
 		if !now.Before(value.Until) {
-			delete(s.rateLimits, existingKey)
+			delete(t.limits, existingKey)
 		}
 	}
-	for identity, observation := range s.rateLimitTeams {
+	for identity, observation := range t.teams {
 		if !now.Before(observation.ExpiresAt) {
-			delete(s.rateLimitTeams, identity)
+			delete(t.teams, identity)
 		}
 	}
-	if current, ok := s.rateLimits[key]; ok && !current.Until.Before(until) {
+	if current, ok := t.limits[key]; ok && !current.Until.Before(until) {
 		value = current
 	} else {
-		s.rateLimits[key] = value
+		t.limits[key] = value
 	}
 	if teamFingerprint != identity.LocalTeam {
 		expiresAt := value.Until
 		// Observing the same team on another model must not shorten the
 		// identity mapping while its earlier model window is still active.
-		if previous := s.rateLimitTeams[identity]; previous.Fingerprint == teamFingerprint && previous.ExpiresAt.After(expiresAt) {
+		if previous := t.teams[identity]; previous.Fingerprint == teamFingerprint && previous.ExpiresAt.After(expiresAt) {
 			expiresAt = previous.ExpiresAt
 		}
-		s.rateLimitTeams[identity] = teamRateLimitObservation{Fingerprint: teamFingerprint, ExpiresAt: expiresAt}
+		t.teams[identity] = teamRateLimitObservation{Fingerprint: teamFingerprint, ExpiresAt: expiresAt}
 	} else {
-		delete(s.rateLimitTeams, identity)
+		delete(t.teams, identity)
 	}
-	s.refreshTeamModelRateLimitStateLocked()
-	s.rateLimitMu.Unlock()
+	t.refreshTeamModelRateLimitStateLocked()
+	t.mu.Unlock()
 	return value, true
+}
+
+// Service 导出面保持不变:经组合根注入的 Execution 能力继续使用这两个方法,
+// 状态与锁只属于 teamRateLimitTracker。
+func (s *Service) ActiveTeamModelRateLimit(credential accountdomain.Credential, upstreamModel string, now time.Time) (TeamModelRateLimit, bool) {
+	return s.rateLimiter.lookupActiveTeamModelRateLimit(credential, upstreamModel, now)
+}
+
+func (s *Service) ObserveTeamModelRateLimit(credential accountdomain.Credential, upstreamModel string, metadata provider.RateLimitMetadata, now time.Time) (TeamModelRateLimit, bool) {
+	return s.rateLimiter.recordTeamModelRateLimitObservation(credential, upstreamModel, metadata, now)
 }

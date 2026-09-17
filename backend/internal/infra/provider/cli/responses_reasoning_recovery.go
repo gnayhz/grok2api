@@ -8,8 +8,8 @@ import (
 
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type reasoningRecoveryOutcome struct {

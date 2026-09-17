@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"os"
 	"strconv"
 	"sync"
@@ -13,7 +15,6 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 )
 
@@ -75,9 +76,9 @@ func TestAccountWebProfileRedisLockOwnsCommitAcrossSQL(t *testing.T) {
 					var once sync.Once
 					finish := func() { once.Do(func() { close(adapter.release) }) }
 					defer finish()
-					registry := provider.NewRegistry(adapter)
-					first := accountapp.NewService(ra, nil, nil, nil, registry, nil, lockA)
-					second := accountapp.NewService(rb, nil, nil, nil, registry, nil, lockB)
+					registry := providerimpl.NewRegistry(adapter)
+					first := accountapp.NewService(ra, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lockA)
+					second := accountapp.NewService(rb, nil, nil, nil, registry, nil, security.RandomTokenSource{}, nil, nil, lockB)
 					ownerCtx, cancel := context.WithCancel(ctx)
 					defer cancel()
 					owner := make(chan error, 1)

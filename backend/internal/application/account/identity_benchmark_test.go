@@ -3,11 +3,13 @@ package account
 import (
 	"context"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"testing"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type identityCostAdapter struct{}
@@ -34,7 +36,7 @@ func BenchmarkAccountIdentitySyncCost(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				s := NewService(repo, nil, nil, nil, provider.NewRegistry(identityCostAdapter{}), nil, nil)
+				s := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(identityCostAdapter{}), nil, security.RandomTokenSource{}, nil, nil, nil)
 				b.ReportAllocs()
 				b.ResetTimer()
 				for b.Loop() {

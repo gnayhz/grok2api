@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,7 +47,7 @@ func TestEgressSoakResourceStability(t *testing.T) {
 		domain.TrafficClassInference: {Mode: domain.RoutingTargetPool, PoolID: 1},
 	}
 	repo.config = config
-	manager := NewManager(repo, cipher)
+	manager := NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	nodeA := domain.Node{ID: 10, Name: "soak-a", Enabled: true, Health: 1}
 	nodeB := domain.Node{ID: 20, Name: "soak-b", Enabled: true, Health: 1}

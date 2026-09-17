@@ -71,7 +71,7 @@ func TestAuthWriteFailuresReturnUnavailableWithoutCookies(t *testing.T) {
 				t.Fatal(err)
 			}
 			sessions := &authSessionFault{AdminSessionRepository: relational.NewAdminSessionRepository(db)}
-			svc := adminapp.NewService(authPasswordFault{relational.NewAdminRepository(db)}, sessions, security.NewTokenService("12345678901234567890123456789012"), time.Minute, time.Hour)
+			svc := adminapp.NewService(authPasswordFault{relational.NewAdminRepository(db)}, sessions, security.NewTokenService("12345678901234567890123456789012"), security.NewBCryptPasswordHasher(), security.RandomTokenSource{}, time.Minute, time.Hour)
 			if err := svc.Bootstrap(ctx, "admin", "original-password"); err != nil {
 				t.Fatal(err)
 			}

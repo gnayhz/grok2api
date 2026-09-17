@@ -15,12 +15,11 @@ import (
 // round-trip and allocation cost of running each provider-wide loader for one
 // selected account. Column lists are shared with the cached routing projection.
 type routingClaimRow struct {
-	Account         accountModel                 `gorm:"embedded"`
-	Material        accountCredentialModel       `gorm:"embedded;embeddedPrefix:material_"`
-	Profile         webAccountProfileModel       `gorm:"embedded;embeddedPrefix:profile_"`
-	Billing         billingModel                 `gorm:"embedded;embeddedPrefix:billing_"`
-	Recovery        quotaRecoveryModel           `gorm:"embedded;embeddedPrefix:recovery_"`
-	EgressBlock     accountEgressLeaseBlockModel `gorm:"embedded;embeddedPrefix:block_"`
+	Account         accountModel           `gorm:"embedded"`
+	Material        accountCredentialModel `gorm:"embedded;embeddedPrefix:material_"`
+	Profile         webAccountProfileModel `gorm:"embedded;embeddedPrefix:profile_"`
+	Billing         billingModel           `gorm:"embedded;embeddedPrefix:billing_"`
+	Recovery        quotaRecoveryModel     `gorm:"embedded;embeddedPrefix:recovery_"`
 	LinkedSource    string
 	LinkedIdentity  string
 	CapabilityKnown bool
@@ -43,7 +42,6 @@ var routingClaimColumns = strings.Join([]string{
 	routingAliasedColumns("profile", "profile_", []string{"account_id", "tier", "synced_at", "nsfw_enabled_at", "terms_accepted_at", "terms_accepted_version", "birth_date_set_at", "egress_identity"}),
 	routingAliasedColumns("billing", "billing_", routingBillingColumns),
 	routingAliasedColumns("recovery", "recovery_", []string{"account_id", "kind", "status", "confirmed_used", "confirmed_limit", "exhausted_at", "next_probe_at", "last_confirmed_at", "updated_at"}),
-	routingAliasedColumns("block", "block_", []string{"account_id", "node_id", "reason", "cooldown_until", "updated_at"}),
 }, ", ")
 
 // GetRoutingCandidate is a new physical claim's consistent view. It never uses
@@ -87,7 +85,6 @@ func (r *AccountRepository) readRoutingClaim(ctx context.Context, id uint64, pro
 		Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = provider_accounts.id").
 		Joins("LEFT JOIN account_billing_snapshots AS billing ON billing.account_id = provider_accounts.id").
 		Joins("LEFT JOIN account_quota_recovery AS recovery ON recovery.account_id = provider_accounts.id").
-		Joins("LEFT JOIN account_egress_lease_blocks AS block ON block.account_id = provider_accounts.id AND block.node_id = provider_accounts.egress_node_id AND block.cooldown_until > ?", now).
 		Where("provider_accounts.id = ? AND provider_accounts.provider = ? AND provider_accounts.enabled = TRUE AND provider_accounts.auth_status = ?", id, provider, account.AuthStatusActive)
 	if provider == account.ProviderBuild || provider == account.ProviderConsole {
 		link := "account_provider_links"
@@ -125,10 +122,6 @@ func (r *AccountRepository) readRoutingClaim(ctx context.Context, id uint64, pro
 		recovery := quotaRecoveryDomain(row.Recovery)
 		result.QuotaRecovery = &recovery
 	}
-	if row.EgressBlock.AccountID != 0 {
-		block := egressLeaseBlockFromModel(row.EgressBlock)
-		result.EgressLeaseBlock = &block
-	}
 	sharedSuper := !row.HasBindings && row.SupportsModel && account.IsBuildSuper(result.Credential, result.Billing)
 	if !row.HasBindings && !row.SupportsModel && provider == account.ProviderBuild && strings.TrimSpace(model) != "" && account.IsBuildSuper(result.Credential, result.Billing) {
 		// Only an unbound Super account missing its own model capability needs
@@ -144,7 +137,7 @@ func (r *AccountRepository) readRoutingClaim(ctx context.Context, id uint64, pro
 		}
 		sharedSuper = len(ids) > 0
 	}
-	result.ModelCapabilityKnown, result.SupportsModel = routingModelCapability(provider, mode, row.HasBindings, sharedSuper, result.Credential, result.Billing, row.CapabilityKnown, row.SupportsModel)
+	result.ModelCapabilityKnown, result.SupportsModel = account.RoutingModelCapability(provider, mode, row.HasBindings, sharedSuper, result.Credential, result.Billing, row.CapabilityKnown, row.SupportsModel)
 	windows, err := r.getRoutingQuotaWindows(ctx, provider, mode, []account.Credential{result.Credential}, id)
 	if err != nil {
 		return account.RoutingCandidate{}, err
@@ -166,14 +159,6 @@ func (r *AccountRepository) readRoutingClaim(ctx context.Context, id uint64, pro
 		}
 	}
 	return result, nil
-}
-
-func routingModelCapability(provider account.Provider, quotaMode string, bound, sharedSuper bool, value account.Credential, billing *account.Billing, known, supported bool) (bool, bool) {
-	static := (provider == account.ProviderConsole && strings.TrimSpace(quotaMode) != "") || (provider == account.ProviderWeb && account.IsWebImagineQuotaMode(quotaMode))
-	if static || bound || (sharedSuper && account.IsBuildSuper(value, billing)) {
-		return true, true
-	}
-	return known, supported
 }
 
 func routingAccountFilter(column string, accountID uint64) func(*gorm.DB) *gorm.DB {

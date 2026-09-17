@@ -6,10 +6,10 @@ import (
 	"errors"
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -121,7 +121,7 @@ func TestCredentialRefreshCallsOAuthAndPersistsRotationEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := accountapp.NewService(repository, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+	service := accountapp.NewService(repository, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	refreshed, err := service.EnsureCredential(ctx, credential, true)
 	if err != nil {
 		t.Fatal(err)
@@ -215,8 +215,8 @@ func TestNewAdapterOAuthUserAgentFallsBackToRecommended(t *testing.T) {
 		t.Fatal(requestErr)
 	}
 	adapter.oauth.applyUserAgent(request)
-	if got := request.Header.Get("User-Agent"); got != config.RecommendedBuildUserAgent {
-		t.Fatalf("fallback user agent = %q, want %q", got, config.RecommendedBuildUserAgent)
+	if got := request.Header.Get("User-Agent"); got != provider.RecommendedBuildUserAgent {
+		t.Fatalf("fallback user agent = %q, want %q", got, provider.RecommendedBuildUserAgent)
 	}
 
 	adapter.UpdateConfig(Config{ClientVersion: "1.0.4", UserAgent: "grok-shell/0.2.200 (macos; aarch64)"})
@@ -272,7 +272,7 @@ func TestOAuthRefreshClassifiesPermanentAndTransientFailures(t *testing.T) {
 			})}
 			client := newOAuthClient(httpClient, func() string { return "0.2.111" }, func() string { return "grok-shell/0.2.111 (linux; x86_64)" })
 			client.tokenURL = "https://auth.x.ai/oauth2/token"
-			_, err := client.refresh(context.Background(), "refresh")
+			_, err := client.refreshWithClientID(context.Background(), "refresh", "")
 			var refreshErr *provider.CredentialRefreshError
 			if !errors.As(err, &refreshErr) || refreshErr.Status != test.status || refreshErr.Permanent != test.permanent || refreshErr.Code != test.code || refreshErr.Message != test.message {
 				t.Fatalf("error = %#v", err)
@@ -295,7 +295,7 @@ func TestOAuthRefreshTreatsMalformedSuccessAsRetryable(t *testing.T) {
 		return oauthResponse(http.StatusOK, `{"expires_in":3600}`), nil
 	})}
 	client := newOAuthClient(httpClient, nil, nil)
-	_, err := client.refresh(context.Background(), "refresh")
+	_, err := client.refreshWithClientID(context.Background(), "refresh", "")
 	var refreshErr *provider.CredentialRefreshError
 	if !errors.As(err, &refreshErr) || refreshErr.Code != "missing_access_token" || refreshErr.Permanent {
 		t.Fatalf("error = %#v", err)
@@ -386,7 +386,7 @@ func TestOAuthInFlightCompletionKeepsImportedCredential(t *testing.T) {
 			if mode == "cancel_after_response" {
 				adapter.oauth.http.Transport = cancelOAuthBodyTransport{base: server.Client().Transport, cancel: cancel}
 			}
-			service := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
+			service := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 			type outcome struct {
 				credential accountdomain.Credential
 				err        error

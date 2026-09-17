@@ -56,7 +56,7 @@ func (r ProbeMeasurement) TaskResult() ProbeTaskResult {
 func ProbeIdentityMatches(actual attemptmeta.Identity, accountID, nodeID, epoch uint64) bool {
 	return actual.ID != "" && actual.RuleVersion != "" && actual.Model != "" && actual.Provider != "" &&
 		actual.AccountID == accountID && actual.Path.NodeID == nodeID && actual.Path.Epoch == epoch && !actual.Path.Rotating &&
-		(actual.Path.Status == attemptmeta.PathRegistered || actual.Path.Status == attemptmeta.PathVerified)
+		actual.Path.Status == attemptmeta.PathRegistered
 }
 
 type ProbeIdentity struct {

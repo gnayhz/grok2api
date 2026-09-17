@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { cn } from "@/shared/lib/cn";
 import { auditResult } from "./audit-presentation";
-import type { AuditDTO } from "./request-audits-api";
+import type { AuditDTO } from "@/entities/audit/audit-api";
 
 export function AuditResultBadge({ audit, className }: {
   audit: Pick<AuditDTO, "statusCode" | "errorCode">;

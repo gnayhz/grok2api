@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/application/selector"
 	"sync"
 	"time"
 
@@ -10,10 +11,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
+	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // deliveryPlan freezes the metadata needed after handoff. It deliberately does
@@ -43,12 +44,12 @@ type deliverySession struct {
 	plan               deliveryPlan
 	response           *provider.Response
 	credential         accountdomain.Credential
-	lease              *accountLease
+	lease              *selector.Lease
 	admission          *admission
 	firstToken         *firstTokenTimer
 	timing             *generationTiming
 	attempts           *failureAttemptRecorder
-	egressTrace        *infraegress.Trace
+	egressTrace        *portphysical.Trace
 	finishGuardOutcome func(bool)
 	once               sync.Once
 	deliveryMu         sync.Mutex
@@ -110,10 +111,10 @@ func (d *deliverySession) finalize(usage Usage, responseID, errorCode string) {
 				qualityReceipt = "committed"
 			}
 		}
-		d.lease.completeSelectorObservation(generationSucceeded)
+		d.lease.CompleteSelectorObservation(generationSucceeded)
 		d.lease.Release()
 		if usage.Reported {
-			infraegress.ObservePhysicalUsage(d.physicalCtx, d.response.Attempt.ID, physicalUsage(usage))
+			portphysical.ObservePhysicalUsage(d.physicalCtx, d.response.Attempt.ID, physicalUsage(usage))
 		}
 		physicalReceipt := s.finishPhysicalReceipt(d.physicalCtx)
 		if d.plan.guardEnabled {
@@ -258,7 +259,7 @@ func (d *deliverySession) finalize(usage Usage, responseID, errorCode string) {
 
 func (d *deliverySession) result(upstreamStartedAt time.Time) *Result {
 	d.response.Body = &firstByteReadCloser{ReadCloser: d.response.Body, mark: d.timing.markFirstBody}
-	d.response.Body = d.lease.ownBody(d.response.Body)
+	d.response.Body = d.lease.OwnBody(d.response.Body)
 	stopRelease := context.AfterFunc(d.ctx, d.cancelDelivery)
 	finalize := func(usage Usage, responseID, code string) {
 		stopRelease()
@@ -272,7 +273,7 @@ func (d *deliverySession) result(upstreamStartedAt time.Time) *Result {
 		BeginDelivery:    d.beginDelivery,
 		CommitDelivery:   d.claimDelivery,
 		CommitCompletion: d.completionCommitter(),
-		Body:             &finalizingBody{budget: responsebuffer.FromContext(d.ctx), ReadCloser: &admissionBody{ReadCloser: d.response.Body, commit: d.claimDelivery}, finalize: func() { finalize(Usage{}, "", "stream_closed") }},
+		Body:             &finalizingBody{budget: responsebuffer.FromContext(d.ctx), ReadCloser: selector.NewAdmissionBody(d.response.Body, d.claimDelivery), finalize: func() { finalize(Usage{}, "", "stream_closed") }},
 		MarkFirstToken:   markFirstToken, RecordDelivery: d.recordDelivery, Finalize: finalize,
 		RecordStreamFailure: func(diagnostic StreamFailureDiagnostic) {
 			d.attempts.captureStreamFailure(d.credential, upstreamStartedAt, d.response, diagnostic)

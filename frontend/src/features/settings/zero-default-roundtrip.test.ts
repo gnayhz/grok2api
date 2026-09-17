@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it, before } from "node:test";
-import type { SettingsConfigDTO } from "@/features/settings/settings-api";
+import type { SettingsConfigDTO } from "@/entities/settings/settings-api";
 
-let model: typeof import("./settings-model.ts");
+let model: typeof import("@/entities/settings/settings-form.ts");
 
 before(async () => {
   if (typeof (globalThis as Record<string, unknown>).window === "undefined") {
     (globalThis as Record<string, unknown>).window = { location: { origin: "http://127.0.0.1:3000" } };
   }
-  model = await import("./settings-model.ts");
+  model = await import("@/entities/settings/settings-form.ts");
 });
 
 type RetryKey = "accountCooldown" | "evidenceTimeout" | "createdTimeout" | "idleAccountCooldown";

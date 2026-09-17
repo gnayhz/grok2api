@@ -24,16 +24,16 @@ import { memo, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
 	Dialog,
 	DialogHeader,
 	DialogTitle,
-} from "@/components/ui/dialog";
-import { OperationsDialogContent } from "@/features/operations/operations-ui";
-import { Input } from "@/components/ui/input";
-import { Spinner } from "@/components/ui/spinner";
+} from "@/shared/ui/dialog";
+import { OperationsDialogContent } from "@/shared/ui/operations";
+import { Input } from "@/shared/ui/input";
+import { Spinner } from "@/shared/ui/spinner";
 import {
 	Table,
 	TableBody,
@@ -41,10 +41,10 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
-} from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { listAllAccounts } from "@/features/accounts/accounts-api";
-import { listAllEgressNodes } from "@/features/settings/settings-api";
+} from "@/shared/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { listAllAccounts } from "@/entities/account/account-api";
+import { listAllEgressNodes } from "@/entities/egress/egress-api";
 import { Pagination } from "@/shared/components/pagination";
 import { cn } from "@/shared/lib/cn";
 
@@ -53,8 +53,8 @@ import {
 	fetchQualityProbes,
 	fetchQualitySettings,
 	type QualityProbeTask,
-} from "./quality-api";
-import { useNow } from "./quality-hooks";
+} from "@/entities/guard/quality-api";
+import { useNow } from "@/shared/lib/use-now";
 import {
 	QualityAccountReference,
 	QualityExitReference,

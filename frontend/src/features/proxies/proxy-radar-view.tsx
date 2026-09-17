@@ -14,10 +14,10 @@ import {
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { useNow } from "@/features/guard/quality-hooks";
-import { nodeCondition } from "@/features/operations/operations-data";
-import { useOperationsNodes, useOperationsPools } from "@/features/operations/operations-queries";
+import { Badge } from "@/shared/ui/badge";
+import { useNow } from "@/shared/lib/use-now";
+import { nodeCondition } from "@/entities/egress/node-condition";
+
 import {
 	getEgressRoutingStats,
 	listEgressSources,
@@ -25,16 +25,17 @@ import {
 	type EgressPoolDTO,
 	type EgressRoutingScope,
 	type EgressTrafficClass,
-} from "@/features/settings/settings-api";
+} from "@/entities/egress/egress-api";
 import { cn } from "@/shared/lib/cn";
 
-import { getNetworkRuntime } from "./network-api";
+import { getNetworkRuntime } from "@/entities/egress/network-runtime-api";
 import {
 	routingScopeLabelKeys,
 	trafficClassLabelKeys,
 } from "./operations-shared";
 import { formatTimeAgo } from "./proxy-format";
 import { ProxyRouteSimulator } from "./proxy-route-simulator";
+import { useEgressNodes, useEgressPools } from "@/entities/egress/egress-queries";
 
 export function ProxyRadarView({
 	onNavigateTab,
@@ -42,8 +43,8 @@ export function ProxyRadarView({
 	onNavigateTab: (tab: "radar" | "nodes" | "pools" | "routing", search?: string) => void;
 }) {
 	const { t, i18n } = useTranslation();
-	const nodesQuery = useOperationsNodes();
-	const poolsQuery = useOperationsPools();
+	const nodesQuery = useEgressNodes();
+	const poolsQuery = useEgressPools();
 	const now = useNow(10_000);
 
 	const sourcesQuery = useQuery({

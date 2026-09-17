@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func TestAdminEditPreservesConcurrentState(t *testing.T) {
 				t.Fatal(err)
 			}
 			repo := relational.NewAccountRepository(db)
-			service := NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, nil, nil)
+			service := NewService(repo, relational.NewAuditRepository(db), nil, nil, nil, nil, security.RandomTokenSource{}, nil, nil, nil)
 			original := mustUpsert(t, repo, accountdomain.Credential{Provider: accountdomain.ProviderBuild, AuthType: accountdomain.AuthTypeOAuth,
 				Name: "original", SourceKey: "admin-concurrency", EncryptedAccessToken: "old-access", EncryptedRefreshToken: "old-refresh", ExpiresAt: now.Add(time.Hour), Enabled: true, AuthStatus: accountdomain.AuthStatusActive})
 			rotatedExpiry := now.Add(4 * time.Hour)
@@ -55,7 +56,7 @@ func TestAdminEditPreservesConcurrentState(t *testing.T) {
 					disabled := false
 					_, err = repo.UpdateMany(ctx, original.Provider, []uint64{original.ID}, repository.AccountUpdates{Enabled: &disabled})
 				case "risk_attribution":
-					err = repo.UpdateRiskAttribution(ctx, original.ID, repository.RiskAttribution{Status: accountdomain.RiskStatusRSCDenied, Trigger: accountdomain.RiskTriggerDegrade, OriginAccountID: original.ID, CheckedAt: &now, Detail: "current attribution"})
+					_, err = repo.UpdateAdministration(ctx, original.ID, repository.AccountAdminPatch{Risk: &repository.RiskAttribution{Status: accountdomain.RiskStatusRSCDenied, Trigger: accountdomain.RiskTriggerDegrade, OriginAccountID: original.ID, CheckedAt: &now, Detail: "current attribution"}})
 				}
 				if err != nil {
 					t.Fatal(err)

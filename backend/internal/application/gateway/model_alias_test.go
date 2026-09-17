@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	executionapp "github.com/chenyme/grok2api/backend/internal/application/execution"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -124,9 +125,11 @@ func (r *aliasRouteResolver) GetByPublicID(context.Context, string) (modeldomain
 	return modeldomain.Route{}, repository.ErrNotFound
 }
 func (r *aliasRouteResolver) GetByPublicIDCandidates(_ context.Context, publicID string) ([]modeldomain.Route, error) {
-	for _, candidate := range modeldomain.PublicIDCandidates(publicID) {
-		if routes, ok := r.byPublic[candidate]; ok {
-			return routes, nil
+	for _, group := range modeldomain.PublicIDCandidateGroups(publicID) {
+		for _, candidate := range group {
+			if routes, ok := r.byPublic[candidate]; ok {
+				return routes, nil
+			}
 		}
 	}
 	if routes, ok := r.byPublic[publicID]; ok {
@@ -152,11 +155,11 @@ func TestResolvePublicModelRoutesGatesDynamicAliasesAndPreservesCompatibility(t 
 		ID: 1, PublicID: "Build/grok-4.5", Provider: account.ProviderBuild, UpstreamModel: "grok-4.5",
 		Capability: modeldomain.CapabilityResponses, Enabled: true,
 	}
-	service := &Service{
+	service := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory(),
 		models: &aliasRouteResolver{
 			byPublic: map[string][]modeldomain.Route{"Build/grok-4.5": {route}},
 		},
-		providers: provider.NewRegistry(console.NewAdapter(console.Config{}, nil, nil, nil)),
+		providers: providerimpl.NewRegistry(console.NewAdapter(console.Config{}, nil, nil, nil)),
 	}
 
 	// Base model always works.

@@ -3,13 +3,12 @@ package court
 import (
 	"context"
 	"errors"
-	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
@@ -24,7 +23,7 @@ func TestCourtNodeTypeReadFailureDefersExitDisposition(t *testing.T) {
 	s := newFixtureCourt(cfg, b.registry, storeSource{b.evidence}, simpleTaskDispatcher{registry.NewProbeTaskStore(b.registry)})
 	t.Cleanup(func() { _ = s.Close(ctx) })
 	id := openSimpleTestCase(t, s, b.registry)
-	settleSimpleTestTasks(t, b.registry, id, func(task registry.ProbeTaskView) model.ProbeTaskResult {
+	settleSimpleTestTasks(t, b.registry, id, func(task model.ProbeTaskView) model.ProbeTaskResult {
 		if task.Direction == model.ProbeExitJury {
 			return model.ProbeTaskResult{Outcome: model.ProbeResultDegraded}
 		}
@@ -99,7 +98,7 @@ func TestCourtObservedCandidateRespectsCurrentNodeState(t *testing.T) {
 	}
 	// Include only the stale observation. Fleet top-up must not mask the fact
 	// that this exact disabled node was selected from the historical window.
-	spec, err := s.dispatchSpecFor(ctx, 1, 7, model.EpochKey{NodeID: 3}, evidence.Estimate{Exits: map[model.EpochKey]evidence.SubjectEstimate{{NodeID: 1}: {}}}, policyFor(cfg, time.Now()))
+	spec, err := s.dispatchSpecFor(ctx, 1, 7, model.EpochKey{NodeID: 3}, model.Estimate{Exits: map[model.EpochKey]model.SubjectEstimate{{NodeID: 1}: {}}}, policyFor(cfg, time.Now()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +120,7 @@ func TestCourtNodeFailurePreservesIndependentRelease(t *testing.T) {
 			t.Cleanup(func() { _ = s.Close(ctx) })
 			id := openSimpleTestCase(t, s, b.registry)
 			if scenario != "deadline_incomplete" {
-				settleSimpleTestTasks(t, b.registry, id, func(task registry.ProbeTaskView) model.ProbeTaskResult {
+				settleSimpleTestTasks(t, b.registry, id, func(task model.ProbeTaskView) model.ProbeTaskResult {
 					degraded := task.Direction == model.ProbeExitJury
 					if scenario == "account_guilty" {
 						degraded = !degraded
@@ -210,7 +209,7 @@ func TestCourtExpiredNodeReadLeavesTimeForRelease(t *testing.T) {
 	s := newFixtureCourt(cfg, b.registry, storeSource{b.evidence}, simpleTaskDispatcher{registry.NewProbeTaskStore(b.registry)})
 	t.Cleanup(func() { _ = s.Close(ctx) })
 	id := openSimpleTestCase(t, s, b.registry)
-	settleSimpleTestTasks(t, b.registry, id, func(task registry.ProbeTaskView) model.ProbeTaskResult {
+	settleSimpleTestTasks(t, b.registry, id, func(task model.ProbeTaskView) model.ProbeTaskResult {
 		if task.Direction == model.ProbeExitJury {
 			return model.ProbeTaskResult{Outcome: model.ProbeResultDegraded}
 		}

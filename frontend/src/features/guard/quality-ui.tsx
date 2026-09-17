@@ -2,14 +2,14 @@ import type { ComponentType, ReactNode } from "react";
 import {
 	OperationsSection,
 	OperationsTabs,
-	StatusPill,
-} from "@/features/operations/operations-ui";
+} from "@/shared/ui/operations";
 export function QualitySection({
 	title,
 	help,
 	action,
 	children,
 	id,
+	icon,
 }: {
 	icon?: ComponentType<{ className?: string }>;
 	title: string;
@@ -20,42 +20,12 @@ export function QualitySection({
 }) {
 	return (
 		<div id={id}>
-			<OperationsSection title={title} description={help} action={action}>
+			<OperationsSection title={title} description={help} action={action} icon={icon}>
 				{children}
 			</OperationsSection>
 		</div>
 	);
 }
-export type Tone = "destructive" | "warning" | "ok" | "muted";
-
-export function ToneBadge({
-	tone,
-	children,
-	className,
-}: {
-	tone: Tone;
-	children: ReactNode;
-	className?: string;
-}) {
-	return (
-		<span className={className}>
-			<StatusPill
-				tone={
-					tone === "destructive"
-						? "bad"
-						: tone === "warning"
-							? "warn"
-							: tone === "ok"
-								? "good"
-								: "neutral"
-				}
-			>
-				{children}
-			</StatusPill>
-		</span>
-	);
-}
-
 export type QualityTabItem = {
 	value: string;
 	label: string;

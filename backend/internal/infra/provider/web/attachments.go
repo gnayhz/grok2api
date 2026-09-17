@@ -5,6 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netguard"
+	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"io"
 	"net"
 	"net/http"
@@ -13,10 +17,6 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/pkg/netguard"
 )
 
 const (
@@ -172,7 +172,7 @@ func (a *Adapter) loadChatFile(ctx context.Context, lease *egress.Lease, input, 
 	if err != nil || int64(len(raw)) > maxBytes {
 		return provider.ImageInput{}, fmt.Errorf("%w: 下载失败或文件超过 %d MiB", errInvalidChatFile, maxBytes>>20)
 	}
-	mimeType, err := validatedChatFileMIME(raw, response.Header.Get("Content-Type"), firstNonEmpty(filename, path.Base(target.originalURL.Path)))
+	mimeType, err := validatedChatFileMIME(raw, response.Header.Get("Content-Type"), texts.FirstNonEmpty(filename, path.Base(target.originalURL.Path)))
 	if err != nil {
 		return provider.ImageInput{}, err
 	}
@@ -331,10 +331,6 @@ func supportedChatFileMIME(value string) bool {
 
 func validateRemoteImageURL(ctx context.Context, raw string) (*remoteImageTarget, error) {
 	return validateRemoteAttachmentURL(ctx, raw, errInvalidChatImage)
-}
-
-func validateRemoteImageURLWithResolver(ctx context.Context, raw string, resolver remoteImageResolver) (*remoteImageTarget, error) {
-	return validateRemoteAttachmentURLWithResolver(ctx, raw, resolver, errInvalidChatImage)
 }
 
 func validateRemoteAttachmentURL(ctx context.Context, raw string, invalid error) (*remoteImageTarget, error) {

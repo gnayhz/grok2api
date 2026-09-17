@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +13,6 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -73,7 +74,7 @@ func TestSharedQuotaRetryBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 			adapter := &exhaustedRetryAdapter{}
-			service := NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), nil, redisruntime.NewLockStore(runtime))
+			service := NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, redisruntime.NewLockStore(runtime))
 			service.SetQuotaRefreshCoordinator(runtime)
 			now := time.Now().UTC()
 			service.now = func() time.Time { return now }
@@ -86,11 +87,11 @@ func TestSharedQuotaRetryBudget(t *testing.T) {
 				service.QueueQuotaRefresh(v.ID, "fast")
 			}
 			for attempt := 0; attempt < quotaRefreshFailureBudget+1; attempt++ {
-				if len(service.quotaRefreshQueue) == 0 {
+				if len(service.quotaRefresh.queue) == 0 {
 					break
 				}
-				request := <-service.quotaRefreshQueue
-				state := service.quotaRefreshes[request.key]
+				request := <-service.quotaRefresh.queue
+				state := service.quotaRefresh.obs[request.key]
 				state.queued, state.running, state.pending = false, true, false
 				service.runQuotaRefresh(ctx, request)
 				now = now.Add(quotaRefreshBackoffMax + time.Minute)
@@ -99,9 +100,9 @@ func TestSharedQuotaRetryBudget(t *testing.T) {
 				service.requeueQuotaRefreshes()
 			}
 			if got := adapter.modeCalls.Load(); got != int64(quotaRefreshFailureBudget) {
-				t.Fatalf("same shared demand exceeded failure budget: attempts=%d budget=%d pending_queue=%d", got, quotaRefreshFailureBudget, len(service.quotaRefreshQueue))
+				t.Fatalf("same shared demand exceeded failure budget: attempts=%d budget=%d pending_queue=%d", got, quotaRefreshFailureBudget, len(service.quotaRefresh.queue))
 			}
-			if len(service.quotaRefreshQueue) != 0 {
+			if len(service.quotaRefresh.queue) != 0 {
 				t.Fatal("parked shared demand queued again")
 			}
 		})

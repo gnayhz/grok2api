@@ -108,6 +108,7 @@ func New(cfg Config, store Store, recorder Recorder) *Service {
 }
 
 // DispatchSpec 一次派发的内容。
+// 与 court.DispatchSpec 保持字段同步,组合根 quality_judicial.go 逐字段复制。
 type DispatchSpec struct {
 	ControlAccounts []uint64
 	ControlExits    []model.EpochKey
@@ -207,10 +208,14 @@ func (s *Service) DispatchForCase(ctx context.Context, spec DispatchSpec) (dispa
 	return dispatched, nil
 }
 
-// RunDue 认领并执行到期任务(执行器未接线时 no-op)。任务并发执行
-// (limit 即并发度——探针是真实上游调用,串行会让单批耗时=任务数×
-// 单任务时延,一个慢出口拖垮整批;并发后整批耗时≈最慢单任务)。
-func (s *Service) RunDue(ctx context.Context, executor Executor, limit int) error {
+// runDue 认领并执行到期任务(执行器未接线时 no-op),返回本批执行数。
+// 生产入口是 RunWorkers 的 worker 循环;导出包装 RunDue 已删除(零生产
+// 调用),同包测试直接调用本方法。任务并发执行(limit 即并发度——探针
+// 是真实上游调用,串行会让单批耗时=任务数×单任务时延,一个慢出口拖垮
+// 整批;并发后整批耗时≈最慢单任务)。
+// RunDueOnce 同步执行一批到期探针任务(集成测试与运维单步驱动使用;
+// 常驻生产循环经 Run)。
+func (s *Service) RunDueOnce(ctx context.Context, executor Executor, limit int) error {
 	_, err := s.runDue(ctx, executor, limit)
 	return err
 }

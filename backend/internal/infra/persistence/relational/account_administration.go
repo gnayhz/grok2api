@@ -72,10 +72,6 @@ func (r *AccountRepository) UpdateAdministration(ctx context.Context, id uint64,
 			}
 			changed = true
 		}
-		if patch.Enabled != nil {
-			_, err := deleteInvalidEgressLeaseBlocksForAccount(tx, current)
-			return err
-		}
 		return nil
 	})
 	if err != nil {

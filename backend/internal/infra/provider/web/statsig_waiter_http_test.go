@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +16,12 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	"github.com/gin-gonic/gin"
@@ -119,15 +121,15 @@ func TestStatsigSharedRefreshHTTPHonorsRequestLifetime(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(map[string]string{"x-statsig-id": base64.RawStdEncoding.EncodeToString(make([]byte, 70))})
 					}))
 					t.Cleanup(signerServer.Close)
-					manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+					manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 					t.Cleanup(func() { _ = manager.Close(ctx) })
 					t.Cleanup(finish)
 					adapter := NewAdapter(Config{BaseURL: upstream.URL, StatsigMode: "url", StatsigSignerURL: signerServer.URL, QuotaTimeout: 4 * time.Second}, manager, cipher, nil, nil)
 					adapter.statsig.client = signerServer.Client()
 					adapter.statsig.validateEndpoint = func(context.Context, string) error { return nil }
-					service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, provider.NewRegistry(adapter), cipher, nil)
+					service := accountapp.NewService(repo, relational.NewAuditRepository(db), nil, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 					router := gin.New()
-					accounthttp.NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+					accounthttp.NewHandler(accounthttp.Dependencies{Administration: service, Credentials: service, Maintenance: service, Onboarding: accountsyncapp.NewOnboarding(service, service, nil)}).Register(router.Group("/api/admin/v1"))
 					call := func(callCtx context.Context, index int) <-chan *httptest.ResponseRecorder {
 						done := make(chan *httptest.ResponseRecorder, 1)
 						go func() {

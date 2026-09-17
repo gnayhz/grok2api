@@ -12,6 +12,7 @@ import (
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -80,7 +81,7 @@ func newRouteRuleTransport(t *testing.T, proxyURL string, config domainegress.Op
 	}
 	node := domainegress.Node{ID: 21, Name: "rule-exit", Enabled: true, EncryptedProxyURL: encryptedProxy}
 	repo := routeRuleEgressRepository{nodes: map[uint64]domainegress.Node{21: node}, config: config}
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return &egressTransport{manager: manager, fallback: http.DefaultTransport}
 }
@@ -107,7 +108,7 @@ func newRouteRuleTwoExitTransport(t *testing.T, ruleProxyURL, otherProxyURL stri
 		31: {ID: 31, Name: "other-exit", Enabled: true, EncryptedProxyURL: otherProxy},
 	}
 	repo := routeRuleEgressRepository{nodes: nodes, config: config}
-	manager := infraegress.NewManager(repo, cipher)
+	manager := infraegress.NewManagerWithLimits(repo, cipher, netbudget.Limits{})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return &egressTransport{manager: manager, fallback: http.DefaultTransport}
 }

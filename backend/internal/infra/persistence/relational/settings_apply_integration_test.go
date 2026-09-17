@@ -11,6 +11,7 @@ import (
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -25,12 +26,12 @@ func settingsTargetsOn(t *testing.T, db *Database, base config.Config, notify fu
 		t.Fatal(err)
 	}
 	repo := NewRuntimeSettingsRepository(db, cipher)
-	loaded, stamp, revision, err := settingsapp.LoadPersisted(context.Background(), base, repo)
+	loaded, stamp, revision, err := loadSettingsConfig(context.Background(), base, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := settingsapp.NewService(loaded, stamp, revision, repo, notify, build(loaded))
-	service.SetFileConfig(base)
+	service := settingsapp.NewService(config.ToRuntimeSettings(loaded), stamp, revision, repo, notify, build(loaded))
+	service.SetFileConfig(config.ToRuntimeSettings(base))
 	return service
 }
 
@@ -94,25 +95,25 @@ func TestSettingsPartialApplyRealConsumers(t *testing.T) {
 			}, func(loaded config.Config) []settingsapp.ApplyTarget {
 				gateA = middleware.NewConcurrencyGate(loaded.Server.MaxConcurrentRequests)
 				return []settingsapp.ApplyTarget{
-					{Name: "capacity", Apply: func(_ context.Context, cfg config.Config) error {
+					{Name: "capacity", Apply: func(_ context.Context, cfg settingsdomain.Config) error {
 						capacityCalls++
 						gateA.UpdateLimit(cfg.Server.MaxConcurrentRequests)
 						return nil
 					}},
-					{Name: "network", Apply: func(_ context.Context, cfg config.Config) error {
+					{Name: "network", Apply: func(_ context.Context, cfg settingsdomain.Config) error {
 						networkCalls++
 						if failNetwork {
 							panic("secret configuration value")
 						}
-						network.SetRotationConfig(egressapp.RotationConfig{MaxGlobalPerHour: cfg.Egress.Rotation.MaxGlobalPerHour})
+						network.SetRotationConfig(egressapp.RotationConfig{MaxGlobalPerHour: egressRotationLimit(cfg)})
 						return nil
 					}},
-					{Name: "tail", Apply: func(context.Context, config.Config) error { tailCalls++; return nil }},
+					{Name: "tail", Apply: func(context.Context, settingsdomain.Config) error { tailCalls++; return nil }},
 				}
 			})
 			b := settingsTargetsOn(t, dbB, base, nil, func(loaded config.Config) []settingsapp.ApplyTarget {
 				gateB = middleware.NewConcurrencyGate(loaded.Server.MaxConcurrentRequests)
-				return []settingsapp.ApplyTarget{{Name: "capacity", Apply: func(_ context.Context, cfg config.Config) error {
+				return []settingsapp.ApplyTarget{{Name: "capacity", Apply: func(_ context.Context, cfg settingsdomain.Config) error {
 					gateB.UpdateLimit(cfg.Server.MaxConcurrentRequests)
 					return nil
 				}}}
@@ -186,7 +187,7 @@ func TestSettingsPartialApplyRealConsumers(t *testing.T) {
 			var restartedGate *middleware.ConcurrencyGate
 			restarted := settingsTargetsOn(t, dbB, base, nil, func(loaded config.Config) []settingsapp.ApplyTarget {
 				restartedGate = middleware.NewConcurrencyGate(loaded.Server.MaxConcurrentRequests)
-				return []settingsapp.ApplyTarget{{Name: "capacity", Apply: func(_ context.Context, cfg config.Config) error {
+				return []settingsapp.ApplyTarget{{Name: "capacity", Apply: func(_ context.Context, cfg settingsdomain.Config) error {
 					restartedGate.UpdateLimit(cfg.Server.MaxConcurrentRequests)
 					return nil
 				}}}

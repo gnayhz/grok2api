@@ -47,7 +47,7 @@ func TestConvertResponsesStreamTerminatesContentDoomLoop(t *testing.T) {
 	stream := repeatSSE("response.output_text.delta",
 		`{"type":"response.output_text.delta","delta":"loop"}`,
 		contentDoomLoopThreshold+8)
-	_, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	_, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err == nil {
 		t.Fatal("repeated visible content must terminate the stream")
 	}
@@ -63,7 +63,7 @@ func TestConvertResponsesStreamAllowsExactlyContentThreshold(t *testing.T) {
 	stream := repeatSSE("response.output_text.delta",
 		`{"type":"response.output_text.delta","delta":"loop"}`,
 		contentDoomLoopThreshold)
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatalf("the content ceiling itself must remain valid: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestConvertResponsesStreamKeepsRepeatedReasoningBelowThreshold(t *testing.T
 				repeats,
 				`event: response.output_text.delta`,
 				`data: {"type":"response.output_text.delta","delta":"answer"}`, "")
-			converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+			converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 			if err != nil {
 				t.Fatalf("deep reasoning must not be treated as a loop: %v", err)
 			}
@@ -144,7 +144,7 @@ func TestConvertResponsesStreamTerminatesReasoningDoomLoop(t *testing.T) {
 			stream := repeatSSE(testCase.event,
 				fmt.Sprintf(`{"type":%q,"item_id":"rs_1","delta":"hmm"}`, testCase.event),
 				reasoningDoomLoopThreshold+8)
-			_, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+			_, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 			if err == nil {
 				t.Fatal("a runaway reasoning loop must still terminate the stream")
 			}
@@ -162,7 +162,7 @@ func TestConvertResponsesStreamTracksSuppressedReasoning(t *testing.T) {
 	stream := repeatSSE("response.reasoning_text.delta",
 		`{"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"hmm"}`,
 		reasoningDoomLoopThreshold+8)
-	_, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationMessages))
+	_, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{}))
 	if err == nil || !strings.Contains(err.Error(), "model reasoning loop detected") {
 		t.Fatalf("reasoning hidden from the downstream protocol must still be guarded: %v", err)
 	}
@@ -186,9 +186,9 @@ func TestConvertResponsesStreamDoesNotCountFlushedSummaryTwice(t *testing.T) {
 	lines = append(lines,
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`, "", "")
-	converted, err := io.ReadAll(ConvertResponseStream(
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
 		io.NopCloser(strings.NewReader(strings.Join(lines, "\n"))), OperationChat,
-	))
+		ResponseOptions{}))
 	if err != nil {
 		t.Fatalf("flushing buffered summaries must not increment the upstream repeat counter: %v", err)
 	}
@@ -212,9 +212,9 @@ func TestConvertResponsesStreamSharesReasoningCounterAcrossEventTypes(t *testing
 			`event: response.reasoning_text.delta`,
 			`data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"hmm"}`, "")
 	}
-	_, err := io.ReadAll(ConvertResponseStream(
+	_, err := io.ReadAll(ConvertResponseStreamWithOptions(
 		io.NopCloser(strings.NewReader(strings.Join(lines, "\n"))), OperationChat,
-	))
+		ResponseOptions{}))
 	if err == nil || !strings.Contains(err.Error(), "model reasoning loop detected") {
 		t.Fatalf("summary and raw reasoning must share one upstream counter: %v", err)
 	}
@@ -224,9 +224,9 @@ func TestConvertResponseStreamGuardsNativeResponsesWithoutRewriting(t *testing.T
 	t.Run("passthrough", func(t *testing.T) {
 		source := ": keep-this-comment\r\n\r\n" + repeatSSE("response.output_text.delta",
 			`{"type":"response.output_text.delta","delta":"answer"}`, 1)
-		converted, err := io.ReadAll(ConvertResponseStream(
+		converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
 			io.NopCloser(strings.NewReader(source)), OperationResponses,
-		))
+			ResponseOptions{}))
 		if err != nil {
 			t.Fatalf("native response passthrough failed: %v", err)
 		}
@@ -239,9 +239,9 @@ func TestConvertResponseStreamGuardsNativeResponsesWithoutRewriting(t *testing.T
 		stream := repeatSSE("response.output_text.delta",
 			`{"type":"response.output_text.delta","delta":"loop"}`,
 			contentDoomLoopThreshold+8)
-		_, err := io.ReadAll(ConvertResponseStream(
+		_, err := io.ReadAll(ConvertResponseStreamWithOptions(
 			io.NopCloser(strings.NewReader(stream)), OperationResponses,
-		))
+			ResponseOptions{}))
 		if err == nil || !strings.Contains(err.Error(), "model output loop detected") {
 			t.Fatalf("native responses must retain loop protection: %v", err)
 		}
@@ -252,7 +252,7 @@ func TestConvertResponseStreamCloseImmediatelyClosesUpstream(t *testing.T) {
 	for _, operation := range []string{OperationChat, OperationResponses} {
 		t.Run(operation, func(t *testing.T) {
 			source := &blockingStreamSource{closed: make(chan struct{})}
-			stream := ConvertResponseStream(source, operation)
+			stream := ConvertResponseStreamWithOptions(source, operation, ResponseOptions{})
 			if err := stream.Close(); err != nil {
 				t.Fatalf("close converted stream: %v", err)
 			}
@@ -279,7 +279,7 @@ func TestConvertResponsesStreamKeepsMarkdownRuleAndTableBorders(t *testing.T) {
 			stream := repeatSSE("response.output_text.delta",
 				fmt.Sprintf(`{"type":"response.output_text.delta","delta":%q}`, testCase.delta),
 				80)
-			converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+			converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 			if err != nil {
 				t.Fatalf("legitimate repeated formatting must not be treated as a loop: %v", err)
 			}
@@ -320,7 +320,7 @@ func TestConvertResponsesStreamDoomLoopCountersResetAndStaySeparate(t *testing.T
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`, "", "")
 	stream := strings.Join(lines, "\n")
-	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationChat, ResponseOptions{}))
 	if err != nil {
 		t.Fatalf("alternating deltas must not be treated as a loop: %v", err)
 	}

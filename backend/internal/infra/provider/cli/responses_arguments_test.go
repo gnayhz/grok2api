@@ -110,7 +110,7 @@ func TestResponsesIntegerArgumentsNormalizedInJSONResponse(t *testing.T) {
 		"model":"public",
 		"tools":[{"type":"function","name":"wait_agent","parameters":{"type":"object","properties":{"timeout_ms":{"type":"integer"}}}}]
 	}`)
-	_, compatibility, err := normalizeResponsesRequest(request, "grok-4.5")
+	_, compatibility, err := normalizeResponsesRequestWithMetadata(request, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestResponsesIntegerArgumentsNormalizedInStream(t *testing.T) {
 		"stream":true,
 		"tools":[{"type":"function","name":"wait_agent","parameters":{"type":"object","properties":{"timeout_ms":{"type":"integer"}}}}]
 	}`)
-	_, compatibility, err := normalizeResponsesRequest(request, "grok-4.5")
+	_, compatibility, err := normalizeResponsesRequestWithMetadata(request, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestResponsesIntegerArgumentsParallelStreamSequenceIsMonotonic(t *testing.T
 		"parallel_tool_calls":true,
 		"tools":[{"type":"function","name":"wait_agent","parameters":{"type":"object","properties":{"timeout_ms":{"type":"integer"}}}}]
 	}`)
-	_, compatibility, err := normalizeResponsesRequest(request, "grok-4.5")
+	_, compatibility, err := normalizeResponsesRequestWithMetadata(request, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestResponsesIntegerArgumentsBufferOverflowFallsBackToStreaming(t *testing.
 		"stream":true,
 		"tools":[{"type":"function","name":"write","parameters":{"type":"object","properties":{"content":{"type":"string"},"mode":{"type":"integer"}}}}]
 	}`)
-	_, compatibility, err := normalizeResponsesRequest(request, "grok-4.5")
+	_, compatibility, err := normalizeResponsesRequestWithMetadata(request, "grok-4.5", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

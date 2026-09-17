@@ -63,8 +63,8 @@ func TestInputAssetAdmissionSerializesSharedCapacity(t *testing.T) {
 				observed, proceed := make(chan struct{}, 2), make(chan struct{})
 				cfg := mediaapp.Config{MaxImageBytes: 1 << 20, MaxTotalBytes: capacity, CleanupThresholdPercent: 100}
 				services := []*mediaapp.Service{
-					mediaapp.NewService(&inputCapacityObservedAssets{NewMediaAssetRepository(db), observed, proceed}, nil, objects, nil, cfg),
-					mediaapp.NewService(&inputCapacityObservedAssets{NewMediaAssetRepository(peer), observed, proceed}, nil, objects, nil, cfg),
+					mediaapp.NewServiceWithTickets(&inputCapacityObservedAssets{NewMediaAssetRepository(db), observed, proceed}, nil, nil, objects, nil, cfg),
+					mediaapp.NewServiceWithTickets(&inputCapacityObservedAssets{NewMediaAssetRepository(peer), observed, proceed}, nil, nil, objects, nil, cfg),
 				}
 				type result struct {
 					asset media.Asset
@@ -116,7 +116,7 @@ func TestInputAssetAdmissionSerializesSharedCapacity(t *testing.T) {
 				if err != nil || len(files) != 1 || len(temps) != 0 {
 					t.Fatalf("refused input retained objects: %d/%d %v", len(files), len(temps), err)
 				}
-				retry := mediaapp.NewService(NewMediaAssetRepository(peer), nil, objects, nil, cfg)
+				retry := mediaapp.NewServiceWithTickets(NewMediaAssetRepository(peer), nil, nil, objects, nil, cfg)
 				if err := retry.ReleaseInputAssets(ctx, []string{media.InputReference(winner.ID)}); err != nil {
 					t.Fatal(err)
 				}

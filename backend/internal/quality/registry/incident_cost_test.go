@@ -46,9 +46,9 @@ func TestIncidentQueriesStayIndexedWithHistory(t *testing.T) {
 			if err := recordIncidentClosures(r.DB(), nil); err != nil {
 				t.Fatal(err)
 			}
-			key := IncidentKey{AccountID: 1, Exit: model.EpochKey{NodeID: 5, Epoch: 1}}
+			key := model.IncidentKey{AccountID: 1, Exit: model.EpochKey{NodeID: 5, Epoch: 1}}
 			start := time.Now()
-			got, err := r.LastClosedAtForIncidents(ctx, []IncidentKey{key, key, {AccountID: uint64(size + 1)}})
+			got, err := r.LastClosedAtForIncidents(ctx, []model.IncidentKey{key, key, {AccountID: uint64(size + 1)}})
 			if err != nil || len(got) != 1 || !got[key].Equal(now) {
 				t.Fatalf("point lookup: %v %v", got, err)
 			}
@@ -107,7 +107,7 @@ func TestIncidentQueriesStayIndexedWithHistory(t *testing.T) {
 			if err := r.DB().Exec("ALTER TABLE q_case_party RENAME TO saved_case_party").Error; err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.LastClosedAtForIncidents(ctx, []IncidentKey{key}); err != nil {
+			if _, err := r.LastClosedAtForIncidents(ctx, []model.IncidentKey{key}); err != nil {
 				t.Fatalf("lookup depended on case history: %v", err)
 			}
 			if err := r.DB().Exec("ALTER TABLE saved_case_party RENAME TO q_case_party").Error; err != nil {

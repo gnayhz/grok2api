@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -13,9 +14,9 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 type shutdownCredentialAdapter struct {
@@ -62,7 +63,7 @@ func TestApplicationDrainsCredentialOwnerAfterCanceledHTTPWaiter(t *testing.T) {
 	var once sync.Once
 	finish := func() { once.Do(func() { close(adapter.release) }) }
 	defer finish()
-	s := accountapp.NewService(repo, nil, nil, nil, provider.NewRegistry(adapter), nil, nil)
+	s := accountapp.NewService(repo, nil, nil, nil, providerimpl.NewRegistry(adapter), nil, security.RandomTokenSource{}, nil, nil, nil)
 	waitJoined := make(chan struct{})
 	ownerDone, waiterDone := make(chan error, 1), make(chan error, 1)
 	a.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +195,7 @@ func TestApplicationDrainsKnownDeviceGrantBeforeStorageClose(t *testing.T) {
 	var once sync.Once
 	finish := func() { once.Do(func() { close(adapter.release) }) }
 	defer finish()
-	service := accountapp.NewService(repo, relational.NewAuditRepository(a.database), store, nil, provider.NewRegistry(adapter), cipher, nil)
+	service := accountapp.NewService(repo, relational.NewAuditRepository(a.database), store, nil, providerimpl.NewRegistry(adapter), cipher, security.RandomTokenSource{}, nil, nil, nil)
 	ownerDone := make(chan error, 1)
 	a.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

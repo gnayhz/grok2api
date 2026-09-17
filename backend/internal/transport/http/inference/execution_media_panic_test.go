@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/console"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -59,7 +59,7 @@ func TestHTTPMediaPanicReleasesUnhandedAccountLease(t *testing.T) {
 						return adapter
 					}, nil, nil, compactionDatabase(t, dialect), "", limiter)
 					router := gin.New()
-					router.Use(middleware.RequestID(), gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) { c.AbortWithStatus(500) }), middleware.ClientAuth(f.clientService))
+					router.Use(middleware.RequestID(nil), gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) { c.AbortWithStatus(500) }), middleware.ClientAuth(f.clientService))
 					NewHandler(f.service, nil, 1<<20).Register(router.Group("/v1"))
 					done := make(chan struct{})
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

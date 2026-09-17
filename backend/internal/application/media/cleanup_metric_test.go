@@ -23,9 +23,9 @@ func TestRunCleanupEmitsHeartbeat(t *testing.T) {
 	if err := database.InitializeSchema(ctxRoot); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(
+	service := NewServiceWithTickets(
 		relational.NewMediaAssetRepository(database),
-		relational.NewMediaJobRepository(database),
+		relational.NewMediaJobRepository(database), nil,
 		stubObjectStorage{},
 		nil,
 		Config{MaxTotalBytes: 1 << 30, CleanupThresholdPercent: 80, CleanupInterval: 50 * time.Millisecond},

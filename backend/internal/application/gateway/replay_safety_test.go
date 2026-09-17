@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	providerimpl "github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"io"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 func TestServerToolRequestsNeverRepeatAfterAmbiguousFailure(t *testing.T) {
@@ -38,9 +39,9 @@ func TestAdmissionUsesNormalizedToolProfileBeforeNetwork(t *testing.T) {
 	for _, actualTools := range []bool{false, true} {
 		base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 		s, accounts := newGuardLoopService(t, base, "normalized-budget")
-		s.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, AdmissionTimeout: 50 * time.Millisecond, ToolAdmissionTimeout: 250 * time.Millisecond})
+		s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, GuardedModels: []string{"grok-4.6"}, AdmissionTimeout: 50 * time.Millisecond, ToolAdmissionTimeout: 250 * time.Millisecond}))
 		base.responses[accounts[0].ID] = []scriptedBuildResponse{{status: 200, headerDelay: 110 * time.Millisecond, body: "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n"}}
-		s.providers = provider.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+		s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 			policy := inferencedomain.ReplayPolicy{Safe: true, Tools: actualTools}
 			request.NormalizedMetadata.ReplayPolicy = &policy
 			if err := request.OnNormalized(*request.NormalizedMetadata); err != nil {

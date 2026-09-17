@@ -16,7 +16,7 @@ func TestConvertedStreamRequiresTerminalEvent(t *testing.T) {
 			"data: [DONE]\n\n",
 		} {
 			t.Run(operation+"/"+body, func(t *testing.T) {
-				stream := ConvertResponseStream(io.NopCloser(strings.NewReader(body)), operation)
+				stream := ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(body)), operation, ResponseOptions{})
 				defer stream.Close()
 				data, err := io.ReadAll(stream)
 				if !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -35,7 +35,7 @@ func TestConvertedStreamRequiresTerminalEvent(t *testing.T) {
 		for _, terminal := range []string{"response.completed", "response.incomplete", "response.failed", "error"} {
 			t.Run(operation+"/"+terminal, func(t *testing.T) {
 				body := "data: {\"type\":\"" + terminal + "\",\"response\":{\"status\":\"completed\"},\"error\":{\"message\":\"failure\"}}\n\n"
-				stream := ConvertResponseStream(io.NopCloser(strings.NewReader(body)), operation)
+				stream := ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(body)), operation, ResponseOptions{})
 				defer stream.Close()
 				if _, err := io.ReadAll(stream); err != nil {
 					t.Fatalf("explicit terminal returned transport error: %v", err)

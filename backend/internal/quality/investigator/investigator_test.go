@@ -259,7 +259,7 @@ func TestRunDueRecordsProbeObservations(t *testing.T) {
 		id1: {Outcome: model.ProbeResultDegraded, Detail: "jury_rule"},
 		id2: {Outcome: model.ProbeResultDegraded, VerifiedIPChange: false},
 	}}
-	if err := service.RunDue(context.Background(), executor, 8); err != nil {
+	if _, err := service.runDue(context.Background(), executor, 8); err != nil {
 		t.Fatal(err)
 	}
 	if len(recorder.obs) != 1 {
@@ -297,7 +297,10 @@ func TestRunDuePersistsEachTaskAtItsOwnCompletion(t *testing.T) {
 	}
 	started := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- service.RunDue(context.Background(), staggeredExecutor{}, 2) }()
+	go func() {
+		_, runErr := service.runDue(context.Background(), staggeredExecutor{}, 2)
+		done <- runErr
+	}()
 	deadline := time.Now().Add(100 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		store.mu.Lock()
@@ -344,7 +347,7 @@ func TestRunDueRetainsMeasurementWhenAggregateWriteFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.RunDue(context.Background(), stubExecutor{results: map[uint64]model.ProbeTaskResult{
+	if _, err := service.runDue(context.Background(), stubExecutor{results: map[uint64]model.ProbeTaskResult{
 		id: {Outcome: model.ProbeResultClean, Detail: "jury_clean"},
 	}}, 1); err == nil {
 		t.Fatal("证据写入失败必须向调用方可见")
@@ -420,7 +423,7 @@ func TestRunDueSurvivesBatchDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RunDue(ctx, deadlineExecutor{}, 4); err != nil {
+	if _, err := svc.runDue(ctx, deadlineExecutor{}, 4); err != nil {
 		t.Fatalf("写回不得因批超时失败: %v", err)
 	}
 	if len(store.completions) != 1 {
@@ -454,7 +457,7 @@ func TestRunDueWriteWindowIndependentOfExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 执行 80ms > 写回窗口 30ms:窗口若从批次开始起算必过期。
-	if err := svc.RunDue(ctx, slowExecutor{d: 80 * time.Millisecond}, 4); err != nil {
+	if _, err := svc.runDue(ctx, slowExecutor{d: 80 * time.Millisecond}, 4); err != nil {
 		t.Fatalf("慢批执行不得挤垮写回窗口: %v", err)
 	}
 	if len(store.completions) != 1 || store.completions[0].state != model.ProbeDone {
@@ -482,7 +485,7 @@ func TestRunDueLateConclusionDoesNotResurrectCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RunDue(ctx, midFlightCancelExecutor{store: store}, 4); err != nil {
+	if _, err := svc.runDue(ctx, midFlightCancelExecutor{store: store}, 4); err != nil {
 		t.Fatalf("已中止任务的迟到结论不得当作批错误: %v", err)
 	}
 	if state := store.states[id]; state != model.ProbeCancelled {

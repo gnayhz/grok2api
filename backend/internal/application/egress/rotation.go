@@ -1,13 +1,10 @@
 package egress
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -30,21 +27,6 @@ type RotationConfig struct {
 	SettleDelay              time.Duration
 	ProbeTimeout             time.Duration
 	ProbeInterval            time.Duration
-}
-
-// DefaultRotationConfig returns conservative defaults.
-func DefaultRotationConfig() RotationConfig {
-	return RotationConfig{
-		Enabled:                  true,
-		MaxAttemptsPerQuarantine: 3,
-		MinNodeInterval:          3 * time.Minute,
-		MaxGlobalPerHour:         6,
-		WebhookTimeout:           15 * time.Second,
-		WebhookRetries:           2,
-		SettleDelay:              20 * time.Second,
-		ProbeTimeout:             2 * time.Minute,
-		ProbeInterval:            5 * time.Second,
-	}
 }
 
 func (c RotationConfig) normalized() RotationConfig {
@@ -619,43 +601,32 @@ type rotationStateRepository interface {
 	UpdateEgressNodeRotationState(ctx context.Context, id uint64, lastRotatedAt *time.Time, attempts int, lastError string) error
 }
 
+// WebhookExecutor 是轮换 webhook 投递的消费方端口；传输实现位于 infra。
+type WebhookExecutor interface {
+	Notify(ctx context.Context, url string, timeout time.Duration, retries int) error
+}
+
+func (s *Service) SetSubscriptionFetcher(fetcher SubscriptionFetcher) {
+	s.mu.Lock()
+	s.subscriptionFetcher = fetcher
+	s.mu.Unlock()
+}
+
+func (s *Service) SetWebhookExecutor(executor WebhookExecutor) {
+	s.mu.Lock()
+	s.webhookExecutor = executor
+	s.mu.Unlock()
+}
+
 func (s *Service) callRotationWebhook(ctx context.Context, rotationURL string, cfg RotationConfig) error {
-	client := &http.Client{Timeout: cfg.WebhookTimeout}
-	if owner := s.httpTransportOwner(); owner != nil {
-		managed, closeTransport, err := owner.ManageHTTPTransport(ctx, http.DefaultTransport.(*http.Transport).Clone())
-		if err != nil {
-			return err
-		}
-		defer closeTransport()
-		client.Transport = managed
+	s.mu.RLock()
+	executor := s.webhookExecutor
+	s.mu.RUnlock()
+	if executor == nil {
+		// 未装配传输端口与订阅拉取同一合同:不为缺依赖自建网络客户端。
+		return errors.New("轮换 webhook 传输组件未装配")
 	}
-	var lastErr error
-	for attempt := 0; attempt <= cfg.WebhookRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(2 * time.Second):
-			}
-		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, rotationURL, bytes.NewReader([]byte("{}")))
-		if err != nil {
-			return err
-		}
-		request.Header.Set("Content-Type", "application/json")
-		response, err := client.Do(request)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		response.Body.Close()
-		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			return nil
-		}
-		lastErr = fmt.Errorf("webhook HTTP %d", response.StatusCode)
-	}
-	return lastErr
+	return executor.Notify(ctx, rotationURL, cfg.WebhookTimeout, cfg.WebhookRetries)
 }
 
 // exitIPRotationChanged reports whether the node's exit identity actually

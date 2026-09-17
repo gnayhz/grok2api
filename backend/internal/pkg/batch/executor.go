@@ -61,14 +61,8 @@ func NewSharedPool(limit int, limiter LeaseLimiter, key string) *Pool {
 	return pool
 }
 
-// NewChildPool 创建分类并发池；任务先取得分类容量，再进入父级全局池。
-func NewChildPool(limit int, parent *Pool) *Pool {
-	pool := NewPool(limit)
-	pool.parent = parent
-	return pool
-}
-
 // NewSharedChildPool 创建同时受分类集群租约和父级总容量约束的并发池。
+// limiter 为 nil 时仅保留分类本地容量与父级全局容量两级约束。
 func NewSharedChildPool(limit int, limiter LeaseLimiter, key string, parent *Pool) *Pool {
 	pool := NewSharedPool(limit, limiter, key)
 	pool.parent = parent

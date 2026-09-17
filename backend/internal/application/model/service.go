@@ -10,11 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
 )
@@ -73,12 +72,29 @@ type ListFilter struct {
 
 type SyncProgressObserver func(completed, total int)
 
+// AccountFacts 是目录读取的账号事实面：仅读取能力，无任何账号写方法。
+// 目录不得通过本面导入、更新或删除账号。
+type AccountFacts interface {
+	Get(ctx context.Context, id uint64) (account.Credential, error)
+	List(ctx context.Context, query repository.AccountListQuery) ([]account.Credential, int64, error)
+	ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error)
+	CountProviderAccountsByIDs(ctx context.Context, provider account.Provider, ids []uint64) (int64, error)
+	GetBilling(ctx context.Context, accountID uint64) (account.Billing, error)
+}
+
 // Service 负责上游模型发现、内部来源路由与对外模型名称维护。
+// CredentialEnsurer is the single account capability the catalog needs:
+// materialize a usable credential before a capability sync probe. The full
+// account service (imports, conversion, administration) stays outside.
+type CredentialEnsurer interface {
+	EnsureCredential(ctx context.Context, value account.Credential, force bool) (account.Credential, error)
+}
+
 type Service struct {
 	models    repository.ModelRepository
-	accounts  repository.AccountRepository
-	account   *accountapp.Service
-	providers *provider.Registry
+	accounts  AccountFacts
+	account   CredentialEnsurer
+	providers provider.Registry
 	bulkPool  *batch.Pool
 	logger    *slog.Logger
 	syncAll   singleflight.Group
@@ -99,7 +115,7 @@ type Service struct {
 	syncErr         error
 }
 
-func NewService(models repository.ModelRepository, accounts repository.AccountRepository, accountService *accountapp.Service, providers *provider.Registry) *Service {
+func NewService(models repository.ModelRepository, accounts AccountFacts, accountService CredentialEnsurer, providers provider.Registry) *Service {
 	return &Service{models: models, accounts: accounts, account: accountService, providers: providers, bulkPool: batch.NewPool(defaultModelSyncWorkers), logger: slog.Default()}
 }
 
@@ -405,11 +421,6 @@ func (s *Service) BatchSetEnabled(ctx context.Context, ids []uint64, enabled boo
 	}
 	updated, err := s.models.UpdateManyEnabled(ctx, values, enabled)
 	return updated, err
-}
-
-// Sync 从全部启用账号同步模型能力，并按 Provider 幂等更新公开路由表。
-func (s *Service) Sync(ctx context.Context) (int, error) {
-	return s.SyncObserved(ctx, nil)
 }
 
 // SyncObserved 执行全量模型同步，并按已完成账号数报告进度。

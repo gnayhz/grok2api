@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 (globalThis as Record<string, unknown>).window = { ...globalThis, location: { origin: "http://test.local" } };
-const { updateAccount } = await import("./accounts-api.ts");
+const { updateAccount } = await import("@/entities/account/account-api");
 
 // Emitted by the real GET handler in TestAccountAuthDiagnosticHTTPContract;
 // single-account GET and PATCH responses use the same transport DTO.

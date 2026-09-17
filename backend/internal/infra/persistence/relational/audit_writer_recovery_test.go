@@ -3,6 +3,7 @@ package relational
 import (
 	"context"
 	"errors"
+	security "github.com/chenyme/grok2api/backend/internal/infra/security"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,7 +73,7 @@ func TestAuditWriterRecoversAfterPersistentSQLFailureAndRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			recoveredJournal := open()
-			recoveredKeys := keyapp.NewService("test-owner", NewClientKeyRepository(b), nil, nil, 120, 8, nil)
+			recoveredKeys := keyapp.NewService("test-owner", NewClientKeyRepository(b), nil, nil, 120, 8, nil, security.RandomTokenSource{})
 			recovered := auditapp.NewService(NewAuditRepository(b), recoveredJournal, nil, 4, time.Millisecond)
 			recovered.SetBillingObserver(recoveredKeys)
 			if err := recovered.Start(ctx); err != nil {
@@ -227,7 +228,7 @@ func TestAuditPendingReservationSurvivesCapacityPressure(t *testing.T) {
 				t.Fatal(err)
 			}
 			installAuditSettlementFailure(t, a)
-			clientKeys := keyapp.NewService("test-owner", NewClientKeyRepository(b), nil, nil, 120, 8, nil)
+			clientKeys := keyapp.NewService("test-owner", NewClientKeyRepository(b), nil, nil, 120, 8, nil, security.RandomTokenSource{})
 			writer := auditapp.NewService(NewAuditRepository(b), journal, nil, 4, time.Millisecond)
 			writer.UpdateWriterConfig(4, time.Millisecond, time.Hour)
 			writer.SetBillingObserver(clientKeys)

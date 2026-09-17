@@ -4,8 +4,8 @@ import { useEffect, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { fetchQualityGuard, resetQualityGuard, updateQualityGuard, type QualityGuardConfig } from "@/features/guard/quality-api";
-import { qualityGuardSchema, toQualityGuardForm, toQualityGuardInput, type QualityGuardForm } from "@/features/guard/quality-guard-model";
+import { fetchQualityGuard, resetQualityGuard, updateQualityGuard, type QualityGuardConfig } from "@/entities/guard/quality-api";
+import { qualityGuardSchema, toQualityGuardForm, toQualityGuardInput, type QualityGuardForm } from "@/entities/guard/quality-guard-model";
 import { useLifetimeSignal } from "@/shared/hooks/use-lifetime-signal";
 
 export function useQualityGuardSettings() {

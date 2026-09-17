@@ -16,7 +16,7 @@ func TestConverterResourceLimitClosesAllRetainedState(t *testing.T) {
 	budget := pool.Request(256 << 10)
 	raw := strings.Repeat("data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"r1\",\"delta\":\""+strings.Repeat("x", 512)+"\"}\n\n", 200)
 	stream := responseflow.New(io.NopCloser(strings.NewReader(raw)), budget)
-	body := ConvertResponseStream(stream, OperationChat)
+	body := ConvertResponseStreamWithOptions(stream, OperationChat, ResponseOptions{})
 	_, err := io.Copy(io.Discard, body)
 	_ = body.Close()
 	if !errors.Is(err, responsebuffer.ErrExhausted) {

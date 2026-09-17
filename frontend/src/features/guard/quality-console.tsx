@@ -2,24 +2,21 @@ import { RefreshCw, Settings2, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
-import { OperationsButton as Button } from "@/features/operations/operations-ui";
-import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { OperationsButton as Button } from "@/shared/ui/operations";
+import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import {
 	OperationsError,
 	OperationsTabs,
-} from "@/features/operations/operations-ui";
-import {
-	useOperationsAccounts,
-	useOperationsCases,
-	useOperationsGuard,
-	useOperationsNodes,
-	useOperationsSelfCheck,
-} from "@/features/operations/operations-queries";
+} from "@/shared/ui/operations";
+
 import { QualityHitStats } from "./quality-hit-stats";
 import { QualityProbeView } from "./quality-probe-view";
 import { QualityTribunalView } from "./quality-tribunal-view";
+import { useAccountDirectory } from "@/entities/account/account-queries";
+import { useEgressNodes } from "@/entities/egress/egress-queries";
+import { useGuardStats, useQualityCases, useQualityGuardSelfCheck } from "@/entities/guard/guard-queries";
 
 export function QualityConsole() {
 	const { t } = useTranslation();
@@ -27,11 +24,11 @@ export function QualityConsole() {
 	const navigate = useNavigate();
 	const requested = location.hash.slice(1);
 	const view = ["stats", "bureau"].includes(requested) ? requested : "tribunal";
-	const guard = useOperationsGuard();
-	const check = useOperationsSelfCheck();
-	const cases = useOperationsCases();
-	const accounts = useOperationsAccounts();
-	const nodes = useOperationsNodes();
+	const guard = useGuardStats();
+	const check = useQualityGuardSelfCheck();
+	const cases = useQualityCases();
+	const accounts = useAccountDirectory();
+	const nodes = useEgressNodes();
 	const enabled = guard.data?.effective?.enabled;
 	const checkBad = check.data?.self_check.outcome === "error";
 	const status = useMemo(() => {

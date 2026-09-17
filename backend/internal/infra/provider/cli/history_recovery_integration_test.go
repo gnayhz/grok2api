@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	physical "github.com/chenyme/grok2api/backend/internal/port/physical"
+	"github.com/chenyme/grok2api/backend/internal/testsupport"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,10 +25,11 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 const rejectedOpaqueJSON = `{"error":{"message":"Could not decrypt the provided encrypted_content. Ensure the value is unmodified."}}`
@@ -82,7 +85,7 @@ func newRecoveryJournalAdapter(t *testing.T, url string, managed bool) (*Adapter
 	adapter.SetReasoningReplay(replay)
 	t.Cleanup(func() { adapter.base.current.Load().CloseIdleConnections() })
 	if managed {
-		manager := infraegress.NewManager(relational.NewEgressRepository(db), cipher)
+		manager := infraegress.NewManagerWithLimits(relational.NewEgressRepository(db), cipher, netbudget.Limits{})
 		adapter.SetEgress(manager)
 		t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	}
@@ -177,8 +180,8 @@ func TestHistoryRecoveryAuthorityRealHTTPAndJournal(t *testing.T) {
 						budget := inferencedomain.NewAttemptBudget(tc.limit)
 						ctx := attemptmeta.WithRequest(t.Context(), "history-recovery", 0, "", nil)
 						ctx = attemptmeta.WithAccount(ctx, 1, string(account.ProviderBuild), request.Model)
-						ctx = infraegress.WithPhysicalCallTrace(ctx, string(account.ProviderBuild), operation)
-						ctx = infraegress.WithPhysicalCallBudget(ctx, budget)
+						ctx = physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), string(account.ProviderBuild), operation)
+						ctx = physical.WithPhysicalCallBudget(ctx, budget)
 						if !tc.disable {
 							request.HistoryControl = gatewayapp.NewHistoryController(tc.mode, budget)
 						}
@@ -204,7 +207,7 @@ func TestHistoryRecoveryAuthorityRealHTTPAndJournal(t *testing.T) {
 						if response.StatusCode != tc.want || len(sent) != tc.calls {
 							t.Fatalf("status=%d calls=%d want=%d/%d", response.StatusCode, len(sent), tc.want, tc.calls)
 						}
-						facts := infraegress.PhysicalFacts(ctx)
+						facts := physical.PhysicalFacts(ctx)
 						if len(facts) != tc.calls || budget.Remaining() != tc.limit-tc.calls {
 							t.Fatalf("facts=%d remaining=%d", len(facts), budget.Remaining())
 						}
@@ -280,7 +283,7 @@ func TestConcurrentRecoveryCannotResetNewGeneration(t *testing.T) {
 			defer cancel()
 			budget := inferencedomain.NewAttemptBudget(2)
 			ctx = attemptmeta.WithRequest(ctx, fmt.Sprintf("writer-%d", writer), 0, "", nil)
-			ctx = infraegress.WithPhysicalCallBudget(infraegress.WithPhysicalCallTrace(ctx, string(account.ProviderBuild), "responses"), budget)
+			ctx = physical.WithPhysicalCallBudget(physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), string(account.ProviderBuild), "responses"), budget)
 			request := baseRequest
 			// Different transport hints permit concurrent HTTP/1 calls while retaining the same durable history scope.
 			request.PromptCacheKey = fmt.Sprintf("writer-%d", writer)
@@ -301,7 +304,7 @@ func TestConcurrentRecoveryCannotResetNewGeneration(t *testing.T) {
 					response.DiscardOutput()
 				}
 			}
-			results <- result{status, err, len(infraegress.PhysicalFacts(ctx))}
+			results <- result{status, err, len(physical.PhysicalFacts(ctx))}
 		}()
 	}
 	statuses := map[int]int{}
@@ -354,7 +357,7 @@ func TestRecoveryCancellationStoredParentAndVetoLeaveHistoryIntact(t *testing.T)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			budget := inferencedomain.NewAttemptBudget(3)
-			ctx = infraegress.WithPhysicalCallBudget(infraegress.WithPhysicalCallTrace(ctx, string(account.ProviderBuild), "responses"), budget)
+			ctx = physical.WithPhysicalCallBudget(physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), string(account.ProviderBuild), "responses"), budget)
 			controller := gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, budget)
 			request.HistoryControl = observedRecoveryController{HistoryController: controller, before: func() {
 				if scenario == "canceled before authorization" {
@@ -415,7 +418,7 @@ func TestHistoryRecoveryBudgetIncludesPlaneFallback(t *testing.T) {
 			t.Cleanup(func() { adapter.base.current.Load().CloseIdleConnections() })
 			budget := inferencedomain.NewAttemptBudget(limit)
 			ctx := attemptmeta.WithRequest(t.Context(), "plane-budget", 0, "", nil)
-			ctx = infraegress.WithPhysicalCallBudget(infraegress.WithPhysicalCallTrace(ctx, string(account.ProviderBuild), "responses"), budget)
+			ctx = physical.WithPhysicalCallBudget(physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), string(account.ProviderBuild), "responses"), budget)
 			response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: token, BuildRouteMode: account.BuildRouteAuto, BuildSuperEntitled: true}, Method: http.MethodPost, Path: "/responses", Model: "grok-4.5", Body: []byte(`{"model":"grok-4.5","input":[{"type":"reasoning","encrypted_content":"opaque","summary":[]},{"role":"user","content":"next"}]}`), HistoryControl: gatewayapp.NewHistoryController(historydomain.AllowLossyRecovery, budget)})
 			if err != nil {
 				t.Fatal(err)
@@ -426,8 +429,8 @@ func TestHistoryRecoveryBudgetIncludesPlaneFallback(t *testing.T) {
 			if limit == 3 {
 				want = 200
 			}
-			if response.StatusCode != want || int(calls.Load()) != limit || len(infraegress.PhysicalFacts(ctx)) != limit {
-				t.Fatalf("status=%d calls=%d facts=%d", response.StatusCode, calls.Load(), len(infraegress.PhysicalFacts(ctx)))
+			if response.StatusCode != want || int(calls.Load()) != limit || len(physical.PhysicalFacts(ctx)) != limit {
+				t.Fatalf("status=%d calls=%d facts=%d", response.StatusCode, calls.Load(), len(physical.PhysicalFacts(ctx)))
 			}
 		})
 	}
@@ -454,7 +457,7 @@ func TestHistoryBudgetIncludesCompactionRetries(t *testing.T) {
 			t.Cleanup(func() { adapter.base.current.Load().CloseIdleConnections() })
 			budget := inferencedomain.NewAttemptBudget(limit)
 			ctx := attemptmeta.WithRequest(t.Context(), "compaction-budget", 0, "", nil)
-			ctx = infraegress.WithPhysicalCallBudget(infraegress.WithPhysicalCallTrace(ctx, string(account.ProviderBuild), "compaction"), budget)
+			ctx = physical.WithPhysicalCallBudget(physical.WithPhysicalCallTrace(ctx, testsupport.NewPhysicalJournalFactory().NewPhysicalJournal(), string(account.ProviderBuild), "compaction"), budget)
 			request := compactionProviderRequest(token)
 			response, err := adapter.forwardGatewayCompactionWithPolicy(ctx, request, "access-token", request.Body, "", 3, 0)
 			if limit == 1 {
@@ -471,8 +474,8 @@ func TestHistoryBudgetIncludesCompactionRetries(t *testing.T) {
 					t.Fatalf("status=%d", response.StatusCode)
 				}
 			}
-			if int(calls.Load()) != limit || len(infraegress.PhysicalFacts(ctx)) != limit {
-				t.Fatalf("calls=%d facts=%d", calls.Load(), len(infraegress.PhysicalFacts(ctx)))
+			if int(calls.Load()) != limit || len(physical.PhysicalFacts(ctx)) != limit {
+				t.Fatalf("calls=%d facts=%d", calls.Load(), len(physical.PhysicalFacts(ctx)))
 			}
 		})
 	}

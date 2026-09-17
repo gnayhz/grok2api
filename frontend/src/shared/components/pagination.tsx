@@ -1,8 +1,8 @@
 import { ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Button } from "@/shared/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/shared/ui/select";
 import { cn } from "@/shared/lib/cn";
 
 const PAGE_SIZE_OPTIONS = [20, 100, 500, 1000, 2000] as const;
@@ -33,7 +33,7 @@ export function CursorPagination({ page, pageSize, hasMore, disabled = false, on
       <div className="flex items-center gap-1">
         <Button type="button" variant="ghost" size="icon" className="size-8" disabled={disabled || page <= 1} onClick={onFirstPage} aria-label={t("common.firstPage")}><ChevronsLeft /></Button>
         <Button type="button" variant="ghost" size="icon" className="size-8" disabled={disabled || page <= 1} onClick={onPreviousPage} aria-label={t("common.previousPage")}><ChevronLeft /></Button>
-        <span className="min-w-20 px-2 text-center text-xs text-muted-foreground">{t("audits.cursorPage", { page })}</span>
+        <span className="min-w-20 px-2 text-center text-xs text-muted-foreground">{t("common.cursorPage", { page })}</span>
         <Button type="button" variant="ghost" size="icon" className="size-8" disabled={disabled || !hasMore} onClick={onNextPage} aria-label={t("common.nextPage")}><ChevronRight /></Button>
       </div>
       <PageSizeSelector pageSize={pageSize} disabled={disabled} options={PAGE_SIZE_OPTIONS} onChange={onPageSizeChange} />
