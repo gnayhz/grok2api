@@ -388,7 +388,14 @@ func TestSyncAccountRunsUpstreamDiscoveryConcurrently(t *testing.T) {
 			results <- syncErr
 		}()
 	}
-	deadline := time.NewTimer(time.Second)
+	// Each SyncAccount goroutine does real SQLite pre-work (account read,
+	// credential decrypt) before the adapter call, so the enter deadline must
+	// tolerate a loaded shared runner: a 1s budget observed peak=5 while the
+	// model package ran beside the other go test binaries, failing the wait
+	// before half the goroutines had even reached discovery. The wait stays
+	// event-driven — only a genuinely serialized discovery pays the full
+	// budget — so roomy costs nothing on a healthy machine.
+	deadline := time.NewTimer(15 * time.Second)
 	for range accountCount {
 		select {
 		case <-adapter.entered:

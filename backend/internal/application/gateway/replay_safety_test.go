@@ -39,8 +39,15 @@ func TestAdmissionUsesNormalizedToolProfileBeforeNetwork(t *testing.T) {
 	for _, actualTools := range []bool{false, true} {
 		base := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{}}
 		s, accounts := newGuardLoopService(t, base, "normalized-budget")
-		s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, GuardedModels: []string{"grok-4.6"}, AdmissionTimeout: 50 * time.Millisecond, ToolAdmissionTimeout: 250 * time.Millisecond}))
-		base.responses[accounts[0].ID] = []scriptedBuildResponse{{status: 200, headerDelay: 110 * time.Millisecond, body: "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n"}}
+		// The tool branch must survive a loaded shared runner: the admission
+		// deadline is absolute from request start, so the pre-headers pre-work
+		// (selection, normalization, physical send) plus headerDelay has to fit
+		// inside ToolAdmissionTimeout. A 250ms tool budget lost that race on a
+		// CI runner whose pre-work alone exceeded 140ms. Scale the sandwich
+		// together and keep the invariant the test exists for: the no-tools
+		// budget fires before headers, the tool budget outlives them.
+		s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{Enabled: true, GuardedModels: []string{"grok-4.6"}, AdmissionTimeout: 500 * time.Millisecond, ToolAdmissionTimeout: 3 * time.Second}))
+		base.responses[accounts[0].ID] = []scriptedBuildResponse{{status: 200, headerDelay: 1100 * time.Millisecond, body: "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\ndata: [DONE]\n\n"}}
 		s.providers = providerimpl.NewRegistry(resourceTestAdapter{base, func(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 			policy := inferencedomain.ReplayPolicy{Safe: true, Tools: actualTools}
 			request.NormalizedMetadata.ReplayPolicy = &policy
