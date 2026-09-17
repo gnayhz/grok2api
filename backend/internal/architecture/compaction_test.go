@@ -56,7 +56,7 @@ func TestCompactionHistoryHasOneOwnerAndExplicitController(t *testing.T) {
 			case *ast.KeyValueExpr:
 				if key, ok := v.Key.(*ast.Ident); ok && key.Name == "HistoryControl" {
 					controllers++
-					if path != "../application/gateway/service.go" {
+					if path != "../application/gateway/response_execution.go" {
 						t.Errorf("%s substitutes a logical history controller", path)
 					}
 				}

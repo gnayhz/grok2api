@@ -36,6 +36,7 @@ frontend/src/shared/          API、会话、组件、壳层翻译和通用工�
 ### 执行域归属（application/）
 
 - **gateway**：逻辑请求编排、总预算、delivery/completion。导出面是 `selector.Lease` / `selector.AttemptResources` 与 `Result.BeginDelivery`/`CommitCompletion`（gateway 不转发 selector 类型）。执行失败事实（错误分类、归因、公开文案与 HTTP 状态）由 gateway 的 failure 投影给出，`transport/http/inference/client_error.go` 负责把这些事实转成协议形状并处理 OpenAI/Anthropic 差异。物理调用预算由 `domain/inference` 的 attempt budget 表达，组合根在执行入口装配；物理收据账本归 `port/physical` 与 `application/execution`。
+  `responseExecution` 持有一次逻辑请求在交付前的可变状态：`prepareRoute` 确定路由与权限，`prepareExecution` 建立预算与计费预留，`runAttempts` 组织有限尝试，`admitResponse` 消费质量判决，`fail` 汇总失败事实。这些阶段串行运行；`handoffResponse` 把必要资源与完成元数据交给 `deliverySession`，不把请求状态对象绑定到长连接。未交接的租约、输出、预留、预算与准入由统一退出路径依次释放，各清理动作独立保证执行。
 - **selector**：候选/资格/原子领取与 CAS；消费方合同 RoutingStore（路由候选/凭据材料/条件写），不含视频完成函数，gateway 不再转发 selector 类型。
 - **admission**：准入等待、guard 快照与换号预算。
 - **mediajob**：图片/视频/语音生成事实与视频物理预算；不持有 gateway.Service。媒体后台执行状态（队列/去重集合/worker/输入槽位/额度恢复游标）由 gateway 内 mediaBackground 组件单一持有，gateway.Service 不再声明这些字段。
@@ -53,6 +54,8 @@ frontend/src/shared/          API、会话、组件、壳层翻译和通用工�
 
 - 依赖方向 app → features → entities → shared；**feature 之间不互相 import**（页面组合一律在 app 层完成，如 `app/quality-settings-route.tsx` 注入设置表单运行时、deferred-pages 组装状态横幅）。
 - `shared/` 不 import entities/features/app；`entities/` 不 import features/app；shadcn 与通用运营件在 `shared/ui`；时长原语在 `shared/lib/duration`；设置表单模型、时长输入与应用状态徽章在 `entities/settings`；节点投影与按域查询 hooks 在 `entities/{egress,account,guard}`；代理/订阅 URL 校验在 `entities/egress/proxy-url`。
+- 页面模块与所需双语文案在 `app/page-modules.ts` 同时按需加载，加载完成才渲染。`app/register-feature-i18n.ts` 负责合并、并发去重和失败重试；feature/entity 持有文案，shared 仅持有通用基础文案。设置状态与时长控件使用 entities/settings 自己的 `settingsForm` 文案。文案归属及页面传递依赖由 i18n 测试约束。
+- 账号页的列表偏好归页面，Provider 专属表单、选择与操作归带 Provider 标识的工作区；切换 Provider 销毁旧工作区。账号编辑器持有自己的表单与提交，设备登录组件持有创建会话、轮询及取消。`useLifetimeMutation` 在提交时捕获挂载生命周期，向 API 传递取消信号并阻止迟到回调修改新界面；服务端已经接受的工作按后端合同完成，新页面通过查询重新取得状态。
 - 边界由 `frontend/src/app/fsd-boundaries.test.ts`（解析静态、动态、类型、重导出和副作用依赖，覆盖别名与相对路径）强制，eslint restricted-imports 提供别名导入的即时检查。
 - Inference/account HTTP 不引用 `provider.VideoOperation` / thinking marker / TTS DTO；标记合同在 `domain/inference`。Account HTTP 按用例拆文件（query/admin/import_export/conversion/refresh/device，另有 handler 装配、web_settings、web_account_scripts 与 SSE stream），handler 接收组合根装配的能力，负责路由、投影与共享错误映射；导入/转换流水线不在 HTTP 内启动同步 goroutine。
 

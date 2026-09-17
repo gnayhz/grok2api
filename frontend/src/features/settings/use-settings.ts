@@ -32,7 +32,7 @@ export function useSettings() {
     queryClient.setQueryData(["settings"], snapshot);
     void queryClient.invalidateQueries({ queryKey: ["system-info"] });
     installForm(snapshot);
-    if (snapshot.applyPending) toast.info(t("settings.application.savedPending"));
+    if (snapshot.applyPending) toast.info(t("settingsForm.application.savedPending"));
     else toast.success(t(message));
   };
   const reportFailure = (error: unknown) => {

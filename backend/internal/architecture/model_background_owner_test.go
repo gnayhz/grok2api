@@ -39,7 +39,7 @@ func TestDetachedAccountModelSyncHasModelOwner(t *testing.T) {
 			case *ast.SelectorExpr:
 				if value.Sel.Name == "QueueAccountSync" {
 					requests++
-					if path != "../application/gateway/service.go" {
+					if path != "../application/gateway/response_attempt.go" {
 						t.Errorf("%s adds a catalog-change trigger outside the current request boundary", path)
 					}
 				}

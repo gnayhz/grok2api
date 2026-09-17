@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { featureTranslationBundles } from "./register-feature-i18n.ts";
+import { featureTranslationLoaders } from "./register-feature-i18n.ts";
 import { i18nResources as sharedResources } from "@/shared/i18n";
 
 type Tree = { [key: string]: string | Tree };
@@ -21,6 +21,13 @@ function collectKeys(node: Tree, prefix: string, keys: Map<string, string>): voi
 
 function placeholders(value: string): string[] {
 	return [...value.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]!).sort();
+}
+
+const featureTranslationBundles = { "zh-CN": {}, en: {} };
+for (const load of Object.values(featureTranslationLoaders)) {
+  const bundle = await load();
+  Object.assign(featureTranslationBundles["zh-CN"], bundle["zh-CN"]);
+  Object.assign(featureTranslationBundles.en, bundle.en);
 }
 
 const resources = {

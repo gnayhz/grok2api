@@ -1,11 +1,8 @@
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, TimerOff, Trash2, TriangleAlert, Webhook } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { z } from "zod";
 
 import { CopyButton } from "@/shared/components/copy-button";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/shared/ui/alert-dialog";
@@ -16,13 +13,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
-import { Switch } from "@/shared/ui/switch";
 import { Spinner } from "@/shared/ui/spinner";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/shared/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { Textarea } from "@/shared/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { ApiError } from "@/shared/api/client";
 import { EmptyState, ErrorState, LoadingState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -51,7 +46,6 @@ import {
   importConsoleAccounts,
   importWebAccounts,
   listAccounts,
-  pollDeviceAuthorization,
   refreshAccountBilling,
   refreshAccountsQuota,
   resetAccountsQuota,
@@ -65,17 +59,13 @@ import {
   refreshAllWebAccountQuotas,
   runWebAccountScripts,
   setWebAccountBirthDate,
-  startDeviceAuthorization,
   syncWebAccountsToConsole,
-  updateAccount,
   updateAccountsEnabled,
   updateAccountsMaxConcurrent,
   type AccountDTO,
   type AccountCleanupStatus,
   type AccountProvider,
   type CleanupPreviewDTO,
-  type AccountUpdateInput,
-  type BuildRouteMode,
   type AccountTaskProgressDTO,
   type BuildConversionInput,
   type BuildConversionStrategy,
@@ -83,7 +73,6 @@ import {
   type WebConsoleSyncInput,
   type WebAccountScriptActions,
   type WebAccountScriptsInput,
-  type DeviceSessionDTO,
 } from "@/entities/account/account-api";
 import { AccountQuota, ConsoleQuota, WebQuota } from "./account-quota";
 import { AccountNameCell } from "./account-name-cell";
@@ -91,8 +80,12 @@ import { WebAccountScriptsDialog } from "./web-account-scripts";
 import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfirmationTarget } from "./web-account-settings";
 import { AccountMetricPanel, AccountStatus, AccountType, AccountTypeText, WebAccountType } from "./accounts-page-views";
 import { downloadAccountExport } from "./download-account-export";
+import { AccountEditor } from "./account-editor";
+import { useDeviceLogin } from "./use-device-login";
 import { useImportController } from "./use-import-controller";
 import { useAbortController } from "@/shared/lib/use-abort-controller";
+import { useLifetimeMutation } from "@/shared/hooks/use-lifetime-mutation";
+import { useLifetimeSignal } from "@/shared/hooks/use-lifetime-signal";
 import { isAbortError } from "@/shared/lib/is-abort-error";
 import { showErrorToast } from "@/shared/lib/show-error";
 
@@ -109,6 +102,25 @@ type AccountSelection = {
 };
 
 export function AccountsPage() {
+  const [provider, setProvider] = useState<AccountProvider>("grok_build");
+  const [pageSize, setPageSize] = useState(20);
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
+  const view = { pageSize, setPageSize, search, setSearch, sort, setSort };
+  // Provider-scoped forms, selection and work are destroyed together. List
+  // preferences stay with the page; late work cannot mutate the next workspace.
+  return <AccountWorkspace key={provider} provider={provider} onProviderChange={setProvider} view={view} />;
+}
+
+type ListView = {
+  pageSize: number; setPageSize: (value: number) => void;
+  search: string; setSearch: (value: string) => void;
+  sort: TableSort; setSort: (value: TableSort | ((current: TableSort) => TableSort)) => void;
+};
+
+function AccountWorkspace({ provider, onProviderChange, view }: { provider: AccountProvider; onProviderChange: (value: AccountProvider) => void; view: ListView }) {
+  const { pageSize, setPageSize, search, setSearch, sort, setSort } = view;
+  const lifetimeSignal = useLifetimeSignal();
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -120,19 +132,16 @@ export function AccountsPage() {
   const conversionAbortRef = useRef<AbortController | null>(null);
   const webConsoleSyncAbortRef = useRef<AbortController | null>(null);
   const { ref: webAccountScriptsAbortRef } = useAbortController();
+  const { begin: beginImportFileRead, cancel: cancelImportFileRead } = useAbortController();
   const { abortRef: importAbortRef, toastRef: importToastRef } = useImportController();
-  const [provider, setProvider] = useState<AccountProvider>("grok_build");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
-  const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState("");
   const [riskFilter, setRiskFilter] = useState("");
   const [agreementFilter, setAgreementFilter] = useState("");
   const [associationFilter, setAssociationFilter] = useState("");
-  const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
-  const [selection, setSelection] = useState<AccountSelection>(() => ({ provider: "grok_build", ids: new Set() }));
+  const [selection, setSelection] = useState<AccountSelection>(() => ({ provider, ids: new Set() }));
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchConcurrencyOpen, setBatchConcurrencyOpen] = useState(false);
   const [batchMaxConcurrent, setBatchMaxConcurrent] = useState("1");
@@ -175,9 +184,6 @@ export function AccountsPage() {
   const [linkedDeleteCounts, setLinkedDeleteCounts] = useState<Partial<Record<AccountProvider, number>>>({});
   // Preview failures must not be painted as +0 — block confirm until a successful recount.
   const [linkedDeletePreviewError, setLinkedDeletePreviewError] = useState(false);
-  const [deviceOpen, setDeviceOpen] = useState(false);
-  const [deviceSession, setDeviceSession] = useState<DeviceSessionDTO | null>(null);
-  const [deviceStatus, setDeviceStatus] = useState<"starting" | "pending" | "failed">("starting");
   const [quickImportOpen, setQuickImportOpen] = useState(false);
   const [quickImportTokens, setQuickImportTokens] = useState("");
   const [webConfirmationTarget, setWebConfirmationTarget] = useState<WebAccountConfirmationTarget | null>(null);
@@ -191,33 +197,12 @@ export function AccountsPage() {
     webConsoleSyncAbortRef.current?.abort();
   }, []);
 
-  const accountSchema = z.object({
-    name: z.string().min(1, t("errors.required")),
-    enabled: z.boolean(),
-    priority: z.number().int(),
-    maxConcurrent: z.number().int().min(1, t("errors.positive")).max(256),
-    minimumRemaining: z.number().min(0),
-    cloudflareCookies: z.string().max(16 << 10, t("settings.invalidValue")),
-    clearCloudflareCookies: z.boolean(),
-    buildSuperEntitled: z.boolean(),
-    buildRouteMode: z.enum(["auto", "build", "xai"]),
-  });
-  type AccountForm = z.infer<typeof accountSchema>;
-  const form = useForm<AccountForm>({
-    resolver: zodResolver(accountSchema),
-    defaultValues: {
-      name: "", enabled: true, priority: 1, maxConcurrent: 8, minimumRemaining: 0,
-      cloudflareCookies: "", clearCloudflareCookies: false, buildSuperEntitled: false, buildRouteMode: "auto",
-    },
-  });
-  const accountEnabled = useWatch({ control: form.control, name: "enabled" });
-  const clearCloudflareCookies = useWatch({ control: form.control, name: "clearCloudflareCookies" });
-  const buildSuperEntitled = useWatch({ control: form.control, name: "buildSuperEntitled" });
-  const buildRouteMode = useWatch({ control: form.control, name: "buildRouteMode" });
   const selected = selection.provider === provider ? selection.ids : new Set<string>();
   const selectedIdsKey = Array.from(selected).sort().join(",");
 
   const accountsQuery = useQuery({
+    // A previous workspace may have cancelled after the server accepted work.
+    refetchOnMount: "always",
     queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, riskFilter, agreementFilter, associationFilter, sort.field, sort.order],
     queryFn: ({ signal }) => listAccounts({
       provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter,
@@ -231,7 +216,8 @@ export function AccountsPage() {
 
   const summaryQuery = useQuery({
     queryKey: ["accounts", "summary"],
-    queryFn: getAccountSummary,
+    refetchOnMount: "always",
+    queryFn: ({ signal }) => getAccountSummary(signal),
   });
 
   const invalidateAccountData = useCallback(() => {
@@ -239,48 +225,18 @@ export function AccountsPage() {
     void queryClient.invalidateQueries({ queryKey: ["accounts", "summary"] });
   }, [queryClient]);
 
-  const updateMutation = useMutation({
-    mutationFn: (values: AccountForm) => {
-      if (!editing) throw new Error(t("errors.generic"));
-      const input: AccountUpdateInput = {
-        name: values.name,
-        priority: values.priority,
-        maxConcurrent: values.maxConcurrent,
-        minimumRemaining: values.minimumRemaining,
-      };
-      if (values.enabled !== editing.enabled) input.enabled = values.enabled;
-      if (editing.provider !== "grok_build") {
-        if (values.clearCloudflareCookies) input.clearCloudflareCookies = true;
-        else if (values.cloudflareCookies.trim()) input.cloudflareCookies = values.cloudflareCookies;
-      } else {
-        input.buildRouteMode = values.buildRouteMode;
-        if (values.buildSuperEntitled !== editing.buildSuperEntitled) input.buildSuperEntitled = values.buildSuperEntitled;
-      }
-      // 手动风控打标已下线(架构基准 B5:质量语义归仲裁庭;账号启停归底座)。
-      // 遗留标记经列表徽章只读可见,不再经编辑表单改写。
-      return updateAccount(editing.id, input);
-    },
-    onSuccess: (account, values) => {
-      const entitlementChanged = editing?.provider === "grok_build" && values.buildSuperEntitled !== editing.buildSuperEntitled;
-      invalidateAccountData();
-      if (entitlementChanged) void queryClient.invalidateQueries({ queryKey: ["models"] });
-      setEditing(null);
-      if (account.modelSyncFailed) toast.warning(t("accounts.updatedWithModelSyncFailure"));
-      else if (account.enabledDoesNotClearCooldown) toast.warning(t("accounts.enabledDoesNotClearCooldown"));
-      else toast.success(t("accounts.updated"));
-    },
-    onError: showError,
-  });
+  const { open: deviceOpen, session: deviceSession, status: deviceStatus, start: startDeviceLogin, onOpenChange: setDeviceOpen } = useDeviceLogin(invalidateAccountData);
 
   useEffect(() => {
     if (!deleting && !batchDeleteOpen) return;
     const ids = deleting ? [deleting.id] : (selectedIdsKey ? selectedIdsKey.split(",") : []);
     if (linkedDeleteTargets.length === 0 || ids.length === 0) return;
+    const controller = new AbortController();
     let cancelled = false;
     // Keep dialog height stable: never mount/unmount loading rows; only update counts in place.
     // Clear error/counts only inside the async path (not sync in effect body) to satisfy react-hooks/set-state-in-effect.
     const timer = window.setTimeout(() => {
-      void previewAccountDeletion(ids, provider, linkedDeleteTargets)
+      void previewAccountDeletion(ids, provider, linkedDeleteTargets, controller.signal)
         .then((preview) => {
           if (cancelled) return;
           // Always materialize a count for every selected target (including 0),
@@ -302,6 +258,7 @@ export function AccountsPage() {
     }, 300);
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearTimeout(timer);
     };
   }, [batchDeleteOpen, deleting, linkedDeleteTargets, provider, selectedIdsKey, t]);
@@ -388,10 +345,10 @@ export function AccountsPage() {
     setLinkedDeleteTargets(options);
   };
 
-  const deleteMutation = useMutation({
+  const deleteMutation = useLifetimeMutation({
     // Snapshot id/targets in mutate() args so AlertDialog close/reset cannot clear linkedDeleteTargets mid-flight.
-    mutationFn: (input: { id: string; provider: AccountProvider; linkedDeleteTargets: AccountProvider[] }) =>
-      deleteAccount(input.id, input.linkedDeleteTargets.length ? { provider: input.provider, linkedDeleteTargets: input.linkedDeleteTargets } : undefined),
+    mutationFn: (input: { id: string; provider: AccountProvider; linkedDeleteTargets: AccountProvider[] }, signal) =>
+      deleteAccount(input.id, input.linkedDeleteTargets.length ? { provider: input.provider, linkedDeleteTargets: input.linkedDeleteTargets } : undefined, signal),
     onSuccess: () => {
       invalidateAccountData();
       setDeleting(null);
@@ -412,7 +369,7 @@ export function AccountsPage() {
     toast.success(t("accounts.deleted"));
   };
 
-  const billingMutation = useMutation({
+  const billingMutation = useLifetimeMutation({
     mutationFn: refreshAccountBilling,
     onSuccess: () => {
       invalidateAccountData();
@@ -421,7 +378,7 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const tokenMutation = useMutation({
+  const tokenMutation = useLifetimeMutation({
     mutationFn: refreshAccountToken,
     onSuccess: () => {
       invalidateAccountData();
@@ -430,7 +387,7 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const clearCooldownMutation = useMutation({
+  const clearCooldownMutation = useLifetimeMutation({
     mutationFn: clearAccountCooldown,
     onSuccess: () => {
       invalidateAccountData();
@@ -439,7 +396,7 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const quotaMutation = useMutation({
+  const quotaMutation = useLifetimeMutation({
     mutationFn: refreshAccountQuota,
     onSuccess: () => {
       invalidateAccountData();
@@ -448,11 +405,11 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const webConfirmationMutation = useMutation({
-    mutationFn: ({ account, action }: WebAccountConfirmationTarget) => {
-      if (action === "acceptTerms") return acceptWebAccountTerms(account.id);
-      if (action === "setBirthDate") return setWebAccountBirthDate(account.id);
-      return enableWebAccountNSFW(account.id);
+  const webConfirmationMutation = useLifetimeMutation({
+    mutationFn: ({ account, action }: WebAccountConfirmationTarget, signal) => {
+      if (action === "acceptTerms") return acceptWebAccountTerms(account.id, signal);
+      if (action === "setBirthDate") return setWebAccountBirthDate(account.id, signal);
+      return enableWebAccountNSFW(account.id, signal);
     },
     onSuccess: (_, target) => {
       setWebConfirmationTarget(null);
@@ -467,12 +424,12 @@ export function AccountsPage() {
     onSettled: invalidateAccountData,
   });
 
-  const allTokenMutation = useMutation({
-    mutationFn: () => {
+  const allTokenMutation = useLifetimeMutation({
+    mutationFn: (_variables: void, signal) => {
       const controller = new AbortController();
       renewalAbortRef.current = controller;
       setRenewalProgress(null);
-      return refreshAllAccountTokens(setRenewalProgress, controller.signal);
+      return refreshAllAccountTokens(setRenewalProgress, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (result) => {
       setRenewAllOpen(false);
@@ -482,14 +439,14 @@ export function AccountsPage() {
     onSettled: () => { renewalAbortRef.current = null; setRenewalProgress(null); invalidateAccountData(); },
   });
 
-  const quotaSyncMutation = useMutation({
-    mutationFn: (targetProvider: AccountProvider) => {
+  const quotaSyncMutation = useLifetimeMutation({
+    mutationFn: (targetProvider: AccountProvider, signal) => {
       const controller = new AbortController();
       quotaSyncAbortRef.current = controller;
       setQuotaSyncProgress(null);
-      if (targetProvider === "grok_web") return refreshAllWebAccountQuotas(setQuotaSyncProgress, controller.signal);
-      if (targetProvider === "grok_console") return refreshAllConsoleAccountQuotas(setQuotaSyncProgress, controller.signal);
-      return refreshAllAccountBilling(setQuotaSyncProgress, controller.signal);
+      if (targetProvider === "grok_web") return refreshAllWebAccountQuotas(setQuotaSyncProgress, AbortSignal.any([signal, controller.signal]));
+      if (targetProvider === "grok_console") return refreshAllConsoleAccountQuotas(setQuotaSyncProgress, AbortSignal.any([signal, controller.signal]));
+      return refreshAllAccountBilling(setQuotaSyncProgress, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (result) => {
       setSyncAllOpen(false);
@@ -499,8 +456,8 @@ export function AccountsPage() {
     onSettled: () => { quotaSyncAbortRef.current = null; setQuotaSyncProgress(null); invalidateAccountData(); },
   });
 
-  const allQuotaResetMutation = useMutation({
-    mutationFn: resetAllAccountQuota,
+  const allQuotaResetMutation = useLifetimeMutation({
+    mutationFn: (_variables: void, signal) => resetAllAccountQuota(signal),
     onSuccess: (result) => {
       setSyncAllOpen(false);
       toast.success(t("accountQuotaReset.completed", result));
@@ -508,12 +465,12 @@ export function AccountsPage() {
     onError: showError,
     onSettled: invalidateAccountData,
   });
-  const conversionMutation = useMutation({
-    mutationFn: (input: BuildConversionInput) => {
+  const conversionMutation = useLifetimeMutation({
+    mutationFn: (input: BuildConversionInput, signal) => {
       const controller = new AbortController();
       conversionAbortRef.current = controller;
       setConversionProgress(null);
-      return convertWebAccountsToBuild(input, setConversionProgress, controller.signal);
+      return convertWebAccountsToBuild(input, setConversionProgress, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (conversion) => {
       setConversionProgress(null);
@@ -530,12 +487,12 @@ export function AccountsPage() {
     },
   });
 
-  const webConsoleSyncMutation = useMutation({
-    mutationFn: (input: WebConsoleSyncInput) => {
+  const webConsoleSyncMutation = useLifetimeMutation({
+    mutationFn: (input: WebConsoleSyncInput, signal) => {
       const controller = new AbortController();
       webConsoleSyncAbortRef.current = controller;
       setWebConsoleSyncProgress(null);
-      return syncWebAccountsToConsole(input, setWebConsoleSyncProgress, controller.signal);
+      return syncWebAccountsToConsole(input, setWebConsoleSyncProgress, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (result) => {
       setWebConversionTargets(null);
@@ -551,12 +508,12 @@ export function AccountsPage() {
     },
   });
 
-  const webAccountScriptsMutation = useMutation({
-    mutationFn: (input: WebAccountScriptsInput) => {
+  const webAccountScriptsMutation = useLifetimeMutation({
+    mutationFn: (input: WebAccountScriptsInput, signal) => {
       const controller = new AbortController();
       webAccountScriptsAbortRef.current = controller;
       setWebAccountScriptsProgress(null);
-      return runWebAccountScripts(input, setWebAccountScriptsProgress, controller.signal);
+      return runWebAccountScripts(input, setWebAccountScriptsProgress, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (result) => {
       setWebAccountScriptsTargets(null);
@@ -575,8 +532,8 @@ export function AccountsPage() {
     },
   });
 
-  const importMutation = useMutation({
-    mutationFn: (files: File[]) => {
+  const importMutation = useLifetimeMutation({
+    mutationFn: (files: File[], signal) => {
       const controller = new AbortController();
       importAbortRef.current = controller;
       const toastID = toast.loading(t("common.importingProgress", { completed: 0, total: "…" }));
@@ -584,9 +541,9 @@ export function AccountsPage() {
       const onProgress = (progress: AccountTaskProgressDTO) => {
         toast.loading(t(progress.phase === "syncing" ? "common.syncingProgress" : "common.importingProgress", progress), { id: toastID });
       };
-      if (provider === "grok_web") return importWebAccounts(files, onProgress, controller.signal);
-      if (provider === "grok_console") return importConsoleAccounts(files, onProgress, controller.signal);
-      return importAccounts(files, onProgress, controller.signal);
+      if (provider === "grok_web") return importWebAccounts(files, onProgress, AbortSignal.any([signal, controller.signal]));
+      if (provider === "grok_console") return importConsoleAccounts(files, onProgress, AbortSignal.any([signal, controller.signal]));
+      return importAccounts(files, onProgress, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (result) => {
       if (importToastRef.current !== null) toast.dismiss(importToastRef.current);
@@ -616,12 +573,12 @@ export function AccountsPage() {
     },
   });
 
-  const exportMutation = useMutation({
-    mutationFn: async (input: { kind: "selected"; ids: string[] } | { kind: "batch"; limit: number; afterId: string; snapshotMaxId: string; batchNumber: number }) => {
+  const exportMutation = useLifetimeMutation({
+    mutationFn: async (input: { kind: "selected"; ids: string[] } | { kind: "batch"; limit: number; afterId: string; snapshotMaxId: string; batchNumber: number }, signal) => {
       if (input.kind === "selected") {
-        return { kind: input.kind, blob: await exportSelectedAccounts(provider, input.ids) } as const;
+        return { kind: input.kind, blob: await exportSelectedAccounts(provider, input.ids, signal) } as const;
       }
-      return { kind: input.kind, batchNumber: input.batchNumber, batch: await exportAccountBatch(provider, input.limit, input.afterId, input.snapshotMaxId) } as const;
+      return { kind: input.kind, batchNumber: input.batchNumber, batch: await exportAccountBatch(provider, input.limit, input.afterId, input.snapshotMaxId, signal) } as const;
     },
     onSuccess: (result) => {
       if (result.kind === "selected") {
@@ -646,8 +603,8 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const batchUpdateMutation = useMutation({
-    mutationFn: (enabled: boolean) => updateAccountsEnabled([...selected], enabled, provider),
+  const batchUpdateMutation = useLifetimeMutation({
+    mutationFn: (enabled: boolean, signal) => updateAccountsEnabled([...selected], enabled, provider, signal),
     onSuccess: () => {
       clearSelection();
       invalidateAccountData();
@@ -656,8 +613,8 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const batchConcurrencyMutation = useMutation({
-    mutationFn: (maxConcurrent: number) => updateAccountsMaxConcurrent([...selected], maxConcurrent, provider),
+  const batchConcurrencyMutation = useLifetimeMutation({
+    mutationFn: (maxConcurrent: number, signal) => updateAccountsMaxConcurrent([...selected], maxConcurrent, provider, signal),
     onSuccess: () => {
       setBatchConcurrencyOpen(false);
       clearSelection();
@@ -667,8 +624,8 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const batchBillingMutation = useMutation({
-    mutationFn: () => refreshAccountsQuota([...selected], provider),
+  const batchBillingMutation = useLifetimeMutation({
+    mutationFn: (_variables: void, signal) => refreshAccountsQuota([...selected], provider, signal),
     onSuccess: (result) => {
       clearSelection();
       setBatchQuotaTaskOpen(false);
@@ -695,8 +652,8 @@ export function AccountsPage() {
     });
   }, []);
 
-  const detectMutation = useMutation({
-    mutationFn: (mode: "selected" | "all") => {
+  const detectMutation = useLifetimeMutation({
+    mutationFn: (mode: "selected" | "all", signal) => {
       const controller = new AbortController();
       detectAbortRef.current = controller;
       setDetectProgress(null);
@@ -708,9 +665,9 @@ export function AccountsPage() {
         onItem: appendDetectItem,
       };
       if (mode === "all") {
-        return detectBuildAccounts({ all: true }, handlers, controller.signal);
+        return detectBuildAccounts({ all: true }, handlers, AbortSignal.any([signal, controller.signal]));
       }
-      return detectBuildAccounts({ ids: [...selected] }, handlers, controller.signal);
+      return detectBuildAccounts({ ids: [...selected] }, handlers, AbortSignal.any([signal, controller.signal]));
     },
     onSuccess: (result, mode) => {
       if (mode === "selected") clearSelection();
@@ -744,8 +701,8 @@ export function AccountsPage() {
     setDetectDialogOpen(true);
   };
 
-  const batchQuotaResetMutation = useMutation({
-    mutationFn: () => resetAccountsQuota([...selected], provider),
+  const batchQuotaResetMutation = useLifetimeMutation({
+    mutationFn: (_variables: void, signal) => resetAccountsQuota([...selected], provider, signal),
     onSuccess: (result) => {
       clearSelection();
       setBatchQuotaTaskOpen(false);
@@ -755,8 +712,8 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const batchTokenMutation = useMutation({
-    mutationFn: () => refreshAccountsTokens([...selected], provider),
+  const batchTokenMutation = useLifetimeMutation({
+    mutationFn: (_variables: void, signal) => refreshAccountsTokens([...selected], provider, signal),
     onSuccess: (result) => {
       clearSelection();
       invalidateAccountData();
@@ -765,10 +722,10 @@ export function AccountsPage() {
     onError: showError,
   });
 
-  const batchDeleteMutation = useMutation({
+  const batchDeleteMutation = useLifetimeMutation({
     // Snapshot selection/targets at click time; dialog unmount/reset must not empty targets.
-    mutationFn: (input: { ids: string[]; provider: AccountProvider; linkedDeleteTargets: AccountProvider[] }) =>
-      deleteAccounts(input.ids, input.provider, input.linkedDeleteTargets),
+    mutationFn: (input: { ids: string[]; provider: AccountProvider; linkedDeleteTargets: AccountProvider[] }, signal) =>
+      deleteAccounts(input.ids, input.provider, input.linkedDeleteTargets, signal),
     onSuccess: (result) => {
       clearSelection();
       setBatchDeleteOpen(false);
@@ -800,10 +757,10 @@ export function AccountsPage() {
     setCleanupPreviewError(false);
   };
 
-  const cleanupMutation = useMutation({
+  const cleanupMutation = useLifetimeMutation({
     // Snapshot statuses/targets at click; dialog close/reset must not mutate an in-flight request.
-    mutationFn: (input: { statuses: AccountCleanupStatus[]; targets: AccountProvider[] }) =>
-      cleanupAccounts(provider, input.statuses, input.targets),
+    mutationFn: (input: { statuses: AccountCleanupStatus[]; targets: AccountProvider[] }, signal) =>
+      cleanupAccounts(provider, input.statuses, input.targets, signal),
     onSuccess: (result) => {
       setCleanupOpen(false);
       resetCleanupState();
@@ -830,6 +787,7 @@ export function AccountsPage() {
   const cleanupPreviewTotals = cleanupPreviewFresh ? cleanupPreview?.data ?? null : null;
   useEffect(() => {
     if (!cleanupOpen || cleanupStatusesKey === "") return;
+    const controller = new AbortController();
     let cancelled = false;
     const previewKey = `${provider}|${cleanupStatusesKey}|${cleanupTargetsKey}`;
     const statuses = cleanupStatusesKey.split(",") as AccountCleanupStatus[];
@@ -837,7 +795,7 @@ export function AccountsPage() {
     const allowed = linkedTargetOptions(provider);
     const targets = (cleanupTargetsKey ? (cleanupTargetsKey.split(",") as AccountProvider[]) : []).filter((target) => allowed.includes(target));
     const timer = window.setTimeout(() => {
-      void previewCleanup(provider, statuses, targets)
+      void previewCleanup(provider, statuses, targets, controller.signal)
         .then((preview) => {
           if (cancelled) return;
           setCleanupPreviewError(false);
@@ -853,70 +811,13 @@ export function AccountsPage() {
     }, 300);
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearTimeout(timer);
     };
   }, [cleanupOpen, cleanupStatusesKey, cleanupTargetsKey, provider, t]);
 
-  useEffect(() => {
-    if (!deviceOpen || !deviceSession || deviceStatus !== "pending") {
-      return;
-    }
-    const controller = new AbortController();
-    let timeout = 0;
-    const poll = async () => {
-      try {
-        const result = await pollDeviceAuthorization(deviceSession.sessionId, controller.signal);
-        if (result.status === "succeeded") {
-          toast.success(t("accounts.created"));
-          setDeviceOpen(false);
-          setDeviceSession(null);
-          invalidateAccountData();
-          return;
-        }
-        if (result.status === "syncFailed") {
-          toast.warning(t("accounts.createdWithSyncFailure"));
-          setDeviceOpen(false);
-          setDeviceSession(null);
-          invalidateAccountData();
-          return;
-        }
-        timeout = window.setTimeout(poll, deviceSession.intervalSeconds * 1000);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        if (error instanceof ApiError && error.status === 429) {
-          timeout = window.setTimeout(poll, (deviceSession.intervalSeconds + 5) * 1000);
-          return;
-        }
-        setDeviceStatus("failed");
-        toast.error(error instanceof Error ? error.message : t("errors.generic"));
-      }
-    };
-    timeout = window.setTimeout(poll, deviceSession.intervalSeconds * 1000);
-    return () => {
-      controller.abort();
-      window.clearTimeout(timeout);
-    };
-  }, [deviceOpen, deviceSession, deviceStatus, invalidateAccountData, t]);
-
   function changeProvider(value: AccountProvider) {
-    setProvider(value);
-    setPage(1);
-    setSelection({ provider: value, ids: new Set() });
-    setTypeFilter("");
-    setStatusFilter("");
-    setRenewalFilter("");
-    setRiskFilter("");
-    setAgreementFilter("");
-    setAssociationFilter("");
-    setQuickImportOpen(false);
-    setQuickImportTokens("");
-    // Cleanup dialog state is provider-scoped: linked targets from another pool
-    // would be rejected by the API (self-target 400) once the dialog reopens.
-    setCleanupOpen(false);
-    setCleanupStatuses(new Set());
-    setCleanupLinkedTargets([]);
-    setCleanupPreview(null);
-    setCleanupPreviewError(false);
+    onProviderChange(value);
   }
 
   function submitQuickImport(): void {
@@ -933,7 +834,9 @@ export function AccountsPage() {
       return;
     }
     try {
-      setQuickImportTokens(await file.text());
+      const { signal } = beginImportFileRead();
+      const text = await file.text();
+      if (!signal.aborted) setQuickImportTokens(text);
     } catch {
       toast.error(t("errors.generic"));
     }
@@ -974,40 +877,14 @@ export function AccountsPage() {
     }
   }
 
-  async function startDeviceLogin(): Promise<void> {
-    setDeviceOpen(true);
-    setDeviceStatus("starting");
-    setDeviceSession(null);
-    try {
-      const session = await startDeviceAuthorization();
-      setDeviceSession(session);
-      setDeviceStatus("pending");
-    } catch (error) {
-      setDeviceStatus("failed");
-      showError(error);
-    }
-  }
-
   function beginEdit(account: AccountDTO): void {
     setEditing(account);
-    form.reset({
-      name: account.name,
-      enabled: account.enabled,
-      priority: account.priority,
-      maxConcurrent: account.maxConcurrent,
-      minimumRemaining: account.minimumRemaining,
-      cloudflareCookies: "",
-      clearCloudflareCookies: false,
-      buildSuperEntitled: account.buildSuperEntitled,
-      buildRouteMode: account.buildRouteMode,
-
-    });
   }
 
   const webConversionPending = conversionMutation.isPending || webConsoleSyncMutation.isPending;
 
   function showError(error: unknown): void {
-    showErrorToast(error, t);
+    if (!lifetimeSignal().aborted) showErrorToast(error, t);
   }
 
   const result = accountsQuery.data;
@@ -1603,7 +1480,7 @@ export function AccountsPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={quickImportOpen} onOpenChange={(open) => { setQuickImportOpen(open); if (!open) { setQuickImportTokens(""); if (quickImportFileInputRef.current) quickImportFileInputRef.current.value = ""; } }}>
+      <Dialog open={quickImportOpen} onOpenChange={(open) => { setQuickImportOpen(open); if (!open) { cancelImportFileRead(); setQuickImportTokens(""); if (quickImportFileInputRef.current) quickImportFileInputRef.current.value = ""; } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t(provider === "grok_build" ? "accounts.quickImportRTTitle" : provider === "grok_console" ? "console.quickImportTitle" : "accounts.quickImportTitle")}</DialogTitle>
@@ -1635,82 +1512,13 @@ export function AccountsPage() {
             />
           </div>
           <DialogFooter>
-            <Button type="button" variant="secondary" size="sm" onClick={() => { setQuickImportOpen(false); setQuickImportTokens(""); }}>{t("common.cancel")}</Button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => { cancelImportFileRead(); setQuickImportOpen(false); setQuickImportTokens(""); }}>{t("common.cancel")}</Button>
             <Button type="button" size="sm" disabled={!quickImportTokens.trim() || importMutation.isPending} onClick={submitQuickImport}>{importMutation.isPending ? <Spinner /> : null}{t("accounts.importAction")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("common.edit")} {editing?.name}</DialogTitle>
-            <DialogDescription>{editing?.email ?? editing?.userId}</DialogDescription>
-          </DialogHeader>
-          <form className="space-y-4" onSubmit={form.handleSubmit((values) => updateMutation.mutate(values))}>
-            <div className="space-y-2"><Label htmlFor="account-name">{t("accounts.name")}</Label><Input id="account-name" {...form.register("name")} />{form.formState.errors.name ? <p className="text-xs text-destructive">{form.formState.errors.name.message}</p> : null}</div>
-            <div className="flex items-center justify-between border-b py-2"><Label htmlFor="account-enabled">{accountEnabled ? t("common.enabled") : t("common.disabled")}</Label><Switch id="account-enabled" checked={accountEnabled} onCheckedChange={(checked) => form.setValue("enabled", checked)} /></div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2"><Label htmlFor="account-priority">{t("accounts.priority")}</Label><Input id="account-priority" type="number" {...form.register("priority", { valueAsNumber: true })} /></div>
-              <div className="space-y-2"><Label htmlFor="account-concurrency">{t("accounts.maxConcurrent")}</Label><Input id="account-concurrency" type="number" min="1" max="256" {...form.register("maxConcurrent", { valueAsNumber: true })} /></div>
-            </div>
-            <div className="space-y-2"><Label htmlFor="account-minimum">{t("accounts.minimumRemaining")}</Label><Input id="account-minimum" type="number" min="0" step="0.01" {...form.register("minimumRemaining", { valueAsNumber: true })} /></div>
-            {editing?.provider === "grok_build" ? (
-              <div className="space-y-4">
-                <div className="flex items-start justify-between gap-4 rounded-md bg-muted/50 p-3">
-                  <div className="space-y-1">
-                    <Label htmlFor="account-build-super-entitled">{t("accounts.buildSuperEntitled.label")}</Label>
-                    <p className="text-xs text-muted-foreground">{t("accounts.buildSuperEntitled.description")}</p>
-                  </div>
-                  <Switch id="account-build-super-entitled" checked={buildSuperEntitled} onCheckedChange={(checked) => form.setValue("buildSuperEntitled", checked, { shouldDirty: true })} />
-                </div>
-                <div className="space-y-2">
-                  <Label id="account-build-route-mode">{t("accounts.buildRouteMode.label")}</Label>
-                  <Tabs value={buildRouteMode} onValueChange={(value) => form.setValue("buildRouteMode", value as BuildRouteMode, { shouldDirty: true })}>
-                    <TabsList aria-labelledby="account-build-route-mode" className="grid h-10 w-full grid-cols-3 p-1">
-                    {(["auto", "build", "xai"] as BuildRouteMode[]).map((mode) => (
-                      <TabsTrigger
-                        key={mode}
-                        value={mode}
-                        className="h-8 px-2 font-normal data-[state=active]:font-medium"
-                      >
-                        {t(`accounts.buildRouteMode.${mode}`)}
-                      </TabsTrigger>
-                    ))}
-                    </TabsList>
-                  </Tabs>
-                  <p className="text-xs text-muted-foreground">{t(`accounts.buildRouteMode.${buildRouteMode}Description`)}</p>
-                  {buildRouteMode === "xai" && !buildSuperEntitled && !(editing.quota.type === "paid" && editing.quota.source !== "buildSuperEntitlement") ? (
-                    <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" />{t("accounts.buildRouteMode.xaiUnconfirmedWarning")}</p>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-            {editing && editing.provider !== "grok_build" ? (
-              <div className="space-y-2">
-                <Label htmlFor="account-cloudflare-cookie">{t("settings.egress.cloudflareCookie")}</Label>
-                <Textarea
-                  id="account-cloudflare-cookie"
-                  className="min-h-20 font-mono text-xs"
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  disabled={clearCloudflareCookies}
-                  placeholder={editing?.cloudflareCookieConfigured ? t("settings.egress.keepConfigured") : "cf_clearance=..."}
-                  {...form.register("cloudflareCookies")}
-                />
-                {editing?.cloudflareCookieConfigured ? (
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Checkbox checked={clearCloudflareCookies} onCheckedChange={(checked) => form.setValue("clearCloudflareCookies", checked === true)} />
-                    {t("common.clear")}
-                  </label>
-                ) : null}
-                {form.formState.errors.cloudflareCookies ? <p className="text-xs text-destructive">{form.formState.errors.cloudflareCookies.message}</p> : null}
-              </div>
-            ) : null}
-            <DialogFooter><Button type="button" variant="secondary" size="sm" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button type="submit" size="sm" disabled={updateMutation.isPending}>{updateMutation.isPending ? <Spinner /> : null}{t("common.save")}</Button></DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      {editing ? <AccountEditor key={editing.id} account={editing} onClose={() => setEditing(null)} /> : null}
 
       <AlertDialog open={Boolean(deleting)} onOpenChange={(open) => {
         if (!open) {

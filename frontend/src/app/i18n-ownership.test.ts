@@ -12,16 +12,12 @@ type Tree = { [key: string]: string | Tree };
 const languages = ["zh-CN", "en"] as const;
 type Language = (typeof languages)[number];
 
-// register-feature-i18n.ts deep-merges every feature bundle into the same
-// `resources` object that shared/i18n exports (i18next's addResourceBundle
-// mutates the store in place), so the base catalog has to be snapshotted
-// before that module is evaluated. Dynamic imports keep that order explicit.
 const { i18nResources } = await import("@/shared/i18n");
 const baseTranslation = Object.fromEntries(
-	languages.map((language) => [language, structuredClone(i18nResources[language].translation) as unknown as Tree]),
+ languages.map(language => [language, structuredClone(i18nResources[language].translation) as unknown as Tree]),
 ) as Record<Language, Tree>;
-const { featureTranslationBundles } = await import("./register-feature-i18n.ts");
-const bundles = featureTranslationBundles as unknown as Record<Language, Record<string, Tree>>;
+const { featureTranslationLoaders } = await import("./register-feature-i18n.ts");
+const bundles = await Promise.all(Object.entries(featureTranslationLoaders).map(async ([name, load]) => ({ name, bundle: await load() })));
 
 function collectLeaves(node: Tree, prefix: string, out: Set<string>): Set<string> {
 	for (const [key, value] of Object.entries(node)) {
@@ -32,58 +28,28 @@ function collectLeaves(node: Tree, prefix: string, out: Set<string>): Set<string
 	return out;
 }
 
-/**
- * Maps every feature/entity-owned namespace to the directory that declares it,
- * parsed from the registration table so the mapping cannot drift from the real
- * bundle list. Base namespaces are the top-level keys of the base catalog and
- * are usable by every layer.
- */
-function declaredNamespaceOwners(): Map<string, string> {
-	const registerPath = join(srcRoot, "app/register-feature-i18n.ts");
-	const source = ts.createSourceFile(registerPath, readFileSync(registerPath, "utf8"), ts.ScriptTarget.Latest, true);
-	const moduleOf = new Map<string, string>();
-	let table: ts.ObjectLiteralExpression | undefined;
-	const visit = (node: ts.Node): void => {
-		if (
-			ts.isImportDeclaration(node) &&
-			ts.isStringLiteral(node.moduleSpecifier) &&
-			node.importClause?.namedBindings &&
-			ts.isNamedImports(node.importClause.namedBindings)
-		) {
-			for (const element of node.importClause.namedBindings.elements) {
-				moduleOf.set(element.name.text, node.moduleSpecifier.text);
-			}
-		}
-		if (
-			ts.isVariableDeclaration(node) &&
-			ts.isIdentifier(node.name) &&
-			node.name.text === "featureTranslationBundles" &&
-			node.initializer &&
-			ts.isObjectLiteralExpression(node.initializer)
-		) {
-			table = node.initializer;
-		}
-		ts.forEachChild(node, visit);
-	};
-	visit(source);
-	assert.ok(table, "register-feature-i18n.ts must declare the featureTranslationBundles table");
-	const owners = new Map<string, string>();
-	for (const languageEntry of table.properties) {
-		if (!ts.isPropertyAssignment(languageEntry) || !ts.isObjectLiteralExpression(languageEntry.initializer)) continue;
-		for (const entry of languageEntry.initializer.properties) {
-			if (!ts.isPropertyAssignment(entry)) continue;
-			const namespace = ts.isIdentifier(entry.name) || ts.isStringLiteral(entry.name) ? entry.name.text : undefined;
-			if (!namespace) continue;
-			const root = ts.isPropertyAccessExpression(entry.initializer) ? entry.initializer.expression : entry.initializer;
-			const module = ts.isIdentifier(root) ? moduleOf.get(root.text) : undefined;
-			if (!module) continue;
-			owners.set(namespace, module.replace(/^@\//, "").split("/").slice(0, 2).join("/"));
-		}
-	}
-	return owners;
+// Read the real literal imports, so ownership cannot drift from bundle loading.
+function declaredBundleOwners(): Map<string, string> {
+ const path = join(srcRoot, "app/register-feature-i18n.ts");
+ const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
+ const owners = new Map<string, string>();
+ const visit = (node: ts.Node): void => {
+  if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && ts.isArrowFunction(node.initializer)) {
+   const name = node.name.text;
+   const imports = (child: ts.Node): void => {
+    if (ts.isCallExpression(child) && child.expression.kind === ts.SyntaxKind.ImportKeyword && ts.isStringLiteral(child.arguments[0])) {
+     owners.set(name, child.arguments[0].text.replace(/^@\//, "").split("/").slice(0, 2).join("/"));
+    }
+    ts.forEachChild(child, imports);
+   };
+   imports(node.initializer);
+  }
+  ts.forEachChild(node, visit);
+ };
+ visit(source);
+ return owners;
 }
-
-const namespaceOwners = declaredNamespaceOwners();
+const bundleOwners = declaredBundleOwners();
 
 // Leaf key -> declaring owners. A namespace can be declared twice (`ops` and
 // `proxies` exist in both the base catalog and a feature bundle); the owner set
@@ -96,14 +62,12 @@ function addOwner(key: string, owner: string): void {
 	keyOwners.set(key, owners);
 }
 for (const key of collectLeaves(baseTranslation["zh-CN"], "", new Set())) addOwner(key, "base");
-for (const language of languages) {
-	for (const [namespace, bundle] of Object.entries(bundles[language])) {
-		const owner = namespaceOwners.get(namespace);
-		assert.ok(owner, `namespace "${namespace}" has no declaring directory in register-feature-i18n.ts`);
-		// Bundle files are flat: their top-level keys are the namespace's keys,
-		// so the declaring namespace is the path prefix.
-		for (const key of collectLeaves(bundle, namespace, new Set())) addOwner(key, owner);
-	}
+for (const { name, bundle } of bundles) {
+ const owner = bundleOwners.get(name);
+ assert.ok(owner, `bundle "${name}" has no declaring directory`);
+ for (const language of languages) {
+  for (const key of collectLeaves(bundle[language] as Tree, "", new Set())) addOwner(key, owner);
+ }
 }
 
 /**
@@ -204,8 +168,7 @@ function ownsKey(consumer: string, key: string): boolean {
 	const owners = keyOwners.get(key);
 	if (!owners) return true; // Undefined keys are i18n.test.ts's concern, not ownership's.
 	if (consumer === "shared") return owners.has("base");
-	const feature = consumer.slice("features/".length);
-	return [...owners].some((owner) => owner === "base" || owner === `features/${feature}` || owner.startsWith("entities/"));
+	return [...owners].some((owner) => owner === "base" || owner === consumer || owner.startsWith("entities/"));
 }
 
 function allowEntryFor(consumer: string, key: string): string | undefined {
@@ -283,8 +246,8 @@ describe("i18n namespace ownership", () => {
 			const rel = relative(srcRoot, file);
 			if (bundleFiles.has(rel)) continue;
 			const [layer, feature] = rel.split("/");
-			if (layer !== "shared" && layer !== "features") continue;
-			const consumer = layer === "shared" ? "shared" : `features/${feature}`;
+			if (layer !== "shared" && layer !== "features" && layer !== "entities") continue;
+			const consumer = layer === "shared" ? "shared" : `${layer}/${feature}`;
 			const ownersOf = (key: string) => [...(keyOwners.get(key) ?? [])].sort().join(", ") || "unknown";
 			for (const usage of usagesIn(ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true))) {
 				if (usage.kind === "exact") {
@@ -316,4 +279,71 @@ describe("i18n namespace ownership", () => {
 		);
 		assert.deepEqual(stale, [], `CROSS_FEATURE_ALLOWLIST entries no longer match any usage; remove or fix them:\n${stale.join("\n")}`);
 	});
+});
+
+it("loads every page's transitive translation dependencies before rendering", () => {
+ const modulePath = join(srcRoot, "app/page-modules.ts");
+ const source = ts.createSourceFile(modulePath, readFileSync(modulePath, "utf8"), ts.ScriptTarget.Latest, true);
+ const leavesByBundle = new Map(bundles.map(({ name, bundle }) => [name, collectLeaves(bundle["zh-CN"] as Tree, "", new Set())]));
+ const baseKeys = collectLeaves(baseTranslation["zh-CN"], "", new Set());
+ const importsOf = (file: ts.SourceFile): string[] => {
+  const imports: string[] = [];
+  const visit = (node: ts.Node): void => {
+   const specifier = ts.isImportDeclaration(node) || ts.isExportDeclaration(node) ? node.moduleSpecifier
+    : ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword ? node.arguments[0] : undefined;
+   if (specifier && ts.isStringLiteral(specifier)) imports.push(specifier.text);
+   ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return imports;
+ };
+ const resolveModule = (from: string, specifier: string): string | undefined => {
+  if (!specifier.startsWith("@/") && !specifier.startsWith(".")) return undefined;
+  const base = specifier.startsWith("@/") ? join(srcRoot, specifier.slice(2)) : resolve(dirname(from), specifier);
+  return [base, `${base}.ts`, `${base}.tsx`, join(base, "index.ts"), join(base, "index.tsx")].find(file => allSourceFiles.has(file));
+ };
+ const allSourceFiles = new Set(listSourceFiles(srcRoot));
+ const missing: string[] = [];
+ let pages = 0;
+ const visitPage = (node: ts.Node): void => {
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "preloadableNamed") {
+   pages++;
+   const ids = node.arguments[2];
+   const available = new Set(baseKeys);
+   if (ids) {
+    assert.ok(ts.isArrayLiteralExpression(ids), "page dependencies must be explicit");
+    for (const id of ids.elements) {
+     assert.ok(ts.isStringLiteral(id));
+     const keys = leavesByBundle.get(id.text);
+     assert.ok(keys, `unknown translation bundle ${id.text}`);
+     for (const key of keys) available.add(key);
+    }
+   }
+   const pageImports = importsOf(ts.createSourceFile(modulePath, node.arguments[0].getText(source), ts.ScriptTarget.Latest, true));
+   const queue = pageImports.map(specifier => resolveModule(modulePath, specifier)).filter((file): file is string => !!file);
+   const seen = new Set<string>();
+   while (queue.length) {
+    const file = queue.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    // The shell's navigation preloader describes other pages; it does not render them.
+    if (file === modulePath || file.endsWith("register-feature-i18n.ts") || bundleFiles.has(relative(srcRoot, file))) continue;
+    const parsed = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+    for (const usage of usagesIn(parsed)) {
+     const keys = usage.kind === "exact" ? [usage.value] : [...keyOwners.keys()].filter(key => key.startsWith(usage.value + "."));
+     for (const key of keys) {
+      if (keyOwners.has(key) && !available.has(key)) missing.push(`${node.arguments[1].getText(source)}: ${relative(srcRoot, file)}:${usage.line} needs ${key}`);
+     }
+    }
+    for (const specifier of importsOf(parsed)) {
+     const dependency = resolveModule(file, specifier);
+     if (dependency) queue.push(dependency);
+    }
+   }
+  }
+  ts.forEachChild(node, visitPage);
+ };
+ visitPage(source);
+ assert.ok(pages > 0, "the check must examine actual page entries");
+ assert.deepEqual([...new Set(missing)], [], `direct navigation lacks translations:\n${[...new Set(missing)].join("\n")}`);
 });

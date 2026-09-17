@@ -138,12 +138,6 @@ func (r *layeredAccountRepository) ListRoutingAccountOverlays(_ context.Context,
 	return r.overlays[upstreamModel], nil
 }
 
-func (r *layeredAccountRepository) callCounts(model string) (int, int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.baseCalls, r.overlayCalls[model]
-}
-
 func newLayeredRepositoryFixture() *layeredAccountRepository {
 	return &layeredAccountRepository{
 		bases: []account.RoutingAccountBase{{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive}}},

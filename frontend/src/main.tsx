@@ -6,7 +6,6 @@ import { AppErrorBoundary } from "@/app/error-boundary";
 import { AppProviders } from "@/app/providers";
 import { router } from "@/app/router";
 import "@/shared/i18n";
-import "@/app/register-feature-i18n";
 import "./index.css";
 
 createRoot(document.getElementById("root")!).render(

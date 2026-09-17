@@ -93,7 +93,7 @@ export function SettingsPage({ versionSection }: { versionSection?: ReactNode })
       {settingsQuery.isError ? <p role="alert" className="text-sm text-destructive">{settingsQuery.error.message} <Button type="button" variant="link" onClick={() => void settingsQuery.refetch()}>{t("common.retry")}</Button></p> : null}
       {snapshot?.restartRequired && snapshot.restartRequired.length > 0 ? (
         <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
-          <p className="font-semibold">{t("settings.application.restart", { fields: snapshot.restartRequired.join(", ") })}</p>
+          <p className="font-semibold">{t("settingsForm.application.restart", { fields: snapshot.restartRequired.join(", ") })}</p>
         </div>
       ) : null}
       <fieldset disabled={saving} className="min-w-0">

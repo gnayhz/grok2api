@@ -55,7 +55,8 @@ func TestTeamRateLimitHasOneAccountOwner(t *testing.T) {
 				switch value.Sel.Name {
 				case "ActiveTeamModelRateLimit", "ObserveTeamModelRateLimit":
 					calls[value.Sel.Name]++
-					if path != "../application/gateway/service.go" {
+					expected := map[string]string{"ActiveTeamModelRateLimit": "response_attempt.go", "ObserveTeamModelRateLimit": "response_failure.go"}
+					if path != "../application/gateway/"+expected[value.Sel.Name] {
 						t.Errorf("%s bypasses the logical request's team observation/attempt boundary", path)
 					}
 				}

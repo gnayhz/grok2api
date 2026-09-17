@@ -22,14 +22,14 @@ export function DurationInput({ id, value, onChange, disabled, allowZero = false
         onChange={(event) => onChange({ value: event.target.value === "" ? Number.NaN : Number(Number(event.target.value)), unit })}
       />
       <Select value={unit} disabled={disabled} onValueChange={(nextUnit) => { if (isDurationUnit(nextUnit)) onChange({ value: value?.value ?? 1, unit: nextUnit }); }}>
-        <SelectTrigger className="w-24 shrink-0 rounded-l-none bg-secondary/55" aria-label={t("settings.durationUnit")}>
+        <SelectTrigger className="w-24 shrink-0 rounded-l-none bg-secondary/55" aria-label={t("settingsForm.durationUnit")}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="s">{t("settings.units.seconds")}</SelectItem>
-          <SelectItem value="m">{t("settings.units.minutes")}</SelectItem>
-          <SelectItem value="h">{t("settings.units.hours")}</SelectItem>
-          <SelectItem value="d">{t("settings.units.days")}</SelectItem>
+          <SelectItem value="s">{t("settingsForm.units.seconds")}</SelectItem>
+          <SelectItem value="m">{t("settingsForm.units.minutes")}</SelectItem>
+          <SelectItem value="h">{t("settingsForm.units.hours")}</SelectItem>
+          <SelectItem value="d">{t("settingsForm.units.days")}</SelectItem>
         </SelectContent>
       </Select>
     </div>

@@ -2,7 +2,6 @@ package relational
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
@@ -27,17 +26,6 @@ func loadSettingsConfig(ctx context.Context, base config.Config, repo repository
 		return config.Config{}, updatedAt, revision, err
 	}
 	return loaded, updatedAt, revision, nil
-}
-
-func applySettings(fn func(config.Config)) func(context.Context, settingsdomain.Config) error {
-	return func(_ context.Context, runtime settingsdomain.Config) error {
-		return nil
-	}
-}
-
-func mustRuntime(t *testing.T, base config.Config) settingsdomain.Config {
-	t.Helper()
-	return config.ToRuntimeSettings(base)
 }
 
 func egressRotationLimit(cfg settingsdomain.Config) int {

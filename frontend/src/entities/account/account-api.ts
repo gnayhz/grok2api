@@ -270,12 +270,12 @@ export function listAccounts(input: ListAccountsInput, signal?: AbortSignal): Pr
 
 // 管理端少量跨页面关联数据需要完整的账号身份映射。逐页读取而不是把
 // pageSize 写死为某个池规模，避免质量仲裁页面只显示最新一页账号的编号。
-export function getAccountSummary(): Promise<AccountSummaryDTO> {
-  return apiRequest("/api/admin/v1/accounts/summary", {}, decodeAccountSummary);
+export function getAccountSummary(signal?: AbortSignal): Promise<AccountSummaryDTO> {
+  return apiRequest("/api/admin/v1/accounts/summary", { signal }, decodeAccountSummary);
 }
 
-export function updateAccount(id: string, input: AccountUpdateInput): Promise<AccountDTO> {
-  return apiRequest(`/api/admin/v1/accounts/${id}`, { method: "PATCH", body: input }, decodeAccount);
+export function updateAccount(id: string, input: AccountUpdateInput, signal?: AbortSignal): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}`, { signal, method: "PATCH", body: input }, decodeAccount);
 }
 
 type LinkedDeleteTarget = AccountProvider;
@@ -295,11 +295,11 @@ type AccountDeleteResultDTO = {
   deletedByProvider?: Partial<Record<AccountProvider, number>>;
 };
 
-export function deleteAccount(id: string, input?: { provider?: AccountProvider; linkedDeleteTargets?: LinkedDeleteTarget[] }): Promise<AccountDeleteResultDTO | { deleted: boolean }> {
+export function deleteAccount(id: string, input?: { provider?: AccountProvider; linkedDeleteTargets?: LinkedDeleteTarget[] }, signal?: AbortSignal): Promise<AccountDeleteResultDTO | { deleted: boolean }> {
   if (input?.linkedDeleteTargets?.length) {
     return apiRequest(
       `/api/admin/v1/accounts/${id}`,
-      { method: "DELETE", body: { provider: input.provider, linkedDeleteTargets: input.linkedDeleteTargets } },
+      { signal, method: "DELETE", body: { provider: input.provider, linkedDeleteTargets: input.linkedDeleteTargets } },
       createObjectDecoder("account delete", {
         deleted: isNumber,
         rootsDeleted: isOptional(isNumber),
@@ -308,13 +308,13 @@ export function deleteAccount(id: string, input?: { provider?: AccountProvider; 
       }),
     );
   }
-  return apiRequest(`/api/admin/v1/accounts/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+  return apiRequest(`/api/admin/v1/accounts/${id}`, { signal, method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
 }
 
-export function previewAccountDeletion(ids: string[], provider: AccountProvider, linkedDeleteTargets: LinkedDeleteTarget[] = []): Promise<AccountDeletionPreviewDTO> {
+export function previewAccountDeletion(ids: string[], provider: AccountProvider, linkedDeleteTargets: LinkedDeleteTarget[] = [], signal?: AbortSignal): Promise<AccountDeletionPreviewDTO> {
   return apiRequest(
     "/api/admin/v1/accounts/deletion-preview",
-    { method: "POST", body: { ids, provider, linkedDeleteTargets } },
+    { signal, method: "POST", body: { ids, provider, linkedDeleteTargets } },
     createObjectDecoder("account deletion preview", {
       rootCount: isNumber,
       linkedByProvider: isRecordOf(isNumber),
@@ -323,31 +323,31 @@ export function previewAccountDeletion(ids: string[], provider: AccountProvider,
   );
 }
 
-export function refreshAccountBilling(id: string): Promise<BillingDTO> {
-  return apiRequest(`/api/admin/v1/accounts/${id}/refresh-billing`, { method: "POST" }, decodeBilling);
+export function refreshAccountBilling(id: string, signal?: AbortSignal): Promise<BillingDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/refresh-billing`, { signal, method: "POST" }, decodeBilling);
 }
 
-export function refreshAccountToken(id: string): Promise<AccountDTO> {
-  return apiRequest(`/api/admin/v1/accounts/${id}/refresh-token`, { method: "POST" }, decodeAccount);
+export function refreshAccountToken(id: string, signal?: AbortSignal): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/refresh-token`, { signal, method: "POST" }, decodeAccount);
 }
 
 
 /** Manual operator escape hatch: unconditionally lift the request-path cooldown
  *  (failure count / cooldown until / reason marker). The enabled state is untouched. */
-export function clearAccountCooldown(id: string): Promise<AccountDTO> {
-  return apiRequest(`/api/admin/v1/accounts/${id}/clear-cooldown`, { method: "POST" }, decodeAccount);
+export function clearAccountCooldown(id: string, signal?: AbortSignal): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/clear-cooldown`, { signal, method: "POST" }, decodeAccount);
 }
 
-export function acceptWebAccountTerms(id: string): Promise<{ completed: boolean }> {
-  return apiRequest(`/api/admin/v1/accounts/web/${id}/accept-terms`, { method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
+export function acceptWebAccountTerms(id: string, signal?: AbortSignal): Promise<{ completed: boolean }> {
+  return apiRequest(`/api/admin/v1/accounts/web/${id}/accept-terms`, { signal, method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
 }
 
-export function setWebAccountBirthDate(id: string): Promise<{ completed: boolean }> {
-  return apiRequest(`/api/admin/v1/accounts/web/${id}/birth-date`, { method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
+export function setWebAccountBirthDate(id: string, signal?: AbortSignal): Promise<{ completed: boolean }> {
+  return apiRequest(`/api/admin/v1/accounts/web/${id}/birth-date`, { signal, method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
 }
 
-export function enableWebAccountNSFW(id: string): Promise<{ completed: boolean }> {
-  return apiRequest(`/api/admin/v1/accounts/web/${id}/nsfw`, { method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
+export function enableWebAccountNSFW(id: string, signal?: AbortSignal): Promise<{ completed: boolean }> {
+  return apiRequest(`/api/admin/v1/accounts/web/${id}/nsfw`, { signal, method: "POST" }, decodeBooleanResult<{ completed: boolean }>("completed"));
 }
 
 type AccountBatchResultDTO = { succeeded: number; failed: number };
@@ -580,8 +580,8 @@ export function importConsoleAccounts(files: readonly File[], onProgress?: (valu
   return runAccountTask("/api/admin/v1/accounts/console/import", body, ["created", "updated", "skipped", "failed", "synced", "syncFailed"], { onProgress, signal, phases: importSyncPhases });
 }
 
-export function refreshAccountQuota(id: string): Promise<AccountDTO> {
-  return apiRequest(`/api/admin/v1/accounts/${id}/refresh-quota`, { method: "POST" }, decodeAccount);
+export function refreshAccountQuota(id: string, signal?: AbortSignal): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/refresh-quota`, { signal, method: "POST" }, decodeAccount);
 }
 
 type AccountExportBatch = {
@@ -600,9 +600,9 @@ function requiredExportHeader(headers: Headers, name: string): string {
   return value;
 }
 
-export async function exportAccountBatch(provider: AccountProvider, limit: number, afterId: string, snapshotMaxId: string): Promise<AccountExportBatch> {
+export async function exportAccountBatch(provider: AccountProvider, limit: number, afterId: string, snapshotMaxId: string, signal?: AbortSignal): Promise<AccountExportBatch> {
   const query = new URLSearchParams({ provider, limit: String(limit), afterId, snapshotMaxId });
-  const result = await apiDownloadResponse(`/api/admin/v1/accounts/export?${query}`);
+  const result = await apiDownloadResponse(`/api/admin/v1/accounts/export?${query}`, { signal });
   const count = Number(requiredExportHeader(result.headers, "X-Exported-Accounts"));
   const nextId = requiredExportHeader(result.headers, "X-Export-Next-ID");
   const nextSnapshotMaxId = requiredExportHeader(result.headers, "X-Export-Snapshot-Max-ID");
@@ -624,32 +624,32 @@ export async function exportAccountBatch(provider: AccountProvider, limit: numbe
   };
 }
 
-export function exportSelectedAccounts(provider: AccountProvider, ids: string[]): Promise<Blob> {
-  return apiDownload("/api/admin/v1/accounts/export", { method: "POST", body: { provider, ids } });
+export function exportSelectedAccounts(provider: AccountProvider, ids: string[], signal?: AbortSignal): Promise<Blob> {
+  return apiDownload("/api/admin/v1/accounts/export", { signal, method: "POST", body: { provider, ids } });
 }
 
-export function updateAccountsEnabled(ids: string[], enabled: boolean, provider: AccountProvider): Promise<{ updated: number }> {
-  return apiRequest("/api/admin/v1/accounts/batch", { method: "PATCH", body: { ids, enabled, provider } }, decodeCountResult<{ updated: number }>("updated"));
+export function updateAccountsEnabled(ids: string[], enabled: boolean, provider: AccountProvider, signal?: AbortSignal): Promise<{ updated: number }> {
+  return apiRequest("/api/admin/v1/accounts/batch", { signal, method: "PATCH", body: { ids, enabled, provider } }, decodeCountResult<{ updated: number }>("updated"));
 }
 
-export function updateAccountsMaxConcurrent(ids: string[], maxConcurrent: number, provider: AccountProvider): Promise<{ updated: number }> {
-  return apiRequest("/api/admin/v1/accounts/batch", { method: "PATCH", body: { ids, maxConcurrent, provider } }, decodeCountResult<{ updated: number }>("updated"));
+export function updateAccountsMaxConcurrent(ids: string[], maxConcurrent: number, provider: AccountProvider, signal?: AbortSignal): Promise<{ updated: number }> {
+  return apiRequest("/api/admin/v1/accounts/batch", { signal, method: "PATCH", body: { ids, maxConcurrent, provider } }, decodeCountResult<{ updated: number }>("updated"));
 }
 
-export function refreshAccountsQuota(ids: string[], provider: AccountProvider): Promise<{ succeeded: number; failed: number }> {
-  return apiRequest("/api/admin/v1/accounts/batch/refresh-quotas", { method: "POST", body: { ids, provider } }, createObjectDecoder("account batch", { succeeded: isNumber, failed: isNumber }));
+export function refreshAccountsQuota(ids: string[], provider: AccountProvider, signal?: AbortSignal): Promise<{ succeeded: number; failed: number }> {
+  return apiRequest("/api/admin/v1/accounts/batch/refresh-quotas", { signal, method: "POST", body: { ids, provider } }, createObjectDecoder("account batch", { succeeded: isNumber, failed: isNumber }));
 }
 
-export function resetAccountsQuota(ids: string[], provider: AccountProvider): Promise<{ reset: number }> {
-  return apiRequest("/api/admin/v1/accounts/batch/reset-quota", { method: "POST", body: { ids, provider } }, decodeCountResult<{ reset: number }>("reset"));
+export function resetAccountsQuota(ids: string[], provider: AccountProvider, signal?: AbortSignal): Promise<{ reset: number }> {
+  return apiRequest("/api/admin/v1/accounts/batch/reset-quota", { signal, method: "POST", body: { ids, provider } }, decodeCountResult<{ reset: number }>("reset"));
 }
 
-export function resetAllAccountQuota(): Promise<{ reset: number }> {
-  return apiRequest("/api/admin/v1/accounts/reset-quota", { method: "POST" }, decodeCountResult<{ reset: number }>("reset"));
+export function resetAllAccountQuota(signal?: AbortSignal): Promise<{ reset: number }> {
+  return apiRequest("/api/admin/v1/accounts/reset-quota", { signal, method: "POST" }, decodeCountResult<{ reset: number }>("reset"));
 }
 
-export function refreshAccountsTokens(ids: string[], provider: AccountProvider): Promise<AccountTokenRefreshResultDTO> {
-  return apiRequest("/api/admin/v1/accounts/batch/refresh-tokens", { method: "POST", body: { ids, provider } }, createObjectDecoder("account token refresh batch", { succeeded: isNumber, failed: isNumber, skipped: isNumber }));
+export function refreshAccountsTokens(ids: string[], provider: AccountProvider, signal?: AbortSignal): Promise<AccountTokenRefreshResultDTO> {
+  return apiRequest("/api/admin/v1/accounts/batch/refresh-tokens", { signal, method: "POST", body: { ids, provider } }, createObjectDecoder("account token refresh batch", { succeeded: isNumber, failed: isNumber, skipped: isNumber }));
 }
 
 type CleanupResultDTO = {
@@ -667,10 +667,11 @@ export type CleanupPreviewDTO = {
   total: number;
 };
 
-export function cleanupAccounts(provider: AccountProvider, statuses: AccountCleanupStatus[], linkedDeleteTargets: LinkedDeleteTarget[] = []): Promise<CleanupResultDTO> {
+export function cleanupAccounts(provider: AccountProvider, statuses: AccountCleanupStatus[], linkedDeleteTargets: LinkedDeleteTarget[] = [], signal?: AbortSignal): Promise<CleanupResultDTO> {
   return apiRequest(
     "/api/admin/v1/accounts/cleanup",
     {
+      signal,
       method: "POST",
       body: {
         provider,
@@ -688,10 +689,10 @@ export function cleanupAccounts(provider: AccountProvider, statuses: AccountClea
   );
 }
 
-export function previewCleanup(provider: AccountProvider, statuses: AccountCleanupStatus[], linkedDeleteTargets: LinkedDeleteTarget[] = []): Promise<CleanupPreviewDTO> {
+export function previewCleanup(provider: AccountProvider, statuses: AccountCleanupStatus[], linkedDeleteTargets: LinkedDeleteTarget[] = [], signal?: AbortSignal): Promise<CleanupPreviewDTO> {
   return apiRequest(
     "/api/admin/v1/accounts/cleanup-preview",
-    { method: "POST", body: { provider, statuses, ...(linkedDeleteTargets.length ? { linkedDeleteTargets } : {}) } },
+    { signal, method: "POST", body: { provider, statuses, ...(linkedDeleteTargets.length ? { linkedDeleteTargets } : {}) } },
     createObjectDecoder("account cleanup preview", {
       rootsByStatus: isRecordOf(isNumber),
       rootCount: isNumber,
@@ -701,11 +702,12 @@ export function previewCleanup(provider: AccountProvider, statuses: AccountClean
   );
 }
 
-export function deleteAccounts(ids: string[], provider: AccountProvider, linkedDeleteTargets: LinkedDeleteTarget[] = []): Promise<AccountDeleteResultDTO> {
+export function deleteAccounts(ids: string[], provider: AccountProvider, linkedDeleteTargets: LinkedDeleteTarget[] = [], signal?: AbortSignal): Promise<AccountDeleteResultDTO> {
   // Batch delete must forward linkedDeleteTargets; omitting them falls back to root-only deletion.
   return apiRequest(
     "/api/admin/v1/accounts",
     {
+      signal,
       method: "DELETE",
       body: {
         ids,
@@ -723,8 +725,8 @@ export function deleteAccounts(ids: string[], provider: AccountProvider, linkedD
   );
 }
 
-export function startDeviceAuthorization(): Promise<DeviceSessionDTO> {
-  return apiRequest("/api/admin/v1/accounts/device/start", { method: "POST" }, decodeDeviceSession);
+export function startDeviceAuthorization(signal?: AbortSignal): Promise<DeviceSessionDTO> {
+  return apiRequest("/api/admin/v1/accounts/device/start", { signal, method: "POST" }, decodeDeviceSession);
 }
 
 export function pollDeviceAuthorization(sessionId: string, signal: AbortSignal): Promise<DevicePollDTO> {
