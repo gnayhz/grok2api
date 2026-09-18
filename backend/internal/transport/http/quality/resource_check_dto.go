@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
-	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/quality/management"
 )
 
 // Resource IDs cross the browser boundary as decimal strings. Numeric request
@@ -30,18 +30,18 @@ func (id *resourceID) UnmarshalJSON(data []byte) error {
 }
 
 type resourceCheckDTO struct {
-	model.ResourceCheck
+	management.ResourceCheck
 	ID         resourceID              `json:"id"`
 	ResourceID resourceID              `json:"resource_id"`
 	Report     *resourceCheckReportDTO `json:"report,omitempty"`
 }
 type resourceCheckReportDTO struct {
-	model.ResourceCheckReport
+	management.ResourceCheckReport
 	ResourceID resourceID              `json:"resource_id"`
 	Groups     []resourceCheckGroupDTO `json:"groups"`
 }
 type resourceCheckGroupDTO struct {
-	model.ResourceCheckGroup
+	management.ResourceCheckGroup
 	ControlAccount resourceID               `json:"control_account"`
 	ControlNode    resourceID               `json:"control_node"`
 	AccountID      resourceID               `json:"account_id"`
@@ -52,7 +52,7 @@ type resourceCheckGroupDTO struct {
 	After          *resourceCheckSampleDTO  `json:"after,omitempty"`
 }
 type resourceCheckSampleDTO struct {
-	model.AccountCheckSample
+	management.AccountCheckSample
 	PathBinding resourceID              `json:"path_binding,omitempty"`
 	Attempt     resourceCheckAttemptDTO `json:"attempt"`
 }
@@ -68,20 +68,20 @@ type resourceCheckPathDTO struct {
 	Epoch  resourceID `json:"epoch,omitempty"`
 }
 
-func checkSampleDTO(s model.AccountCheckSample) resourceCheckSampleDTO {
+func checkSampleDTO(s management.AccountCheckSample) resourceCheckSampleDTO {
 	return resourceCheckSampleDTO{AccountCheckSample: s, PathBinding: resourceID(s.PathBinding), Attempt: resourceCheckAttemptDTO{
 		Identity: s.Attempt, AccountID: resourceID(s.Attempt.AccountID), Revision: resourceID(s.Attempt.Revision),
 		Path: resourceCheckPathDTO{Path: s.Attempt.Path, NodeID: resourceID(s.Attempt.Path.NodeID), Epoch: resourceID(s.Attempt.Path.Epoch)},
 	}}
 }
-func checkSamplesDTO(samples []model.AccountCheckSample) []resourceCheckSampleDTO {
+func checkSamplesDTO(samples []management.AccountCheckSample) []resourceCheckSampleDTO {
 	items := make([]resourceCheckSampleDTO, 0, len(samples))
 	for _, sample := range samples {
 		items = append(items, checkSampleDTO(sample))
 	}
 	return items
 }
-func checkDTO(check model.ResourceCheck) resourceCheckDTO {
+func checkDTO(check management.ResourceCheck) resourceCheckDTO {
 	result := resourceCheckDTO{ResourceCheck: check, ID: resourceID(check.ID), ResourceID: resourceID(check.ResourceID)}
 	if check.Report == nil {
 		return result

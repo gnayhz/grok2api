@@ -11,6 +11,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 )
 
+// Read results exposed by this use case. Transport can encode these values
+// without importing the model package's evidence and attribution policy.
+type ResourceCheck = model.ResourceCheck
+type ResourceCheckReport = model.ResourceCheckReport
+type ResourceCheckGroup = model.ResourceCheckGroup
+type AccountCheckSample = model.AccountCheckSample
+
 type ResourceCheckStore interface {
 	CreateResourceCheck(context.Context, model.ProbeTask, int) (uint64, error)
 	ListResourceChecks(context.Context, string, []uint64) ([]model.ResourceCheck, error)
@@ -138,7 +145,7 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 	return items, nil
 }
 
-func (s *ResourceChecks) List(ctx context.Context, kind string, ids []uint64) ([]model.ResourceCheck, error) {
+func (s *ResourceChecks) List(ctx context.Context, kind string, ids []uint64) ([]ResourceCheck, error) {
 	if !validResources(kind, ids) {
 		return nil, errors.New("invalid resource query")
 	}
