@@ -181,6 +181,9 @@ func (r *Registry) migrate(ctx context.Context) error {
 	if err := r.db.WithContext(ctx).AutoMigrate(qualitySchemaModels...); err != nil {
 		return fmt.Errorf("初始化质量层表: %w", err)
 	}
+	if err := r.migrateAccountCheckDirection(ctx); err != nil {
+		return err
+	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_q_observation_account_at ON q_observation(account_id, at DESC, id DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_q_observation_exit_at ON q_observation(node_id, epoch, at DESC, id DESC)",

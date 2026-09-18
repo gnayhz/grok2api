@@ -43,14 +43,14 @@ func (s qualityEvidenceSource) CrossValidate(snapshot model.Snapshot) model.Esti
 }
 
 // bootstrapJudicialLayer wires the experiment queue and evaluator.
-func bootstrapJudicialLayer(qualityRegistry *qualityregistry.Registry, evidenceStore *qualityevidence.Store, logger *slog.Logger) (*qualitycourt.Service, *qualityinvestigator.Service) {
+func bootstrapJudicialLayer(qualityRegistry *qualityregistry.Registry, evidenceStore *qualityevidence.Store, logger *slog.Logger) (*qualitycourt.Service, *qualityinvestigator.Service, *qualityregistry.ProbeTaskStore) {
 	courtCfg := qualitycourt.DefaultConfig()
 	courtCfg.Logger = logger
 	probeStore := qualityregistry.NewProbeTaskStore(qualityRegistry)
 	investigatorService := qualityinvestigator.New(qualityinvestigator.DefaultConfig(), probeStore, evidenceRecorderAdapter{store: evidenceStore})
 	courtService := qualitycourt.New(courtCfg, qualityRegistry,
 		qualityEvidenceSource{store: evidenceStore}, qualityDispatcher{service: investigatorService}, probeStore)
-	return courtService, investigatorService
+	return courtService, investigatorService, probeStore
 }
 
 // evidenceRecorderAdapter 适配 investigator.Recorder → evidence.Store。

@@ -82,6 +82,7 @@ import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfi
 import { AccountMetricPanel, AccountStatus, AccountType, AccountTypeText, WebAccountType } from "./accounts-page-views";
 import { downloadAccountExport } from "./download-account-export";
 import { AccountEditor } from "./account-editor";
+import { ResourceCheckDialog } from "@/entities/guard/resource-check-dialog";
 import { useDeviceLogin } from "./use-device-login";
 import { useImportController } from "./use-import-controller";
 import { useAbortController } from "@/shared/lib/use-abort-controller";
@@ -166,6 +167,7 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
   const [exportCompletedCount, setExportCompletedCount] = useState(0);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [detectDialogOpen, setDetectDialogOpen] = useState(false);
+  const [qualityCheckAccount, setQualityCheckAccount] = useState<{ id: string; name: string }[] | null>(null);
   const [detectMode, setDetectMode] = useState<"selected" | "all">("all");
   const [allQuotaTask, setAllQuotaTask] = useState<BuildQuotaTask>("sync");
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
@@ -1142,7 +1144,10 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
                 }}>{t("accounts.batchSetConcurrency")}</Button>
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion([...selected])}>{t("accountConversion.action")}</Button> : null}
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
-                {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("selected")}>{t("accountCredential.detectAction")}</Button> : null}
+                {provider === "grok_build" ? <>
+                  <Button variant="secondary" size="sm" disabled={bulkTaskPending || selected.size > 32} onClick={() => setQualityCheckAccount([...selected].map(id => ({ id, name: accountsQuery.data?.items.find(account => account.id === id)?.name || id })))}>{t("resourceChecks.action")}</Button>
+                  <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("selected")}>{t("accounts.availabilityCheck")}</Button>
+                </> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => {
                   if (provider === "grok_build") {
                     setBatchQuotaTask("sync");
@@ -1158,7 +1163,7 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion("all")}>{t("accountConversion.action")}</Button> : null}
                 {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets("all")}>{t("webAccountScripts.action")}</Button> : null}
-                {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("all")}>{t("accountCredential.detectAction")}</Button> : null}
+                {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("all")}>{t("accounts.availabilityCheck")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => { setAllQuotaTask("sync"); setSyncAllOpen(true); }}>{t("accountCredential.quotaSyncAction")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={bulkTaskPending} onClick={() => { resetCleanupState(); setCleanupOpen(true); }}><Trash2 />{t("accounts.cleanupAction")}</Button> : null}
@@ -1230,7 +1235,10 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
                               onConfirm={setWebConfirmationTarget}
                             />
                           ) : null}
-                          {provider === "grok_build" ? <DropdownMenuItem onClick={() => tokenMutation.mutate(account.id)}><RotateCw />{t("accounts.refreshToken")}</DropdownMenuItem> : null}
+                          {provider === "grok_build" ? <>
+                            <DropdownMenuItem onClick={() => setQualityCheckAccount([{ id: account.id, name: account.name }])}><Search />{t("resourceChecks.action")}</DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => tokenMutation.mutate(account.id)}><RotateCw />{t("accounts.refreshToken")}</DropdownMenuItem>
+                          </> : null}
                           {account.cooldownUntil && new Date(account.cooldownUntil) > new Date() ? (
                             <DropdownMenuItem onClick={() => clearCooldownMutation.mutate(account.id)} disabled={clearCooldownMutation.isPending}>
                               <TimerOff />{t("accounts.clearCooldown")}
@@ -1250,6 +1258,8 @@ function AccountWorkspace({ provider, onProviderChange, view }: { provider: Acco
         ) : null}
         </DataTableShell>
       </div>
+
+      {qualityCheckAccount && <ResourceCheckDialog key={qualityCheckAccount.map(target => target.id).join(",")} kind="account" targets={qualityCheckAccount} onClose={() => setQualityCheckAccount(null)} />}
 
       <WebAccountSettingsDialogs
         confirmationTarget={webConfirmationTarget}

@@ -16,6 +16,7 @@ type ProbeMeasurement struct {
 	Detail           string
 	VerifiedIPChange bool
 	PathKey          string
+	CheckEvidence    *AccountCheckSample
 }
 
 type MeasurementOutcome string

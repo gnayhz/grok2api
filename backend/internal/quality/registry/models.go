@@ -111,6 +111,7 @@ func (qIPEpochModel) TableName() string { return "q_ip_epoch" }
 
 // qProbeTaskModel 调查局任务队列(B3):方向/陪审员/被告,状态,结果。
 type qProbeTaskModel struct {
+	CheckReportJSON    string     `gorm:"type:text;not null;default:''"`
 	ProjectionVersion  int        `gorm:"not null;default:0;index"`
 	ExperimentJSON     string     `gorm:"type:text;not null;default:''"`
 	LeaseOwner         string     `gorm:"size:128;not null;default:'';index"`
@@ -119,7 +120,7 @@ type qProbeTaskModel struct {
 	ControlAttemptJSON string     `gorm:"type:text;not null;default:''"`
 	ID                 uint64     `gorm:"primaryKey;autoIncrement"`
 	CaseID             uint64     `gorm:"not null;default:0;index:idx_q_probe_task_case"`
-	Direction          string     `gorm:"size:32;not null;check:chk_q_probe_task_direction,direction IN ('account_differential','exit_jury')"`
+	Direction          string     `gorm:"size:32;not null;check:chk_q_probe_task_direction,direction IN ('account_differential','exit_jury','account_check','resource_check')"`
 	DefendantAccountID uint64     `gorm:"not null;default:0"`
 	DefendantNodeID    uint64     `gorm:"not null;default:0"`
 	DefendantEpoch     uint64     `gorm:"not null;default:0"`

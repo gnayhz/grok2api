@@ -28,9 +28,13 @@ func (r *Registry) CancelProbesForCase(ctx context.Context, caseID uint64, reaso
 // CancelOrphanProbes 中止关联案件已不在审的在飞探针(兜底:任何结案
 // 路径漏掉 CancelProbesForCase 都由这里收敛)。
 func (r *Registry) CancelOrphanProbes(ctx context.Context, reason string) (int64, error) {
+	if err := r.expirePendingAccountChecks(ctx); err != nil {
+		return 0, err
+	}
 	openStatus := string(model.CaseInvestigating)
 	now := time.Now().UTC()
 	res := r.db.WithContext(ctx).Model(&qProbeTaskModel{}).
+		Where("NOT (direction IN ? AND case_id = 0)", manualProbeDirections).
 		Where("state IN ? AND NOT EXISTS (SELECT 1 FROM q_case c WHERE c.id = q_probe_task.case_id AND c.status = ?)",
 			[]string{string(model.ProbePending), string(model.ProbeRunning)}, openStatus).
 		Updates(map[string]any{

@@ -28,7 +28,7 @@ func (s *Service) RunWorkers(ctx context.Context, executor Executor, concurrency
 		go func() {
 			defer workers.Done()
 			for ctx.Err() == nil {
-				taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				taskCtx, cancel := context.WithTimeout(ctx, model.ResourceCheckTimeout)
 				count, err := s.runDue(taskCtx, executor, 1)
 				cancel()
 				if err != nil && ctx.Err() == nil && report != nil {

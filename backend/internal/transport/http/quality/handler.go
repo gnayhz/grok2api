@@ -21,10 +21,12 @@ import (
 
 // Deps 是质量层管理面依赖(app 注入)。
 type Deps struct {
-	Queries     *management.Queries
-	Court       *court.Service
-	Enforcement *enforcement.Service
-	Guard       *guard.Service
+	Queries        *management.Queries
+	Court          *court.Service
+	Enforcement    *enforcement.Service
+	Guard          *guard.Service
+	AccountChecks  *management.AccountChecks
+	ResourceChecks *management.ResourceChecks
 	// DialerDistribution 拨号选择分布(G10;nil=拨号策略未注入)。
 	DialerDistribution func() map[string]map[uint64]uint64
 	// Tunables 运行参数面(批7 面板可调承诺;nil=只读默认)。
@@ -63,6 +65,10 @@ func NewHandler(deps Deps) *Handler {
 
 // Register 挂载管理路由(管理鉴权由外层 adminProtected 提供)。
 func (h *Handler) Register(router *gin.RouterGroup) {
+	router.POST("/quality/resource-checks", h.postResourceChecks)
+	router.GET("/quality/resource-checks", h.getResourceChecks)
+	router.POST("/quality/accounts/:id/checks", h.postAccountCheck)
+	router.GET("/quality/accounts/:id/checks", h.getAccountChecks)
 	router.GET("/quality/overview", h.getOverview)
 	router.GET("/quality/court/cases", h.getCases)
 	router.POST("/quality/court/review", h.postReview)

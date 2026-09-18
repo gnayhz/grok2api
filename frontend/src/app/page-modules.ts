@@ -11,7 +11,7 @@ function preloadableNamed<T extends Record<K, ComponentType>, K extends keyof T>
   return { load, preload: () => { void load().catch(() => {}); } };
 }
 
-export const AccountsPageModule = preloadableNamed(() => import("@/features/accounts/accounts-page"), "AccountsPage", ["accounts", "accountQuota", "console", "accountBulk", "models", "settings"]);
+export const AccountsPageModule = preloadableNamed(() => import("@/features/accounts/accounts-page"), "AccountsPage", ["resourceChecks", "accounts", "accountQuota", "console", "accountBulk", "models", "settings"]);
 export const AppShellModule = preloadableNamed(() => import("@/app/app-shell"), "AppShell");
 export const RequestAuditsPageModule = preloadableNamed(() => import("@/features/audits/request-audits-page"), "RequestAuditsPage", ["audits", "network", "settings"]);
 export const ClientKeysPageModule = preloadableNamed(() => import("@/features/client-keys/client-keys-page"), "ClientKeysPage", ["keys"]);
@@ -23,7 +23,7 @@ export const QualityConsoleModule = preloadableNamed(() => import("@/features/gu
 export const QualitySettingsPageModule = preloadableNamed(() => import("@/app/quality-settings-route"), "QualitySettingsRoute", ["quality", "experiment", "guardProbes", "ops", "settings", "network", "models", "settingsForm"]);
 export const VideoGalleryPageModule = preloadableNamed(() => import("@/features/media/video-gallery-page"), "VideoGalleryPage", ["media"]);
 export const ModelsPageModule = preloadableNamed(() => import("@/features/models/models-page"), "ModelsPage", ["models", "console"]);
-export const ProxiesPageModule = preloadableNamed(() => import("@/features/proxies/proxies-page"), "ProxiesPage", ["network", "networkResources", "networkPools", "networkRouting", "ops", "settings", "settingsForm"]);
+export const ProxiesPageModule = preloadableNamed(() => import("@/features/proxies/proxies-page"), "ProxiesPage", ["resourceChecks", "network", "networkResources", "networkPools", "networkRouting", "ops", "settings", "settingsForm"]);
 export const SettingsPageModule = preloadableNamed(() => import("@/features/settings/settings-page"), "SettingsPage", ["settings", "models", "console", "accountBulk", "settingsForm"]);
 
 const routeModules = {

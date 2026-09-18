@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 )
@@ -14,6 +15,7 @@ const LegacyProbeExperimentVersion = "reasoning-capability-v1"
 // the trigger's tools, effort or client protocol. Legacy experiments retain
 // their original matching rules.
 type ProbeExperiment struct {
+	ResourceCheck  *ResourceCheckPlan   `json:"resource_check,omitempty"`
 	Version        string               `json:"version"`
 	TriggerEventID string               `json:"trigger_event_id"`
 	Baseline       attemptmeta.Identity `json:"baseline"`
@@ -25,6 +27,12 @@ func NewProbeExperiment(obs Observation) ProbeExperiment {
 }
 
 func (s ProbeExperiment) UnsupportedReason() string {
+	if s.Version == AccountCheckVersion || s.Version == ResourceCheckVersion {
+		if s.Baseline.Provider != "grok_build" || s.Baseline.Model == "" || s.Baseline.RuleVersion == "" || s.Prompt() == "" {
+			return "experiment_baseline_missing"
+		}
+		return ""
+	}
 	if s.Version != ProbeExperimentVersion && s.Version != LegacyProbeExperimentVersion {
 		return "unsupported_experiment_version"
 	}
@@ -56,6 +64,24 @@ func (s ProbeExperiment) Profile() attemptmeta.Profile {
 }
 
 func (s ProbeExperiment) Prompt() string {
+	if s.Version == ResourceCheckVersion {
+		switch s.Sample {
+		case "token-short":
+			return "Reply only OK. Data: " + strings.Repeat("a", 512)
+		case "token-long":
+			return "Reply only OK. Data: " + strings.Repeat("a", 2048)
+		}
+		return ""
+	}
+	if s.Version == AccountCheckVersion {
+		switch s.Sample {
+		case "brief-confirmation":
+			return "Please reply with a brief greeting."
+		case "repeated-as":
+			return "Reply only OK. Data: " + strings.Repeat("a", 500)
+		}
+		return ""
+	}
 	if s.Version == ProbeExperimentVersion {
 		if s.Sample == "brief-confirmation" {
 			return "Please reply with a brief greeting."

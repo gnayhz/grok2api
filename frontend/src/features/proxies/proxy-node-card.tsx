@@ -23,6 +23,7 @@ export const ProxyNodeCardItem = memo(function ProxyNodeCardItem({
 	onToggleSelect,
 	onToggleEnabled,
 	onTestProbe,
+	onQualityCheck,
 	onRotate,
 	onRevealProxyURL,
 	onRevealRotationURL,
@@ -39,6 +40,7 @@ export const ProxyNodeCardItem = memo(function ProxyNodeCardItem({
 	onToggleSelect: (id: string) => void;
 	onToggleEnabled: (id: string, enabled: boolean) => void;
 	onTestProbe: (id: string) => void;
+	onQualityCheck: () => void;
 	onRotate: (id: string) => void;
 	onRevealProxyURL: (id: string) => void;
 	onRevealRotationURL: (id: string) => void;
@@ -98,6 +100,7 @@ export const ProxyNodeCardItem = memo(function ProxyNodeCardItem({
 								</Button>
 							</DropdownMenuTrigger>
 							<DropdownMenuContent align="end" className="w-44">
+								<DropdownMenuItem onClick={onQualityCheck}><ShieldAlert className="mr-2 size-3.5" />{t("resourceChecks.action")}</DropdownMenuItem>
 								<DropdownMenuItem onClick={() => onTestProbe(node.id)}>
 									<Zap className="mr-2 size-3.5 text-amber-500" />
 									<span>{t("network.testLatency")}</span>

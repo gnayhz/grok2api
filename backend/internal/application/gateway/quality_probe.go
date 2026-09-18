@@ -340,6 +340,16 @@ func (s *Service) qualityProbeMeasurement(ctx context.Context, request provider.
 	if responseflow.FromReader(response.Body) == nil {
 		response.Body = resources.Own(responseflow.New(response.Body, responsebuffer.FromContext(ctx)))
 	}
+	if frozen && (spec.Version == qualitymodel.AccountCheckVersion || spec.Version == qualitymodel.ResourceCheckVersion) {
+		sample, err := readAccountCheckStream(ctx, response.Body, hold, resources)
+		sample.Sample = spec.Sample
+		result.CheckEvidence = &sample
+		if err != nil {
+			return fail(probeOperationFailure(ctx, err, qualitymodel.ProbeFailureCompletion), "account check completion unavailable")
+		}
+		result.Outcome, result.Failure = sample.Outcome, sample.Failure
+		return result
+	}
 	replay, verdict, _, fingerprint, peekErr := peekQualityStreamReport(ctx, response.Body, qualityProtocolResponses, hold)
 	replay = resources.Own(replay)
 	switch {
@@ -485,6 +495,9 @@ func (s *Service) qualityProbeRequestForContext(ctx context.Context, route model
 	maxOutput := qualityProbeMaxOutputTokens
 	if spec.Version == qualitymodel.LegacyProbeExperimentVersion {
 		maxOutput = 1024
+	}
+	if spec.Version == qualitymodel.AccountCheckVersion || spec.Version == qualitymodel.ResourceCheckVersion {
+		maxOutput = 256
 	}
 	body := map[string]any{"model": route.PublicID, "input": spec.Prompt(), "stream": true, "max_output_tokens": maxOutput}
 	if effort := spec.Profile().ReasoningEffort; effort != "" {

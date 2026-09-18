@@ -6,6 +6,7 @@ type TranslationBundle = Record<"zh-CN" | "en", TranslationTree>;
 // The app owns loading, while each feature/entity owns its vocabulary.
 // Literal imports keep the dependency graph and build chunks statically visible.
 export const featureTranslationLoaders = {
+  resourceChecks: () => import("@/entities/guard/resource-check-translations").then(m => ({ "zh-CN": { resourceChecks: m.resourceChecksZh }, en: { resourceChecks: m.resourceChecksEn } })),
   creativeConsole: () => import("@/features/creative-console/creative-console-translations").then(m => ({ "zh-CN": { creativeConsole: m.creativeConsoleZh }, en: { creativeConsole: m.creativeConsoleEn } })),
   dashboard: () => import("@/features/dashboard/dashboard-translations").then(m => ({ "zh-CN": { dashboard: m.dashboardZh }, en: { dashboard: m.dashboardEn } })),
   settings: () => import("@/features/settings/settings-translations").then(m => ({ "zh-CN": { settings: m.settingsZh }, en: { settings: m.settingsEn } })),

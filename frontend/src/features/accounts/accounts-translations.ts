@@ -1,6 +1,7 @@
 // accounts 文案归 feature 并由 app 注册;键名保持不变。
 // 增补键(RT 导入/冷却清除/续期)以尾随 spread 合并,保留 assign 覆盖语义。
 export const accountsZh = {
+  availabilityCheck: "可用性检测",
         title: "上游账号",
         description: "分别管理 Grok Build OAuth、Grok Web SSO 与 Grok Console SSO 号池、健康状态和额度。",
         add: "接入账号",
@@ -216,26 +217,27 @@ export const accountsZh = {
   importedWithFailures: "导入完成：新增 {{created}}，更新 {{updated}}，跳过 {{skipped}}，RT 验证失败 {{failed}}；初始同步成功 {{synced}}，失败 {{syncFailed}}",
   refreshErrorStatus: "HTTP 状态", refreshErrorCode: "错误码", refreshErrorMessage: "错误信息", refreshErrorResponse: "额外详情" })),
   ...(({
-  detectAllTitle: "检测全部 Grok Build 账号？",
-  detectAllDescription: "将对每个启用且状态正常的 Grok Build 账号发起一次 grok-4.5 探测请求。已确认失效的账号会被标记并移出号池。",
-  detectSelectedTitle: "检测选中的 {{count}} 个 Grok Build 账号？",
-  detectSelectedDescription: "逐个验证所选账号，并显示正常、失效和检测失败结果。",
+  detectAllTitle: "检测全部 Grok Build 账号的可用性？",
+  detectAllDescription: "检查凭据、额度和接口能否成功响应，不检查降智。将对每个启用且状态正常的账号发起一次 grok-4.5 请求；已确认失效的账号会被标记并移出号池。",
+  detectSelectedTitle: "检测选中的 {{count}} 个账号的可用性？",
+  detectSelectedDescription: "检查凭据、额度和接口能否成功响应，不检查降智。结果中的可用仅表示此次请求成功。",
   detectAll: "开始检测",
   detectProgressLabel: "检测进度",
   detectInvalidCount: "已发现 {{count}} 个失效账号",
-  detectSelectedSummary: "正常 {{ok}} · 失效 {{invalid}} · 失败 {{failed}}",
+  detectSelectedSummary: "可用 {{ok}} · 失效 {{invalid}} · 失败 {{failed}}",
   detectResultsLimited: "结果列表仅保留最近 {{count}} 条；上方累计统计不受影响。",
   detectWaitingInvalid: "正在检测；这里只增量显示已确认失效的账号。",
   detectWaitingResults: "正在等待账号检测结果。",
   detectNoInvalid: "未发现失效账号。",
   detectNoResults: "暂无检测结果。",
-  detectOutcome: { ok: "正常", invalid: "失效", failed: "失败" },
+  detectOutcome: { ok: "可用", invalid: "失效", failed: "失败" },
   batchDetected: "账号检测完成：成功 {{succeeded}}，失败 {{failed}}",
   allDetected: "全量检测完成：成功 {{succeeded}}，失败 {{failed}}" })),
 };
 
 // accounts en 对齐翻译:与 accountsZh 键集一致,插值参数一致。
 export const accountsEn = {
+  availabilityCheck: "Availability check",
         title: "Upstream accounts",
         description: "Manage Grok Build OAuth, Grok Web SSO and Grok Console SSO pools, health and quota.",
         add: "Connect account",
@@ -450,20 +452,20 @@ export const accountsEn = {
   cooldownCleared: "Account cooldown cleared; the account can be scheduled again",
   enabledDoesNotClearCooldown: "Enabled state changed, but cooldown is unchanged. Use Clear cooldown to reset cooldownUntil." })),
   ...(({
-  detectAllTitle: "Detect all Grok Build accounts?",
-  detectAllDescription: "Probe each enabled and healthy Grok Build account with grok-4.5. Confirmed invalid accounts are marked and removed from routing.",
-  detectSelectedTitle: "Detect {{count}} selected Grok Build accounts?",
-  detectSelectedDescription: "Validate the selected accounts and show healthy, invalid, and failed results.",
+  detectAllTitle: "Check availability of all Grok Build accounts?",
+  detectAllDescription: "Check credentials, quota and successful responses, not degradation. Probe eligible accounts with grok-4.5; confirmed invalid accounts are marked and removed from routing.",
+  detectSelectedTitle: "Check availability of {{count}} selected accounts?",
+  detectSelectedDescription: "Check credentials, quota and successful responses, not degradation. Available only means this request succeeded.",
   detectAll: "Start detection",
   detectProgressLabel: "Detection progress",
   detectInvalidCount: "{{count}} invalid accounts found",
-  detectSelectedSummary: "Healthy {{ok}} · Invalid {{invalid}} · Failed {{failed}}",
+  detectSelectedSummary: "Available {{ok}} · Invalid {{invalid}} · Failed {{failed}}",
   detectResultsLimited: "Only the latest {{count}} results are retained; cumulative totals above remain complete.",
   detectWaitingInvalid: "Detection is running; confirmed invalid accounts appear here.",
   detectWaitingResults: "Waiting for account detection results.",
   detectNoInvalid: "No invalid accounts found.",
   detectNoResults: "No detection results.",
-  detectOutcome: { ok: "Healthy", invalid: "Invalid", failed: "Failed" },
+  detectOutcome: { ok: "Available", invalid: "Invalid", failed: "Failed" },
   batchDetected: "Detection complete: {{succeeded}} succeeded, {{failed}} failed",
   allDetected: "Full detection complete: {{succeeded}} succeeded, {{failed}} failed" })),
 };

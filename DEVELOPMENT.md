@@ -8,6 +8,8 @@
 
 需求改变时先确认期望行为，再核对源码、真实调用和测试。文档描述的是当前约定；实现缺陷不能因为“源码就是这样”自动成为正确规则，旧草案也不能覆盖当前需求。架构检查失败时应检查跨界原因；确需改变边界，须同时说明新的 owner、接口、迁移及消费者验证，不能仅删除测试或加入宽泛豁免。
 
+修改降智判据、资源风控或复核行为前，先读[质量模块中的 A/B 静默路由定义、四种资源组合与脱敏对照](backend/internal/quality/README.md#降智的含义与四种资源组合)。实时守卫与主动检测共享协议事实，不共享案件判决；超时、可用性和缺少可见思考必须分别解释。
+
 ## 首次启动隔离开发环境
 
 以下命令从仓库根目录执行。需要 Git、仓库声明的 Go/Node/pnpm 和用于生成本地密钥的 OpenSSL；Docker 仅在容器构建或相关集成验证时需要。先确认现有 `config.yaml`、`data/` 是否用于实际业务，不复用其中的账号、密钥或数据库。
@@ -77,6 +79,7 @@ rg '目标规则或函数' backend/internal/architecture
 | 连接、TLS、HTTP/2、SOCKS、容量 | `infra/egress/`、对应 `pkg/` 网络组件 | socket/client/request/waiter 额度、活跃流隔离、EOF/取消、binding/health revision |
 | 响应质量准入 | `quality/guard/`、`domain/guard/`、gateway 的准入文件 | 规范事件解释、策略快照、内存预算、扣留与交付、未知/失败不得当降智票 |
 | 调查、案件、人工解除限制 | `quality/investigator/`、`court/`、`registry/`、`management/` | 受控对照、实际路径、证据协议、当前 epoch、其他案件持有的限制、原子结案 |
+| 账号/出口主动风控检测 | `quality/management`、`quality/investigator`、`quality/model`、`quality/registry`、gateway、egress 的目标路径探测与 `entities/guard` | 批量持久任务、前后正常对照、token 差分、目标同域地址核实、独立账号/出口归因、只读案件限制、SQLite/PostgreSQL CHECK 升级 |
 | 上传、图片、视频、下载或删除 | `application/media/`、`infra/mediafetch/`、gateway 媒体执行、`application/mediajob/` 生成事实 | SSRF、文件引用授权、暂存/claim、归档来源、恢复同一作业、计费与孤儿回收 |
 | TTS、STT 或实时语音 | gateway 的 voice 文件、`application/mediajob/voice_generation.go`、HTTP inference、Provider 语音实现 | 执行与双向通道归 gateway；输入格式/选项、终态完整性、生成与交付分离、取消后的用量 |
 | 管理员登录或浏览器会话 | `application/adminauth/`、管理鉴权中间件；`frontend/src/shared/auth/` | 密码代际、刷新族复用、撤销、旧请求/缓存隔离、退出后的迟到响应 |

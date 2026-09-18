@@ -26,9 +26,11 @@ type Measurements interface {
 }
 
 type ProbeExecutor struct {
-	state        ProbeState
-	measurements Measurements
-	logger       *slog.Logger
+	resourceMeasurements ResourceCheckMeasurements
+	resourceProgress     ResourceCheckProgress
+	state                ProbeState
+	measurements         Measurements
+	logger               *slog.Logger
 }
 
 func NewProbeExecutor(state ProbeState, measurements Measurements, logger *slog.Logger) *ProbeExecutor {
@@ -41,6 +43,12 @@ func NewProbeExecutor(state ProbeState, measurements Measurements, logger *slog.
 func (e *ProbeExecutor) Execute(ctx context.Context, task model.ProbeTask) (model.ProbeTaskResult, error) {
 	if err := ctx.Err(); err != nil {
 		return interrupted(model.ProbeTaskResult{}), err
+	}
+	if task.Direction == model.ProbeAccountCheck {
+		return e.executeAccountCheck(ctx, task)
+	}
+	if task.Direction == model.ProbeResourceCheck {
+		return e.executeResourceCheck(ctx, task)
 	}
 	if task.Direction != model.ProbeAccountDifferential && task.Direction != model.ProbeExitJury {
 		return rejected(model.ProbeTaskResult{}, model.ProbeFailureExperiment, "unsupported_probe_direction"), ErrInadmissible

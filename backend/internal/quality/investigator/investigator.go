@@ -258,7 +258,11 @@ func (s *Service) runDue(ctx context.Context, executor Executor, limit int) (int
 					results <- outcome{task: task, result: model.ProbeTaskResult{Outcome: model.ProbeResultError, FailureKind: "executor_failure", Detail: "executor_panic"}, execErr: errors.New("probe executor panic"), completedAt: time.Now().UTC()}
 				}
 			}()
-			taskCtx, taskCancel := context.WithCancel(ctx)
+			timeout := 2 * time.Minute
+			if task.Direction == model.ProbeResourceCheck {
+				timeout = model.ResourceCheckTimeout
+			}
+			taskCtx, taskCancel := context.WithTimeout(ctx, timeout)
 			defer taskCancel()
 			stopHeartbeat := s.heartbeat(taskCtx, task.ID, taskCancel)
 			defer stopHeartbeat()
@@ -290,6 +294,13 @@ func (s *Service) runDue(ctx context.Context, executor Executor, limit int) (int
 				state = model.ProbeCancelled
 			}
 			if err := s.settleProbe(out.task.ID, state, out.result, now); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if model.IsManualProbe(out.task.Direction) {
+			// Manual reports have no court evidence projection or restriction.
+			if err := s.settleProbe(out.task.ID, model.ProbeDone, out.result, now); err != nil && firstErr == nil {
 				firstErr = err
 			}
 			continue

@@ -96,12 +96,27 @@ func (s *ProbeTaskStore) ClaimPendingProbeTasks(ctx context.Context, limit int) 
 	var rows []qProbeTaskModel
 	if err := s.registry.db.WithContext(ctx).
 		Where("state = ?", string(model.ProbePending)).
-		Order("id").Limit(limit).Find(&rows).Error; err != nil {
+		Where("direction <> ? OR created_at >= ?", string(model.ProbeAccountCheck), time.Now().UTC().Add(-10*time.Minute)).
+		Where("direction <> ? OR created_at >= ?", string(model.ProbeResourceCheck), time.Now().UTC().Add(-model.ResourceCheckQueueTimeout)).
+		Order("id").Limit(max(limit, 64)).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	tasks := make([]model.ProbeTask, 0, len(rows))
 	now := time.Now().UTC()
 	for _, row := range rows {
+		if len(tasks) >= limit {
+			break
+		}
+		if row.Direction == string(model.ProbeResourceCheck) {
+			claimed, err := s.claimResourceCheck(ctx, row, now)
+			if err != nil {
+				return tasks, err
+			}
+			if claimed {
+				tasks = append(tasks, probeTaskFromRow(row))
+			}
+			continue
+		}
 		claimed := s.registry.db.WithContext(ctx).Model(&qProbeTaskModel{}).
 			Where("id = ? AND state = ?", row.ID, string(model.ProbePending)).
 			Updates(map[string]any{"state": string(model.ProbeRunning), "updated_at": now, "lease_owner": s.owner, "lease_until": now.Add(ProbeLease)})
@@ -139,6 +154,20 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 		"control_path_key": result.ControlPathKey, "control_verified": result.ControlVerified,
 		"result": string(result.Outcome), "verified_ip_change": result.VerifiedIPChange, "detail": result.Detail,
 	}
+	if result.AccountCheck != nil {
+		reportJSON, err := json.Marshal(result.AccountCheck)
+		if err != nil {
+			return err
+		}
+		updates["check_report_json"] = string(reportJSON)
+	}
+	if result.ResourceCheck != nil {
+		reportJSON, err := json.Marshal(result.ResourceCheck)
+		if err != nil {
+			return err
+		}
+		updates["check_report_json"] = string(reportJSON)
+	}
 	return s.registry.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&qProbeTaskModel{}).
 			Where("id = ? AND state = ? AND lease_owner = ? AND lease_until > ?", taskID, string(model.ProbeRunning), s.owner, time.Now().UTC()).Updates(updates)
@@ -155,6 +184,9 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 		if err := tx.First(&row, "id = ?", taskID).Error; err != nil {
 			return err
 		}
+		if model.IsManualProbe(model.ProbeDirection(row.Direction)) {
+			return nil
+		}
 		obs := model.ProbeObservation(probeTaskFromRow(row), result, finishedAt)
 		payload, err := json.Marshal(obs)
 		if err != nil {
@@ -170,7 +202,7 @@ func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]model
 		limit = 50
 	}
 	var rows []qProbeTaskModel
-	if err := s.registry.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.registry.db.WithContext(ctx).Where("direction NOT IN ?", manualProbeDirections).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	views := make([]model.ProbeTaskView, 0, len(rows))

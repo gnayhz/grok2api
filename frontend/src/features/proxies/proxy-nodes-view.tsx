@@ -1,3 +1,4 @@
+import { ResourceCheckDialog } from "@/entities/guard/resource-check-dialog";
 import { useQueryClient } from "@tanstack/react-query";
 import {
 	Copy,
@@ -116,6 +117,7 @@ export function ProxyNodesView({
 	);
 	const [search, setSearch] = useState("");
 	const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
+	const [qualityTargets, setQualityTargets] = useState<{ id: string; name: string }[] | null>(null);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
 	// Edit & delete dialog states
@@ -535,6 +537,7 @@ export function ProxyNodesView({
 				</div>
 			</div>
 
+			{qualityTargets && <ResourceCheckDialog key={qualityTargets.map(target => target.id).join(",")} kind="node" targets={qualityTargets} onClose={() => setQualityTargets(null)} />}
 			{/* Batch Operations Bar */}
 			{selectedIds.size > 0 && (
 				<div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5 shadow-sm">
@@ -549,6 +552,7 @@ export function ProxyNodesView({
 					</div>
 
 					<div className="flex flex-wrap items-center gap-1.5">
+						<Button size="sm" variant="outline" className="h-7 text-xs" disabled={selectedIds.size > 32} onClick={() => setQualityTargets([...selectedIds].map(id => ({ id, name: filteredNodes.find(node => node.id === id)?.name || id })))}>{t("resourceChecks.action")}</Button>
 						<Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={handleBatchProbe}>
 							<Zap className="size-3 text-amber-500" />
 							{t("network.batchProbe")}
@@ -616,6 +620,7 @@ export function ProxyNodesView({
 							key={node.id}
 							node={node}
 							cond={nodeCondition(node, now)}
+							onQualityCheck={() => setQualityTargets([{ id: node.id, name: node.name }])}
 							isSelected={selectedIds.has(node.id)}
 							isProbing={probingNodeId === node.id}
 							locale={i18n.language}
@@ -802,6 +807,7 @@ export function ProxyNodesView({
 													</Button>
 												</DropdownMenuTrigger>
 												<DropdownMenuContent align="end" className="w-44">
+													<DropdownMenuItem onClick={() => setQualityTargets([{ id: node.id, name: node.name }])}><ShieldAlert />{t("resourceChecks.action")}</DropdownMenuItem>
 													<DropdownMenuItem onClick={() => handleTestSingle(node.id)}>
 														<Zap className="mr-2 size-3.5 text-amber-500" />
 														<span>{t("network.testLatency")}</span>
