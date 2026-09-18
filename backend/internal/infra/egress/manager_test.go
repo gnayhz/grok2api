@@ -87,7 +87,7 @@ func TestBuildResponseHeaderTimeoutHotUpdateRebuildsCachedClients(t *testing.T) 
 	if _, err := manager.transport.clientForContext(context.Background(), 1, domain.ScopeBuild, "", "", "", false, "", clientOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	manager.UpdateBuildResponseHeaderTimeout(7 * time.Minute)
+	manager.UpdateBuildTransportSettings(7*time.Minute, 0)
 	if len(clients) != 1 || clients[0].closedIdle != 1 {
 		t.Fatalf("old clients=%d closed=%d", len(clients), clients[0].closedIdle)
 	}

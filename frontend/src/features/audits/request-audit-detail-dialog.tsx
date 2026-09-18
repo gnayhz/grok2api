@@ -32,6 +32,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/shared/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { GenerationUsagePanel } from "./generation-usage-panel";
+import { ExecutionDiagnosticsPanel } from "./execution-diagnostics-panel";
 import { getRequestAudit, type AuditAttemptDTO, type AuditBillingBreakdownDTO, type AuditBillingComponentDTO, type AuditDTO } from "@/entities/audit/audit-api";
 import { CopyButton } from "@/shared/components/copy-button";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
@@ -140,6 +141,7 @@ function RequestAuditDetailContent({ audit, open, titleRef }: {
                   ) : null}
                 </TabsTrigger>
                 <TabsTrigger value="generation" className={detailTabClass} disabled={!hasDetail}><Activity className="size-3.5" />{t("audits.generationUsage")}</TabsTrigger>
+                <TabsTrigger value="execution" className={detailTabClass} disabled={!hasDetail}><Clock3 className="size-3.5" />{t("audits.executionTiming")}</TabsTrigger>
                 <TabsTrigger value="requestMetadata" className={detailTabClass} disabled={!hasDetail}><ListTree className="size-3.5" />{t("audits.requestMetadata")}</TabsTrigger>
               </TabsList>
             </div>
@@ -155,6 +157,9 @@ function RequestAuditDetailContent({ audit, open, titleRef }: {
             </TabsContent>
             <TabsContent value="attempts" className="min-h-0 flex-1 overflow-hidden">
               {hasDetail ? <UpstreamAttemptsPanel audit={activeAudit} attempts={attempts} /> : null}
+            </TabsContent>
+            <TabsContent value="execution" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6">
+              {hasDetail ? <ExecutionDiagnosticsPanel value={activeAudit.diagnostics} /> : null}
             </TabsContent>
           </Tabs>
         ) : null}

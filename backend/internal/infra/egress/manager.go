@@ -265,7 +265,9 @@ type clientCacheKey struct {
 	fingerprint     string
 	accountIdentity string
 	// sessionKey partitions a reusable Build pool within the account boundary.
-	sessionKey string
+	sessionKey         string
+	buildHeaderTimeout time.Duration
+	sessionIdleTimeout time.Duration
 }
 
 type cachedNodeSnapshot struct {
@@ -354,10 +356,10 @@ func (m *Manager) log() *slog.Logger {
 	return m.logger
 }
 
-// UpdateBuildResponseHeaderTimeout rebuilds only cached Build clients. Active
-// requests keep their current transport and are not interrupted.
-func (m *Manager) UpdateBuildResponseHeaderTimeout(value time.Duration) {
-	m.transport.UpdateBuildResponseHeaderTimeout(value)
+// UpdateBuildTransportSettings retires affected clients without interrupting
+// active requests. Session idle changes leave shared and fresh clients alone.
+func (m *Manager) UpdateBuildTransportSettings(headerTimeout, sessionIdleTimeout time.Duration) {
+	m.transport.updateBuildSettings(headerTimeout, sessionIdleTimeout)
 }
 
 // UpdateBuildStreamIdleTimeout affects subsequent Build streams. Active
@@ -501,6 +503,7 @@ func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (doma
 type clientOptions struct {
 	buildEnvironmentProxy   bool
 	requireAccountIsolation bool
+	sessionIdleTimeout      time.Duration
 	freshTunnel             bool
 	// sessionKey is a soft hint; the registry resolves scope and fresh policy
 	// before choosing a client, always respecting the account boundary.

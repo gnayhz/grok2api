@@ -14,7 +14,7 @@ import (
 )
 
 func TestSessionHintRespectsEveryPoolStrategy(t *testing.T) {
-	for _, strategy := range []domain.PoolStrategy{domain.PoolStrategyAffinity, domain.PoolStrategyRandom, domain.PoolStrategySticky, domain.PoolStrategyRotation, domain.PoolStrategyLeastUsed} {
+	for _, strategy := range []domain.PoolStrategy{domain.PoolStrategyAffinity, domain.PoolStrategySessionReuse, domain.PoolStrategyRandom, domain.PoolStrategySticky, domain.PoolStrategyRotation, domain.PoolStrategyLeastUsed} {
 		for _, isolated := range []bool{false, true} {
 			for _, fresh := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/isolated=%t/fresh=%t", strategy, isolated, fresh), func(t *testing.T) {
@@ -23,6 +23,7 @@ func TestSessionHintRespectsEveryPoolStrategy(t *testing.T) {
 					t.Cleanup(func() { _ = m.Close(context.Background()) })
 					m.UpdateAccountIsolatedConnections(isolated)
 					const poolID = uint64(50101)
+					ResetPoolStats(poolID)
 					repo.pool[poolID] = domain.Pool{ID: poolID, Enabled: true, Strategy: domain.PoolStrategyAffinity}
 					nodes := sessionTestNodes(1, 2, 3)
 					for i := range nodes {
@@ -62,6 +63,10 @@ func TestSessionHintRespectsEveryPoolStrategy(t *testing.T) {
 					case domain.PoolStrategyAffinity:
 						if len(seen) != 1 || !seen[3] {
 							t.Fatalf("affinity lost valid session pin: %v", seen)
+						}
+					case domain.PoolStrategySessionReuse:
+						if len(seen) != 1 {
+							t.Fatalf("session reuse changed exit across account switches: %v", seen)
 						}
 					case domain.PoolStrategySticky:
 						if len(seen) != 1 || !seen[1] {

@@ -6,6 +6,8 @@ This document describes runtime ownership and invariants. For cross-module bound
 
 ## State ownership
 
+When a request diagnostic collector is present, each physical HTTP submission records bounded connection events through response headers, including connection reuse and TLS session resumption. Internal connection retries retain distinct physical identities. Observations contain no endpoints, addresses, credentials or body text; provider-owned prompt digests are carried as immutable metadata. The collector does not change network admission, retry limits or connection ownership. Audit details expose these observations; list queries omit them.
+
 | Component | Owned state and work |
 | --- | --- |
 | `routingRuntime` | Immutable node/operations/pool projections, routing generations, fixed-target cache, selection accounting, session pins and rotation cursors |
@@ -33,6 +35,20 @@ Retiring a cached client closes its idle connections. Its active requests retain
 Browser HTTP/2 initialization is scoped to the origin and never runs while holding a shared state lock. Waiting requests can cancel independently. The connection pool avoids fhttp's connection mutex during selection and idle close. Socket writes have a ten-second limit; cancellation interrupts a write that remains blocked across a short grace window. Healthy multiplexed streams survive normal cancellation of another stream. Request retries retain fhttp's protocol-safe rules, and application retries never replay a request after submission may have begun.
 
 TCP, proxy negotiation, TLS and HTTP/2 preface establishment have a ten-second budget. The establishment quota remains held until `GotConn`/WebSocket handoff; the deadline is then removed. Normal long response streams are governed by the caller and the existing provider stream-idle policy, not by the establishment deadline.
+
+## Session reuse pool strategy
+
+`session-reuse` is an opt-in pool strategy for Build requests. It assigns each new session to an eligible member by current in-flight leases, then the number of retained session assignments. A pool/session hash breaks ties independently of upstream account identity. Selection and recording the assignment share one local lock, so concurrent first requests for one session retain one assignment and concurrent new sessions see earlier allocations. Existing sessions retain their qualified member even when another member becomes less busy. Upstream account changes do not reset the route.
+
+Assignments are scoped to pool and the already isolated Build session digest. Quality restrictions, retry exclusions and current pool membership are checked before using a pin; authoritative admission and binding-generation checks still run before a lease is published. An ineligible pin is replaced by an eligible member in the same pool; releasing the old exit from quality remand does not move that session back. Empty pools retain their configured fallback behavior, including returning to the primary pool when it becomes available. Route reassignment does not clear history, override account/resource authorization, or guarantee an upstream prefix-cache hit. The quality court may temporarily remand both account and exit while investigating; connection reuse never bypasses that decision.
+
+Requests with no Build session and requests from other providers select randomly. Explicit `prompt_cache_key` takes precedence over generic session headers; clients must keep the selected identity within a conversation and change it for a new conversation. Message-derived soft identities cannot reliably distinguish independent conversations with identical openings. A newly allocated session may choose the same exit as another session: the policy distributes assignments, not exclusive IPs or a guaranteed alternating sequence.
+
+This version supports one process. The routing table retains at most 8,192 assignments with a two-hour idle lifetime and evicts the least recently used assignment at capacity. Retained assignments are a bounded load hint, not a count of currently active conversations. Restarting clears them. Multi-instance routing requires coordinated bindings and shared load accounting before it can offer the same semantics; separate process tables do not provide cluster-wide affinity. Account isolation, fresh-connection requirements, transport idle timeouts and socket/client budgets remain independent and unchanged.
+
+Load comparison uses node identities and local in-flight leases; it is not a rolling requests-per-IP limit. Aliased nodes sharing an IP, a high-volume existing session and multiple instances can still concentrate traffic. This strategy does not establish a supplier's request threshold or guarantee response quality. Old `affinity`, `random`, `sticky`, `rotation` and `least-used` policies retain their behavior.
+
+Build session clients use `providerBuild.sessionIdleConnTimeout` from runtime settings (default 5 minutes, range 30 seconds to 30 minutes). This is distinct from the two-hour route assignment and from the stream-idle deadline. A hot update atomically retires affected session clients; new acquisitions use the new value, while accepted leases and active responses complete on their old transports. Retirement can cause one reconnect after saving. Unchanged settings retain warm clients; fresh-connection and non-session clients keep their independent policies. The registry fences stale construction before and after publication and retains retired resources until release. Proxy/upstream closure may still shorten the usable lifetime.
 
 ## Health and binding consistency
 

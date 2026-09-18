@@ -78,12 +78,12 @@ func TestEgressPoolCRUDAndMembership(t *testing.T) {
 	}
 }
 
-// 池策略必须原样落库:affinity/random/sticky 三种策略 round-trip。
+// Pool strategy values must survive persistence without normalization.
 func TestEgressPoolStrategyRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	repo := NewEgressRepository(database)
-	for _, strategy := range []domain.PoolStrategy{domain.PoolStrategyAffinity, domain.PoolStrategyRandom, domain.PoolStrategySticky} {
+	for _, strategy := range []domain.PoolStrategy{domain.PoolStrategyAffinity, domain.PoolStrategySessionReuse, domain.PoolStrategyRandom, domain.PoolStrategySticky, domain.PoolStrategyRotation, domain.PoolStrategyLeastUsed} {
 		pool, err := repo.CreateEgressPool(ctx, domain.Pool{Name: "strategy-" + string(strategy), Enabled: true, Strategy: strategy, FallbackMode: domain.PoolFallbackNone})
 		if err != nil {
 			t.Fatal(err)

@@ -157,10 +157,10 @@ func TestClientCacheLifecycleUnderProxyURLEditAndHotUpdates(t *testing.T) {
 	}
 
 	// 3. 超时热更新 ×2 与 URL 编辑交替 → 客户端缓存容量有界。
-	manager.UpdateBuildResponseHeaderTimeout(7 * time.Second)
-	manager.UpdateBuildResponseHeaderTimeout(11 * time.Second)
+	manager.UpdateBuildTransportSettings(7*time.Second, 0)
+	manager.UpdateBuildTransportSettings(11*time.Second, 0)
 	roundTrip()
-	manager.UpdateBuildResponseHeaderTimeout(9 * time.Second)
+	manager.UpdateBuildTransportSettings(9*time.Second, 0)
 	repo.nodes[0].EncryptedProxyURL = encryptedProxy(t, cipher, proxyA.server.URL)
 	manager.invalidateNodes()
 	roundTrip()

@@ -292,6 +292,18 @@ func (j *ConversationJournal) Reserve(ctx context.Context, p repository.JournalR
 				persistedInput = append(persistedInput, p.Input[i])
 			}
 		}
+		// Only the new delta is encoded. Bound JSON/base64/encryption workspace
+		// inside this transaction, then release it before loading the old chain.
+		// The caller no longer retains a whole-request decoding workspace here.
+		encodingBytes := 4096 + 256*len(persistedInput)
+		for _, item := range persistedInput {
+			encodingBytes += 7 * len(item)
+		}
+		encodingLease, e := responsebuffer.FromContext(ctx).Reserve(encodingBytes)
+		if e != nil {
+			return e
+		}
+		defer encodingLease.Release()
 		encrypted, e := j.encrypt(persistedInput)
 		if e != nil {
 			return e
@@ -362,7 +374,8 @@ func (j *ConversationJournal) loadChain(tx *gorm.DB, session string, generation 
 	}
 	return turns, nil
 }
-func (j *ConversationJournal) Commit(ctx context.Context, p repository.JournalCommit) error {
+func (j *ConversationJournal) Commit(ctx context.Context, p repository.JournalCommit) (err error) {
+	defer func() { err = mapError(err) }()
 	id := journalScopeID(p.Ticket.Scope)
 	rid := journalRequestID(id, p.Ticket.Token)
 	encoded, e := j.encrypt(p.Output)
@@ -395,7 +408,10 @@ func (j *ConversationJournal) Commit(ctx context.Context, p repository.JournalCo
 		}
 		var req conversationRequestModel
 		if e = tx.First(&req, "id = ? AND session = ?", rid, id).Error; e != nil {
-			return historydomain.ErrHistoryMissing
+			if errors.Is(e, gorm.ErrRecordNotFound) {
+				return historydomain.ErrHistoryMissing
+			}
+			return e
 		}
 		if req.Generation != p.Ticket.Generation || req.Parent != p.Ticket.Parent || req.Version != p.Ticket.Version || req.InputHash != p.Ticket.InputHash || req.InputCount != p.Ticket.InputCount {
 			return repository.ErrConflict

@@ -12,6 +12,7 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"github.com/chenyme/grok2api/backend/internal/port/provider"
@@ -33,6 +34,7 @@ type deliveryPlan struct {
 	clientKeyID                        uint64
 	streaming                          bool
 	startedAt                          time.Time
+	handedOffAt                        time.Time
 }
 
 // deliverySession owns the accepted response, release and once-only terminal
@@ -72,6 +74,10 @@ func (d *deliverySession) recordDelivery(stats DeliveryStats) {
 
 func (d *deliverySession) finalize(usage Usage, responseID, errorCode string) {
 	d.once.Do(func() {
+		finalizeStarted := time.Now()
+		if !d.plan.handedOffAt.IsZero() {
+			requestdiag.Stage(d.ctx, "response_delivery", d.plan.handedOffAt)
+		}
 		defer d.physicalBudget.Close()
 		d.lifecycleMu.Lock()
 		d.terminal = true
@@ -239,6 +245,9 @@ func (d *deliverySession) finalize(usage Usage, responseID, errorCode string) {
 		} else {
 			s.finishTextQuotas(budget, d.textFacts)
 		}
+		requestdiag.Stage(d.ctx, "completion_before_audit", finalizeStarted)
+		requestdiag.Stage(d.ctx, "request_before_audit", d.plan.startedAt)
+		record.Diagnostics = requestdiag.Snapshot(d.ctx)
 		if err := budget.run("audit", finalizationAuditBudget, func(stageCtx context.Context) error {
 			return s.audits.Create(stageCtx, record)
 		}); err != nil {

@@ -28,7 +28,7 @@ frontend/src/shared/          API、会话、组件、壳层翻译和通用工�
 
 ### 内圈端口（port/）
 
-- `port/provider`：上游能力合同（错误分类、DTO、Adapter 小接口、Registry 操作类型、历史与标记）。Responses 方言的账号探测解释（`responses_probe.go`）与 `pkg/responsecheck` 的三家协议完成语义（OpenAI/Responses/Anthropic 终止判定）、`pkg/jsonpeek` 的 SSE 事件类型表是**已记录的共享协议原语例外**：它们被 port、infra 与 gateway 三方共同消费，位置由依赖方向决定，不属于 Provider 方言私产；方言私有的解析与 body 包装仍在 `infra/provider/{cli,web,console}`。
+- `port/provider`：上游能力合同（错误分类、DTO、Adapter 小接口、Registry 操作类型、历史与标记）。Responses 方言的账号探测解释（`responses_probe.go`）与 `pkg/responsecheck` 的三家协议完成语义（OpenAI/Responses/Anthropic 终止判定及有界失败字段投影）、`pkg/jsonpeek` 的 SSE 事件类型表是**已记录的共享协议原语例外**：它们被 port、infra 与 gateway 等消费方共同使用，位置由依赖方向决定，不属于 Provider 方言私产；方言私有的解析与 body 包装仍在 `infra/provider/{cli,web,console}`。失败字段投影不解释业务重试或账号政策，写入审计前仍由审计记录者脱敏。
 - `port/physical`：物理调用记账合同（`Journal` 的 reserve/observe/facts/confirm 值级方法、`JournalFactory`、attempt 预算与 context 携带）。可变账本实现在 application/execution，HTTP body 包装与传输侧记录在 infra/egress；组合根注入 factory，context 只携带合同，不存在第二套账本入口。
 - `port/crypto`：凭据加解密、口令哈希/校验、管理员 access token 与随机 token 合同（Cryptor/PasswordHasher/AdminTokenManager/TokenSource）。AES/JWT/bcrypt/随机源实现在 infra/security；确定性摘要在 pkg/tokenhash；客户端 Key 的 g2a 格式规则在 domain/clientkey。
 - `port/lifecycle`：关闭取消判定。

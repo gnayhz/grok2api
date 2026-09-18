@@ -9,6 +9,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"github.com/chenyme/grok2api/backend/internal/port/provider"
@@ -281,6 +282,7 @@ func (s *Service) finishUnhandedText(record *audit.Record, g *textGeneration, ct
 	if record.ErrorCode == "quality_event_unavailable" {
 		record.QualityReceipt = "failed"
 	}
+	record.Diagnostics = requestdiag.Snapshot(ctx)
 }
 
 func (s *Service) finishTextQuotas(budget finalizationBudget, g *textGeneration) {

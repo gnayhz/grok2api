@@ -121,6 +121,9 @@ func (c Config) validateProviderBuild() error {
 	if strings.TrimSpace(c.ProviderBuild.ClientVersion) == "" || strings.TrimSpace(c.ProviderBuild.ClientIdentifier) == "" || strings.TrimSpace(c.ProviderBuild.TokenAuth) == "" || strings.TrimSpace(c.ProviderBuild.UserAgent) == "" {
 		return errors.New("provider.build 客户端标识不能为空")
 	}
+	if idle := c.ProviderBuild.SessionIdleConnTimeout; idle < MinBuildSessionIdleConnTimeout || idle > MaxBuildSessionIdleConnTimeout {
+		return errors.New("Grok Build 会话连接空闲保留时间必须在 30 秒到 30 分钟之间")
+	}
 	if timeout := c.ProviderBuild.ResponseHeaderTimeout; timeout < MinBuildResponseHeaderTimeout || timeout > MaxBuildResponseHeaderTimeout {
 		return errors.New("Grok Build 响应头超时必须在 30 秒到 30 分钟之间")
 	}

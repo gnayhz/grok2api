@@ -6,14 +6,27 @@ import (
 	"fmt"
 	"strings"
 
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // normalizeResponsesRequestWithMetadata 改写路由字段和兼容别名，并为上游不支持的新工具协议建立请求级映射。
 func normalizeResponsesRequestWithMetadata(body []byte, model string, metadata *provider.NormalizedRequestMetadata) ([]byte, *responsesToolCompatibility, error) {
+	payload, compatibility, err := normalizeResponsesPayload(body, model, metadata)
+	if err != nil {
+		return nil, nil, err
+	}
+	normalized, err := json.Marshal(payload)
+	return normalized, compatibility, err
+}
+
+// The request owner may apply cache routing to this payload before encoding it.
+// Keep tool normalization and metadata extraction identical for both callers.
+func normalizeResponsesPayload(body []byte, model string, metadata *provider.NormalizedRequestMetadata) (map[string]json.RawMessage, *responsesToolCompatibility, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, nil, fmt.Errorf("解析 Responses 请求: %w", err)
@@ -54,11 +67,7 @@ func normalizeResponsesRequestWithMetadata(body []byte, model string, metadata *
 	if err != nil {
 		return nil, nil, err
 	}
-	normalized, err := json.Marshal(payload)
-	if err != nil {
-		return nil, nil, err
-	}
-	return normalized, compatibility, nil
+	return payload, compatibility, nil
 }
 
 // normalizeBuildRequestWithMetadata applies the stable compatibility boundary shared by Responses,
@@ -91,6 +100,10 @@ func normalizeBuildRequestPayloadWithMetadata(payload map[string]json.RawMessage
 	}
 	if normalizeBuildReasoningEffortPayload(payload, model) {
 		changed = true
+	}
+	if effort, ok := buildReasoningEffort(payload); ok && strings.EqualFold(strings.TrimSpace(effort), modeldomain.ReasoningEffortNone) &&
+		modeldomain.SupportsReasoningForProvider(accountdomain.ProviderBuild, model) && !modeldomain.SupportsReasoningEffort(model, modeldomain.ReasoningEffortNone) {
+		return false, &responsesRequestError{Message: "该模型不支持 reasoning.effort=none，请使用模型支持的推理档位", Param: "reasoning.effort", Code: "unsupported_reasoning_effort"}
 	}
 	// grok-build 1.0.4 always requests a concise reasoning summary from its
 	// Responses backend, even when it uses the model's default effort. Chat
@@ -260,29 +273,39 @@ func patchReasoningTextTypes(payload map[string]json.RawMessage) {
 	if isEmptyJSON(raw) {
 		return
 	}
-	var items []any
+	var items []json.RawMessage
 	if json.Unmarshal(raw, &items) != nil {
 		return // 字符串输入或其他合法简写不需要处理。
 	}
 	changed := false
-	for _, rawItem := range items {
-		item, ok := rawItem.(map[string]any)
-		if !ok || item["type"] != "reasoning" {
+	for i, rawItem := range items {
+		if jsonpeek.RootStringFieldScan(rawItem, "type") != "reasoning" {
 			continue
 		}
-		content, ok := item["content"].([]any)
-		if !ok {
+		var item map[string]json.RawMessage
+		if json.Unmarshal(rawItem, &item) != nil {
 			continue
 		}
-		for _, rawContent := range content {
-			value, ok := rawContent.(map[string]any)
-			if !ok {
+		var content []json.RawMessage
+		if json.Unmarshal(item["content"], &content) != nil {
+			continue
+		}
+		itemChanged := false
+		for j, rawContent := range content {
+			var value map[string]json.RawMessage
+			if json.Unmarshal(rawContent, &value) != nil || value == nil {
 				continue
 			}
 			if _, exists := value["type"]; !exists {
-				value["type"] = "reasoning_text"
-				changed = true
+				value["type"] = mustJSON("reasoning_text")
+				content[j] = mustJSON(value)
+				itemChanged = true
 			}
+		}
+		if itemChanged {
+			item["content"] = mustJSON(content)
+			items[i] = mustJSON(item)
+			changed = true
 		}
 	}
 	if changed {

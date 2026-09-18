@@ -105,7 +105,7 @@ function NetworkWorkspace() {
 			>
 				{/* Modern Tab Bar */}
 				<div className="flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b border-border/80 pb-0">
-					<TabsList className="h-11 max-w-full justify-start overflow-x-auto bg-transparent p-0 gap-1 rounded-none border-b-0">
+					<TabsList className="h-11 max-w-full justify-start overflow-x-auto bg-transparent p-0 gap-1 rounded-none border-b-0 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
 						{/* Tab 1: Radar & Topology */}
 						<TabsTrigger
 							value="radar"

@@ -71,6 +71,7 @@ const (
 
 // Record 表示推理请求审计；成功请求不保存正文，失败请求仅保留受限诊断快照。
 type Record struct {
+	Diagnostics *ExecutionDiagnostics
 	// Completion stages retain independent acknowledgements. Empty means not
 	// recorded. Server delivery cannot prove client consumption; a missing
 	// acknowledgement does not establish that a remote write was rolled back.

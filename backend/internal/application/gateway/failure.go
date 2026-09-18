@@ -182,10 +182,18 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 func newTransportUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	code, message := "upstream_network_error", "连接上游服务失败"
 	status := http.StatusBadGateway
+	var streamFailure *qualityUpstreamFailure
+	if errors.As(err, &streamFailure) {
+		status, code, message = http.StatusBadGateway, "upstream_stream_error", "上游流式响应报告失败"
+		if streamFailure.invalidRequest {
+			status, code, message = http.StatusBadRequest, "upstream_bad_request", "上游拒绝了请求参数，请检查模型支持的参数"
+		}
+		return &UpstreamFailure{HTTPStatus: status, Code: code, PublicMessage: message, AccountID: accountID, AccountName: accountName, Fingerprint: code, Cause: err}
+	}
 	if errors.Is(err, historydomain.ErrIdentityLossNotAuthorized) {
 		return &UpstreamFailure{HTTPStatus: http.StatusConflict, Code: "history_identity_context_unavailable", PublicMessage: "会话身份已隔离，无法安全恢复旧历史；请携带完整原生历史或使用已验证的父响应", Fingerprint: "history_identity_context_unavailable", Cause: err}
 	}
-	if errors.Is(err, historydomain.ErrHistoryPrepare) {
+	if errors.Is(err, historydomain.ErrHistoryPrepare) && !errors.Is(err, responsebuffer.ErrExhausted) && !errors.Is(err, responsebuffer.ErrLimit) {
 		reason := historydomain.HistoryFailureReason(err)
 		status, code, message = http.StatusConflict, "history_"+reason, "无法确认会话历史连续性，请检查父响应或开始新会话"
 		if reason == "store_error" {

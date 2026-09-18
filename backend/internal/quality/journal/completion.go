@@ -81,7 +81,8 @@ func (s *Store) beginCompletions(events []qualitymodel.Event) {
 		}
 		write := s.completions.writing[e.Attempt.ID]
 		if write == nil {
-			write = &admissionWrite{}
+			_, finished := s.completions.pending[e.Attempt.ID]
+			write = &admissionWrite{finished: finished}
 			s.completions.writing[e.Attempt.ID] = write
 		}
 		write.refs++

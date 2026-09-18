@@ -20,14 +20,15 @@ var (
 
 // ProviderBuildConfig 是管理接口使用的 Provider 可编辑输入。
 type ProviderBuildConfig struct {
-	BaseURL               string
-	FallbackBaseURL       string
-	ClientVersion         string
-	ClientIdentifier      string
-	TokenAuth             string
-	UserAgent             string
-	ResponseHeaderTimeout string
-	StreamIdleTimeout     string
+	BaseURL                string
+	FallbackBaseURL        string
+	ClientVersion          string
+	ClientIdentifier       string
+	TokenAuth              string
+	UserAgent              string
+	SessionIdleConnTimeout string
+	ResponseHeaderTimeout  string
+	StreamIdleTimeout      string
 }
 
 // ProviderBuildRecommendation 表示当前网关已完成兼容回归的 Grok Build 协议基线。

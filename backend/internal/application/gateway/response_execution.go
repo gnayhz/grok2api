@@ -14,6 +14,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	portphysical "github.com/chenyme/grok2api/backend/internal/port/physical"
 	"github.com/chenyme/grok2api/backend/internal/port/provider"
@@ -80,6 +81,13 @@ type responseExecution struct {
 }
 
 func (s *Service) createResponseAt(ctx context.Context, input Input, path string) (result *Result, resultErr error) {
+	ctx = requestdiag.WithCollector(ctx)
+	// Large inputs include inline media and their encrypted durable history.
+	// Give that sequential preparation room within the unchanged process pool;
+	// an explicitly supplied (for example probe) budget is never relaxed.
+	if len(input.Body) > 8<<20 {
+		ctx = responsebuffer.WithRequestLimit(ctx, 256<<20)
+	}
 	r := &responseExecution{service: s, ctx: ctx, input: input, path: path, startedAt: time.Now()}
 	r.holdCfg, r.snapshotScope = s.requestGuardSnapshot()
 	r.ctx, r.egressTrace = portphysical.WithTrace(r.ctx)
@@ -100,9 +108,11 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if input.auditOperation != "" {
 		r.auditOperation = input.auditOperation
 	}
+	routeStarted := time.Now()
 	if err := r.prepareRoute(); err != nil {
 		return nil, err
 	}
+	requestdiag.Stage(r.ctx, "route", routeStarted)
 	if err := r.prepareExecution(); err != nil {
 		return nil, err
 	}
@@ -175,6 +185,7 @@ func (r *responseExecution) discardPendingOutput() {
 }
 
 func (r *responseExecution) prepareExecution() error {
+	defer requestdiag.Stage(r.ctx, "execution_prepare", time.Now())
 	r.physicalCallCtx = r.service.startPhysicalTrace(r.ctx, string(r.route.Provider), string(r.operation))
 
 	// degradedNodes 收集本请求内被守卫判定降智的出口节点。注入
@@ -347,6 +358,7 @@ func (r *responseExecution) ensureCredential(credential accountdomain.Credential
 	result, err := r.service.accounts.EnsureCredential(r.ctx, credential, force)
 	r.failureAttempts.captureCredentialFailure(credential, started, force, err)
 	r.timing.markCredential(time.Since(started))
+	requestdiag.Stage(r.ctx, "credential", started)
 	return result, err
 }
 func (r *responseExecution) handoffResponse(response *provider.Response, lease *selector.Lease, credential accountdomain.Credential, upstreamStartedAt time.Time) *Result {
@@ -364,7 +376,7 @@ func (r *responseExecution) handoffResponse(response *provider.Response, lease *
 		plan: deliveryPlan{route: r.route, operation: r.operation, guard: r.holdCfg, guardEnabled: r.qualityHoldEnabled, audit: r.auditBase,
 			usageSource: r.usageSource, pricingModel: r.pricingModel, storeResponse: r.supportsStoredResponses && historydomain.ResponseStorageRequested(r.input.StoreResponse),
 			promptCacheKey: r.ownershipPromptCacheKey, reasoningReplayKey: r.reasoningReplayKey,
-			requestID: r.input.RequestID, clientKeyID: r.input.ClientKey.ID, streaming: r.input.Streaming, startedAt: r.startedAt},
+			requestID: r.input.RequestID, clientKeyID: r.input.ClientKey.ID, streaming: r.input.Streaming, startedAt: r.startedAt, handedOffAt: time.Now()},
 	}
 	r.handedOff = true
 	return session.result(upstreamStartedAt)

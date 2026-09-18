@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"io"
@@ -155,6 +156,14 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 	}
 	pump := newQualityReadPumpWithBudget(body, responsebuffer.FromContext(ctx))
 	state := qualityScanState{kernel: cfg.Kernel(), protocol: protocol, startedAt: time.Now()}
+	var firstData time.Time
+	defer func() {
+		if firstData.IsZero() {
+			requestdiag.Stage(ctx, "upstream_first_event", state.startedAt)
+		} else {
+			requestdiag.Stage(ctx, "quality_evidence", firstData)
+		}
+	}()
 	held := responsebuffer.New(responsebuffer.FromContext(ctx), qualityHoldMaxBufferBytes)
 	frameOffset := 0
 	liveness := newQualityLivenessTimer(cfg)
@@ -210,6 +219,8 @@ func peekQualityStreamReport(ctx context.Context, body io.ReadCloser, protocol s
 				frameOffset += consumed
 				state.pending = held.Bytes()[frameOffset:] // Borrow only; EOF may complete this final line.
 				if !sawData && state.sawDataEvent {
+					requestdiag.Stage(ctx, "upstream_first_event", state.startedAt)
+					firstData = time.Now()
 					if err := liveness.observeData(); err != nil {
 						return emit(newPrefixReplay(held, pump), QualityWait, state.usage, err)
 					}

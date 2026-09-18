@@ -21,19 +21,20 @@ type clientRegistry struct {
 	network *netbudget.Runtime
 	owned   sync.Map // requestClient -> *clientHandle
 
-	clientMu           sync.RWMutex
-	clients            map[clientCacheKey]cachedClient
-	clientLoads        sharedLoadGroup
-	clientVersions     map[uint64]uint64
-	clientGeneration   uint64
-	buildHeaderTimeout atomic.Int64
-	accountIsolated    atomic.Bool
-	lastClientCleanup  time.Time
-	newBuildClient     func(string, time.Duration) (requestClient, error)
-	newBuildEnvClient  func(time.Duration) (requestClient, error)
-	newBrowserClient   func(string, string) (*browserClient, error)
-	log                func() *slog.Logger
-	closed             atomic.Bool
+	clientMu                sync.RWMutex
+	clients                 map[clientCacheKey]cachedClient
+	clientLoads             sharedLoadGroup
+	clientVersions          map[uint64]uint64
+	clientGeneration        uint64
+	buildHeaderTimeout      atomic.Int64
+	buildSessionIdleTimeout atomic.Int64
+	accountIsolated         atomic.Bool
+	lastClientCleanup       time.Time
+	newBuildClient          func(string, time.Duration) (requestClient, error)
+	newBuildEnvClient       func(time.Duration) (requestClient, error)
+	newBrowserClient        func(string, string) (*browserClient, error)
+	log                     func() *slog.Logger
+	closed                  atomic.Bool
 }
 
 func (m *clientRegistry) invalidate(nodeIDs map[uint64]struct{}, scope domain.Scope) {
@@ -76,20 +77,30 @@ func (m *clientRegistry) close() {
 func newClientRegistry(log func() *slog.Logger, network *netbudget.Runtime) *clientRegistry {
 	c := &clientRegistry{network: network, clients: make(map[clientCacheKey]cachedClient), clientVersions: make(map[uint64]uint64), log: log}
 	c.buildHeaderTimeout.Store(int64(settingsdomain.DefaultBuildResponseHeaderTimeout))
+	c.buildSessionIdleTimeout.Store(int64(settingsdomain.DefaultBuildSessionIdleConnTimeout))
 	return c
 }
-func (m *clientRegistry) UpdateBuildResponseHeaderTimeout(value time.Duration) {
-	if value <= 0 {
-		value = settingsdomain.DefaultBuildResponseHeaderTimeout
+func (m *clientRegistry) updateBuildSettings(headerTimeout, sessionIdleTimeout time.Duration) {
+	if headerTimeout <= 0 {
+		headerTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
 	}
-	if previous := time.Duration(m.buildHeaderTimeout.Swap(int64(value))); previous == value {
-		return
+	if sessionIdleTimeout <= 0 {
+		sessionIdleTimeout = settingsdomain.DefaultBuildSessionIdleConnTimeout
 	}
 	m.clientMu.Lock()
+	headerChanged := time.Duration(m.buildHeaderTimeout.Load()) != headerTimeout
+	if !headerChanged && time.Duration(m.buildSessionIdleTimeout.Load()) == sessionIdleTimeout {
+		m.clientMu.Unlock()
+		return
+	}
+	// Publish both values and retire affected identities in one transition.
+	// Active leases keep their transport until completion; never mutate it.
+	m.buildHeaderTimeout.Store(int64(headerTimeout))
+	m.buildSessionIdleTimeout.Store(int64(sessionIdleTimeout))
 	var stale []requestClient
 	m.invalidateAllClientVersionsLocked()
 	for key, cached := range m.clients {
-		if key.scope == domain.ScopeBuild {
+		if key.scope == domain.ScopeBuild && (headerChanged || key.sessionKey != "") {
 			stale = append(stale, m.evictClientLocked(key, cached))
 		}
 	}

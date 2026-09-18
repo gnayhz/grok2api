@@ -490,12 +490,12 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 	}, "grok_console")
 }
 
-// ensureEgressPoolStrategyConstraint 将代理池策略 CHECK 升级到包含 rotation。
+// ensureEgressPoolStrategyConstraint 将代理池策略 CHECK 升级到当前策略集合。
 // AutoMigrate 不会可靠替换已有 CHECK，启动时幂等检测并重建。
 func (d *Database) ensureEgressPoolStrategyConstraint(ctx context.Context) error {
 	return d.ensureNamedConstraints(ctx, []consoleConstraint{
 		{model: &egressPoolModel{}, table: "egress_pools", name: "chk_egress_pools_strategy"},
-	}, "rotation")
+	}, "session-reuse")
 }
 
 // ensureAuditOperationConstraints upgrades existing databases so Codex remote

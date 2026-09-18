@@ -332,22 +332,23 @@ type billingReservationModel struct {
 func (billingReservationModel) TableName() string { return "billing_reservations" }
 
 type requestAuditModel struct {
-	UpstreamStatusCode   int    `gorm:"not null;default:0"`
-	HistoryOutcome       string `gorm:"not null;default:''"`
-	HistoryScopeHash     string `gorm:"not null;default:''"`
-	HistoryGeneration    int64  `gorm:"not null;default:0"`
-	HistoryRestoredItems int    `gorm:"not null;default:0"`
-	HistoryNormalizer    int    `gorm:"not null;default:0"`
-	ProviderStateCommit  string `gorm:"not null;default:''"`
-	ResponseID           string `gorm:"not null;default:''"`
-	HistoryCommit        string `gorm:"not null;default:''"`
-	AdmissionOutcome     string `gorm:"not null;default:''"`
-	GenerationOutcome    string `gorm:"not null;default:''"`
-	OwnershipCommit      string `gorm:"not null;default:''"`
-	DeliveryOutcome      string `gorm:"not null;default:''"`
-	PhysicalReceipt      string `gorm:"not null;default:''"`
-	QualityReceipt       string `gorm:"not null;default:''"`
-	LedgerOutcome        string `gorm:"not null;default:''"`
+	UpstreamStatusCode   int     `gorm:"not null;default:0"`
+	HistoryOutcome       string  `gorm:"not null;default:''"`
+	HistoryScopeHash     string  `gorm:"not null;default:''"`
+	HistoryGeneration    int64   `gorm:"not null;default:0"`
+	HistoryRestoredItems int     `gorm:"not null;default:0"`
+	HistoryNormalizer    int     `gorm:"not null;default:0"`
+	ProviderStateCommit  string  `gorm:"not null;default:''"`
+	ResponseID           string  `gorm:"not null;default:''"`
+	HistoryCommit        string  `gorm:"not null;default:''"`
+	DiagnosticsJSON      *string `gorm:"type:text"`
+	AdmissionOutcome     string  `gorm:"not null;default:''"`
+	GenerationOutcome    string  `gorm:"not null;default:''"`
+	OwnershipCommit      string  `gorm:"not null;default:''"`
+	DeliveryOutcome      string  `gorm:"not null;default:''"`
+	PhysicalReceipt      string  `gorm:"not null;default:''"`
+	QualityReceipt       string  `gorm:"not null;default:''"`
+	LedgerOutcome        string  `gorm:"not null;default:''"`
 
 	ID                        uint64  `gorm:"primaryKey;autoIncrement"`
 	EventID                   string  `gorm:"size:64;check:chk_request_audits_event_id,event_id = '' OR length(event_id) BETWEEN 16 AND 64"`
@@ -662,7 +663,7 @@ type egressPoolModel struct {
 	// Enabled 无 default 标签:同 egress_nodes——停用池不得被列默认 true 复活,
 	// 否则“已停用池不承流、回退链在停用池终止”的语义在创建瞬间即被破坏。
 	Enabled        bool   `gorm:"not null"`
-	Strategy       string `gorm:"size:16;not null;default:affinity;check:chk_egress_pools_strategy,strategy IN ('affinity','random','sticky','rotation')"`
+	Strategy       string `gorm:"size:16;not null;default:affinity;check:chk_egress_pools_strategy,strategy IN ('affinity','random','sticky','rotation','least-used','session-reuse')"`
 	FallbackMode   string `gorm:"size:16;not null;default:none;check:chk_egress_pools_fallback_mode,fallback_mode IN ('none','pool','direct')"`
 	FallbackPoolID uint64 `gorm:"not null;default:0;check:chk_egress_pools_fallback_pool,(fallback_mode <> 'pool' AND fallback_pool_id = 0) OR (fallback_mode = 'pool' AND fallback_pool_id > 0)"`
 	// RotationCursorNodeID 持久化节点轮询的游标节点，重启不归位。

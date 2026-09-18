@@ -71,8 +71,12 @@ func applyRuntimeSettings(base Config, value settingsdomain.Config, legacy bool)
 		BaseURL: value.ProviderBuild.BaseURL, FallbackBaseURL: settingsdomain.NormalizeBuildFallbackBaseURL(value.ProviderBuild.FallbackBaseURL),
 		ClientVersion: value.ProviderBuild.ClientVersion, ClientIdentifier: value.ProviderBuild.ClientIdentifier,
 		TokenAuth: value.ProviderBuild.TokenAuth, UserAgent: value.ProviderBuild.UserAgent,
-		ResponseHeaderTimeout: Duration(value.ProviderBuild.ResponseHeaderTimeout),
-		StreamIdleTimeout:     Duration(value.ProviderBuild.StreamIdleTimeout),
+		SessionIdleConnTimeout: Duration(value.ProviderBuild.SessionIdleConnTimeout),
+		ResponseHeaderTimeout:  Duration(value.ProviderBuild.ResponseHeaderTimeout),
+		StreamIdleTimeout:      Duration(value.ProviderBuild.StreamIdleTimeout),
+	}
+	if legacy && value.ProviderBuild.SessionIdleConnTimeout == 0 {
+		base.Provider.Build.SessionIdleConnTimeout = Duration(settingsdomain.DefaultBuildSessionIdleConnTimeout)
 	}
 	if legacy && value.ProviderBuild.ResponseHeaderTimeout <= 0 {
 		base.Provider.Build.ResponseHeaderTimeout = Duration(settingsdomain.DefaultBuildResponseHeaderTimeout)
@@ -225,8 +229,9 @@ func ToRuntimeSettings(value Config) settingsdomain.Config {
 			BaseURL: value.Provider.Build.BaseURL, FallbackBaseURL: settingsdomain.NormalizeBuildFallbackBaseURL(value.Provider.Build.FallbackBaseURL),
 			ClientVersion: value.Provider.Build.ClientVersion, ClientIdentifier: value.Provider.Build.ClientIdentifier,
 			TokenAuth: value.Provider.Build.TokenAuth, UserAgent: value.Provider.Build.UserAgent,
-			ResponseHeaderTimeout: value.Provider.Build.ResponseHeaderTimeout.Value(),
-			StreamIdleTimeout:     value.Provider.Build.StreamIdleTimeout.Value(),
+			SessionIdleConnTimeout: value.Provider.Build.SessionIdleConnTimeout.Value(),
+			ResponseHeaderTimeout:  value.Provider.Build.ResponseHeaderTimeout.Value(),
+			StreamIdleTimeout:      value.Provider.Build.StreamIdleTimeout.Value(),
 		},
 		ProviderWeb: settingsdomain.ProviderWebConfig{
 			BaseURL: value.Provider.Web.BaseURL, QuotaTimeout: value.Provider.Web.QuotaTimeout.Value(),

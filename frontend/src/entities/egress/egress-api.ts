@@ -27,7 +27,7 @@ export type EgressNodeInput = {
 	rotationURL?: string; clearRotationURL?: boolean; rotationEnabled?: boolean;
 };
 
-export type EgressPoolStrategy = "affinity" | "random" | "sticky" | "rotation" | "least-used";
+export type EgressPoolStrategy = "affinity" | "session-reuse" | "random" | "sticky" | "rotation" | "least-used";
 export type EgressPoolFallbackMode = "none" | "pool" | "direct";
 
 export type EgressRoutingScope = "grok_build" | "grok_web" | "grok_console";
@@ -218,14 +218,14 @@ const decodeEgressProbeResult = (value: unknown): EgressProbeResultDTO => {
 
 const egressPoolValidator = hasShape({
 	id: isString, name: isString, enabled: isBoolean,
-	strategy: isOneOf("affinity", "random", "sticky", "rotation", "least-used"),
+	strategy: isOneOf("affinity", "session-reuse", "random", "sticky", "rotation", "least-used"),
 	fallbackMode: isOneOf("none", "pool", "direct"), fallbackPoolId: isOptional(isString), fallbackPoolName: isOptional(isString),
 	memberCount: isNumber, healthyCount: isNumber, quarantinedCount: isNumber, memberIds: isArrayOf(isString), preferredNodeId: isOptional(isString), rotationCursorNodeId: isOptional(isString), lastSelectedNodeId: isOptional(isString), createdAt: isString, updatedAt: isString,
 });
 
 const decodeEgressPool = createObjectDecoder<EgressPoolDTO>("egress pool", {
 	id: isString, name: isString, enabled: isBoolean,
-	strategy: isOneOf("affinity", "random", "sticky", "rotation", "least-used"),
+	strategy: isOneOf("affinity", "session-reuse", "random", "sticky", "rotation", "least-used"),
 	fallbackMode: isOneOf("none", "pool", "direct"), fallbackPoolId: isOptional(isString), fallbackPoolName: isOptional(isString),
 	memberCount: isNumber, healthyCount: isNumber, quarantinedCount: isNumber, memberIds: isArrayOf(isString), preferredNodeId: isOptional(isString), rotationCursorNodeId: isOptional(isString), lastSelectedNodeId: isOptional(isString), createdAt: isString, updatedAt: isString,
 });

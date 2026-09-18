@@ -19,38 +19,45 @@ func (m *clientRegistry) clientForContext(ctx context.Context, id uint64, scope 
 	}
 	options, sessionDecision := resolveConnectionOptions(scope, options)
 	sessionKey := options.sessionKey
-	clientKind := "browser"
-	buildHeaderTimeout := time.Duration(0)
-	if scope == domain.ScopeBuild {
-		clientKind = "build"
-		buildHeaderTimeout = time.Duration(m.buildHeaderTimeout.Load())
-		if buildHeaderTimeout <= 0 {
-			buildHeaderTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
-		}
-		clientKind += "\x00" + strconv.FormatInt(int64(buildHeaderTimeout), 10)
-		if options.buildEnvironmentProxy {
-			clientKind += "\x00environment-proxy"
-		}
-		if options.freshTunnel {
-			clientKind += "\x00fresh-connection"
-		}
-		if sessionKey != "" {
-			// 单连接钉扎形态:传输层并发/空闲旋钮与共享池不同,必须进
-			// 指纹,否则同节点同账号下两种形态会互相命中对方的缓存条目。
-			clientKind += "\x00session-pinned"
-		}
-	}
-	// cookies 刻意不进指纹:客户端构造不接收 cookies(按请求头携带、无 jar,
-	// 见 buildCachedClient),把它纳入键只会让 clearance 例行刷新或账号 cookie
-	// 变化把同出口的整池热连接无谓作废(每次 3-4 RTT/条重握手)。指纹仍含
-	// proxyURL/userAgent——它们真实决定传输层形态(TLS profile、拨号目标)。
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent)))
 	cacheScope := scope
 	if cacheScope == domain.ScopeWebAsset {
 		cacheScope = domain.ScopeWeb
 	}
 	for attempt := 0; attempt < clientCreationRetryLimit; attempt++ {
+		m.clientMu.RLock()
 		isolated := m.accountIsolated.Load()
+		buildHeaderTimeout, sessionIdleTimeout := time.Duration(0), time.Duration(0)
+		if scope == domain.ScopeBuild {
+			buildHeaderTimeout = time.Duration(m.buildHeaderTimeout.Load())
+			if sessionKey != "" {
+				sessionIdleTimeout = time.Duration(m.buildSessionIdleTimeout.Load())
+			}
+		}
+		m.clientMu.RUnlock()
+		clientKind := "browser"
+		if scope == domain.ScopeBuild {
+			clientKind = "build"
+			if buildHeaderTimeout <= 0 {
+				buildHeaderTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
+			}
+			clientKind += "\x00" + strconv.FormatInt(int64(buildHeaderTimeout), 10)
+			if options.buildEnvironmentProxy {
+				clientKind += "\x00environment-proxy"
+			}
+			if options.freshTunnel {
+				clientKind += "\x00fresh-connection"
+			}
+			if sessionKey != "" {
+				// 单连接钉扎形态:传输层并发/空闲旋钮与共享池不同,必须进
+				// 指纹,否则同节点同账号下两种形态会互相命中对方的缓存条目。
+				clientKind += "\x00session-pinned"
+			}
+		}
+		// cookies 刻意不进指纹:客户端构造不接收 cookies(按请求头携带、无 jar,
+		// 见 buildCachedClient),把它纳入键只会让 clearance 例行刷新或账号 cookie
+		// 变化把同出口的整池热连接无谓作废(每次 3-4 RTT/条重握手)。指纹仍含
+		// proxyURL/userAgent——它们真实决定传输层形态(TLS profile、拨号目标)。
+		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent)))
 		policy := ConnectionPolicy{AccountIsolated: isolated, Fresh: options.freshTunnel, SessionReuse: sessionDecision}
 		if options.requireAccountIsolation && !isolated {
 			return cachedClient{}, errAccountConnectionIsolationDisabled
@@ -63,8 +70,8 @@ func (m *clientRegistry) clientForContext(ctx context.Context, id uint64, scope 
 				keyAccountIdentity = "shared"
 			}
 		}
-		key := clientCacheKey{nodeID: id, scope: cacheScope, fingerprint: fingerprint, accountIdentity: keyAccountIdentity, sessionKey: sessionKey}
-		loadKey := strconv.FormatUint(key.nodeID, 10) + "\x00" + string(key.scope) + "\x00" + key.fingerprint + "\x00" + key.accountIdentity + "\x00" + key.sessionKey
+		key := clientCacheKey{nodeID: id, scope: cacheScope, fingerprint: fingerprint, accountIdentity: keyAccountIdentity, sessionKey: sessionKey, buildHeaderTimeout: buildHeaderTimeout, sessionIdleTimeout: sessionIdleTimeout}
+		loadKey := strconv.FormatUint(key.nodeID, 10) + "\x00" + string(key.scope) + "\x00" + key.fingerprint + "\x00" + key.accountIdentity + "\x00" + key.sessionKey + "\x00" + strconv.FormatInt(int64(key.sessionIdleTimeout), 10)
 		now := time.Now().UTC()
 		m.clientMu.RLock()
 		cached, cachedOK := m.clients[key]
@@ -123,7 +130,7 @@ func (m *clientRegistry) createAndCacheClient(key clientCacheKey, id uint64, sco
 	now := time.Now().UTC()
 	m.clientMu.Lock()
 	stale := m.cleanupClientCacheLocked(now)
-	if (key.accountIdentity != "") != m.accountIsolated.Load() {
+	if !m.clientSettingsMatchLocked(key) {
 		m.clientMu.Unlock()
 		m.closeRequestClients(stale)
 		return cachedClient{}, errClientCacheInvalidated
@@ -139,6 +146,7 @@ func (m *clientRegistry) createAndCacheClient(key clientCacheKey, id uint64, sco
 	m.clientMu.Unlock()
 	m.closeRequestClients(stale)
 
+	options.sessionIdleTimeout = key.sessionIdleTimeout
 	value, err := m.buildCachedClient(scope, proxyURL, userAgent, buildHeaderTimeout, options)
 	if err != nil {
 		return cachedClient{}, err
@@ -147,7 +155,7 @@ func (m *clientRegistry) createAndCacheClient(key clientCacheKey, id uint64, sco
 
 	m.clientMu.Lock()
 	stale = m.cleanupClientCacheLocked(value.lastUsed)
-	if (key.accountIdentity != "") != m.accountIsolated.Load() {
+	if !m.clientSettingsMatchLocked(key) {
 		m.clientMu.Unlock()
 		m.closeRequestClients(append(stale, value.client))
 		return cachedClient{}, errClientCacheInvalidated
@@ -210,7 +218,7 @@ func (m *clientRegistry) buildCachedClient(scope domain.Scope, proxyURL, userAge
 func (m *clientRegistry) constructClient(scope domain.Scope, proxyURL, userAgent string, buildHeaderTimeout time.Duration, options clientOptions) (cachedClient, error) {
 	if scope == domain.ScopeBuild {
 		if options.sessionKey != "" || options.freshTunnel {
-			client, err := newBuildClientConfigured(proxyURL, buildHeaderTimeout, buildConnectionOptions{environmentProxy: options.buildEnvironmentProxy, sessionPinned: options.sessionKey != "", freshConnection: options.freshTunnel, onDial: options.onSessionDial}, m.network)
+			client, err := newBuildClientConfigured(proxyURL, buildHeaderTimeout, buildConnectionOptions{environmentProxy: options.buildEnvironmentProxy, sessionPinned: options.sessionKey != "", sessionIdleTimeout: options.sessionIdleTimeout, freshConnection: options.freshTunnel, onDial: options.onSessionDial}, m.network)
 			if err != nil {
 				return cachedClient{}, err
 			}
@@ -353,4 +361,17 @@ func (m *clientRegistry) invalidateClientVersionLocked(nodeID uint64) {
 func (m *clientRegistry) invalidateAllClientVersionsLocked() {
 	m.clientGeneration++
 	clear(m.clientVersions)
+}
+
+// Called under clientMu to fence construction started with an older settings
+// snapshot, including construction that begins after an update invalidated keys.
+func (m *clientRegistry) clientSettingsMatchLocked(key clientCacheKey) bool {
+	if (key.accountIdentity != "") != m.accountIsolated.Load() {
+		return false
+	}
+	if key.scope != domain.ScopeBuild {
+		return true
+	}
+	return key.buildHeaderTimeout == time.Duration(m.buildHeaderTimeout.Load()) &&
+		(key.sessionKey == "" || key.sessionIdleTimeout == time.Duration(m.buildSessionIdleTimeout.Load()))
 }

@@ -34,6 +34,9 @@ import "./audits.css";
 
 const AUDIT_PAGE_CACHE_TIME_MS = 60_000;
 const AUDIT_SUMMARY_CACHE_TIME_MS = 120_000;
+// 自动刷新节拍:列表、汇总与周期统计一起轮询;服务端短缓存(汇总 10s、dashboard 15s)均短于该间隔,
+// 普通轮询即可拿到新数据,refresh=1 强制刷新仍只保留给手动点击。
+const AUDIT_AUTO_REFRESH_MS = 30_000;
 // 筛选名单始终限制在服务器搜索后的前 50 条，避免大账号池把大量选项累积到浏览器。
 const AUDIT_FILTER_PAGE_SIZE = 50;
 // 名单高度约 5 行，超出后内部滚动。
@@ -116,19 +119,21 @@ const AuditWorkspace = memo(function AuditWorkspace({ openAudit }: { openAudit: 
     placeholderData: keepPreviousData,
     gcTime: AUDIT_PAGE_CACHE_TIME_MS,
     structuralSharing: false,
+    refetchInterval: AUDIT_AUTO_REFRESH_MS,
   });
   const dashboardTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const periodStatsQuery = useQuery({
     queryKey: ["audit-degraded-withholds", period, dashboardTimezone],
     queryFn: () => getDashboard(period, dashboardTimezone),
     placeholderData: keepPreviousData,
-    refetchInterval: 30_000,
+    refetchInterval: AUDIT_AUTO_REFRESH_MS,
   });
   const summaryQuery = useQuery({
     queryKey: ["request-audits", "summary", debouncedSearch, modelFilter, statusFilter, modeFilter, errorCodeFilter, debouncedKeyFilter, debouncedAccountFilter, period],
     queryFn: ({ signal }) => getRequestAuditSummary({ search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, errorCode: errorCodeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period }, forceSummaryRefresh.current, signal),
     placeholderData: keepPreviousData,
     gcTime: AUDIT_SUMMARY_CACHE_TIME_MS,
+    refetchInterval: AUDIT_AUTO_REFRESH_MS,
   });
   const modelOptionsQuery = useQuery({
     queryKey: ["models", "audit-filter"],
@@ -337,7 +342,7 @@ const AuditWorkspace = memo(function AuditWorkspace({ openAudit }: { openAudit: 
                   id: "key", label: t("audits.key"), value: keyFilter,
                   onChange: setKeyFilter, options: [
                     {
-                      value: "any", label: t("audits.key"), groups: keyFilterGroups,
+                      value: "any", label: t("audits.selectKey"), groups: keyFilterGroups,
                       onGroupsOpenChange: setKeyFilterOptionsOpen,
                       groupSearch: { value: keyFilterOptionsSearch, placeholder: t("audits.keyFilterPlaceholder"), onChange: (value) => {
                         setKeyFilterOptionsSearch(value);
@@ -349,7 +354,7 @@ const AuditWorkspace = memo(function AuditWorkspace({ openAudit }: { openAudit: 
                   id: "account", label: t("audits.account"), value: accountFilter,
                   onChange: setAccountFilter, options: [
                     {
-                      value: "any", label: t("audits.account"), groups: accountFilterGroups,
+                      value: "any", label: t("audits.selectAccount"), groups: accountFilterGroups,
                       onGroupsOpenChange: setAccountFilterOptionsOpen,
                       groupSearch: { value: accountFilterOptionsSearch, placeholder: t("audits.accountFilterPlaceholder"), onChange: (value) => {
                         setAccountFilterOptionsSearch(value);

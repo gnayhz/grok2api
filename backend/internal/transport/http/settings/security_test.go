@@ -180,3 +180,25 @@ func TestLegacySettingsRequestMayOmitManagedClearance(t *testing.T) {
 		t.Fatal("missing managed-clearance fields were treated as an explicit update")
 	}
 }
+
+func TestSessionIdleSettingSurvivesHTTPBoundary(t *testing.T) {
+	var dto settingsConfigDTO
+	if err := json.Unmarshal([]byte(`{"providerBuild":{"sessionIdleConnTimeout":"8m"}}`), &dto); err != nil {
+		t.Fatal(err)
+	}
+	input := dto.toApplication()
+	if input.ProviderBuild.SessionIdleConnTimeout != "8m" {
+		t.Fatal("HTTP input lost timeout")
+	}
+	response := newSettingsResponse(settingsapp.Snapshot{Config: input})
+	if response.Config.ProviderBuild.SessionIdleConnTimeout != "8m" {
+		t.Fatal("HTTP response lost timeout")
+	}
+	var legacy settingsConfigDTO
+	if err := json.Unmarshal([]byte(`{"providerBuild":{}}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.toApplication().ProviderBuild.SessionIdleConnTimeout != "" {
+		t.Fatal("missing field should preserve current setting")
+	}
+}

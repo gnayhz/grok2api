@@ -371,7 +371,7 @@ func completionHTTPUpstreamWithResponse(t *testing.T, model string, generated *a
 		if payload["stream"] == true {
 			w.Header().Set("Content-Type", "text/event-stream")
 			for _, event := range []any{
-				map[string]any{"type": "response.created", "response": map[string]any{"id": "resp_completion", "model": model}},
+				map[string]any{"type": "response.created", "response": map[string]any{"id": answer["id"], "model": model}},
 				map[string]any{"type": "response.reasoning_text.delta", "item_id": "rs_1", "delta": "completion thought"},
 				map[string]any{"type": "response.output_text.delta", "item_id": "msg_1", "delta": "completion answer"},
 				map[string]any{"type": "response.completed", "response": answer},

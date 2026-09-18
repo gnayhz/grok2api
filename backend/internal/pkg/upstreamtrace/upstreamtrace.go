@@ -11,27 +11,41 @@ import (
 )
 
 // upstreamtrace 是真实上游形态采样的观测工具（用户批准的全链路摸底）。
-// GROK2API_UPSTREAM_TRACE_DIR 指向目录时，在转换器之前把原始上游响应
-//（SSE 流或完整 body）连同归一化后的上游请求体落盘；未设置时全部函数
-// 是一次原子载入判空，零开销。文件名: <unixms>_<seq>_<op>_<model>_<kind>.<ext>。
+// GROK2API_UPSTREAM_TRACE_DIR 保存原始请求/响应及网络阶段；独立设置
+// GROK2API_UPSTREAM_NETWORK_TRACE_DIR 可只保存不含内容的网络阶段。
+// 文件名: <unixms>_<seq>_<op>_<model>_<kind>.<ext>。
 // Build（cli）与 Console 两个受守卫的通道共用。
 
 var (
-	dir  atomic.Value
-	seq  atomic.Uint64
-	once sync.Once
+	dir        atomic.Value
+	networkDir atomic.Value
+	seq        atomic.Uint64
+	once       sync.Once
 )
 
 func Enabled() (string, bool) {
 	once.Do(func() {
-		if d := os.Getenv("GROK2API_UPSTREAM_TRACE_DIR"); d != "" {
-			if err := os.MkdirAll(d, 0o700); err == nil {
-				dir.Store(d)
-			}
-		}
+		raw, network := traceDirectories()
+		dir.Store(raw)
+		networkDir.Store(network)
 	})
 	d, _ := dir.Load().(string)
 	return d, d != ""
+}
+
+func traceDirectories() (raw, network string) {
+	prepare := func(path string) string {
+		if path != "" && os.MkdirAll(path, 0o700) == nil {
+			return path
+		}
+		return ""
+	}
+	raw = prepare(os.Getenv("GROK2API_UPSTREAM_TRACE_DIR"))
+	network = raw
+	if path := os.Getenv("GROK2API_UPSTREAM_NETWORK_TRACE_DIR"); path != "" {
+		network = prepare(path)
+	}
+	return raw, network
 }
 
 func path(d, op, model, kind, ext string) string {

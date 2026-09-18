@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 )
 
@@ -193,6 +194,12 @@ func peekQualityBodyReportWithBudget(body io.ReadCloser, cfg QualityRetryRuntime
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		// 200 但 body 非合法 JSON：按空流处理（可重试），不猜质量。
 		return replay, QualityWait, Usage{}, empty.fingerprint(QualityWait, errQualityEmptyStream), errQualityEmptyStream
+	}
+	if observeQualityFailure(&empty, data) {
+		empty.sawDataEvent = true
+		raw := jsonpeek.RootRawValue(data, "usage")
+		empty.usage = usageFromPhysical(jsonpeek.TokenUsageObject(raw), Usage{})
+		return replay, QualityWait, empty.usage, empty.fingerprint(QualityWait, empty.protocolErr), empty.protocolErr
 	}
 	if parsed.Output == nil {
 		// 合法 JSON 但非 Responses 形状：非流式 chat/messages 请求的 body 已被

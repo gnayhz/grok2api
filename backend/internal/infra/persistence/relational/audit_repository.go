@@ -270,6 +270,15 @@ func settleInsertedAudits(tx *gorm.DB, inserted []preparedAudit) error {
 }
 
 func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttemptModel, error) {
+	var diagnosticsJSON *string
+	if value.Diagnostics != nil {
+		raw, err := json.Marshal(value.Diagnostics)
+		if err != nil || len(raw) > 512<<10 {
+			return requestAuditModel{}, nil, errors.New("invalid or oversized execution diagnostics")
+		}
+		text := string(raw)
+		diagnosticsJSON = &text
+	}
 	provider := value.Provider
 	if provider == "" {
 		provider = "grok_build"
@@ -290,7 +299,8 @@ func toAuditModels(value audit.Record) (requestAuditModel, []requestAuditAttempt
 		}
 	}
 	row := requestAuditModel{
-		EventID: eventID, RequestID: truncate(value.RequestID, 64), ClientKeyID: value.ClientKeyID, ClientKeyName: truncate(value.ClientKeyName, 160), ClientIP: strings.TrimSpace(value.ClientIP),
+		DiagnosticsJSON: diagnosticsJSON,
+		EventID:         eventID, RequestID: truncate(value.RequestID, 64), ClientKeyID: value.ClientKeyID, ClientKeyName: truncate(value.ClientKeyName, 160), ClientIP: strings.TrimSpace(value.ClientIP),
 		ModelRouteID: value.ModelRouteID, ModelPublicID: truncate(value.ModelPublicID, 255), ModelUpstreamModel: truncate(value.ModelUpstreamModel, 255),
 		Provider: truncate(provider, 32), Operation: string(operation), UsageSource: string(usageSource),
 		ReasoningEffort: audit.NormalizeReasoningEffort(value.ReasoningEffort),
@@ -477,7 +487,7 @@ func (r *AuditRepository) List(ctx context.Context, offset, limit int) ([]audit.
 		return nil, 0, err
 	}
 	var rows []requestAuditModel
-	if err := query.Omit("request_headers_json").Order("created_at DESC, id DESC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
+	if err := query.Omit("request_headers_json", "diagnostics_json").Order("created_at DESC, id DESC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	out := make([]audit.Record, 0, len(rows))
@@ -550,7 +560,7 @@ func (r *AuditRepository) ListCursor(ctx context.Context, input repository.Audit
 	}
 	var rows []requestAuditModel
 	query = applyStableSort(query, input.Sort, fields, fallback, "request_audits.id")
-	if err := query.Omit("request_headers_json").Limit(input.Limit + 1).Find(&rows).Error; err != nil {
+	if err := query.Omit("request_headers_json", "diagnostics_json").Limit(input.Limit + 1).Find(&rows).Error; err != nil {
 		return nil, false, err
 	}
 	hasMore := len(rows) > input.Limit

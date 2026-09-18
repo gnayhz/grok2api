@@ -204,6 +204,9 @@ const (
 	// PoolStrategyAffinity keeps every caller identity on a stable exit IP
 	// (rendezvous hashing). Node failures reshuffle only the affected callers.
 	PoolStrategyAffinity PoolStrategy = "affinity"
+	// PoolStrategySessionReuse assigns new Build sessions across eligible exits
+	// and retains their selected exit independently of upstream account changes.
+	PoolStrategySessionReuse PoolStrategy = "session-reuse"
 	// PoolStrategyRandom spreads every request over a random member.
 	PoolStrategyRandom PoolStrategy = "random"
 	// PoolStrategySticky always uses the first schedulable member in stable
@@ -220,7 +223,7 @@ const (
 )
 
 func (value PoolStrategy) IsValid() bool {
-	return value == PoolStrategyAffinity || value == PoolStrategyRandom || value == PoolStrategySticky || value == PoolStrategyRotation || value == PoolStrategyLeastUsed
+	return value == PoolStrategyAffinity || value == PoolStrategySessionReuse || value == PoolStrategyRandom || value == PoolStrategySticky || value == PoolStrategyRotation || value == PoolStrategyLeastUsed
 }
 
 // Normalized maps the zero value (pre-strategy rows) onto the historical

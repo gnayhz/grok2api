@@ -26,8 +26,9 @@ func toEditable(cfg settingsdomain.Config) EditableConfig {
 			BaseURL: cfg.ProviderBuild.BaseURL, FallbackBaseURL: normalizeBuildFallbackBaseURL(cfg.ProviderBuild.FallbackBaseURL),
 			ClientVersion: cfg.ProviderBuild.ClientVersion, ClientIdentifier: cfg.ProviderBuild.ClientIdentifier,
 			TokenAuth: cfg.ProviderBuild.TokenAuth, UserAgent: cfg.ProviderBuild.UserAgent,
-			ResponseHeaderTimeout: formatDuration(cfg.ProviderBuild.ResponseHeaderTimeout),
-			StreamIdleTimeout:     formatDuration(cfg.ProviderBuild.StreamIdleTimeout),
+			SessionIdleConnTimeout: formatDuration(cfg.ProviderBuild.SessionIdleConnTimeout),
+			ResponseHeaderTimeout:  formatDuration(cfg.ProviderBuild.ResponseHeaderTimeout),
+			StreamIdleTimeout:      formatDuration(cfg.ProviderBuild.StreamIdleTimeout),
 		},
 		ProviderWeb: ProviderWebConfig{
 			BaseURL: cfg.ProviderWeb.BaseURL, QuotaTimeout: formatDuration(cfg.ProviderWeb.QuotaTimeout),

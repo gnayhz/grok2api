@@ -25,8 +25,10 @@ type JournalReserve struct {
 	ItemHash func([]byte) (string, bool, error)
 	// Incremental is native previous_response_id input. ItemHashes are chained
 	// after the explicitly selected parent's digest inside the transaction.
-	Incremental      bool
-	ItemHashes       []string
+	Incremental bool
+	ItemHashes  []string
+	// Input borrows request bytes for Reserve's duration. Implementations must
+	// encrypt/copy before returning and must not mutate the borrowed items.
 	Input            [][]byte
 	InputReasoning   map[int][][]byte
 	Now              time.Time

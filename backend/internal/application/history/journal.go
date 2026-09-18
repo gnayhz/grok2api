@@ -1,6 +1,7 @@
 package history
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
+	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/google/uuid"
@@ -58,8 +61,10 @@ func (p *PreparedHistory) Generation() int64 {
 // Prepare resolves full-prefix lineage, not completion order or a text-only
 // anchor. Missing opaque reasoning is restored at the original visible index.
 func (r *ReasoningReplay) Prepare(ctx context.Context, model, key string, body []byte, options ...historydomain.ReplayPreparation) (output []byte, result historydomain.Prepared, returnedErr error) {
+	defer requestdiag.Stage(ctx, "history_prepare", time.Now())
 	defer func() {
 		if returnedErr != nil {
+			requestdiag.Failure(ctx, "history", "history_prepare", journalFailureReason(returnedErr))
 			returnedErr = fmt.Errorf("%w: %w", historydomain.ErrHistoryPrepare, returnedErr)
 		}
 	}()
@@ -72,24 +77,48 @@ func (r *ReasoningReplay) Prepare(ctx context.Context, model, key string, body [
 		}
 		return next, nil, nil
 	}
-	workspace, workspaceErr := responsebuffer.JSONWorkspace(responsebuffer.FromContext(ctx), body)
-	if workspaceErr != nil {
-		return body, nil, workspaceErr
+	// Borrow validated input fields: media data must not be copied into both
+	// root and item RawMessages before it can be hashed or stored.
+	if !json.Valid(body) || len(bytes.TrimSpace(body)) == 0 || bytes.TrimSpace(body)[0] != '{' {
+		return body, nil, fmt.Errorf("invalid history request")
 	}
-	defer workspace.Release()
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(body, &root); err != nil {
+	budget := responsebuffer.FromContext(ctx)
+	ctx = responsebuffer.WithContext(ctx, budget)
+	// Structural metadata remains live during reservation and restoration. The
+	// byte workspaces below are separate, sequential phases of the request.
+	metadata, err := budget.Reserve(responsebuffer.BorrowedJSONWorkspaceSize(body))
+	if err != nil {
 		return body, nil, err
 	}
+	defer metadata.Release()
+	root := make(map[string]json.RawMessage)
+	jsonpeek.ObjectFields(body, func(key, value []byte) bool { root[string(key)] = value; return true })
 	var raw []json.RawMessage
-	if err := json.Unmarshal(root["input"], &raw); err != nil {
+	input := bytes.TrimSpace(root["input"])
+	if len(input) > 0 && input[0] == '[' {
+		jsonpeek.ArrayValues(input, func(value []byte) bool { raw = append(raw, value); return true })
+	} else if !bytes.Equal(input, []byte("null")) {
+		workspace, err := budget.Reserve(4 * len(input))
+		if err != nil {
+			return body, nil, err
+		}
+		defer workspace.Release()
 		var text string
-		if json.Unmarshal(root["input"], &text) != nil {
-			return body, nil, fmt.Errorf("invalid history input: %w", err)
+		if json.Unmarshal(input, &text) != nil {
+			return body, nil, fmt.Errorf("invalid history input")
 		}
 		item, _ := json.Marshal(map[string]string{"role": "user", "content": text})
 		raw = []json.RawMessage{item}
 	}
+	largest := 0
+	for _, item := range raw {
+		largest = max(largest, len(item))
+	}
+	workspace, err := budget.Reserve(4 * largest)
+	if err != nil {
+		return body, nil, err
+	}
+	defer workspace.Release()
 	var previous string
 	_ = json.Unmarshal(root["previous_response_id"], &previous)
 	// Conversation identity follows exact visible history, independently of the
@@ -97,6 +126,8 @@ func (r *ReasoningReplay) Prepare(ctx context.Context, model, key string, body [
 	baseHash := journalHash("conversation-visible-v1")
 	hash := baseHash
 	inputReasoning := map[int][][]byte{}
+	reasoningState := responsebuffer.NewState(budget, len(body)*2)
+	defer reasoningState.Close()
 	var visible [][]byte
 	var prefixes, hashes []string
 	for _, item := range raw {
@@ -105,6 +136,9 @@ func (r *ReasoningReplay) Prepare(ctx context.Context, model, key string, body [
 			return body, nil, err
 		}
 		if isReasoning {
+			if err := reasoningState.Grow(2*len(item), 0); err != nil {
+				return body, nil, err
+			}
 			normalized, ok := normalizeJournalReasoning(item)
 			if !ok {
 				return body, nil, fmt.Errorf("invalid input reasoning")
@@ -116,8 +150,11 @@ func (r *ReasoningReplay) Prepare(ctx context.Context, model, key string, body [
 		hash = journalHash(hash + itemHash)
 		hashes = append(hashes, itemHash)
 		prefixes = append(prefixes, hash)
-		visible = append(visible, append([]byte(nil), item...))
+		visible = append(visible, item)
 	}
+	// Canonical bytes are no longer retained. SQL decryption gets the same
+	// budget without holding the per-item encoding workspace simultaneously.
+	workspace.Release()
 	var legacyScopes []repository.JournalScope
 	for _, option := range options {
 		for _, oldKey := range option.LegacyKeys {
@@ -154,7 +191,28 @@ func (r *ReasoningReplay) Prepare(ctx context.Context, model, key string, body [
 	}
 	restored := 0
 	if previous == "" && len(reservation.Turns) > 0 {
-		body, restored, err = restoreJournalItems(root, raw, reservation.Turns)
+		// Account for decoded turns and for opaque items added while encoding
+		// the result; restored reasoning can be larger than the client input.
+		turnBytes := 0
+		for _, turn := range reservation.Turns {
+			for _, item := range turn.Input {
+				turnBytes += len(item)
+			}
+			for _, item := range turn.Output {
+				turnBytes += len(item)
+			}
+		}
+		restoreWorkspace, reserveErr := budget.Reserve(2 * (len(body) + turnBytes))
+		if reserveErr != nil {
+			prepared.Discard()
+			return nil, nil, reserveErr
+		}
+		defer restoreWorkspace.Release()
+		var next []byte
+		next, restored, err = restoreJournalItems(root, raw, reservation.Turns)
+		if restored > 0 {
+			body = next
+		}
 		if err != nil {
 			prepared.Discard()
 			return nil, nil, err
@@ -200,12 +258,20 @@ func canonicalJournalItem(raw []byte) ([]byte, bool, error) {
 	return b, false, e
 }
 
+func journalItemIsReasoning(item []byte) (bool, error) {
+	value := bytes.TrimSpace(item)
+	if len(value) == 0 || value[0] != '{' || !json.Valid(value) {
+		return false, fmt.Errorf("invalid history item")
+	}
+	return jsonpeek.RootStringFieldScan(value, "type") == "reasoning", nil
+}
+
 func restoreJournalItems(root map[string]json.RawMessage, input []json.RawMessage, turns []repository.JournalTurn) ([]byte, int, error) {
 	pending := map[int][][]byte{}
 	for _, turn := range turns {
 		inputVisible := 0
 		for _, item := range turn.Input {
-			_, reasoning, e := canonicalJournalItem(item)
+			reasoning, e := journalItemIsReasoning(item)
 			if e != nil {
 				return nil, 0, e
 			}
@@ -215,7 +281,7 @@ func restoreJournalItems(root map[string]json.RawMessage, input []json.RawMessag
 		}
 		position := turn.InputCount - inputVisible
 		for _, item := range turn.Input {
-			_, reasoning, _ := canonicalJournalItem(item)
+			reasoning, _ := journalItemIsReasoning(item)
 			if reasoning {
 				pending[position] = append(pending[position], item)
 			} else {
@@ -224,7 +290,7 @@ func restoreJournalItems(root map[string]json.RawMessage, input []json.RawMessag
 		}
 		position = turn.InputCount
 		for _, item := range turn.Output {
-			_, reasoning, e := canonicalJournalItem(item)
+			reasoning, e := journalItemIsReasoning(item)
 			if e != nil {
 				return nil, 0, e
 			}
@@ -246,7 +312,7 @@ func restoreJournalItems(root map[string]json.RawMessage, input []json.RawMessag
 	// that boundary. A conflicting cipher is a new history, never silently mixed.
 	existing := map[int][][]byte{}
 	for _, item := range input {
-		_, reasoning, e := canonicalJournalItem(item)
+		reasoning, e := journalItemIsReasoning(item)
 		if e != nil {
 			return nil, 0, e
 		}
@@ -298,13 +364,16 @@ func restoreJournalItems(root map[string]json.RawMessage, input []json.RawMessag
 			return nil, 0, e
 		}
 		next = append(next, item)
-		_, reasoning, _ := canonicalJournalItem(item)
+		reasoning, _ := journalItemIsReasoning(item)
 		if !reasoning {
 			position++
 		}
 	}
 	if e := inject(); e != nil {
 		return nil, 0, e
+	}
+	if restored == 0 {
+		return nil, 0, nil
 	}
 	encoded, e := json.Marshal(next)
 	if e != nil {
@@ -357,7 +426,8 @@ func (p *PreparedHistory) store(ctx context.Context, payload []byte) error {
 		}
 		output = append(output, append([]byte(nil), raw...))
 	}
-	err := p.replay.journal.Commit(ctx, repository.JournalCommit{Ticket: p.reservation.Ticket, ResponseID: responseID, PrefixHash: hash, TotalCount: count, Output: output, Now: p.replay.now().UTC()})
+	commit := repository.JournalCommit{Ticket: p.reservation.Ticket, ResponseID: responseID, PrefixHash: hash, TotalCount: count, Output: output}
+	err := p.commitStoredOutput(ctx, commit)
 	outcome := "committed"
 	if err != nil {
 		outcome = historydomain.HistoryFailureReason(err)

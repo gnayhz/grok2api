@@ -30,6 +30,10 @@ const buildResponseHeaderDuration = durationSchema.refine((value) => {
   const seconds = durationSeconds(value);
   return seconds >= 30 && seconds <= 30 * 60;
 });
+const buildSessionIdleConnDuration = durationSchema.refine((value) => {
+  const seconds = durationSeconds(value);
+  return seconds >= 30 && seconds <= 30 * 60;
+});
 const buildStreamIdleDuration = durationSchema.refine((value) => {
   const seconds = durationSeconds(value);
   return seconds >= 30 && seconds <= 10 * 60;
@@ -76,6 +80,7 @@ export const settingsSchema = z.object({
     tokenAuth: z.string().trim().min(1),
     tokenAuthConfigured: z.boolean(),
     userAgent: z.string().trim().min(1),
+    sessionIdleConnTimeout: buildSessionIdleConnDuration,
     responseHeaderTimeout: buildResponseHeaderDuration,
     streamIdleTimeout: buildStreamIdleDuration,
   }),
@@ -221,7 +226,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
   const egressRotation = config.egressRotation ?? defaultEgressRotationConfig();
   return {
     server: config.server,
-    providerBuild: { ...config.providerBuild, responseHeaderTimeout: parseDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: parseDuration(config.providerBuild.streamIdleTimeout) },
+    providerBuild: { ...config.providerBuild, sessionIdleConnTimeout: parseDuration(config.providerBuild.sessionIdleConnTimeout), responseHeaderTimeout: parseDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: parseDuration(config.providerBuild.streamIdleTimeout) },
     providerWeb: {
       ...config.providerWeb,
       statsigManualValue: "",
@@ -283,7 +288,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
 export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
   return {
     server: config.server,
-    providerBuild: { ...config.providerBuild, responseHeaderTimeout: formatDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: formatDuration(config.providerBuild.streamIdleTimeout) },
+    providerBuild: { ...config.providerBuild, sessionIdleConnTimeout: formatDuration(config.providerBuild.sessionIdleConnTimeout), responseHeaderTimeout: formatDuration(config.providerBuild.responseHeaderTimeout), streamIdleTimeout: formatDuration(config.providerBuild.streamIdleTimeout) },
     providerWeb: {
       ...config.providerWeb,
       quotaTimeout: formatDuration(config.providerWeb.quotaTimeout), chatTimeout: formatDuration(config.providerWeb.chatTimeout), streamIdleTimeout: formatDuration(config.providerWeb.streamIdleTimeout),

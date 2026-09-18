@@ -9,6 +9,7 @@ import (
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
@@ -16,6 +17,7 @@ import (
 // admitResponse observes one successful upstream response before delivery.
 // It records evidence and may retry, but never owns another physical attempt.
 func (r *responseExecution) admitResponse(response *provider.Response, credential accountdomain.Credential, attempt int) attemptDecision {
+	defer requestdiag.Stage(r.ctx, "quality_admission", time.Now())
 	if !r.qualityHoldEnabled {
 		return attemptProceed
 	}
@@ -113,6 +115,15 @@ func (r *responseExecution) admitResponse(response *provider.Response, credentia
 			return attemptStop
 		}
 		r.lastFailure = newTransportUpstreamFailure(peekErr, credential.ID, credential.Name)
+		var streamFailure *qualityUpstreamFailure
+		if errors.As(peekErr, &streamFailure) {
+			r.failureAttempts.captureStreamFailure(credential, r.responseStartedAt, response, StreamFailureDiagnostic{
+				Body: streamFailure.diagnostic.Body, BodyTruncated: streamFailure.diagnostic.BodyTruncated,
+			})
+			if streamFailure.invalidRequest {
+				return attemptStop
+			}
+		}
 		switch {
 		case errors.Is(peekErr, errQualityCreatedTimeout):
 			r.noteGuardSignal(GuardSignalCreatedTimeout)

@@ -30,16 +30,17 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type auditResponse struct {
-	UpstreamStatusCode  int    `json:"upstreamStatusCode"`
-	ResponseID          string `json:"responseId"`
-	ProviderStateCommit string `json:"providerStateCommit"`
-	AdmissionOutcome    string `json:"admissionOutcome"`
-	GenerationOutcome   string `json:"generationOutcome"`
-	OwnershipCommit     string `json:"ownershipCommit"`
-	DeliveryOutcome     string `json:"deliveryOutcome"`
-	PhysicalReceipt     string `json:"physicalReceipt"`
-	QualityReceipt      string `json:"qualityReceipt"`
-	LedgerOutcome       string `json:"ledgerOutcome"`
+	Diagnostics         *auditdomain.ExecutionDiagnostics `json:"diagnostics,omitempty"`
+	UpstreamStatusCode  int                               `json:"upstreamStatusCode"`
+	ResponseID          string                            `json:"responseId"`
+	ProviderStateCommit string                            `json:"providerStateCommit"`
+	AdmissionOutcome    string                            `json:"admissionOutcome"`
+	GenerationOutcome   string                            `json:"generationOutcome"`
+	OwnershipCommit     string                            `json:"ownershipCommit"`
+	DeliveryOutcome     string                            `json:"deliveryOutcome"`
+	PhysicalReceipt     string                            `json:"physicalReceipt"`
+	QualityReceipt      string                            `json:"qualityReceipt"`
+	LedgerOutcome       string                            `json:"ledgerOutcome"`
 
 	HistoryOutcome       string `json:"historyOutcome"`
 	HistoryScopeHash     string `json:"historyScopeHash"`
@@ -387,7 +388,8 @@ func newListFilter(c *gin.Context) auditapp.ListFilter {
 func newAuditResponse(value auditdomain.Record) auditResponse {
 	observation := value.ObserveStream()
 	result := auditResponse{
-		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName, ClientIP: value.ClientIP,
+		Diagnostics: value.Diagnostics,
+		ID:          value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName, ClientIP: value.ClientIP,
 		ModelRouteID: value.ModelRouteID, ModelPublicID: value.ModelPublicID, ModelUpstreamModel: value.ModelUpstreamModel,
 		Provider: value.Provider, Operation: string(value.Operation), UsageSource: string(value.UsageSource),
 		ReasoningEffort: value.ReasoningEffort,

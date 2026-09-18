@@ -3,10 +3,10 @@ package inference
 import (
 	"bytes"
 	"encoding/json"
-	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/chenyme/grok2api/backend/internal/pkg/jsonpeek"
+	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 )
 
 type responseInspector struct {
@@ -200,96 +200,8 @@ func (i *responseInspector) markTerminalFailure(data []byte) {
 }
 
 func projectStreamFailureDiagnostic(data []byte) gateway.StreamFailureDiagnostic {
-	var root map[string]json.RawMessage
-	if json.Unmarshal(data, &root) != nil {
-		return gateway.StreamFailureDiagnostic{}
-	}
-	projected := make(map[string]json.RawMessage)
-	copySafeDiagnosticFields(projected, root, "type", "status", "code", "message", "param")
-	if raw := projectSafeErrorValue(root["error"]); len(raw) > 0 {
-		projected["error"] = raw
-	}
-	if responseRaw := root["response"]; len(responseRaw) > 0 {
-		var response map[string]json.RawMessage
-		if json.Unmarshal(responseRaw, &response) == nil {
-			safeResponse := make(map[string]json.RawMessage)
-			copySafeDiagnosticFields(safeResponse, response, "id", "status", "code", "message")
-			if raw := projectSafeErrorValue(response["error"]); len(raw) > 0 {
-				safeResponse["error"] = raw
-			}
-			if raw := projectSafeErrorValue(response["incomplete_details"]); len(raw) > 0 {
-				safeResponse["incomplete_details"] = raw
-			}
-			if len(safeResponse) > 0 {
-				if encoded, err := json.Marshal(safeResponse); err == nil {
-					projected["response"] = encoded
-				}
-			}
-		}
-	}
-	if len(projected) == 0 {
-		return gateway.StreamFailureDiagnostic{}
-	}
-	encoded, err := json.Marshal(projected)
-	if err != nil {
-		return gateway.StreamFailureDiagnostic{}
-	}
-	diagnostic := gateway.StreamFailureDiagnostic{Body: encoded}
-	if len(diagnostic.Body) > maxStreamFailureDiagnosticBytes {
-		bounded := diagnostic.Body[:maxStreamFailureDiagnosticBytes]
-		for len(bounded) > 0 && !utf8.Valid(bounded) {
-			bounded = bounded[:len(bounded)-1]
-		}
-		diagnostic.Body = append([]byte(nil), bounded...)
-		diagnostic.BodyTruncated = true
-	} else {
-		diagnostic.Body = append([]byte(nil), diagnostic.Body...)
-	}
-	return diagnostic
-}
-
-func copySafeDiagnosticFields(destination, source map[string]json.RawMessage, fields ...string) {
-	for _, field := range fields {
-		if raw := projectSafeScalar(source[field]); len(raw) > 0 {
-			destination[field] = raw
-		}
-	}
-}
-
-func projectSafeErrorValue(raw json.RawMessage) json.RawMessage {
-	if scalar := projectSafeScalar(raw); len(scalar) > 0 {
-		return scalar
-	}
-	var value map[string]json.RawMessage
-	if json.Unmarshal(raw, &value) != nil {
-		return nil
-	}
-	projected := make(map[string]json.RawMessage)
-	copySafeDiagnosticFields(projected, value, "type", "status", "code", "message", "param", "reason")
-	if len(projected) == 0 {
-		return nil
-	}
-	encoded, err := json.Marshal(projected)
-	if err != nil {
-		return nil
-	}
-	return encoded
-}
-
-func projectSafeScalar(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return nil
-	}
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return nil
-	}
-	switch value.(type) {
-	case nil, string, bool, float64:
-		return append(json.RawMessage(nil), raw...)
-	default:
-		return nil
-	}
+	diagnostic := responsecheck.ProjectFailureDiagnostic(data, maxStreamFailureDiagnosticBytes)
+	return gateway.StreamFailureDiagnostic{Body: diagnostic.Body, BodyTruncated: diagnostic.BodyTruncated}
 }
 
 func (i *responseInspector) Finish() {

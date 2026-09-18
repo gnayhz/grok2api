@@ -16,18 +16,24 @@ type networkEvent struct {
 	Reused           bool   `json:"reused,omitempty"`
 	IdleMicroseconds int64  `json:"idle_us,omitempty"`
 	Protocol         string `json:"protocol,omitempty"`
+	Resumed          bool   `json:"resumed,omitempty"`
 	Failed           bool   `json:"failed,omitempty"`
 }
 
-// Network samples connection timing only when upstream tracing is enabled.
+// Network samples connection timing when raw or network-only tracing is enabled.
 // No addresses, headers, credentials or request content enter this report.
 // Finish is called after receiving headers; streaming arrival times are in the
 // existing raw trace. Hooks compose with transport accounting and retry hooks.
 func Network(ctx context.Context, provider, operation string) (context.Context, func()) {
-	d, enabled := Enabled()
-	if !enabled {
+	_, _ = Enabled()
+	d, _ := networkDir.Load().(string)
+	if d == "" {
 		return ctx, func() {}
 	}
+	return network(ctx, provider, operation, d)
+}
+
+func network(ctx context.Context, provider, operation, directory string) (context.Context, func()) {
 	start := time.Now()
 	var mu sync.Mutex
 	events := make([]networkEvent, 0, 12)
@@ -52,7 +58,7 @@ func Network(ctx context.Context, provider, operation string) (context.Context, 
 		ConnectDone:       func(_ string, _ string, err error) { note(networkEvent{Stage: "connect_done", Failed: err != nil}) },
 		TLSHandshakeStart: func() { note(networkEvent{Stage: "tls_start"}) },
 		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
-			note(networkEvent{Stage: "tls_done", Protocol: state.NegotiatedProtocol, Failed: err != nil})
+			note(networkEvent{Stage: "tls_done", Protocol: state.NegotiatedProtocol, Resumed: state.DidResume, Failed: err != nil})
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			note(networkEvent{Stage: "request_written", Failed: info.Err != nil})
@@ -73,7 +79,7 @@ func Network(ctx context.Context, provider, operation string) (context.Context, 
 			Events     []networkEvent `json:"events"`
 		}{provider, operation, start.UTC(), events}, "", "  ")
 		if err == nil {
-			_ = os.WriteFile(path(d, operation, provider, "network", "json"), data, 0600)
+			_ = os.WriteFile(path(directory, operation, provider, "network", "json"), data, 0600)
 		}
 	}
 }

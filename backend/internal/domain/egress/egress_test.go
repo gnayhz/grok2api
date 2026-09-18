@@ -194,7 +194,7 @@ func TestValidateRoutingTargets(t *testing.T) {
 }
 
 func TestPoolStrategyNormalized(t *testing.T) {
-	for _, strategy := range []PoolStrategy{PoolStrategyAffinity, PoolStrategyRandom, PoolStrategySticky} {
+	for _, strategy := range []PoolStrategy{PoolStrategyAffinity, PoolStrategySessionReuse, PoolStrategyRandom, PoolStrategySticky} {
 		if !strategy.IsValid() {
 			t.Errorf("expected %q valid", strategy)
 		}

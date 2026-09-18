@@ -298,7 +298,11 @@ func TestProbeExecutorQualifications(t *testing.T) {
 						}
 						return
 					}
-					if len(calls.calls) != 2 {
+					wantCalls := 2
+					if test.failure == model.ProbeFailureIdentity || test.failure == model.ProbeFailureExperiment {
+						wantCalls = 1
+					}
+					if len(calls.calls) != wantCalls {
 						t.Fatalf("calls=%v", calls.calls)
 					}
 					wantVerified := test.name == "matched" || test.name == "raw_error"
@@ -307,6 +311,12 @@ func TestProbeExecutorQualifications(t *testing.T) {
 					}
 					if strings.Contains(result.Detail, "secret") {
 						t.Fatal("provider text persisted")
+					}
+					if wantCalls == 1 {
+						if result.ControlAttempt.ID != "" || result.ControlOutcome != "" {
+							t.Fatal("fabricated control without a measurement")
+						}
+						return
 					}
 					primary, control := calls.calls[0], calls.calls[1]
 					if direction == model.ProbeAccountDifferential {

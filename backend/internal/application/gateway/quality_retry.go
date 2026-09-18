@@ -133,6 +133,8 @@ type qualityHoldFingerprint struct {
 // "终态兜底触发"。
 func qualityHoldRule(sig QualityStreamSignals, semanticOnly bool, err error) string {
 	switch {
+	case errors.Is(err, errQualityUpstreamFailure):
+		return "upstream_error"
 	case errors.Is(err, responsebuffer.ErrExhausted):
 		return "resource_exhausted"
 	case errors.Is(err, errQualityChoices):

@@ -29,11 +29,18 @@ func (e *journalCommitError) Unwrap() []error {
 	return []error{historydomain.ErrHistoryCommit, e.cause}
 }
 
+func (e *journalCommitError) HistoryFailureDiagnostic() (string, string) {
+	return e.stage, e.reason
+}
+
 func journalCommitFailure(stage, reason string, cause error) error {
 	return &journalCommitError{stage: stage, reason: reason, cause: cause}
 }
 
 func journalFailureReason(err error) string {
+	if kind, ok := repository.StoreFaultKindOf(err); ok {
+		return "store_" + string(kind)
+	}
 	switch {
 	case errors.Is(err, responsebuffer.ErrLimit):
 		return "size_limit"

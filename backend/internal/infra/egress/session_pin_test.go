@@ -201,7 +201,7 @@ func TestSessionClientEvictionExemptions(t *testing.T) {
 	if _, err := manager.transport.clientForContext(context.Background(), 7, domain.ScopeBuild, "", "", "", false, "acct-A", clientOptions{sessionKey: "sess-keep"}); err != nil {
 		t.Fatalf("会话客户端创建失败: %v", err)
 	}
-	if !managerHasClientForKey(manager, clientCacheKey{nodeID: 7, scope: domain.ScopeBuild, fingerprint: sharedFingerprint(t, manager, 7)}) {
+	if !managerHasClientForKey(manager, sharedClientKey(t, manager, 7)) {
 		t.Fatalf("会话客户端出现后共享池被逐出")
 	}
 	// 共享池的节点切换清理不得回收会话客户端。
@@ -213,18 +213,18 @@ func TestSessionClientEvictionExemptions(t *testing.T) {
 	}
 }
 
-// sharedFingerprint 找回共享池条目的指纹,避免测试重复实现键派生。
-func sharedFingerprint(t *testing.T, manager *Manager, nodeID uint64) string {
+// sharedClientKey 找回共享池条目的身份,避免测试重复实现键派生。
+func sharedClientKey(t *testing.T, manager *Manager, nodeID uint64) clientCacheKey {
 	t.Helper()
 	manager.transport.clientMu.Lock()
 	defer manager.transport.clientMu.Unlock()
 	for key := range manager.transport.clients {
 		if key.nodeID == nodeID && key.sessionKey == "" && key.accountIdentity == "" {
-			return key.fingerprint
+			return key
 		}
 	}
 	t.Fatalf("节点 %d 没有共享池条目", nodeID)
-	return ""
+	return clientCacheKey{}
 }
 
 func managerHasClientForKey(manager *Manager, key clientCacheKey) bool {
@@ -260,7 +260,7 @@ func TestSessionClientCapacityBudgetSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("共享池创建失败: %v", err)
 	}
-	sharedFp := sharedFingerprint(t, manager, 7)
+	sharedKey := sharedClientKey(t, manager, 7)
 
 	base := time.Now().UTC().Add(-time.Hour)
 	manager.transport.clientMu.Lock()
@@ -278,7 +278,7 @@ func TestSessionClientCapacityBudgetSeparation(t *testing.T) {
 		client.CloseIdleConnections()
 	}
 
-	if !managerHasClientForKey(manager, clientCacheKey{nodeID: 7, scope: domain.ScopeBuild, fingerprint: sharedFp}) {
+	if !managerHasClientForKey(manager, sharedKey) {
 		t.Fatalf("会话条目满额时把共享池挤出了容量预算")
 	}
 	sessionCount := 0

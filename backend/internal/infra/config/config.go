@@ -147,14 +147,15 @@ type ProviderConfig struct {
 }
 
 type BuildProviderConfig struct {
-	BaseURL               string   `yaml:"baseURL"`
-	FallbackBaseURL       string   `yaml:"fallbackBaseURL"`
-	ClientVersion         string   `yaml:"clientVersion"`
-	ClientIdentifier      string   `yaml:"clientIdentifier"`
-	TokenAuth             string   `yaml:"tokenAuth"`
-	UserAgent             string   `yaml:"userAgent"`
-	ResponseHeaderTimeout Duration `yaml:"-"`
-	StreamIdleTimeout     Duration `yaml:"-"`
+	BaseURL                string   `yaml:"baseURL"`
+	FallbackBaseURL        string   `yaml:"fallbackBaseURL"`
+	ClientVersion          string   `yaml:"clientVersion"`
+	ClientIdentifier       string   `yaml:"clientIdentifier"`
+	TokenAuth              string   `yaml:"tokenAuth"`
+	UserAgent              string   `yaml:"userAgent"`
+	SessionIdleConnTimeout Duration `yaml:"-"`
+	ResponseHeaderTimeout  Duration `yaml:"-"`
+	StreamIdleTimeout      Duration `yaml:"-"`
 }
 
 type WebProviderConfig struct {
@@ -687,7 +688,7 @@ func defaultConfig() Config {
 			Build: BuildProviderConfig{
 				BaseURL: "https://cli-chat-proxy.grok.com/v1", FallbackBaseURL: settingsdomain.DefaultBuildFallbackBaseURL,
 				ClientVersion: RecommendedBuildClientVersion, ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
-				UserAgent: RecommendedBuildUserAgent, ResponseHeaderTimeout: Duration(settingsdomain.DefaultBuildResponseHeaderTimeout),
+				UserAgent: RecommendedBuildUserAgent, SessionIdleConnTimeout: Duration(settingsdomain.DefaultBuildSessionIdleConnTimeout), ResponseHeaderTimeout: Duration(settingsdomain.DefaultBuildResponseHeaderTimeout),
 				StreamIdleTimeout: Duration(settingsdomain.DefaultBuildStreamIdleTimeout),
 			},
 			Web: WebProviderConfig{

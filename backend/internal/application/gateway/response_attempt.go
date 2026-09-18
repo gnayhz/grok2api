@@ -14,6 +14,7 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/retryafter"
@@ -51,6 +52,12 @@ attemptLoop:
 			r.lastErr = err
 			break
 		}
+		// Preserve the last observed failure rather than start another physical
+		// generation with only a fraction of a second left for admission.
+		if r.physicalStarted && !hasRetryAdmissionBudget(r.admission) {
+			requestdiag.Failure(r.ctx, "retry", "admission", "insufficient_remaining_budget")
+			break
+		}
 		// 账号切换预算唯一由 admission 收口：本闸门与 DecideRetry 共用
 		// BudgetExhausted，覆盖本循环所有换号路径（传输失败、空输出、扣留
 		// 重试），受守卫管辖的请求不会比守卫预算多耗上游账号。
@@ -70,6 +77,7 @@ attemptLoop:
 			}
 		}
 		r.timing.markSelection(time.Since(selectionStarted))
+		requestdiag.Stage(r.ctx, "account_selection", selectionStarted)
 		if err != nil {
 			if r.lastFailure == nil {
 				r.lastErr = err
@@ -121,6 +129,12 @@ attemptLoop:
 		}
 		if r.lease.QuotaRecoveryRef != nil {
 			credential.QuotaRecoveryRevision = r.lease.QuotaRecoveryRef.Revision
+		}
+		if r.physicalStarted && !hasRetryAdmissionBudget(r.admission) {
+			r.lease.SkipSelectorObservation()
+			r.lease.Release()
+			requestdiag.Failure(r.ctx, "retry", "admission", "insufficient_remaining_budget")
+			break
 		}
 		if r.qualityHoldEnabled {
 			r.qualityAccountAttempts++

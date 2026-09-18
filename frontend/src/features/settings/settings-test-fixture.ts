@@ -5,7 +5,7 @@ export function settingsTestConfig(): SettingsConfigDTO {
     server: { maxConcurrentRequests: 1024 },
     providerBuild: {
       baseURL: "https://build.example", fallbackBaseURL: "https://api.example", clientVersion: "1.0.4", clientIdentifier: "grok-shell",
-      tokenAuth: "xai-grok-cli", tokenAuthConfigured: false, userAgent: "ua", responseHeaderTimeout: "5m", streamIdleTimeout: "2m",
+      tokenAuth: "xai-grok-cli", tokenAuthConfigured: false, userAgent: "ua", responseHeaderTimeout: "5m", sessionIdleConnTimeout: "5m", streamIdleTimeout: "2m",
     },
     providerWeb: {
       baseURL: "https://web.example", quotaTimeout: "10s", chatTimeout: "2m", streamIdleTimeout: "2m",

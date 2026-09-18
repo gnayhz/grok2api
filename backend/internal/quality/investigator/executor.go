@@ -92,7 +92,7 @@ func (e *ProbeExecutor) Execute(ctx context.Context, task model.ProbeTask) (mode
 	}
 	// A control changes one variable, never overwrites the primary sample and
 	// never retries it. The court decides how much evidence is sufficient.
-	if result.Outcome != model.ProbeResultClean && task.ControlAccountID != 0 && task.ControlNodeID != 0 {
+	if needsMatchedControl(result) && task.ControlAccountID != 0 && task.ControlNodeID != 0 {
 		detail, err := e.checkEpoch(ctx, task.ControlNodeID, task.ControlEpoch, "control")
 		if err != nil {
 			return pathFailure(result, detail, err), err
@@ -134,6 +134,14 @@ func (e *ProbeExecutor) Execute(ctx context.Context, task model.ProbeTask) (mode
 	}
 	e.logger.Info("quality_probe_executed", "task", task.ID, "case", task.CaseID, "direction", task.Direction, "outcome", result.Outcome, "detail", result.Detail)
 	return result, nil
+}
+
+// Local identity, policy, capacity and persistence failures cannot participate
+// in attribution. Spending a control request cannot repair that missing primary
+// evidence. Upstream availability failures still receive the matched control.
+func needsMatchedControl(result model.ProbeTaskResult) bool {
+	return result.Outcome == model.ProbeResultDegraded ||
+		result.Outcome == model.ProbeResultError && model.ProbeFailure(result.FailureKind).SupportsAvailability()
 }
 
 func (e *ProbeExecutor) identityContext(ctx context.Context, accountID uint64) context.Context {

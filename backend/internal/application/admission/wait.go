@@ -32,6 +32,24 @@ func NewWait(parent context.Context, started time.Time, budget time.Duration) *W
 
 func (a *Wait) Context() context.Context { return a.ctx }
 
+// Remaining reports the pre-delivery budget without extending it or canceling
+// an accepted stream. Parent deadlines may be shorter than the local budget.
+func (a *Wait) Remaining() (time.Duration, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	deadline := a.deadline
+	if a.committed {
+		deadline = time.Time{}
+	}
+	if parent, ok := a.ctx.Deadline(); ok && (deadline.IsZero() || parent.Before(deadline)) {
+		deadline = parent
+	}
+	if deadline.IsZero() {
+		return 0, false
+	}
+	return max(0, time.Until(deadline)), true
+}
+
 func (a *Wait) SetBudget(budget time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

@@ -3,9 +3,11 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	"github.com/chenyme/grok2api/backend/internal/port/provider"
 )
 
 // buildPromptCacheRoute records internal tools added to route this request through the cache-capable path.
@@ -18,16 +20,49 @@ type buildPromptCacheRoute struct {
 }
 
 func prepareBuildPromptCacheRoute(body []byte, operation, model, promptCacheKey string, policy inferencedomain.ToolCompatibilityPolicy) ([]byte, buildPromptCacheRoute, error) {
-	route := buildPromptCacheRoute{
-		injectedToolTypes:   make(map[string]struct{}),
-		clientDeclaredTools: make(map[string]struct{}),
-	}
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, route, fmt.Errorf("解析 Build prompt cache 请求: %w", err)
+		return nil, buildPromptCacheRoute{}, fmt.Errorf("解析 Build prompt cache 请求: %w", err)
 	}
 	if payload == nil {
 		payload = make(map[string]json.RawMessage)
+	}
+	route, err := prepareBuildPromptCachePayload(payload, operation, model, promptCacheKey, policy)
+	if err != nil {
+		return nil, route, err
+	}
+	if strings.TrimSpace(promptCacheKey) == "" {
+		return body, route, nil
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, route, fmt.Errorf("编码 Build prompt cache 请求: %w", err)
+	}
+	return encoded, route, nil
+}
+
+// Normalize and route native Responses with one JSON decode/encode pair. The
+// compaction path retains its separate sampling policy and does not add cache tools.
+func prepareBuildResponsesRequest(body []byte, request provider.ResponseResourceRequest) ([]byte, *responsesToolCompatibility, buildPromptCacheRoute, error) {
+	route := buildPromptCacheRoute{}
+	payload, compatibility, err := normalizeResponsesPayload(body, request.Model, request.NormalizedMetadata)
+	if err != nil {
+		return nil, nil, route, err
+	}
+	if request.Method == http.MethodPost && (compatibility == nil || !compatibility.compactionRequested) {
+		route, err = prepareBuildPromptCachePayload(payload, request.Operation, request.Model, request.PromptCacheKey, request.ToolCompatibilityPolicy)
+		if err != nil {
+			return nil, compatibility, route, fmt.Errorf("准备 Build prompt cache 路由: %w", err)
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	return encoded, compatibility, route, err
+}
+
+func prepareBuildPromptCachePayload(payload map[string]json.RawMessage, operation, model, promptCacheKey string, policy inferencedomain.ToolCompatibilityPolicy) (buildPromptCacheRoute, error) {
+	route := buildPromptCacheRoute{
+		injectedToolTypes:   make(map[string]struct{}),
+		clientDeclaredTools: make(map[string]struct{}),
 	}
 	key := strings.TrimSpace(promptCacheKey)
 	if key != "" {
@@ -35,7 +70,7 @@ func prepareBuildPromptCacheRoute(body []byte, operation, model, promptCacheKey 
 	}
 	tools, err := buildCacheRouteTools(payload)
 	if err != nil {
-		return nil, route, err
+		return route, err
 	}
 	for _, rawTool := range tools {
 		kind, name := buildCacheToolIdentity(rawTool)
@@ -52,11 +87,7 @@ func prepareBuildPromptCacheRoute(body []byte, operation, model, promptCacheKey 
 	// Hide upstream internal subcalls even when the client explicitly declares x_search.
 	// Cache routing itself applies only to plain-text conversations with a stable cache session identity.
 	if key == "" || !isBuildCacheConversationOperation(operation) || isBuildCacheMediaModel(model) || hasBuildCacheToolType(tools, "image_generation") {
-		if key == "" {
-			return body, route, nil
-		}
-		encoded, err := json.Marshal(payload)
-		return encoded, route, err
+		return route, nil
 	}
 
 	var choice string
@@ -74,13 +105,9 @@ func prepareBuildPromptCacheRoute(body []byte, operation, model, promptCacheKey 
 		payload["tools"] = mustJSON(tools)
 	}
 	if err := route.plan.Validate(policy); err != nil {
-		return nil, route, err
+		return route, err
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, route, fmt.Errorf("编码 Build prompt cache 请求: %w", err)
-	}
-	return encoded, route, nil
+	return route, nil
 }
 
 func buildCacheRouteTools(payload map[string]json.RawMessage) ([]json.RawMessage, error) {

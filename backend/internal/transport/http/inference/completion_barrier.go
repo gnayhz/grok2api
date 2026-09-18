@@ -23,6 +23,7 @@ type completionBarrierWriter struct {
 	holding       bool
 	state         *responsebuffer.State
 	written       int64
+	flushed       int64
 	events        int64
 	onFlushed     func()
 }
@@ -80,12 +81,14 @@ func (w *completionBarrierWriter) WriteHeaderNow() {
 func (w *completionBarrierWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *completionBarrierWriter) Flush()                      { _ = w.FlushError() }
 func (w *completionBarrierWriter) FlushError() error {
-	if w.written == 0 {
+	// Partial frames and held terminal frames have not added downstream bytes.
+	if w.written == w.flushed {
 		return nil
 	}
 	if err := flushStreamResponse(w.ResponseWriter); err != nil {
 		return err
 	}
+	w.flushed = w.written
 	if w.onFlushed != nil {
 		w.onFlushed()
 	}

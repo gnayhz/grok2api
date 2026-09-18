@@ -6,6 +6,10 @@ import (
 )
 
 const (
+	DefaultBuildSessionIdleConnTimeout = 5 * time.Minute
+	MinBuildSessionIdleConnTimeout     = 30 * time.Second
+	MaxBuildSessionIdleConnTimeout     = 30 * time.Minute
+
 	DefaultBuildResponseHeaderTimeout = 5 * time.Minute
 	MinBuildResponseHeaderTimeout     = 30 * time.Second
 	MaxBuildResponseHeaderTimeout     = 30 * time.Minute
@@ -148,14 +152,15 @@ type BatchConfig struct {
 
 // ProviderBuildConfig 定义 Grok Build CLI 上游协议标识。
 type ProviderBuildConfig struct {
-	BaseURL               string
-	FallbackBaseURL       string
-	ClientVersion         string
-	ClientIdentifier      string
-	TokenAuth             string
-	UserAgent             string
-	ResponseHeaderTimeout time.Duration
-	StreamIdleTimeout     time.Duration
+	BaseURL                string
+	FallbackBaseURL        string
+	ClientVersion          string
+	ClientIdentifier       string
+	TokenAuth              string
+	UserAgent              string
+	SessionIdleConnTimeout time.Duration
+	ResponseHeaderTimeout  time.Duration
+	StreamIdleTimeout      time.Duration
 }
 
 // RoutingConfig 定义会话粘性、冷却和故障切换边界。

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 )
@@ -19,6 +20,14 @@ func peekCanonicalQualityStream(ctx context.Context, body io.ReadCloser, stream 
 	cfg = normalizeQualityRetry(cfg)
 	state := qualityScanState{kernel: cfg.Kernel(), protocol: protocol, startedAt: time.Now()}
 	var useful atomic.Bool
+	var firstData time.Time
+	defer func() {
+		if firstData.IsZero() {
+			requestdiag.Stage(ctx, "upstream_first_event", state.startedAt)
+		} else {
+			requestdiag.Stage(ctx, "quality_evidence", firstData)
+		}
+	}()
 	liveness := newQualityLivenessTimer(cfg)
 	defer liveness.timer.Stop()
 	verdict := QualityWait
@@ -39,6 +48,8 @@ func peekCanonicalQualityStream(ctx context.Context, body io.ReadCloser, stream 
 					return true, err
 				}
 				state.sawDataEvent = true
+				requestdiag.Stage(ctx, "upstream_first_event", state.startedAt)
+				firstData = time.Now()
 			}
 			if bytes.Equal(bytes.TrimSpace(event.Data), []byte("[DONE]")) {
 				state.terminal = true

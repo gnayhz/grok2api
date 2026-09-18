@@ -9,14 +9,10 @@ import (
 )
 
 const (
-	// IdleConnTimeout 保留空闲连接的时长。上游提示缓存按「连接→后端实例」
-	// 亲和复用(实测换连接即冷、同连接跨账号也热),主动退役一条仍然健康的
-	// 连接等于放弃整段会话缓存:轮间隙超过空闲窗口时,下一轮必然落到新
-	// 后端、全量重算(线上表现为中途突然只剩公共头部命中)。半死连接的
-	// 检测交给下方的 HTTP/2 PING 健康检查(20s 探测+10s 超时),因此这里
-	// 只需低于上游代理自身的空闲关闭窗口即可,取 150s 覆盖常见的思考/
-	// 阅读间隙。历史上取 30s 是在 PING 健康检查存在之前规避半死连接的
-	// 保守值,代价是 >30s 的轮间隙稳定丢缓存。
+	// IdleConnTimeout 保留健康空闲连接，减少轮间重复建连和握手。
+	// 连接复用、出口绑定和上游提示缓存是独立事实：同一连接仍可能未命中，
+	// 新连接也可能命中，不能从连接状态推断上游后端或缓存归属。
+	// 150s 覆盖常见轮间间隔；半死 HTTP/2 连接由下方 PING 检测。
 	IdleConnTimeout = 150 * time.Second
 	// HTTP2ReadIdleTimeout periodically probes an otherwise idle HTTP/2
 	// connection. Go's default is zero, which leaves half-dead pooled

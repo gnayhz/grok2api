@@ -97,6 +97,7 @@ function extractLocaleKeys(blockIndex: number): Set<string> {
 
 test("every backend error code has zh-CN and en translations", () => {
   const backend = extractBackendCodes();
+  for (const code of ["unsupported_reasoning_effort", "upstream_stream_error", "upstream_bad_request"]) backend.add(code);
   assert.ok(backend.size > 50, `backend code extraction looks wrong: ${backend.size}`);
   const zh = extractLocaleKeys(0);
   const en = extractLocaleKeys(1);

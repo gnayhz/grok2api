@@ -289,6 +289,11 @@ function getStrategyConfig(t: (key: string) => string): Record<
 	{ label: string; tone: string; desc: string }
 > {
 	return {
+		"session-reuse": {
+			label: t("networkPools.stratSessionReuse"),
+			tone: "border-indigo-500/30 text-indigo-600 dark:text-indigo-400 bg-indigo-500/5",
+			desc: t("networkPools.stratSessionReuseDesc"),
+		},
 		affinity: {
 			label: t("network.stratAffinity"),
 			tone: "border-purple-500/30 text-purple-600 dark:text-purple-400 bg-purple-500/5",
@@ -633,6 +638,9 @@ function PoolConfigModal({
 								<SelectItem value="least-used">
 									{t("network.stratLeastUsed")}
 								</SelectItem>
+								<SelectItem value="session-reuse">
+									{t("networkPools.stratSessionReuse")}
+								</SelectItem>
 								<SelectItem value="affinity">
 									{t("network.stratAffinity")}
 								</SelectItem>
@@ -650,6 +658,11 @@ function PoolConfigModal({
 						<p className="text-[11px] text-muted-foreground">
 							{getStrategyConfig(t)[strategy]?.desc}
 						</p>
+						{strategy === "session-reuse" && (
+							<p className="text-[11px] text-muted-foreground">
+								{t("networkPools.sessionIdentityHint")}
+							</p>
+						)}
 					</div>
 
 					<div className="space-y-1.5">

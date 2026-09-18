@@ -9,6 +9,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/google/uuid"
 )
 
@@ -68,7 +69,7 @@ func (s *Service) RecordPhysicalEvents(ctx context.Context, facts []attemptmeta.
 		event := model.Event{Attempt: fact.Attempt, Stage: model.EventStageExchange, Outcome: model.EventOutcomeObserved, At: fact.At, Physical: &fact}
 		events = append(events, event)
 	}
-	return s.journal.RecordMany(ctx, events)
+	return s.recordEvents(ctx, events)
 }
 
 func (s *Service) RecordQualityEvent(ctx context.Context, obs Receipt, ttl time.Duration) error {
@@ -88,9 +89,28 @@ func (s *Service) RecordQualityEvent(ctx context.Context, obs Receipt, ttl time.
 		if completion.ErrorCode == "request_canceled" {
 			completion.Outcome = string(Canceled)
 		}
-		return s.journal.RecordMany(ctx, []model.Event{e, completion})
+		return s.recordEvents(ctx, []model.Event{e, completion})
 	}
-	return s.journal.RecordMany(ctx, []model.Event{e})
+	return s.recordEvents(ctx, []model.Event{e})
+}
+
+// Retry the same immutable facts once within the caller's existing receipt
+// deadline. The journal deduplicates identity and payload atomically, including
+// uncertain commit outcomes. Backlog/identity/unknown errors are not transient.
+func (s *Service) recordEvents(ctx context.Context, facts []model.Event) error {
+	err := s.journal.RecordMany(ctx, facts)
+	kind, ok := repository.StoreFaultKindOf(err)
+	if err == nil || !ok || !repository.StoreFaultTransient(kind) {
+		return err
+	}
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return s.journal.RecordMany(ctx, facts)
+	}
 }
 
 func (s *Service) handle(ctx context.Context, e model.Event) error {

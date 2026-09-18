@@ -117,7 +117,9 @@ func TestNonstreamFailedTerminalCannotCommitConversationOrCompleteSuccessfully(t
 				finishTestResult(t, result, Usage{}, "", "")
 				_ = result.Body.Close()
 			}
-			if err == nil || result != nil || accepted || len(events) != 2 || events[0].Outcome != QualityObservedAdmitted || events[1].Outcome != QualityObservedInterrupted {
+			// A complete failure envelope is rejected before admission, even if
+			// it carries thinking; no successful completion or cache write exists.
+			if !errors.Is(err, errQualityUpstreamFailure) || result != nil || accepted || len(events) != 1 || events[0].Outcome != QualityObservedRejected || events[0].ErrorCode != "upstream_error" {
 				t.Errorf("status=%s convert=%v result=%v err=%v accepted=%v events=%+v", status, convert, result != nil, err, accepted, events)
 			}
 		}

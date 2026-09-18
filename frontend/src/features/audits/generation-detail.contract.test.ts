@@ -55,3 +55,20 @@ test("present generation details require numeric counters and explicit outcome/s
     assert.throws(() => decodeAuditDetail(value));
   }
 });
+
+test("execution diagnostics preserve connection reuse and string identities while old rows remain unknown", () => {
+  const value = fixture();
+  assert.equal(decodeAuditDetail(value).audit.diagnostics, undefined);
+  value.audit.diagnostics = {
+    version: 1,
+    stages: [{ stage: "history_commit", us: 1750, calls: 1 }],
+    failures: [{ component: "history", stage: "store", reason: "store_lock" }],
+    exchanges: [{ physicalId: "synthetic/1", accountId: "36028797018963969", nodeId: "3", epoch: "1", plane: "build", stage: "primary", status: 200, us: 2000,
+      events: [{ stage: "got_conn", us: 100, reused: true }] }],
+  };
+  const decoded = decodeAuditDetail(value).audit.diagnostics!;
+  assert.equal(decoded.exchanges?.[0].events?.[0].reused, true);
+  assert.equal(decoded.exchanges?.[0].accountId, "36028797018963969");
+  value.audit.diagnostics.exchanges[0].accountId = 123;
+  assert.throws(() => decodeAuditDetail(value));
+});

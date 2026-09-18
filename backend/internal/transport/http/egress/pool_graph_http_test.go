@@ -117,6 +117,19 @@ func TestPoolGraphHTTPPreservesValidConfiguration(t *testing.T) {
 			if err != nil || stored.Strategy != domain.PoolStrategySticky || stored.FallbackMode != domain.PoolFallbackDirect || stored.FallbackPoolID != 0 {
 				t.Fatalf("valid retry did not persist: %+v %v", stored, err)
 			}
+			var reused poolResponse
+			if err := json.Unmarshal(request(http.MethodPut, "/egress-pools/"+firstID, poolRequest{Name: first.Name, Strategy: "session-reuse", FallbackMode: "none"}, http.StatusOK), &reused); err != nil {
+				t.Fatal(err)
+			}
+			stored, err = repo.GetEgressPool(ctx, first.ID)
+			if err != nil || stored.Strategy != domain.PoolStrategySessionReuse || reused.Strategy != "session-reuse" {
+				t.Fatalf("session strategy lost at HTTP/storage boundary: %q %q %v", reused.Strategy, stored.Strategy, err)
+			}
+			request(http.MethodPut, "/egress-pools/"+firstID, poolRequest{Name: first.Name, Strategy: "not-a-strategy", FallbackMode: "none"}, http.StatusBadRequest)
+			stored, err = repo.GetEgressPool(ctx, first.ID)
+			if err != nil || stored.Strategy != domain.PoolStrategySessionReuse {
+				t.Fatalf("invalid strategy overwrote persisted session strategy: %q %v", stored.Strategy, err)
+			}
 		})
 	}
 }

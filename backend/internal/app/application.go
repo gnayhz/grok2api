@@ -276,7 +276,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	egressManager.SetLogger(logger)
 	egressManager.SetClearanceLock(refreshLock)
 	egressManager.UpdateClearanceConfig(clearanceConfig(cfg))
-	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
+	egressManager.UpdateBuildTransportSettings(cfg.Provider.Build.ResponseHeaderTimeout.Value(), cfg.Provider.Build.SessionIdleConnTimeout.Value())
 	egressManager.UpdateBuildStreamIdleTimeout(cfg.Provider.Build.StreamIdleTimeout.Value())
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
 		BaseURL: cfg.Provider.Build.BaseURL, FallbackBaseURL: settingsdomain.NormalizeBuildFallbackBaseURL(cfg.Provider.Build.FallbackBaseURL),
@@ -485,7 +485,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 			return nil
 		})},
 		{Name: "network", Apply: settingsApply(fileCfg, func(next config.Config) error {
-			egressManager.UpdateBuildResponseHeaderTimeout(next.Provider.Build.ResponseHeaderTimeout.Value())
+			egressManager.UpdateBuildTransportSettings(next.Provider.Build.ResponseHeaderTimeout.Value(), next.Provider.Build.SessionIdleConnTimeout.Value())
 			egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
 			egressManager.UpdateClearanceConfig(clearanceConfig(next))
 			egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)

@@ -24,6 +24,7 @@ export type AuditBillingBreakdownDTO = {
 };
 
 export type AuditDTO = {
+	diagnostics?: ExecutionDiagnosticsDTO;
   responseId?: string;
   upstreamStatusCode?: number;
   admissionOutcome?: string;
@@ -97,6 +98,20 @@ export type AuditDTO = {
   requestHeaders?: Record<string, string[]>;
   attemptCount: number;
   createdAt: string;
+};
+
+export type ExecutionDiagnosticsDTO = {
+  version: number;
+  truncated?: boolean;
+  stages?: { stage: string; us: number; calls: number }[];
+  failures?: { component: string; stage: string; reason: string }[];
+  exchanges?: {
+    physicalId: string; accountId: string; nodeId: string; epoch: string;
+    plane: string; stage: string; status: number; us: number; failed?: boolean;
+    events?: { stage: string; us: number; reused?: boolean; resumed?: boolean; failed?: boolean }[];
+    prompt?: { keyEpoch: string; session: string; instructions: string; tools: string; parameters: string;
+      inputItems: number; inputBytes: number; prefixes?: { items: number; digest: string }[] };
+  }[];
 };
 
 export type AuditAttemptDTO = {
@@ -196,7 +211,20 @@ const auditBillingValidator = hasShape({
   model: isOptional(isString), version: isOptional(isString), tier: isOptional(isOneOf("standard", "long_context", "media")),
   components: isArrayOf(auditBillingComponentValidator), totalInUsdTicks: isNumber,
 });
+const executionDiagnosticsValidator = hasShape({
+  version: isNumber, truncated: isOptional(isBoolean),
+  stages: isOptional(isArrayOf(hasShape({ stage: isString, us: isNumber, calls: isNumber }))),
+  failures: isOptional(isArrayOf(hasShape({ component: isString, stage: isString, reason: isString }))),
+  exchanges: isOptional(isArrayOf(hasShape({
+    physicalId: isString, accountId: isString, nodeId: isString, epoch: isString,
+    plane: isString, stage: isString, status: isNumber, us: isNumber, failed: isOptional(isBoolean),
+    events: isOptional(isArrayOf(hasShape({ stage: isString, us: isNumber, reused: isOptional(isBoolean), resumed: isOptional(isBoolean), failed: isOptional(isBoolean) }))),
+    prompt: isOptional(hasShape({ keyEpoch: isString, session: isString, instructions: isString, tools: isString, parameters: isString,
+      inputItems: isNumber, inputBytes: isNumber, prefixes: isOptional(isArrayOf(hasShape({ items: isNumber, digest: isString }))) })),
+  }))),
+});
 const auditValidator = hasShape({
+  diagnostics: isOptional(executionDiagnosticsValidator),
   id: isString, requestId: isString, clientKeyId: isString, clientKeyName: isOptional(isString), clientIp: isOptional(isString), modelRouteId: isString,
   modelPublicId: isOptional(isString), modelUpstreamModel: isOptional(isString), provider: isOneOf("grok_build", "grok_web", "grok_console"),
   operation: isOneOf("responses", "compaction", "chat", "messages", "image", "image_edit", "video", "tts", "stt", "realtime", "voice"), usageSource: isOneOf("upstream", "estimated", "none"),

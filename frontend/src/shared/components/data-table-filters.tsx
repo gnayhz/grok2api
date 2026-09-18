@@ -1,12 +1,13 @@
-import { Check, ListFilter, Search, X } from "lucide-react";
+import { ListFilter, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/shared/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 
-// Groups turn an option into a third menu level: the option itself stays
-// selectable as the unnarrowed value, and every group entry narrows it further.
+// Groups turn an option into a third menu level: a picker for the group
+// entries. Clearing the filter stays at the parent level ("全部" / X), so the
+// picker itself only narrows.
 type DataTableFilterOptionGroup = {
   id: string;
   label: string;
@@ -124,7 +125,6 @@ export function DataTableFilters({ filters }: { filters: DataTableFilter[] }) {
                         <DropdownMenuSubTrigger className="pr-2">
                           <span className="shrink-0 whitespace-nowrap">{option.label}</span>
                           {narrowedLabel ? <span className="ml-auto max-w-16 truncate text-xs text-muted-foreground">{narrowedLabel}</span> : null}
-                          {option.value === filter.value ? <Check className="ml-auto" /> : null}
                         </DropdownMenuSubTrigger>
                         <DropdownMenuSubContent sideOffset={6} className="max-h-[min(26rem,calc(100vh-2rem))] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto p-0 shadow-lg shadow-black/5">
                           {option.groupSearch ? (
@@ -141,8 +141,10 @@ export function DataTableFilters({ filters }: { filters: DataTableFilter[] }) {
                               </div>
                             </div>
                           ) : null}
+                          {/* 第三级是纯粹的名单选择器:清除筛选统一走上一级"全部"。
+                              这里不再放"全部"项——它与上一级语义重复,且曾误用
+                              option.value("any") 占位值导致服务端按账号模糊匹配落空。 */}
                           <DropdownMenuRadioGroup value={filter.value} onValueChange={filter.onChange}>
-                            <DropdownMenuRadioItem value={option.value} className="mx-1 my-1 min-h-8 text-xs focus:bg-muted/50">{t("common.all")}</DropdownMenuRadioItem>
                             {option.groups.map((group) => (
                               <div key={group.id}>
                                 <DropdownMenuSeparator />

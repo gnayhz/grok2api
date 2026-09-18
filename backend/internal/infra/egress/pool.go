@@ -195,11 +195,17 @@ func (m *routingRuntime) AcquirePoolRouted(ctx context.Context, scope domain.Sco
 				return nil, PoolRouteNone, nil
 			}
 		}
-		selected := m.selectPoolNode(pool, candidates, members, affinity)
-		// Only affinity permits session pinning. Explicit random, least-used,
-		// sticky and rotation strategies must retain their configured semantics.
-		if session := buildSessionForScope(ctx, scope); session != "" && pool.Strategy.Normalized() == domain.PoolStrategyAffinity {
-			selected = m.pinSessionNode(ctx, session, candidates, selected)
+		var selected domain.Node
+		session := buildSessionForScope(ctx, scope)
+		if session != "" && pool.Strategy.Normalized() == domain.PoolStrategySessionReuse {
+			selected = m.sessionReuse.selectNode(pool.ID, session, candidates, time.Now(), m.inflightCount)
+		} else {
+			selected = m.selectPoolNode(pool, candidates, members, affinity)
+			// Legacy affinity keeps its account-based first choice. Other explicit
+			// strategies cannot be overridden by a retained session hint.
+			if session != "" && pool.Strategy.Normalized() == domain.PoolStrategyAffinity {
+				selected = m.pinSessionNode(ctx, session, candidates, selected)
+			}
 		}
 		releaseNodeCandidates(buffer)
 		RecordPoolSelection(pool.ID, selected.ID)
@@ -239,6 +245,8 @@ func (m *routingRuntime) InvalidatePoolCache() {
 //     account on a stable exit IP; a node leaving/rejoining only reshuffles the
 //     callers that hashed onto it;
 //   - random: every request picks a random member;
+//   - session-reuse: Build sessions are allocated before this helper; requests
+//     without a supported session use random selection;
 //   - sticky: always the first schedulable member in stable id order — it only
 //     moves on when that member breaks;
 //   - rotation: stay on the current member until it breaks, then advance to
@@ -257,7 +265,7 @@ func (m *routingRuntime) selectPoolNode(pool domain.Pool, nodes, allMembers []do
 		return nodes[0]
 	}
 	switch pool.Strategy.Normalized() {
-	case domain.PoolStrategyRandom:
+	case domain.PoolStrategyRandom, domain.PoolStrategySessionReuse:
 		return nodes[rand.IntN(len(nodes))]
 	case domain.PoolStrategySticky:
 		return nodes[0]

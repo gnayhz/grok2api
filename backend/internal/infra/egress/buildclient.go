@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
 	"github.com/chenyme/grok2api/backend/internal/pkg/netbudget"
 	"github.com/chenyme/grok2api/backend/internal/pkg/proxydial"
@@ -24,9 +25,10 @@ type buildConnectionOptions struct {
 	// with HTTP/2 multiplexing when supported. The registry owns account
 	// partitioning and policy retirement; fresh policy cannot use this pool.
 	// Reuse helps upstream affinity but cannot guarantee a cache hit.
-	sessionPinned   bool
-	freshConnection bool
-	onDial          func()
+	sessionIdleTimeout time.Duration
+	sessionPinned      bool
+	freshConnection    bool
+	onDial             func()
 }
 
 // newBuildClientConfigured keeps Grok Build on the standard Go HTTP/TLS stack
@@ -34,9 +36,14 @@ type buildConnectionOptions struct {
 // reserved for Grok Web, where the browser fingerprint and User-Agent belong
 // together.
 func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Duration, options buildConnectionOptions, budget ...*netbudget.Runtime) (*http.Client, error) {
+	idleTimeout := buildtransport.IdleConnTimeout
 	maxConnsPerHost, maxIdleConnsPerHost := 256, 128
 	if options.sessionPinned && !options.freshConnection {
 		maxConnsPerHost, maxIdleConnsPerHost = 1, 1
+		idleTimeout = options.sessionIdleTimeout
+		if idleTimeout <= 0 {
+			idleTimeout = settingsdomain.DefaultBuildSessionIdleConnTimeout
+		}
 	}
 	direct := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
@@ -49,7 +56,7 @@ func newBuildClientConfigured(proxyURL string, responseHeaderTimeout time.Durati
 		MaxIdleConns:          maxConnsPerHost,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		MaxConnsPerHost:       maxConnsPerHost,
-		IdleConnTimeout:       buildtransport.IdleConnTimeout,
+		IdleConnTimeout:       idleTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 		ExpectContinueTimeout: time.Second,

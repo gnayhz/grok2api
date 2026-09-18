@@ -59,6 +59,7 @@ type routingRuntime struct {
 	sessionPinMu         sync.Mutex
 	sessionPins          map[string]sessionNodePin
 	sessionPinSweep      time.Time
+	sessionReuse         sessionReuseRoutes
 	rotationPersists     map[uint64]*rotationPersistState
 }
 

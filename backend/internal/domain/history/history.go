@@ -13,6 +13,15 @@ const JournalNormalizerVersion = 1
 var ErrHistoryCommit = errors.New("history_commit_failed")
 var ErrHistoryPrepare = errors.New("history_prepare_failed")
 
+// FailureDiagnostic exposes controlled categories without decoder/SQL text.
+func FailureDiagnostic(err error) (stage, reason string) {
+	var diagnostic interface{ HistoryFailureDiagnostic() (string, string) }
+	if errors.As(err, &diagnostic) {
+		return diagnostic.HistoryFailureDiagnostic()
+	}
+	return "commit", HistoryFailureReason(err)
+}
+
 // Prepared owns one reserved turn. Discard releases its writer without deleting
 // the parent chain. Reset advances only its still-current generation.
 type Prepared interface {

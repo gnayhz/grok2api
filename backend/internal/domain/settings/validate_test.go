@@ -11,7 +11,7 @@ func validConfig() Config {
 	accountIsolated := true
 	return Config{
 		Server:            ServerConfig{MaxConcurrentRequests: 1024},
-		ProviderBuild:     ProviderBuildConfig{BaseURL: "https://api.grok.com", FallbackBaseURL: DefaultBuildFallbackBaseURL, ClientVersion: "1.0.4", ClientIdentifier: "id", TokenAuth: "token", UserAgent: "ua", ResponseHeaderTimeout: DefaultBuildResponseHeaderTimeout, StreamIdleTimeout: DefaultBuildStreamIdleTimeout},
+		ProviderBuild:     ProviderBuildConfig{BaseURL: "https://api.grok.com", FallbackBaseURL: DefaultBuildFallbackBaseURL, ClientVersion: "1.0.4", ClientIdentifier: "id", TokenAuth: "token", UserAgent: "ua", SessionIdleConnTimeout: DefaultBuildSessionIdleConnTimeout, ResponseHeaderTimeout: DefaultBuildResponseHeaderTimeout, StreamIdleTimeout: DefaultBuildStreamIdleTimeout},
 		ProviderWeb:       ProviderWebConfig{BaseURL: "https://chat.grok.com", StatsigMode: "manual", StatsigManualValue: strings.Repeat("A", 94), ClearanceMode: "manual", ClearanceTimeout: time.Minute, ClearanceRefresh: 10 * time.Minute, QuotaTimeout: 30 * time.Second, ChatTimeout: time.Minute, StreamIdleTimeout: DefaultWebStreamIdleTimeout, ImageTimeout: time.Minute, VideoTimeout: 10 * time.Minute, MediaConcurrency: 4, RecoveryBackoffBase: 30 * time.Second, RecoveryBackoffMax: time.Hour},
 		ProviderConsole:   ProviderConsoleConfig{BaseURL: "https://console.grok.com", ChatTimeout: time.Minute, StreamIdleTimeout: DefaultConsoleStreamIdleTimeout},
 		Batch:             BatchConfig{ImportConcurrency: 4, ConversionConcurrency: 4, SyncConcurrency: 4, RefreshConcurrency: 4, RandomDelay: &randomDelay},

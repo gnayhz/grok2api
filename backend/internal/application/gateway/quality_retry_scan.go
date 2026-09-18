@@ -426,6 +426,7 @@ func observeQualityPayload(state *qualityScanState, payload []byte) {
 	default:
 		observeQualityResponses(state, payload)
 	}
+	observeQualityFailure(state, payload)
 	state.usage = boundedQualityUsage(state.usage)
 }
 

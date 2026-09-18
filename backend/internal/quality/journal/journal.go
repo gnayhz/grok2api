@@ -10,13 +10,24 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/sqlfault"
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-var ErrConflict = errors.New("guard event identity conflict")
-var ErrBacklogFull = errors.New("guard event backlog capacity exhausted")
+var ErrConflict error = journalDiagnosticError("identity_conflict")
+var ErrBacklogFull error = journalDiagnosticError("backlog_full")
+
+type journalDiagnosticError string
+
+func (e journalDiagnosticError) Error() string {
+	if e == journalDiagnosticError("identity_conflict") {
+		return "guard event identity conflict"
+	}
+	return "guard event backlog capacity exhausted"
+}
+func (e journalDiagnosticError) StoreDiagnosticReason() string { return string(e) }
 
 const DefaultBacklogLimit int64 = 10000
 
@@ -92,10 +103,11 @@ func (s *Store) RecordMany(ctx context.Context, events []qualitymodel.Event) err
 		return nil
 	})
 	s.trackCompletions(events, inserted, err)
-	return err
+	return sqlfault.Wrap(err)
 }
 
-func (s *Store) CheckCapacity(ctx context.Context) error {
+func (s *Store) CheckCapacity(ctx context.Context) (err error) {
+	defer func() { err = sqlfault.Wrap(err) }()
 	var rows []CapacityRow
 	if err := s.db.WithContext(ctx).Where("id = 1").Find(&rows).Error; err != nil {
 		return err
@@ -156,6 +168,18 @@ func (s *Store) record(tx *gorm.DB, e qualitymodel.Event, inserted ...*[]quality
 		}
 		if existing.Payload != row.Payload {
 			return ErrConflict
+		}
+		// A previous transaction may have committed before its connection failed.
+		// Re-acknowledge only this process's still-live obligation. Never adopt
+		// another owner or resurrect a completed/recovered admission.
+		if len(inserted) > 0 && e.Stage == qualitymodel.EventStageAdmission && e.Outcome == qualitymodel.EventOutcomeAdmitted {
+			var count int64
+			if err := tx.Model(&CompletionRow{}).Where("attempt_id = ? AND owner = ? AND lease_until > ?", e.Attempt.ID, s.completions.owner, time.Now().UTC()).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 1 {
+				*inserted[0] = append(*inserted[0], e)
+			}
 		}
 		return nil
 	}

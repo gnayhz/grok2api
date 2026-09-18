@@ -21,11 +21,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsebuffer"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responsecheck"
 	"github.com/chenyme/grok2api/backend/internal/pkg/responseflow"
 	"github.com/chenyme/grok2api/backend/internal/pkg/texts"
 	"github.com/chenyme/grok2api/backend/internal/pkg/upstreamtrace"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
 	"github.com/chenyme/grok2api/backend/internal/port/provider"
 	"github.com/google/uuid"
 	"io"
@@ -222,7 +224,15 @@ func (t *buildDirectTransport) RoundTrip(request *http.Request) (*http.Response,
 		}
 		return nil, err
 	}
+	meta := physical.MetaFromContext(request.Context())
+	traceCtx, finishTrace := requestdiag.Network(request.Context(), meta.Plane, meta.Stage)
+	request = request.WithContext(traceCtx)
 	response, err := t.current.Load().RoundTrip(request)
+	status := -1
+	if response != nil {
+		status = response.StatusCode
+	}
+	finishTrace(status, err)
 	err = infraegress.MarkPhysicalExecutionError(request.Context(), err)
 	attemptmeta.Attach(response, request)
 	infraegress.RecordDirectPhysicalCall(request.Context(), response, err)
@@ -285,6 +295,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	var toolCompatibility *responsesToolCompatibility
 	var conversationOptions conversation.ResponseOptions
 	cacheRoute := buildPromptCacheRoute{}
+	cachePrepared := false
 	compactionRequested := false
 	if request.NormalizeBody {
 		if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
@@ -312,7 +323,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				}
 			}
 			body = preparation.Body
-			body, toolCompatibility, err = normalizeResponsesRequestWithMetadata(body, request.Model, request.NormalizedMetadata)
+			body, toolCompatibility, cacheRoute, err = prepareBuildResponsesRequest(body, request)
+			cachePrepared = true
 			if toolCompatibility != nil {
 				compactionRequested = toolCompatibility.compactionRequested
 				if preparation.Unavailable > 0 {
@@ -341,7 +353,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 	}
 	if len(body) > 0 && request.Method == http.MethodPost {
-		if !compactionRequested {
+		if !compactionRequested && !cachePrepared {
 			body, cacheRoute, err = prepareBuildPromptCacheRoute(body, request.Operation, request.Model, request.PromptCacheKey, request.ToolCompatibilityPolicy)
 			if err != nil {
 				err = fmt.Errorf("准备 Build prompt cache 路由: %w", err)
@@ -630,6 +642,7 @@ func (a *Adapter) nextGrokTurnIndex(key string) string {
 }
 
 func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (*http.Response, string, error) {
+	ctx = requestdiag.WithPrompt(ctx, body)
 	// Preserve client turn indices; otherwise maintain a local request sequence.
 	// This is CLI telemetry, not a documented cache checkpoint mechanism.
 	if request.GrokTurnIndex == "" && request.PromptCacheKey != "" && request.Credential.ID != 0 {

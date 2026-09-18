@@ -145,6 +145,9 @@ func (s *Service) mergeEditable(current settingsdomain.Config, input EditableCon
 		{"media.cleanupInterval", input.Media.CleanupInterval, func(value time.Duration) { next.Media.CleanupInterval = value }},
 		{"batch.randomDelay", input.Batch.RandomDelay, func(value time.Duration) { next.Batch.RandomDelay = durationPointer(value) }},
 	}
+	if strings.TrimSpace(input.ProviderBuild.SessionIdleConnTimeout) != "" {
+		durations = append(durations, durationInput{"providerBuild.sessionIdleConnTimeout", input.ProviderBuild.SessionIdleConnTimeout, func(value time.Duration) { next.ProviderBuild.SessionIdleConnTimeout = value }})
+	}
 	if strings.TrimSpace(input.ProviderBuild.ResponseHeaderTimeout) != "" {
 		durations = append(durations, durationInput{"providerBuild.responseHeaderTimeout", input.ProviderBuild.ResponseHeaderTimeout, func(value time.Duration) { next.ProviderBuild.ResponseHeaderTimeout = value }})
 	}

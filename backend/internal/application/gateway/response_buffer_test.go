@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/chenyme/grok2api/backend/internal/application/selector"
+	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	"io"
 	"net/http"
 	"strings"
@@ -98,7 +100,7 @@ func TestStreamPrefixReleasesReservationOnReadAndAbort(t *testing.T) {
 }
 
 func TestProviderResourceFailureDoesNotRotateAccount(t *testing.T) {
-	for _, cause := range []error{responsebuffer.ErrExhausted, responsebuffer.ErrLimit} {
+	for _, cause := range []error{responsebuffer.ErrExhausted, responsebuffer.ErrLimit, fmt.Errorf("%w: %w", historydomain.ErrHistoryPrepare, responsebuffer.ErrExhausted), fmt.Errorf("%w: %w", historydomain.ErrHistoryPrepare, responsebuffer.ErrLimit)} {
 		failure := newTransportUpstreamFailure(cause, 1, "account")
 		if failure.Code != "response_resource_exhausted" && failure.Code != "response_too_large" {
 			t.Fatalf("misclassified: %s", failure.Code)

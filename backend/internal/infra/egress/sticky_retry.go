@@ -11,6 +11,8 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
+	"github.com/chenyme/grok2api/backend/internal/port/physical"
 )
 
 // do retries only the connection phase of a proxy-pool request.
@@ -91,7 +93,11 @@ func (l *Lease) submitPhysical(request *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	meta := physical.MetaFromContext(request.Context())
+	traceCtx, finishTrace := requestdiag.Network(request.Context(), meta.Plane, meta.Stage)
+	request = request.WithContext(traceCtx)
 	response, err := l.client.Do(request)
+	finishTrace(exchangeStatus(response), err)
 	if err != nil || response == nil || response.Body == nil {
 		finish()
 	} else {

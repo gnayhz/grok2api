@@ -10,6 +10,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	historydomain "github.com/chenyme/grok2api/backend/internal/domain/history"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestdiag"
 )
 
 // completionState serializes the success barrier and its receipts. A later
@@ -79,7 +80,12 @@ func (d *deliverySession) commitCompletion(facts Completion) error {
 		return c.err
 	}
 	if d.response.CommitOutput != nil {
-		if err := d.response.CommitOutput(); err != nil {
+		started := time.Now()
+		err := d.response.CommitOutput()
+		requestdiag.Stage(d.ctx, "history_commit", started)
+		if err != nil {
+			stage, reason := historydomain.FailureDiagnostic(err)
+			requestdiag.Failure(d.ctx, "history", stage, reason)
 			c.history = "failed"
 			c.err = fmt.Errorf("%w: %w: %w", inferencedomain.ErrCompletionCommit, historydomain.ErrHistoryCommit, err)
 			return c.err
