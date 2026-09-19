@@ -77,7 +77,7 @@ func TestPostgresRowLockCannotStarveOtherDeadline(t *testing.T) {
 	}
 	cfg := DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
-	policy := policyFor(cfg, now.Add(-time.Hour))
+	policy := caseProofPolicy(711, model.EpochKey{}, model.Observation{}, now.Add(-time.Hour), cfg)
 	raw, err := json.Marshal(map[string]any{"policy": policy})
 	if err != nil {
 		t.Fatal(err)

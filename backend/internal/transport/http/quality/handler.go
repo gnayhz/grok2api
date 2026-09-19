@@ -29,8 +29,7 @@ type Deps struct {
 	// DialerDistribution 拨号选择分布(G10;nil=拨号策略未注入)。
 	DialerDistribution func() map[string]map[uint64]uint64
 	// Tunables 运行参数面(批7 面板可调承诺;nil=只读默认)。
-	Tunables         TunablesStore
-	RotationCapacity func() int
+	Tunables TunablesStore
 }
 
 // Handler 暴露质量防护四入口。
@@ -335,14 +334,7 @@ func (h *Handler) getProbes(c *gin.Context) {
 			"id": task.ID, "case_id": task.CaseID, "direction": string(task.Direction),
 			"experiment": task.Experiment,
 			"defendant":  task.Defendant, "node_id": task.NodeID, "epoch": task.Epoch,
-			// node_id/epoch are the comparison target for account
-			// differentials; baseline_* is the original degraded path.
-			"baseline_node_id": task.BaselineNodeID, "baseline_epoch": task.BaselineEpoch,
-			"verified_ip_change": task.VerifiedIPChange,
-			"control_account_id": task.ControlAccountID, "control_node_id": task.ControlNodeID, "control_epoch": task.ControlEpoch,
-			"failure_kind": task.FailureKind, "path_key": task.PathKey, "control_outcome": task.ControlOutcome,
-			"control_detail": task.ControlDetail, "control_path_key": task.ControlPathKey, "control_verified": task.ControlVerified,
-			"juror": task.Juror, "state": string(task.State), "result": string(task.Result),
+			"state": string(task.State), "result": string(task.Result),
 			"detail": task.Detail, "created_at": task.CreatedAt,
 		}
 		if task.ResourceCheck != nil {

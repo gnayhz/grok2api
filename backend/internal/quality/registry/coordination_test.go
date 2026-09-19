@@ -130,7 +130,7 @@ func TestCoordinatorFencesOldWriterAfterTakeover(t *testing.T) {
 func TestProbeTaskInheritsFrozenCaseExperiment(t *testing.T) {
 	r := newReconcileRegistry(t)
 	ctx := context.Background()
-	spec := model.ProbeExperiment{Version: model.ProbeExperimentVersion, TriggerEventID: "trigger", Sample: "ordering"}
+	spec := model.ProbeExperiment{Version: model.ResourceCheckVersion, TriggerEventID: "trigger", Sample: "ordering"}
 	raw, err := json.Marshal(map[string]any{"policy": map[string]any{"experiment": spec}})
 	if err != nil {
 		t.Fatal(err)

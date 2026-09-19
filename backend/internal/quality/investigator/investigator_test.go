@@ -2,8 +2,7 @@ package investigator
 
 import (
 	"context"
-	"errors"
-	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+
 	"path/filepath"
 	"sync"
 	"testing"
@@ -96,178 +95,12 @@ func (r *memRecorder) Record(_ context.Context, obs model.Observation) error {
 	return r.fail
 }
 
-// TestDispatchForCaseBudget 锚定立案即派+预算:差分×健康出口上限+
-// 陪审员×被告出口,预算内截断。
-func TestDispatchForCaseBudget(t *testing.T) {
-	store := newMemStore()
-	service := New(Config{DifferentialExits: 2, JurorsPerExit: 3, ProbeBudget: 5}, store, &memRecorder{})
-	spec := DispatchSpec{
-		CaseID:    9,
-		Defendant: 42,
-		HealthyExits: []model.EpochKey{
-			{NodeID: 1}, {NodeID: 2}, {NodeID: 3},
-		},
-		CoRemandedExits: []model.EpochKey{{NodeID: 7}, {NodeID: 8}},
-		Jurors:          []uint64{100, 101, 102, 103},
-	}
-	dispatched, err := service.DispatchForCase(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 差分 2(上限)+陪审员 min(3×2, 余预算 3)=5。
-	if dispatched != 5 {
-		t.Fatalf("预算内派发 = %d, want 5", dispatched)
-	}
-	var differential, jury int
-	for _, task := range store.tasks {
-		switch task.Direction {
-		case model.ProbeAccountDifferential:
-			differential++
-		case model.ProbeExitJury:
-			jury++
-		}
-	}
-	if differential != 2 || jury != 3 {
-		t.Fatalf("差分 %d 陪审 %d", differential, jury)
-	}
-}
-
-// TestDispatchForCaseCarriesDifferentialPaths 锚定差分任务的路径语义:
-// baseline 是原始降智出口,defendant node/epoch 是对比出口;同一对比节点
-// 的不同 epoch 不能在同一轮重复占槽。
-func TestDispatchForCaseCarriesDifferentialPaths(t *testing.T) {
-	store := newMemStore()
-	service := New(DefaultConfig(), store, &memRecorder{})
-	dispatched, err := service.DispatchForCase(context.Background(), DispatchSpec{
-		CaseID: 10, Defendant: 42,
-		BaselineExit: model.EpochKey{NodeID: 116, Epoch: 0},
-		HealthyExits: []model.EpochKey{
-			{NodeID: 107, Epoch: 138},
-			{NodeID: 107, Epoch: 139},
-			{NodeID: 111, Epoch: 0},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dispatched != 2 {
-		t.Fatalf("同节点不同 epoch 只能保留一个对比目标, dispatched=%d", dispatched)
-	}
-	if len(store.tasks) != 2 {
-		t.Fatalf("tasks=%+v", store.tasks)
-	}
-	for _, task := range store.tasks {
-		if task.Direction != model.ProbeAccountDifferential {
-			t.Fatalf("unexpected task=%+v", task)
-		}
-		if task.BaselineNodeID != 116 || task.BaselineEpoch != 0 {
-			t.Fatalf("baseline path lost: %+v", task)
-		}
-		if task.DefendantNodeID == 116 {
-			t.Fatalf("comparison target must not equal baseline: %+v", task)
-		}
-	}
-}
-
-func TestDispatchForCaseUsesOnlyCoreProbeGroups(t *testing.T) {
-	store := newMemStore()
-	service := New(DefaultConfig(), store, &memRecorder{})
-	dispatched, err := service.DispatchForCase(context.Background(), DispatchSpec{
-		CaseID: 11, Defendant: 42,
-		BaselineExit:    model.EpochKey{NodeID: 9, Epoch: 2},
-		HealthyExits:    []model.EpochKey{{NodeID: 1}, {NodeID: 2}, {NodeID: 3}, {NodeID: 4}},
-		CoRemandedExits: []model.EpochKey{{NodeID: 9, Epoch: 2}},
-		Jurors:          []uint64{100, 101, 102, 103},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dispatched != 7 || len(store.tasks) != 7 {
-		t.Fatalf("simple round must dispatch 3 differential + 4 jury tasks, dispatched=%d tasks=%d", dispatched, len(store.tasks))
-	}
-	var differential, jury int
-	for _, task := range store.tasks {
-		switch task.Direction {
-		case model.ProbeAccountDifferential:
-			differential++
-		case model.ProbeExitJury:
-			jury++
-		default:
-			t.Fatalf("unexpected probe direction in simple round: %+v", task)
-		}
-	}
-	if differential != 3 || jury != 4 {
-		t.Fatalf("simple probe groups = differential %d jury %d", differential, jury)
-	}
-}
-
 // TestDispatchForCaseRequiresStore 锚定调查局组装契约:未接任务存储时
 // 必须返回可诊断错误,不能在立案路径上 nil pointer panic。
 func TestDispatchForCaseRequiresStore(t *testing.T) {
-	service := New(DefaultConfig(), nil, &memRecorder{})
+	service := New(nil, &memRecorder{})
 	if _, err := service.DispatchForCase(context.Background(), DispatchSpec{CaseID: 1, Defendant: 7}); err == nil {
 		t.Fatal("缺少任务存储时必须返回错误")
-	}
-}
-
-// TestAdmissibleI8 锚定 I8:差分 degraded 结论必须验证出口 IP 真的变了;
-// clean 结论可直接作为洗冤证据,传输错误不可采。
-func TestAdmissibleI8(t *testing.T) {
-	if ok, reason := Admissible(model.ProbeAccountDifferential, model.ProbeTaskResult{
-		Outcome: model.ProbeResultClean, VerifiedIPChange: false,
-	}); !ok || reason != "" {
-		t.Fatalf("差分 clean 结论应可采, ok=%v reason=%q", ok, reason)
-	}
-	if ok, reason := Admissible(model.ProbeAccountDifferential, model.ProbeTaskResult{
-		Outcome: model.ProbeResultDegraded, VerifiedIPChange: false,
-	}); ok || reason != "differential_without_ip_change_verification" {
-		t.Fatalf("未验证 IP 变化的差分 degraded 结论必须不可采, ok=%v reason=%q", ok, reason)
-	}
-	// 陪审员方向不涉 IP 变化验证(同一出口是探测对象本身)。
-	if ok, _ := Admissible(model.ProbeExitJury, model.ProbeTaskResult{
-		Outcome: model.ProbeResultDegraded,
-	}); !ok {
-		t.Fatal("陪审员结论可采")
-	}
-	if ok, _ := Admissible(model.ProbeExitJury, model.ProbeTaskResult{
-		Outcome: model.ProbeResultError,
-	}); ok {
-		t.Fatal("传输错误不可采(I10)")
-	}
-	if ok, reason := Admissible(model.ProbeExitJury, model.ProbeTaskResult{}); ok || reason != "unknown_probe_result" {
-		t.Fatalf("未知探针结果不得升级为 clean 证据, ok=%v reason=%q", ok, reason)
-	}
-}
-
-// TestRunDueRecordsProbeObservations 执行器结论入账证据局
-// (source=probe),不可采结论标失败不入账。
-func TestRunDueRecordsProbeObservations(t *testing.T) {
-	store := newMemStore()
-	service := New(DefaultConfig(), store, &memRecorder{})
-	// 两个任务:可采的陪审员降智 + 不可采的差分。
-	id1, _ := store.CreateProbeTask(context.Background(), model.ProbeTask{
-		CaseID: 1, Direction: model.ProbeExitJury, DefendantAccountID: 7,
-		DefendantNodeID: 5, JurorAccountID: 88,
-	})
-	id2, _ := store.CreateProbeTask(context.Background(), model.ProbeTask{
-		CaseID: 1, Direction: model.ProbeAccountDifferential, DefendantAccountID: 7,
-		DefendantNodeID: 5,
-	})
-	recorder := &memRecorder{}
-	service = New(DefaultConfig(), store, recorder)
-	executor := stubExecutor{results: map[uint64]model.ProbeTaskResult{
-		id1: {Outcome: model.ProbeResultDegraded, Detail: "jury_rule"},
-		id2: {Outcome: model.ProbeResultDegraded, VerifiedIPChange: false},
-	}}
-	if _, err := service.runDue(context.Background(), executor, 8); err != nil {
-		t.Fatal(err)
-	}
-	if len(recorder.obs) != 1 {
-		t.Fatalf("只有可采结论入账 = %d", len(recorder.obs))
-	}
-	obs := recorder.obs[0]
-	if obs.Source != model.SourceProbe || obs.AccountID != 88 || obs.Exit.NodeID != 5 || obs.Outcome != model.OutcomeDegraded {
-		t.Fatalf("陪审员观测主体应是陪审员: %+v", obs)
 	}
 }
 
@@ -287,7 +120,7 @@ func (staggeredExecutor) Execute(_ context.Context, task model.ProbeTask) (model
 func TestRunDuePersistsEachTaskAtItsOwnCompletion(t *testing.T) {
 	store := newMemStore()
 	recorder := &memRecorder{}
-	service := New(DefaultConfig(), store, recorder)
+	service := New(store, recorder)
 	for i := 0; i < 2; i++ {
 		if _, err := store.CreateProbeTask(context.Background(), model.ProbeTask{
 			CaseID: 1, Direction: model.ProbeExitJury, DefendantNodeID: 5, JurorAccountID: uint64(80 + i),
@@ -330,33 +163,6 @@ func TestRunDuePersistsEachTaskAtItsOwnCompletion(t *testing.T) {
 	}
 	if store.completions[0].finishedAt.Equal(store.completions[1].finishedAt) {
 		t.Fatal("completion timestamps must not be stamped once at batch end")
-	}
-}
-
-// TestRunDueRetainsMeasurementWhenAggregateWriteFails 锚定证据一致性:
-// 观测入账失败时探针不能伪装成 done,否则法院会把不存在的 clean 证据
-// 用于洗冤/翻案。
-func TestRunDueRetainsMeasurementWhenAggregateWriteFails(t *testing.T) {
-	store := newMemStore()
-	recorder := &memRecorder{fail: errors.New("evidence store unavailable")}
-	service := New(DefaultConfig(), store, recorder)
-	id, err := store.CreateProbeTask(context.Background(), model.ProbeTask{
-		CaseID: 1, Direction: model.ProbeExitJury, DefendantAccountID: 7,
-		DefendantNodeID: 5, JurorAccountID: 88,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.runDue(context.Background(), stubExecutor{results: map[uint64]model.ProbeTaskResult{
-		id: {Outcome: model.ProbeResultClean, Detail: "jury_clean"},
-	}}, 1); err == nil {
-		t.Fatal("证据写入失败必须向调用方可见")
-	}
-	if state := store.states[id]; state != model.ProbeDone {
-		t.Fatalf("聚合写入失败不能抹去已持久化的测试结果, got %s", state)
-	}
-	if len(store.completions) != 1 || store.completions[0].state != model.ProbeDone {
-		t.Fatalf("测试结果仍应落 done, got %+v", store.completions)
 	}
 }
 
@@ -416,7 +222,7 @@ func (deadlineExecutor) Execute(ctx context.Context, task model.ProbeTask) (mode
 // 后,结论写回必须用独立上下文照常落地——不得遗留 running。
 func TestRunDueSurvivesBatchDeadline(t *testing.T) {
 	store := newMemStore()
-	svc := New(DefaultConfig(), store, &memRecorder{})
+	svc := New(store, &memRecorder{})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	id, err := store.CreateProbeTask(ctx, model.ProbeTask{Direction: model.ProbeExitJury, JurorAccountID: 1})
@@ -451,7 +257,7 @@ func TestRunDueWriteWindowIndependentOfExecution(t *testing.T) {
 	probeWriteTimeout = 30 * time.Millisecond
 	defer func() { probeWriteTimeout = orig }()
 	store := newMemStore()
-	svc := New(DefaultConfig(), store, &memRecorder{})
+	svc := New(store, &memRecorder{})
 	ctx := context.Background()
 	if _, err := store.CreateProbeTask(ctx, model.ProbeTask{Direction: model.ProbeExitJury, JurorAccountID: 1}); err != nil {
 		t.Fatal(err)
@@ -479,7 +285,7 @@ func (e midFlightCancelExecutor) Execute(_ context.Context, task model.ProbeTask
 // ——RunDue 不报错,行保持 cancelled。
 func TestRunDueLateConclusionDoesNotResurrectCancelled(t *testing.T) {
 	store := newMemStore()
-	svc := New(DefaultConfig(), store, &memRecorder{})
+	svc := New(store, &memRecorder{})
 	ctx := context.Background()
 	id, err := store.CreateProbeTask(ctx, model.ProbeTask{Direction: model.ProbeExitJury, JurorAccountID: 1})
 	if err != nil {
@@ -495,13 +301,5 @@ func TestRunDueLateConclusionDoesNotResurrectCancelled(t *testing.T) {
 		if c.taskID == id {
 			t.Fatal("已中止任务不得产生完成记录(复活)")
 		}
-	}
-}
-
-func TestProbeObservationRetainsActualAttemptInsteadOfTaskPlan(t *testing.T) {
-	actual := attemptmeta.Identity{ID: "probe/1", AccountID: 13, Revision: 7, RuleVersion: "r1", Path: attemptmeta.Path{NodeID: 31, Epoch: 4, Status: attemptmeta.PathRegistered}}
-	obs := observationFromResult(model.ProbeTask{DefendantAccountID: 99, DefendantNodeID: 98, DefendantEpoch: 97}, model.ProbeTaskResult{Outcome: model.ProbeResultError, Attempt: actual}, time.Now())
-	if obs.AccountID != 13 || obs.Exit.NodeID != 31 || obs.Exit.Epoch != 4 || obs.Attempt != actual {
-		t.Fatalf("rewrote physical identity: %+v", obs)
 	}
 }

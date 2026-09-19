@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -161,7 +163,7 @@ func TestQualityProbePreparationReleasesAllUnhandedCapacity(t *testing.T) {
 					var recovered any
 					func() {
 						defer func() { recovered = recover() }()
-						result := f.gateway.ProbeExitJury(qualitymodel.WithProbeIdentity(context.Background(), 91, true), f.accountID, 0)
+						result := (gateway.ResourceCheckMeasurer{Gateway: f.gateway, Paths: preparationMustNotReachPath{t}}).MeasureResourceCheck(qualitymodel.WithProbeExperiment(qualitymodel.WithProbeIdentity(context.Background(), 91, true), qualitymodel.NewProbeExperiment(qualitymodel.Observation{Attempt: attemptmeta.Identity{Provider: "grok_build", Model: f.model, RuleVersion: "fictional-rule"}})), f.accountID, 1)
 						if result.Outcome != qualitymodel.MeasurementError || result.Failure != qualitymodel.ProbeFailureCredential {
 							t.Errorf("failure classification=%+v", result)
 						}
@@ -179,4 +181,11 @@ func TestQualityProbePreparationReleasesAllUnhandedCapacity(t *testing.T) {
 			}
 		}
 	}
+}
+
+type preparationMustNotReachPath struct{ t *testing.T }
+
+func (p preparationMustNotReachPath) ProbeBuildTarget(context.Context, account.Credential, uint64) (string, int, uint64, error) {
+	p.t.Error("credential preparation failure reached a network path probe")
+	return "", 0, 0, errors.New("unexpected path call")
 }

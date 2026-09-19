@@ -32,15 +32,3 @@ const (
 	ProbeFailureCompletion       ProbeFailure = "unknown/completion/error"
 	ProbeFailureCompletionBudget ProbeFailure = "local/completion/deadline"
 )
-
-// SupportsAvailability permits only failures observed on the upstream response
-// boundary. It does not establish attribution: identity, independent paths and
-// matched controls still have to satisfy the court's experiment protocol.
-func (f ProbeFailure) SupportsAvailability() bool {
-	switch f {
-	case ProbeFailureHTTPServer, ProbeFailureCreatedTimeout, ProbeFailureEvidenceTimeout,
-		ProbeFailureEmptyStream, ProbeFailureTruncatedStream:
-		return true
-	}
-	return false
-}

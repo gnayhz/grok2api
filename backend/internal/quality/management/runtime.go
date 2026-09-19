@@ -6,17 +6,13 @@ import (
 	"time"
 
 	qualitycourt "github.com/chenyme/grok2api/backend/internal/quality/court"
-	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 // Runtime applies evidence first because expanding its window can fail. Case
 // policy already captured when opening a case remains unchanged.
 type Runtime struct {
-	Court        interface{ SetConfig(qualitycourt.Config) }
-	Investigator interface {
-		SetConfig(qualityinvestigator.Config)
-	}
+	Court    interface{ SetConfig(qualitycourt.Config) }
 	Evidence interface {
 		SetConfigContext(context.Context, qualitymodel.EvidenceConfig) error
 	}
@@ -38,19 +34,7 @@ func (s Runtime) Apply(ctx context.Context, t Config) error {
 	}
 	if s.Court != nil {
 		s.Court.SetConfig(qualitycourt.Config{
-			AccountNeedExits:     t.AccountNeedExits,
-			AccountSpanNodes:     t.AccountSpanNodes,
-			ExitNeedN:            t.ExitNeedN,
-			ExitNeedK:            t.ExitNeedK,
-			JurorCount:           t.JurorsPerExit,
 			InvestigationTimeout: d.investigationTimeout,
-		})
-	}
-	if s.Investigator != nil {
-		s.Investigator.SetConfig(qualityinvestigator.Config{
-			DifferentialExits: t.DifferentialExits,
-			JurorsPerExit:     t.JurorsPerExit,
-			ProbeBudget:       t.ProbeBudget,
 		})
 	}
 	return nil

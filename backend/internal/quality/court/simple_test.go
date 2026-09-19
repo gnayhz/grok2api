@@ -2,8 +2,7 @@ package court
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+
 	"testing"
 	"time"
 
@@ -21,62 +20,20 @@ type recordingSimpleTaskDispatcher struct {
 }
 
 func (d *recordingSimpleTaskDispatcher) DispatchForCase(ctx context.Context, spec DispatchSpec) (int, error) {
-	d.specs = append(d.specs, DispatchSpec{
-		CaseID:          spec.CaseID,
-		Defendant:       spec.Defendant,
-		BaselineExit:    spec.BaselineExit,
-		HealthyExits:    append([]model.EpochKey(nil), spec.HealthyExits...),
-		CoRemandedExits: append([]model.EpochKey(nil), spec.CoRemandedExits...),
-		Jurors:          append([]uint64(nil), spec.Jurors...),
-	})
+	d.specs = append(d.specs, spec)
 	return (simpleTaskDispatcher{store: d.store}).DispatchForCase(ctx, spec)
 }
-
 func (d simpleTaskDispatcher) DispatchForCase(ctx context.Context, spec DispatchSpec) (int, error) {
-	if spec.Proof {
-		_, err := d.store.CreateProbeTask(ctx, model.ProbeTask{CaseID: spec.CaseID, Direction: model.ProbeCaseProof, DefendantAccountID: spec.Defendant, DefendantNodeID: spec.BaselineExit.NodeID, DefendantEpoch: spec.BaselineExit.Epoch, BaselineNodeID: spec.BaselineExit.NodeID, BaselineEpoch: spec.BaselineExit.Epoch})
-		return 1, err
-	}
-	count := 0
-	for _, exit := range spec.HealthyExits {
-		id, err := d.store.CreateProbeTask(ctx, model.ProbeTask{
-			CaseID: spec.CaseID, Direction: model.ProbeAccountDifferential,
-			ControlAccountID: 99, ControlNodeID: exit.NodeID, ControlEpoch: exit.Epoch,
-			DefendantAccountID: spec.Defendant, DefendantNodeID: exit.NodeID,
-			DefendantEpoch: exit.Epoch, BaselineNodeID: spec.BaselineExit.NodeID,
-			BaselineEpoch: spec.BaselineExit.Epoch,
-		})
-		if err != nil {
-			return count, err
-		}
-		_ = id
-		count++
-		if count == 3 {
-			break
-		}
-	}
-	for _, exit := range spec.CoRemandedExits {
-		for i, juror := range spec.Jurors {
-			if i == 4 {
-				break
-			}
-			if _, err := d.store.CreateProbeTask(ctx, model.ProbeTask{
-				CaseID: spec.CaseID, Direction: model.ProbeExitJury,
-				DefendantAccountID: spec.Defendant, DefendantNodeID: exit.NodeID,
-				DefendantEpoch: exit.Epoch, JurorAccountID: juror,
-				ControlAccountID: juror, ControlNodeID: 99,
-			}); err != nil {
-				return count, err
-			}
-			count++
-		}
-	}
-	return count, nil
+	_, err := d.store.CreateProbeTask(ctx, model.ProbeTask{CaseID: spec.CaseID, Direction: model.ProbeCaseProof, DefendantAccountID: spec.Defendant, DefendantNodeID: spec.BaselineExit.NodeID, DefendantEpoch: spec.BaselineExit.Epoch, BaselineNodeID: spec.BaselineExit.NodeID, BaselineEpoch: spec.BaselineExit.Epoch})
+	return 1, err
+}
+func reportTestIncident(s *Service, ctx context.Context, account uint64, exit model.EpochKey) error {
+	return s.ReportDegradedObservation(ctx, model.Observation{At: time.Now().UTC(), AccountID: account, Exit: exit, Attempt: experimentIdentity("fictional-trigger", account, exit.NodeID, exit.Epoch)})
 }
 
 func openSimpleTestCase(t *testing.T, service *Service, reg *registry.Registry) uint64 {
 	t.Helper()
-	if err := service.ReportDegraded(context.Background(), 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, context.Background(), 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
 	cases, err := reg.ListOpenCases(context.Background())
@@ -89,47 +46,53 @@ func openSimpleTestCase(t *testing.T, service *Service, reg *registry.Registry) 
 	return cases[0].ID
 }
 
+// Translate the synthetic account/exit world into the same complete proof
+// certificates used by the production executor. No vote counts are involved.
 func settleSimpleTestTasks(t *testing.T, reg *registry.Registry, caseID uint64, result func(model.ProbeTaskView) model.ProbeTaskResult) {
 	t.Helper()
+	ctx := context.Background()
 	store := registry.NewProbeTaskStore(reg)
-	claimed, err := store.ClaimPendingProbeTasks(context.Background(), 32)
+	claimed, err := store.ClaimPendingProbeTasks(ctx, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(claimed) == 0 {
-		t.Fatal("simple case must create probe tasks")
-	}
-	views, err := store.ListProbeTasksForCase(context.Background(), caseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	byID := make(map[uint64]model.ProbeTaskView, len(views))
-	for _, view := range views {
-		byID[view.ID] = view
+		t.Fatal("case must create proof task")
 	}
 	for _, task := range claimed {
-		measured := result(byID[task.ID])
-		accountID := task.DefendantAccountID
-		if task.Direction == model.ProbeExitJury {
-			accountID = task.JurorAccountID
+		if task.CaseID != caseID {
+			continue
 		}
-		measured.Attempt = experimentIdentity(fmt.Sprintf("main-%d", task.ID), accountID, task.DefendantNodeID, task.DefendantEpoch)
-		measured.ControlAttempt = experimentIdentity(fmt.Sprintf("control-%d", task.ID), task.ControlAccountID, task.ControlNodeID, task.ControlEpoch)
-		measured.PathKey = fmt.Sprintf("path-%d", task.DefendantNodeID)
-		measured.ControlOutcome = model.ProbeResultClean
-		measured.ControlVerified = true
-		measured.ControlPathKey = fmt.Sprintf("path-%d", task.ControlNodeID)
-		if measured.Outcome == model.ProbeResultClean {
-			measured.VerifiedIPChange = true
-		}
-		if measured.Detail == "created_timeout" || measured.Detail == "upstream_http" {
-			measured.FailureKind = string(model.ProbeFailureCreatedTimeout)
-			if measured.Detail == "upstream_http" {
-				measured.FailureKind = string(model.ProbeFailureHTTPServer)
+		account := result(model.ProbeTaskView{Direction: model.ProbeAccountDifferential})
+		exit := result(model.ProbeTaskView{Direction: model.ProbeExitJury})
+		now := time.Now().UTC()
+		var observations []model.ResourceObservation
+		if account.Outcome != model.ProbeResultError && exit.Outcome != model.ProbeResultError {
+			a, n := task.DefendantAccountID, task.BaselineNodeID
+			otherA, otherN := uint64(8), uint64(4)
+			if otherA == a {
+				otherA++
 			}
-			measured.VerifiedIPChange = true
+			if otherN == n {
+				otherN++
+			}
+			ac, ec := "A", "A"
+			if account.Outcome == model.ProbeResultDegraded {
+				ac = "B"
+			}
+			if exit.Outcome == model.ProbeResultDegraded {
+				ec = "B"
+			}
+			observations = []model.ResourceObservation{caseProofObservation(task.Experiment, 1, otherA, otherN, "A"), caseProofObservation(task.Experiment, 2, a, otherN, ac), caseProofObservation(task.Experiment, 3, otherA, n, ec)}
 		}
-		if err := store.CompleteProbeTask(context.Background(), task.ID, model.ProbeDone, measured, time.Now().UTC()); err != nil {
+		r := caseProofReport(task.Experiment, now, observations)
+		for i := 1; i <= len(observations); i++ {
+			r.Calls, r.Revision = i, uint64(i)
+			if err := store.SaveResourceCheckProgress(ctx, task.ID, r); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.CompleteProbeTask(ctx, task.ID, model.ProbeDone, model.ProbeTaskResult{ResourceCheck: &r}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -192,20 +155,6 @@ func TestSimpleCourtExitConvictionBansIncidentExit(t *testing.T) {
 	records, err := bench.registry.ListRecentCases(context.Background(), 10)
 	if err != nil || len(records) != 1 || records[0].Verdict != model.VerdictExitGuilty {
 		t.Fatalf("exit conviction must close with explicit verdict: records=%+v err=%v", records, err)
-	}
-}
-
-func TestSimpleCourtCancelledTasksAreNotExecutionFailures(t *testing.T) {
-	// summarizePlanningProgress 包装已删;直接组合 assessExperiment+planningProgressFor(与被删包装逐字段等价)。
-	summary := planningProgressFor(assessExperiment([]model.ProbeTaskView{
-		{Direction: model.ProbeExitJury, State: model.ProbeCancelled},
-		{Direction: model.ProbeAccountDifferential, State: model.ProbeCancelled},
-	}, policyFor(DefaultConfig(), time.Time{})))
-	if summary.JuryFailed != 0 || summary.DiffFailed != 0 || summary.DiffTransportFailed != 0 {
-		t.Fatalf("cancelled tasks must remain distinct from failures: %+v", summary)
-	}
-	if summary.JuryTasks != 1 || summary.DiffTasks != 1 {
-		t.Fatalf("cancelled tasks should remain visible as attempts: %+v", summary)
 	}
 }
 
@@ -290,154 +239,6 @@ func TestSimpleCourtDeadlineClosesStuckPendingCase(t *testing.T) {
 	}
 }
 
-func TestSimpleCourtRepeatedDifferentialTransportSupportsAccount(t *testing.T) {
-	bench := newBench(t)
-	store := registry.NewProbeTaskStore(bench.registry)
-	cfg := DefaultConfig()
-	cfg.EvaluateEvery = time.Hour
-	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
-	t.Cleanup(func() { _ = service.Close(context.Background()) })
-	caseID := openSimpleTestCase(t, service, bench.registry)
-	settleSimpleCaseUntilClosed(t, service, bench.registry, caseID, func(task model.ProbeTaskView) model.ProbeTaskResult {
-		if task.Direction == model.ProbeExitJury {
-			return model.ProbeTaskResult{Outcome: model.ProbeResultClean, Detail: "jury_clean"}
-		}
-		return model.ProbeTaskResult{Outcome: model.ProbeResultError, Detail: "created_timeout"}
-	})
-	if bench.registry.AccountState(7).State != model.AccountSentenced {
-		t.Fatal("a clean jury plus repeated defendant-only transport failures must identify the account")
-	}
-	if bench.registry.ExitStateOfCurrentEpoch(3).State != model.ExitAvailable {
-		t.Fatal("account attribution must release the incident exit")
-	}
-	records, err := bench.registry.ListRecentCases(context.Background(), 10)
-	if err != nil || len(records) != 1 || records[0].Verdict != model.VerdictAccountGuilty {
-		t.Fatalf("repeated differential transport pattern must produce account verdict: records=%+v err=%v", records, err)
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(records[0].EvidenceJSON), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload["rule"] != "account_availability_pattern" || payload["assessment"] == nil {
-		t.Fatalf("verdict must expose the weak transport signal separately: payload=%v", payload)
-	}
-}
-
-func TestSimpleCourtReplacesFailedDifferentialsWithUntestedExits(t *testing.T) {
-	bench := newBench(t)
-	store := registry.NewProbeTaskStore(bench.registry)
-	dispatcher := &recordingSimpleTaskDispatcher{store: store}
-	cfg := DefaultConfig()
-	cfg.EvaluateEvery = time.Hour
-	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, dispatcher)
-	t.Cleanup(func() { _ = service.Close(context.Background()) })
-	caseID := openSimpleTestCase(t, service, bench.registry)
-
-	initialTasks, err := store.ListProbeTasksForCase(context.Background(), caseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	initialDiffNodes := make(map[uint64]struct{})
-	initialDifferentials := 0
-	for _, task := range initialTasks {
-		if task.Direction == model.ProbeAccountDifferential {
-			initialDiffNodes[task.NodeID] = struct{}{}
-			initialDifferentials++
-		}
-	}
-	if initialDifferentials != cfg.AccountNeedExits {
-		t.Fatalf("expected one initial differential per target exit, got %d tasks=%+v", initialDifferentials, initialTasks)
-	}
-
-	firstDifferential := true
-	settleSimpleTestTasks(t, bench.registry, caseID, func(task model.ProbeTaskView) model.ProbeTaskResult {
-		if task.Direction == model.ProbeExitJury {
-			return model.ProbeTaskResult{Outcome: model.ProbeResultClean, Detail: "jury_clean"}
-		}
-		if firstDifferential {
-			firstDifferential = false
-			return model.ProbeTaskResult{Outcome: model.ProbeResultDegraded, VerifiedIPChange: true, Detail: "valid_degraded"}
-		}
-		return model.ProbeTaskResult{Outcome: model.ProbeResultError, Detail: "path_unobserved"}
-	})
-
-	stats, err := service.Evaluate(context.Background(), time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.Retried != 2 {
-		t.Fatalf("two failed comparison paths must be replaced, stats=%+v", stats)
-	}
-	if len(dispatcher.specs) != 2 || len(dispatcher.specs[1].HealthyExits) != 2 {
-		t.Fatalf("replacement dispatch must contain exactly the missing comparison paths, specs=%+v", dispatcher.specs)
-	}
-
-	tasks, err := store.ListProbeTasksForCase(context.Background(), caseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending := make([]model.ProbeTaskView, 0, 2)
-	failed := 0
-	for _, task := range tasks {
-		if task.State == model.ProbePending {
-			pending = append(pending, task)
-		}
-		if task.Direction == model.ProbeAccountDifferential && task.Result == model.ProbeResultError {
-			failed++
-		}
-	}
-	if len(pending) != 2 || failed != 2 {
-		t.Fatalf("failed paths must remain history while two replacements wait, pending=%+v failed=%d tasks=%+v", pending, failed, tasks)
-	}
-	seenReplacementNodes := make(map[uint64]struct{}, len(pending))
-	for _, task := range pending {
-		if task.Direction != model.ProbeAccountDifferential {
-			t.Fatalf("replacement must stay in account differential direction: %+v", task)
-		}
-		if task.BaselineNodeID != 3 || task.BaselineEpoch != 0 {
-			t.Fatalf("replacement must retain the original baseline, task=%+v", task)
-		}
-		if _, seen := initialDiffNodes[task.NodeID]; seen {
-			t.Fatalf("replacement must not reuse any tested comparison node, task=%+v initial=%v", task, initialDiffNodes)
-		}
-		if _, duplicate := seenReplacementNodes[task.NodeID]; duplicate {
-			t.Fatalf("replacement nodes must be distinct, pending=%+v", pending)
-		}
-		seenReplacementNodes[task.NodeID] = struct{}{}
-	}
-
-	settleSimpleTestTasks(t, bench.registry, caseID, func(task model.ProbeTaskView) model.ProbeTaskResult {
-		if task.Direction != model.ProbeAccountDifferential {
-			return model.ProbeTaskResult{Outcome: model.ProbeResultClean}
-		}
-		return model.ProbeTaskResult{Outcome: model.ProbeResultDegraded, VerifiedIPChange: true, Detail: "replacement_degraded"}
-	})
-	if _, err := service.Evaluate(context.Background(), time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	closed, found, err := bench.registry.GetCase(context.Background(), caseID)
-	if err != nil || !found || !closed.Status.Closed() || closed.Verdict != model.VerdictAccountGuilty {
-		t.Fatalf("valid replacement evidence must finish account attribution: case=%+v found=%v err=%v", closed, found, err)
-	}
-}
-
-func TestSimpleCourtNoControlsCannotConvict(t *testing.T) {
-	bench := newBench(t)
-	store := registry.NewProbeTaskStore(bench.registry)
-	cfg := DefaultConfig()
-	cfg.EvaluateEvery = time.Hour
-	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
-	t.Cleanup(func() { _ = service.Close(context.Background()) })
-	caseID := openSimpleTestCase(t, service, bench.registry)
-	settleSimpleCaseUntilClosed(t, service, bench.registry, caseID, func(model.ProbeTaskView) model.ProbeTaskResult {
-		return model.ProbeTaskResult{Outcome: model.ProbeResultError, Detail: "upstream_http"}
-	})
-	if bench.registry.AccountState(7).State != model.AccountActive {
-		t.Fatal("cross-face signals must not override inconclusive Build controls")
-	}
-}
-
 func TestSimpleCourtCoalescesRepeatedIncident(t *testing.T) {
 	bench := newBench(t)
 	store := registry.NewProbeTaskStore(bench.registry)
@@ -446,10 +247,10 @@ func TestSimpleCourtCoalescesRepeatedIncident(t *testing.T) {
 	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	first := model.EpochKey{NodeID: 3, Epoch: 0}
-	if err := service.ReportDegraded(context.Background(), 7, first); err != nil {
+	if err := reportTestIncident(service, context.Background(), 7, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReportDegraded(context.Background(), 7, first); err != nil {
+	if err := reportTestIncident(service, context.Background(), 7, first); err != nil {
 		t.Fatal(err)
 	}
 	cases, err := bench.registry.ListOpenCases(context.Background())
@@ -461,7 +262,7 @@ func TestSimpleCourtCoalescesRepeatedIncident(t *testing.T) {
 		t.Fatalf("same incident must not duplicate parties: parties=%d err=%v", len(parties), err)
 	}
 	tasks, err := store.ListProbeTasksForCase(context.Background(), cases[0].ID)
-	if err != nil || len(tasks) != 7 {
+	if err != nil || len(tasks) != 1 {
 		t.Fatalf("same incident must not duplicate the probe round: tasks=%d err=%v", len(tasks), err)
 	}
 }
@@ -474,10 +275,10 @@ func TestSimpleCourtStartsSeparateCaseForSameAccountOnAnotherExit(t *testing.T) 
 	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 
-	if err := service.ReportDegraded(context.Background(), 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, context.Background(), 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReportDegraded(context.Background(), 7, model.EpochKey{NodeID: 4, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, context.Background(), 7, model.EpochKey{NodeID: 4, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -509,7 +310,7 @@ func TestSimpleCourtStartsSeparateCaseForSameAccountOnAnotherExit(t *testing.T) 
 		if taskErr != nil {
 			t.Fatal(taskErr)
 		}
-		if len(tasks) != 7 {
+		if len(tasks) != 1 {
 			t.Fatalf("each incident must receive one finite probe round: case=%d tasks=%d", record.ID, len(tasks))
 		}
 	}
@@ -530,10 +331,10 @@ func TestSimpleCourtClosureSuppressionIsScopedToIncidentExit(t *testing.T) {
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	ctx := context.Background()
 
-	if err := service.ReportDegraded(ctx, 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, ctx, 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReportDegraded(ctx, 7, model.EpochKey{NodeID: 4, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, ctx, 7, model.EpochKey{NodeID: 4, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
 	cases, err := bench.registry.ListOpenCases(ctx)
@@ -615,10 +416,10 @@ func TestSimpleCourtDoesNotClearCooldownWhileAnotherCaseHoldsAccount(t *testing.
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	ctx := context.Background()
 
-	if err := service.ReportDegraded(ctx, 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, ctx, 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReportDegraded(ctx, 7, model.EpochKey{NodeID: 4, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, ctx, 7, model.EpochKey{NodeID: 4, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
 	cases, err := bench.registry.ListOpenCases(ctx)
@@ -711,10 +512,10 @@ func TestSimpleCourtReleaseRespectsAnotherCaseHoldingExit(t *testing.T) {
 	cfg.EvaluateEvery = time.Hour
 	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
-	if err := service.ReportDegraded(context.Background(), 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, context.Background(), 7, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReportDegraded(context.Background(), 8, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
+	if err := reportTestIncident(service, context.Background(), 8, model.EpochKey{NodeID: 3, Epoch: 0}); err != nil {
 		t.Fatal(err)
 	}
 	cases, err := bench.registry.ListOpenCases(context.Background())
@@ -753,15 +554,16 @@ func TestSimpleCourtReleaseRespectsAnotherCaseHoldingExit(t *testing.T) {
 
 func TestSimpleCourtPoolExitConvictionKeepsEpochHoldUntilChange(t *testing.T) {
 	bench := newBench(t)
-	if err := bench.registry.DB().Exec("UPDATE egress_nodes SET proxy_pool = 1 WHERE id = 3").Error; err != nil {
-		t.Fatal(err)
-	}
 	store := registry.NewProbeTaskStore(bench.registry)
 	cfg := DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
 	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	caseID := openSimpleTestCase(t, service, bench.registry)
+	if err := bench.registry.DB().Exec("UPDATE egress_nodes SET proxy_pool = 1 WHERE id = 3").Error; err != nil {
+		t.Fatal(err)
+	}
+
 	settleSimpleTestTasks(t, bench.registry, caseID, func(task model.ProbeTaskView) model.ProbeTaskResult {
 		if task.Direction == model.ProbeExitJury {
 			return model.ProbeTaskResult{Outcome: model.ProbeResultDegraded}
@@ -785,15 +587,16 @@ func TestSimpleCourtPoolExitConvictionKeepsEpochHoldUntilChange(t *testing.T) {
 
 func TestSimpleCourtMarksPoolPartyWithdrawnAfterEpochChange(t *testing.T) {
 	bench := newBench(t)
-	if err := bench.registry.DB().Exec("UPDATE egress_nodes SET proxy_pool = 1 WHERE id = 3").Error; err != nil {
-		t.Fatal(err)
-	}
 	store := registry.NewProbeTaskStore(bench.registry)
 	cfg := DefaultConfig()
 	cfg.EvaluateEvery = time.Hour
 	service := newFixtureCourt(cfg, bench.registry, storeSource{store: bench.evidence}, simpleTaskDispatcher{store: store})
 	t.Cleanup(func() { _ = service.Close(context.Background()) })
 	caseID := openSimpleTestCase(t, service, bench.registry)
+	if err := bench.registry.DB().Exec("UPDATE egress_nodes SET proxy_pool = 1 WHERE id = 3").Error; err != nil {
+		t.Fatal(err)
+	}
+
 	settleSimpleTestTasks(t, bench.registry, caseID, func(task model.ProbeTaskView) model.ProbeTaskResult {
 		if task.Direction == model.ProbeExitJury {
 			return model.ProbeTaskResult{Outcome: model.ProbeResultDegraded}

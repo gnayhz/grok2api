@@ -13,8 +13,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// 调查局持久任务队列。新案件只持有一个共享证明任务；历史案件
-// 按其冻结的差分/陪审计划执行。court 派发，investigator 认领和入账。
+// Durable proof queue. Retired task rows may be claimed only to persist their
+// unsupported-protocol rejection; they never run a physical measurement.
 
 // ProbeTaskStore 实现 investigator.Store(任务/结论用 model 共享词汇)。
 type ProbeTaskStore struct {

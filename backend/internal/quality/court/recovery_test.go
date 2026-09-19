@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -22,13 +23,12 @@ func TestExperimentPolicyAndDeadlineSurviveSettingsChange(t *testing.T) {
 	before, _, _ := b.registry.GetCase(context.Background(), id)
 	saved := casePolicy(before, cfg)
 	cfg.InvestigationTimeout = time.Hour
-	cfg.AccountNeedExits = 6
 	s.SetConfig(cfg)
 	views, err := s.LiveCaseViews(context.Background(), before.OpenedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := views[0].Assessment.Policy; got != saved {
+	if got := views[0].Assessment.Policy; !reflect.DeepEqual(got, saved) {
 		t.Fatalf("policy drifted: %v -> %v", saved, got)
 	}
 	if _, err := s.Evaluate(context.Background(), before.OpenedAt.Add(2*time.Minute)); err != nil {
@@ -45,7 +45,7 @@ func TestExperimentPolicyAndDeadlineSurviveSettingsChange(t *testing.T) {
 	if err := json.Unmarshal([]byte(closed.EvidenceJSON), &data); err != nil {
 		t.Fatal(err)
 	}
-	if data.Trigger != "traffic_degraded" || data.Assessment.Policy != saved || data.Assessment.Account.Cancelled == 0 {
+	if data.Trigger != "traffic_degraded" || !reflect.DeepEqual(data.Assessment.Policy, saved) {
 		t.Fatalf("closure lost incident, policy, or interrupted measurements: %+v", data)
 	}
 }

@@ -44,16 +44,17 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 		{name: "adapter capacity", forward: responsebuffer.ErrExhausted, want: model.ProbeFailureResource},
 		{name: "adapter unknown HTTP text", forward: errors.New("HTTP evidence timed out"), want: model.ProbeFailureForward},
 		{name: "admission capacity", read: responsebuffer.ErrExhausted, want: model.ProbeFailureResource},
-		{name: "admission unknown evidence text", read: errors.New("evidence_timeout"), want: model.ProbeFailureAdmission},
-		{name: "unread answer exceeds old completion limit", tail: strings.Repeat(" ", qualityProbeCompletionBytes) + completed},
+		{name: "admission unknown evidence text", read: errors.New("evidence_timeout"), want: model.ProbeFailureCompletion},
+		{name: "completed answer", tail: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" + completed},
 		{name: "persistence after success", tail: completed, persistFailure: true, want: model.ProbeFailurePersistence},
 		{name: "upstream server", status: 503, want: model.ProbeFailureHTTPServer},
 		{name: "upstream credential", status: 401, want: model.ProbeFailureHTTPRejected},
 		{name: "upstream quota", status: 429, want: model.ProbeFailureHTTPRejected},
-		{name: "empty stream", want: model.ProbeFailureEmptyStream},
+		{name: "empty stream", want: model.ProbeFailureCompletion},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			s := &Service{physicalJournals: executionapp.NewPhysicalJournalFactory()}
+			s.SetGuardSnapshotSource(StaticGuardSnapshotSource(QualityRetryRuntime{RuleVersion: "fictional-rule"}))
 			s.providers = providerimpl.NewRegistry(resourceTestAdapter{&scriptedBuildAdapter{}, func(ctx context.Context, _ provider.ResponseResourceRequest) (*provider.Response, error) {
 				if test.forward != nil {
 					return nil, test.forward
@@ -84,7 +85,9 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 			if test.want == "" {
 				s.SetQualityEventRecorder(recorder)
 			}
-			got := s.qualityProbeMeasurement(context.Background(), provider.ResponseResourceRequest{Credential: account.Credential{Provider: account.ProviderBuild}}, QualityRetryRuntime{})
+			hold, _ := s.requestGuardSnapshot()
+			spec := model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: hold.RuleVersion, Revision: hold.Revision}}
+			got := s.qualityProbeMeasurement(model.WithProbeExperiment(context.Background(), spec), provider.ResponseResourceRequest{Credential: account.Credential{ID: 7, Provider: account.ProviderBuild}, Model: "fictional-model"}, QualityRetryRuntime{})
 			wantOutcome := model.MeasurementError
 			if test.want == "" {
 				wantOutcome = model.MeasurementClean
@@ -93,8 +96,8 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 				t.Fatalf("got %+v, want %s", got, test.want)
 			}
 			if test.want == "" {
-				if len(recorder.facts) != 1 || recorder.facts[0].Status != 200 || recorder.facts[0].BodyBytes == 0 || recorder.facts[0].GenerationOutcome == "completed" {
-					t.Fatalf("early signal lost the exchange or fabricated completion: %+v", recorder.facts)
+				if len(recorder.facts) != 1 || recorder.facts[0].Status != 200 || recorder.facts[0].BodyBytes == 0 || !got.CheckEvidence.Completed {
+					t.Fatalf("complete stream lost exchange or completion: %+v", recorder.facts)
 				}
 			}
 		})
@@ -103,7 +106,7 @@ func TestProbeFailureProvenanceAtMeasurementBoundary(t *testing.T) {
 
 func TestProbeCompletionChildBudgetCannotBecomeAvailabilityEvidence(t *testing.T) {
 	kind := probeOperationFailure(context.Background(), context.DeadlineExceeded, model.ProbeFailureCompletion)
-	if kind != model.ProbeFailureCompletionBudget || kind.SupportsAvailability() {
+	if kind != model.ProbeFailureCompletionBudget {
 		t.Fatal(kind)
 	}
 }

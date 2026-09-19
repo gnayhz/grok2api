@@ -70,7 +70,7 @@ func TestProbeLifecycleRecoveryAndIndependentReaper(t *testing.T) {
 			}
 			orphan := create(0)
 			own := create(caseID)
-			service := New(DefaultConfig(), second, &memRecorder{})
+			service := New(second, &memRecorder{})
 			runCtx, cancel := context.WithCancel(ctx)
 			started := make(chan uint64, 8)
 			done := make(chan error, 1)
@@ -155,7 +155,7 @@ func (s *blockingMaintenanceStore) CancelOrphanProbes(ctx context.Context, _ str
 
 func TestProbeLifecycleWaitsForMaintenanceCancellation(t *testing.T) {
 	store := &blockingMaintenanceStore{memStore: newMemStore(), blocked: make(chan struct{}), finished: make(chan struct{})}
-	svc := New(DefaultConfig(), store, &memRecorder{})
+	svc := New(store, &memRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -185,7 +185,7 @@ func TestProbeLifecycleWaitsForMaintenanceCancellation(t *testing.T) {
 
 func TestProbeLifecycleRejectsStartupRecoveryFailure(t *testing.T) {
 	store := &blockingMaintenanceStore{memStore: newMemStore(), startupErr: errors.New("database unavailable")}
-	svc := New(DefaultConfig(), store, &memRecorder{})
+	svc := New(store, &memRecorder{})
 	if err := svc.Run(context.Background(), lifecycleExecutor{make(chan uint64, 1)}, nil); !errors.Is(err, store.startupErr) {
 		t.Fatalf("startup failure=%v", err)
 	}

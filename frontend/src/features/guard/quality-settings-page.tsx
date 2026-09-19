@@ -54,44 +54,13 @@ import {
 // edits use gateway settings; investigation tunables own a third versioned form.
 // No save attempts to simulate a transaction across these independent domains.
 
-type FieldKind = "duration" | "number";
-
-const ALL_TUNABLE_FIELDS: Array<{ key: keyof QualitySettingsInput; kind: FieldKind }> = [
-	{ key: "account_need_exits", kind: "number" },
-	{ key: "account_span_nodes", kind: "number" },
-	{ key: "exit_need_n", kind: "number" },
-	{ key: "exit_need_k", kind: "number" },
-	{ key: "differential_exits", kind: "number" },
-	{ key: "jurors_per_exit", kind: "number" },
-	{ key: "probe_budget", kind: "number" },
-	{ key: "investigation_timeout", kind: "duration" },
-	{ key: "retention", kind: "duration" },
-	{ key: "evidence_window", kind: "duration" },
-];
-
-/** 可行性预校验(批10 后端同款约束的前置):
- * 门槛超出可派证据量会静默关闭定罪通道——保存前即拒,不走 400 往返。 */
-function tunablesFeasibilityError(form: QualitySettings): string | null {
-	if (form.exit_need_k > form.exit_need_n) {
-		return "quality.settings.feasibility.kOverN";
-	}
-	if (form.account_span_nodes > form.account_need_exits) {
-		return "quality.settings.feasibility.spanOverExits";
-	}
-	if (form.jurors_per_exit < form.exit_need_n) {
-		return "quality.settings.feasibility.jurorsBelowWitnesses";
-	}
-	if (form.probe_budget < form.differential_exits + form.jurors_per_exit) {
-		return "quality.settings.feasibility.budgetBelowCoreProbes";
-	}
-	return null;
-}
+const DETECTION_FIELDS: Array<keyof QualitySettingsInput> = ["investigation_timeout", "retention", "evidence_window"];
 
 const SETTINGS_VIEWS = [
 	"jurisdiction",
 	"retry",
 	"rotation",
-	"tunables",
+	"detection",
 ] as const;
 type SettingsView = (typeof SETTINGS_VIEWS)[number];
 
@@ -171,21 +140,6 @@ export function QualitySettingsPage({ settings }: { settings: QualitySettingsRun
 			);
 		}
 
-		if (settingsView === "tunables") {
-			const rev = settingsQuery.data?.revision;
-			if (!rev) return null;
-			return (
-				<Badge
-					variant="secondary"
-					className="font-mono text-xs px-2 py-0.5 gap-1 bg-muted/80 text-foreground border border-border/70 font-semibold shrink-0"
-				>
-					<span>v{rev}</span>
-					<span className="text-[10px] text-muted-foreground font-sans font-normal">
-						· 归因规则
-					</span>
-				</Badge>
-			);
-		}
 
 		return null;
 	}, [settingsView, settingsQuery.data, guard.guardQuery.data]);
@@ -264,7 +218,7 @@ export function QualitySettingsPage({ settings }: { settings: QualitySettingsRun
 								icon: Waypoints,
 							},
 							{
-								value: "tunables",
+								value: "detection",
 								label: t("ops.settingsInvestigation"),
 								icon: Gavel,
 							},
@@ -518,10 +472,10 @@ export function QualitySettingsPage({ settings }: { settings: QualitySettingsRun
 
 					<TabsContent
 						forceMount
-						value="tunables"
+						value="detection"
 						className="mt-0 min-w-0 data-[state=inactive]:hidden"
 					>
-						<QualityTunablesSection />
+						<QualityDetectionSection />
 					</TabsContent>
 				</Tabs>
 
@@ -940,7 +894,7 @@ function QualityJurisdictionSection({ settings }: { settings: ReturnType<typeof 
 }
 
 /** 仲裁庭与证据局参数：独立保存，整体热应用。 */
-function QualityTunablesSection() {
+function QualityDetectionSection() {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const lifetimeSignal = useLifetimeSignal();
@@ -958,7 +912,6 @@ function QualityTunablesSection() {
 	const base = draft?.base ?? settingsQuery.data;
 	const edits = draft?.edits ?? {};
 	const form = base ? { ...base, ...edits } : null;
-	const feasibility = form ? tunablesFeasibilityError(form) : null;
 
 	const saveMutation = useMutation({
 		mutationFn: async (input: QualitySettings) => {
@@ -995,21 +948,15 @@ function QualityTunablesSection() {
 		);
 	}
 
-	const dirty = ALL_TUNABLE_FIELDS.some(
-		(field) =>
-			edits[field.key] !== undefined && edits[field.key] !== base?.[field.key],
-	);
+	const dirty = DETECTION_FIELDS.some(key => edits[key] !== undefined && edits[key] !== base[key]);
 
 	const setField = (
 		key: keyof QualitySettingsInput,
 		raw: string,
-		kind: FieldKind,
 	) => {
 		setDraft((prev) => {
    const next = prev ?? { base, edits: {} };
-   const parsed = Number(raw);
-   const value = kind === "number" ? (Number.isFinite(parsed) ? parsed : 0) : raw;
-   return { base: next.base, edits: { ...next.edits, [key]: value } };
+   return { base: next.base, edits: { ...next.edits, [key]: raw } };
   });
 		setSavedNote(null);
 	};
@@ -1018,12 +965,12 @@ function QualityTunablesSection() {
 		<QualitySection
 			icon={Gavel}
 			title={t("ops.settingsInvestigation")}
-			help={`${t("quality.settings.help")} ${t("quality.settings.capacityProjection", { count: settingsQuery.data?.max_rotations_per_hour })}`}
+			help={t("quality.settings.help")}
 			action={
 				<Button
 					type="button"
 					size="sm"
-					disabled={!dirty || saveMutation.isPending || feasibility !== null}
+					disabled={!dirty || saveMutation.isPending}
 					onClick={() => saveMutation.mutate(form)}
 				>
 					{saveMutation.isPending ? <Spinner /> : null}
@@ -1031,19 +978,6 @@ function QualityTunablesSection() {
 				</Button>
 			}
 		>
-			{feasibility ? (
-				<p className="text-xs text-destructive">
-					{t(feasibility, {
-						k: form.exit_need_k,
-						n: form.exit_need_n,
-						span: form.account_span_nodes,
-						exits: form.account_need_exits,
-						jurors: form.jurors_per_exit,
-						budget: form.probe_budget,
-						differential: form.differential_exits,
-					})}
-				</p>
-			) : null}
 			{saveMutation.isError ? (
 				<p className="text-xs text-destructive">{String(saveMutation.error)}</p>
 			) : null}
@@ -1068,37 +1002,25 @@ function QualityTunablesSection() {
     </Button>
    ) : null}
 			<div className="ops-form-grid">
-				{ALL_TUNABLE_FIELDS.map((field) => (
+				{DETECTION_FIELDS.map((key) => (
 					<SettingsField
-						controlId={`quality-tunable-${String(field.key)}`}
-						key={field.key}
-						label={t(`quality.settings.fields.${String(field.key)}`)}
-						description={t(`quality.settings.helps.${String(field.key)}`)}
+						controlId={`quality-detection-${String(key)}`}
+						key={key}
+						label={t(`quality.settings.fields.${String(key)}`)}
+						description={t(`quality.settings.helps.${String(key)}`)}
 						current={
-							form[field.key] !== base[field.key]
-								? String(base[field.key])
+							form[key] !== base[key]
+								? String(base[key])
 								: undefined
 						}
 					>
 						<Input
 							disabled={saveMutation.isPending}
-							id={`quality-tunable-${String(field.key)}`}
-							type={field.kind === "number" ? "number" : "text"}
-							min={
-								field.kind === "number"
-									? [
-											"account_need_exits",
-											"account_span_nodes",
-											"exit_need_n",
-											"exit_need_k",
-										].includes(field.key)
-										? 2
-										: 1
-									: undefined
-							}
-							value={String(form[field.key])}
+							id={`quality-detection-${String(key)}`}
+							type="text"
+							value={String(form[key])}
 							onChange={(event) =>
-								setField(field.key, event.target.value, field.kind)
+								setField(key, event.target.value)
 							}
 						/>
 					</SettingsField>

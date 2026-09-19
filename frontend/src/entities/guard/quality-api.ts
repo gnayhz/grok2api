@@ -6,30 +6,13 @@ import { createValidatedDecoder, hasShape, isArrayOf, isBoolean, isNumber, isObj
 // 节点质量面/人工解禁/批量轮换。对应后端 qualityhttp handler。
 
 export type QualityCaseLive = {
-	assessment?: ExperimentReport;
-	case_id: number;
-	defendant: number;
-	account_degraded_exits: number;
-	account_need_exits: number;
-	account_span_nodes: number;
-	account_need_span_nodes: number;
-	exit_witnesses: number;
-	exit_need_n: number;
-	exit_degraded: number;
-	exit_need_k: number;
-	differential_valid?: number;
-	differential_failed?: number;
-	differential_transport_failed?: number;
-	differential_attempts?: number;
-	differential_attempt_limit?: number;
-	jury_failed?: number;
-	pending_probes: number;
-	waiting_reason: string;
-	/** 稳定机器码(deadline_reached/awaiting_probes/...),面板按码翻译;
-	 * 旧后端无此字段时回退 waiting_reason 原文。 */
-	waiting_reason_code?: string;
-	deadline_at?: string;
-	expired?: boolean;
+ assessment?: ExperimentReport;
+ case_id: number;
+ defendant: number;
+ pending_probes: number;
+ waiting_reason_code: string;
+ deadline_at: string;
+ expired: boolean;
 };
 
 export type QualityCase = {
@@ -69,15 +52,7 @@ export type ProbeExperiment = {
 
 export type QualityProbeTask = {
 	experiment?: ProbeExperiment;
-	control_account_id?: number;
-	control_node_id?: number;
-	control_epoch?: number;
-	failure_kind?: string;
-	path_key?: string;
-	control_outcome?: string;
-	control_detail?: string;
-	control_path_key?: string;
-	control_verified?: boolean;
+
 	id: number;
 	case_id: number;
 	direction: string;
@@ -85,11 +60,7 @@ export type QualityProbeTask = {
 	defendant: number;
 	node_id: number;
 	epoch: number;
-	/** Original degraded path used by attempt 1; node_id/epoch is attempt 2. */
-	baseline_node_id?: number;
-	baseline_epoch?: number;
-	verified_ip_change?: boolean;
-	juror: number;
+
 	state: string;
 	result: string;
 	detail: string;
@@ -97,17 +68,11 @@ export type QualityProbeTask = {
 	finished_at?: string | null;
 };
 
-export type ExperimentGroup = {
-	attempts: number; pending: number; cancelled: number; clean: number; degraded: number;
-	transport: number; unavailable: number; confirmed_degraded: number; confirmed_transport: number;
-};
 export type ExperimentReport = {
-	proof?: { calls: number; max_calls: number; generations: number };
-	policy: { experiment?: ProbeExperiment; version: string; account_paths: number; account_nodes: number; jury_size: number; jury_degraded: number;
-		transport_paths: number; max_account_attempts: number; max_jury_attempts: number; deadline_at: string };
-	verdict: string; reason: string; phase: string; account_suspicion: string;
-	account: ExperimentGroup; exit: ExperimentGroup;
-	account_support: string[]; exit_support: string[]; limitations: string[];
+ proof?: ResourceReport;
+ policy: { experiment?: ProbeExperiment; version: string; deadline_at: string };
+ verdict: string;
+ reason: string;
 };
 
 export type QualityNodeView = {
@@ -159,10 +124,7 @@ export const probeDecoder = createValidatedDecoder<{ items: QualityProbeTask[] }
 		defendant: isNumber,
 		node_id: isNumber,
 		epoch: isNumber,
-		baseline_node_id: isOptional(isNumber),
-		baseline_epoch: isOptional(isNumber),
-		verified_ip_change: isOptional(isBoolean),
-		juror: isNumber,
+
 		state: isString,
 		result: isString,
 		detail: isString,
@@ -274,20 +236,12 @@ export function unbanQualityNode(nodeID: number): Promise<boolean> {
 }
 
 export type QualitySettingsInput = {
-	account_need_exits: number;
-	account_span_nodes: number;
-	exit_need_n: number;
-	exit_need_k: number;
-	differential_exits: number;
-	jurors_per_exit: number;
-	probe_budget: number;
 	retention: string;
 	evidence_window: string;
 	investigation_timeout: string;
 };
 
 export type QualitySettings = QualitySettingsInput & {
- max_rotations_per_hour: number;
  revision: string;
  applied_revision: string;
  apply_pending: boolean;
@@ -296,15 +250,11 @@ export type QualitySettings = QualitySettingsInput & {
 };
 
 const qualityInputShape = {
- account_need_exits: isNumber, account_span_nodes: isNumber,
- exit_need_n: isNumber, exit_need_k: isNumber,
- differential_exits: isNumber, jurors_per_exit: isNumber, probe_budget: isNumber,
  retention: isString, evidence_window: isString, investigation_timeout: isString,
 };
 
 export const settingsDecoder = createValidatedDecoder<QualitySettings>("quality settings", hasShape({
  ...qualityInputShape,
- max_rotations_per_hour: isNumber,
  revision: isString,
  applied_revision: isString,
  apply_pending: isBoolean,
@@ -319,10 +269,7 @@ export function fetchQualitySettings(signal?: AbortSignal): Promise<QualitySetti
 // Only owned editable fields and the version observed when editing are written.
 export function qualitySettingsWrite(input: QualitySettings) {
  return {
-  account_need_exits: input.account_need_exits, account_span_nodes: input.account_span_nodes,
-  exit_need_n: input.exit_need_n, exit_need_k: input.exit_need_k,
-  differential_exits: input.differential_exits, jurors_per_exit: input.jurors_per_exit,
-  probe_budget: input.probe_budget, retention: input.retention,
+  retention: input.retention,
   evidence_window: input.evidence_window, investigation_timeout: input.investigation_timeout,
   revision: input.revision,
  };

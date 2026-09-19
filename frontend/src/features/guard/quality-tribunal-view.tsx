@@ -1,17 +1,12 @@
 import { CaseProofEvidence } from "./case-proof-evidence";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-	Activity,
-	AlertCircle,
-	ArrowRight,
 	Gavel,
-	Info,
 	RefreshCw,
 	Scale,
 	Search,
 	Server,
 	ShieldCheck,
-	Timer,
 	Unlock,
 	User,
 	UserX,
@@ -49,8 +44,6 @@ import {
 	type QualityCase,
 } from "@/entities/guard/quality-api";
 import { caseDispositionKey, partyDispositionKey } from "./quality-case-presentation";
-import { QualityAccountReference, QualityExitReference } from "./quality-identity";
-import { getProbeFinding } from "./quality-view";
 import { useAccountDirectory, useRestrictedAccountCount } from "@/entities/account/account-queries";
 import { useEgressNodes } from "@/entities/egress/egress-queries";
 import { useQualityCases } from "@/entities/guard/guard-queries";
@@ -625,39 +618,7 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 
 									{/* Cross-Evidence Progress Gauge */}
 									<div className="mt-3 space-y-2 text-xs">
-										{report?.policy.version === "resource-proof-case-v1" ? (<p className="text-xs">{isZh ? "对照检测完成后归因" : "Attribution by comparison"} · {report.proof?.generations ?? 0} {isZh ? "次生成" : "generations"}</p>) : report ? (
-											<div className="space-y-1.5">
-												{/* Group 1: Exit Jury (固定出口 · 换正常账号) */}
-												<div className="flex items-center justify-between text-[11px]">
-													<span className="text-muted-foreground flex items-center gap-1">
-														<Waypoints className="size-3 text-primary" />
-														<span>{isZh ? "出口陪审组 (换正常账号)" : "Exit Jury"}</span>
-													</span>
-													<div className="flex items-center gap-1 font-mono text-[10px] tabular-nums">
-														{report.exit.clean > 0 && <span className="text-emerald-500 font-bold">{report.exit.clean} 通过</span>}
-														{report.exit.degraded > 0 && <span className="text-rose-500 font-bold">{report.exit.degraded} 降智</span>}
-														{report.exit.pending > 0 && <span className="text-muted-foreground">{report.exit.pending} 待跑</span>}
-													</div>
-												</div>
-
-												{/* Group 2: Account Differential (固定账号 · 换纯净出口) */}
-												<div className="flex items-center justify-between text-[11px]">
-													<span className="text-muted-foreground flex items-center gap-1">
-														<User className="size-3 text-purple-500" />
-														<span>{isZh ? "账号差分组 (换纯净出口)" : "Account Differential"}</span>
-													</span>
-													<div className="flex items-center gap-1 font-mono text-[10px] tabular-nums">
-														{report.account.clean > 0 && <span className="text-emerald-500 font-bold">{report.account.clean} 通过</span>}
-														{report.account.degraded > 0 && <span className="text-rose-500 font-bold">{report.account.degraded} 降智</span>}
-														{report.account.pending > 0 && <span className="text-muted-foreground">{report.account.pending} 待跑</span>}
-													</div>
-												</div>
-											</div>
-										) : (
-											<p className="text-[11px] text-muted-foreground">
-												{t("ops.legacy")}
-											</p>
-										)}
+										{report?.proof && <p className="text-xs text-muted-foreground">{isZh ? "对照检测" : "Comparison checks"} · {report.proof.generations ?? 0} {isZh ? "次生成" : "generations"}</p>}
 									</div>
 								</div>
 
@@ -720,7 +681,6 @@ function CaseExperiment({
 	open,
 	accountsMap,
 	nodesMap,
-	ipByNode,
 	onClose,
 }: {
 	item: QualityCase;
@@ -737,8 +697,7 @@ function CaseExperiment({
 					item={item}
 					accountsMap={accountsMap}
 					nodesMap={nodesMap}
-					ipByNode={ipByNode}
-				/>
+					/>
 			</DialogContent>
 		</Dialog>
 	);
@@ -748,12 +707,10 @@ function CaseExperimentContent({
 	item,
 	accountsMap: caseAccountsMap,
 	nodesMap,
-	ipByNode,
 }: {
 	item: QualityCase;
 	accountsMap: Map<number, QualityAccountIdentity>;
 	nodesMap: Map<number, QualityNodeIdentity>;
-	ipByNode: QualityExitIPIndex;
 }) {
 	const { t, i18n } = useTranslation();
 	const isZh = i18n.language.startsWith("zh");
@@ -771,7 +728,6 @@ function CaseExperimentContent({
 		},
 	});
 
-	const report = reportOf(item);
 	const probes = useQuery({
 		queryKey: ["quality", "probes", "case", item.id],
 		queryFn: ({ signal }) => fetchQualityProbesForCase(signal, item.id),
@@ -779,45 +735,12 @@ function CaseExperimentContent({
 		refetchInterval: item.status === "investigating" ? 5000 : false,
 	});
 
-	const probeAccounts = useAccountDirectory((probes.data ?? []).flatMap((probe) => [probe.defendant, probe.juror, probe.control_account_id ?? 0, ...(probe.proof?.observations ?? []).map(o => Number(o.account_id))]));
+	const probeAccounts = useAccountDirectory((probes.data ?? []).flatMap((probe) => [probe.defendant, ...(probe.proof?.observations ?? []).map(o => Number(o.account_id))]));
 	const accountsMap = useMemo(() => new Map([
 		...caseAccountsMap,
 		...(probeAccounts.data?.items ?? []).map((value) => [Number(value.id), { name: value.name, email: value.email }] as const),
 	]), [caseAccountsMap, probeAccounts.data]);
 
-	const account = item.parties.find((p) => p.kind === "account");
-	const exit = item.parties.find((p) => p.kind === "exit");
-
-	// Extract unique control accounts and exits
-	const controlAccountsList = useMemo(() => {
-		if (!probes.data) return [];
-		const accMap = new Map<number, string>();
-		for (const p of probes.data) {
-			const cId = p.control_account_id ?? (p.direction === "exit" || p.direction === "exit_jury" ? p.juror : undefined);
-			if (cId && !accMap.has(cId)) {
-				const info = accountsMap.get(cId);
-				accMap.set(cId, info?.name || info?.email || `#${cId}`);
-			}
-		}
-		return Array.from(accMap.entries()).map(([id, name]) => ({ id, name }));
-	}, [probes.data, accountsMap]);
-
-	const controlExitsList = useMemo(() => {
-		if (!probes.data) return [];
-		const exitMap = new Map<number, string>();
-		for (const p of probes.data) {
-			const nId = p.control_node_id ?? p.baseline_node_id ?? (p.direction === "account" || p.direction === "account_differential" ? p.node_id : undefined);
-			if (nId && !exitMap.has(nId)) {
-				const info = nodesMap.get(nId);
-				exitMap.set(nId, info?.name || `节点 #${nId}`);
-			}
-		}
-		return Array.from(exitMap.entries()).map(([id, name]) => ({ id, name }));
-	}, [probes.data, nodesMap]);
-
-	const proofProtocol = report?.policy.version === "resource-proof-case-v1" || Boolean(item.proof) || (item.evidence?.policy as { version?: string } | undefined)?.version === "resource-proof-case-v1";
-
-	const tone = verdictTone(item);
 
 	return (
 		<>
@@ -828,9 +751,7 @@ function CaseExperimentContent({
 						<Gavel className="size-5 shrink-0 text-primary" />
 						<span>{t("experiment.case", { id: item.id })} · {isZh ? "调查报告" : "Investigation report"}</span>
 					</DialogTitle>
-					{!proofProtocol && <StatusPill tone={tone}>
-						{t(`ops.${verdictKey(item)}`)}
-					</StatusPill>}
+
 				</div>
 				<p className="text-xs text-muted-foreground">
 					{isZh ? "立案时间：" : "Opened: "}{new Date(item.opened_at).toLocaleString(i18n.language)}{item.closed_at && <> · {isZh ? "结案时间：" : "Closed: "}{new Date(item.closed_at).toLocaleString(i18n.language)}</>}
@@ -838,285 +759,7 @@ function CaseExperimentContent({
 			</DialogHeader>
 
 			<div className="min-w-0 space-y-4 py-2 text-xs">
-				{proofProtocol && <CaseProofEvidence item={item} tasks={probes.data ?? []} loading={probes.isPending} error={probes.isError} retry={() => void probes.refetch()} accounts={accountsMap} nodes={nodesMap} />}
-				{!proofProtocol && <>
-
-				{/* Section 1: Methodology & Accused Parties (100% Matching Section 1 in Probe Report) */}
-				<div className="rounded-lg border border-border/80 bg-muted/20 p-3">
-					<h4 className="font-semibold text-foreground mb-1.5 flex items-center gap-1.5">
-						<Scale className="size-4 text-indigo-500" />
-						<span>{isZh ? "实验设计与涉案当事双方" : "Methodology & Accused Parties"}</span>
-					</h4>
-					<p className="text-[11px] text-muted-foreground leading-relaxed">
-						{isZh
-							? "固定涉案出口换正常账号（陪审组），固定嫌疑账号换纯净出口（差分组）。通过两组交替对照测试隔离单点变量，查明降智归因。"
-							: t("experiment.intro")}
-					</p>
-
-					{/* 2-Column Parties Grid */}
-					<div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-border/50 pt-2.5">
-						<div>
-							<span className="text-[10px] text-muted-foreground block mb-0.5">
-								{isZh ? "涉案嫌疑账号 (Defendant Account)" : t("guardProbes.defendantAccount")}
-							</span>
-							{account ? (
-								<div className="flex min-w-0 items-center justify-between gap-2 pr-2">
-									<QualityAccountReference id={account.account_id} accounts={accountsMap} />
-									<Badge variant={["remanded", "sentenced"].includes(account.disposition) ? "destructive" : "secondary"} className="text-[9px] px-1 py-0">
-										{t(partyDispositionKey(account.disposition))}
-									</Badge>
-								</div>
-							) : (
-								<span className="text-muted-foreground italic">未指定</span>
-							)}
-						</div>
-
-						<div>
-							<span className="text-[10px] text-muted-foreground block mb-0.5">
-								{isZh ? "涉案异常出口 (Incident Exit)" : t("guardProbes.suspectExit")}
-							</span>
-							{exit ? (
-								<div className="flex min-w-0 items-center justify-between gap-2 pr-2">
-									<QualityExitReference node={exit.node_id} epoch={exit.epoch} nodes={nodesMap} ipByNode={ipByNode} />
-									<Badge variant={exit.disposition === "remanded" || exit.disposition === "sentenced" ? "destructive" : "secondary"} className="text-[9px] px-1 py-0">
-										{t(partyDispositionKey(exit.disposition))}
-									</Badge>
-								</div>
-							) : (
-								<span className="text-muted-foreground italic">直连/未知出口</span>
-							)}
-						</div>
-					</div>
-
-					{/* Control Benchmarks List */}
-					<div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-border/50 pt-2.5">
-						<div>
-							<span className="text-[10px] text-muted-foreground block mb-1">
-								{isZh ? "匹配对照账号 (Control Accounts)" : "Control Benchmark Accounts"}
-							</span>
-							{controlAccountsList.length > 0 ? (
-								<div className="flex flex-wrap gap-1">
-									{controlAccountsList.map((acc) => (
-										<span key={acc.id} className="inline-flex items-center gap-1 rounded bg-card/80 border border-border/60 px-1.5 py-0.5 text-[10px] font-mono text-foreground font-semibold">
-											<User className="size-2.5 text-primary" />
-											<span>{acc.name}</span>
-										</span>
-									))}
-								</div>
-							) : (
-								<span className="text-[10px] text-muted-foreground italic">{isZh ? "账号池随机对照正常账号" : "Clean accounts"}</span>
-							)}
-						</div>
-
-						<div>
-							<span className="text-[10px] text-muted-foreground block mb-1">
-								{isZh ? "匹配对照出口 (Control Exits)" : "Matched Control Exits"}
-							</span>
-							{controlExitsList.length > 0 ? (
-								<div className="flex flex-wrap gap-1">
-									{controlExitsList.map((ex) => (
-										<span key={ex.id} className="inline-flex items-center gap-1 rounded bg-card/80 border border-border/60 px-1.5 py-0.5 text-[10px] font-mono text-foreground font-semibold">
-											<Server className="size-2.5 text-emerald-500" />
-											<span>{ex.name}</span>
-										</span>
-									))}
-								</div>
-							) : (
-								<span className="text-[10px] text-muted-foreground italic">{isZh ? "已知纯净候选出口" : "Clean exits"}</span>
-							)}
-						</div>
-					</div>
-				</div>
-
-				{/* Section 2: Findings & Evidentiary Support (100% Matching Section 2 in Probe Report) */}
-				<div className="rounded-lg border border-border/80 bg-card p-3 space-y-2.5">
-					<h4 className="font-semibold text-foreground mb-1.5 flex items-center gap-1.5">
-						<AlertCircle className="size-4 text-primary" />
-						<span>{isZh ? "审讯裁决推论与事实支撑 (Attribution Findings)" : t("guardProbes.evidenceTitle")}</span>
-					</h4>
-
-					{/* Highlight Finding Box matching Probe Report Finding Box */}
-					<div
-						className={cn(
-							"rounded-lg border p-3 leading-relaxed",
-							tone === "neutral"
-								? "border-emerald-500/30 bg-emerald-500/5 text-emerald-950 dark:text-emerald-200"
-								: tone === "bad"
-									? "border-rose-500/30 bg-rose-500/5 text-rose-950 dark:text-rose-200"
-									: "border-amber-500/30 bg-amber-500/5 text-amber-950 dark:text-amber-200"
-						)}
-					>
-						<p className="font-bold text-xs mb-1">
-							{t(`ops.${verdictKey(item)}`)} · {t(`ops.${caseDispositionKey(item)}`)}
-						</p>
-						{report?.reason && (
-							<p className="text-[11px] opacity-90 mt-0.5">{t(`experiment.facts.${report.reason}`, { defaultValue: report.reason })}</p>
-						)}
-					</div>
-
-					{/* Specific Support Facts */}
-					{report && (
-						<div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-							<div className="rounded-md border border-border/60 bg-muted/20 p-2.5 space-y-1">
-								<p className="font-semibold text-[11px] text-foreground flex items-center gap-1">
-									<Server className="size-3 text-rose-500" />
-									<span>{t("experiment.exitSupport")}</span>
-								</p>
-								{report.exit_support && report.exit_support.length > 0 ? (
-									<ul className="space-y-0.5 text-[10px]">
-										{report.exit_support.map((fact, idx) => (
-											<li key={idx} className="flex items-start gap-1 text-rose-600 dark:text-rose-400">
-												<span className="size-1 rounded-full bg-rose-500 mt-1.5 shrink-0" />
-												<span>{t(`experiment.facts.${fact}`, { defaultValue: fact })}</span>
-											</li>
-										))}
-									</ul>
-								) : (
-									<p className="text-[10px] text-muted-foreground/70 italic">{t("experiment.noSupport")}</p>
-								)}
-							</div>
-
-							<div className="rounded-md border border-border/60 bg-muted/20 p-2.5 space-y-1">
-								<p className="font-semibold text-[11px] text-foreground flex items-center gap-1">
-									<User className="size-3 text-purple-500" />
-									<span>{t("experiment.accountSupport")}</span>
-								</p>
-								{report.account_support && report.account_support.length > 0 ? (
-									<ul className="space-y-0.5 text-[10px]">
-										{report.account_support.map((fact, idx) => (
-											<li key={idx} className="flex items-start gap-1 text-purple-600 dark:text-purple-400">
-												<span className="size-1 rounded-full bg-purple-500 mt-1.5 shrink-0" />
-												<span>{t(`experiment.facts.${fact}`, { defaultValue: fact })}</span>
-											</li>
-										))}
-									</ul>
-								) : (
-									<p className="text-[10px] text-muted-foreground/70 italic">{t("experiment.noSupport")}</p>
-								)}
-							</div>
-						</div>
-					)}
-
-					{/* Limitations if any */}
-					{report?.limitations && report.limitations.length > 0 && (
-						<div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-800 dark:text-amber-200">
-							<p className="font-bold mb-0.5 flex items-center gap-1">
-								<Info className="size-3" />
-								<span>{t("experiment.limitations")}：</span>
-							</p>
-							<ul className="list-disc list-inside space-y-0.5 pl-1 opacity-90 text-[10px]">
-								{report.limitations.map((lim, idx) => (
-									<li key={idx}>{t(`experiment.facts.${lim}`, { defaultValue: lim })}</li>
-								))}
-							</ul>
-						</div>
-					)}
-				</div>
-
-				{/* Section 3: Telemetry (100% Matching Section 3 in Probe Report) */}
-				{report && (
-					<div className="rounded-lg border border-border/80 bg-muted/10 p-3">
-						<h4 className="font-semibold text-foreground mb-1.5 flex items-center gap-1.5">
-							<Timer className="size-4 text-muted-foreground" />
-							<span>{isZh ? "两组对照测试度量遥测" : t("guardProbes.telemetryTitle")}</span>
-						</h4>
-
-						<div className="grid grid-cols-3 gap-2 font-mono text-[11px]">
-							<div className="rounded-md border border-border/40 bg-card/60 p-2">
-								<span className="text-[10px] text-muted-foreground block">{isZh ? "出口陪审组 (Jury)" : "Exit Jury"}</span>
-								<span className="font-bold text-foreground">
-									{report.exit.clean} 通过 / {report.exit.degraded} 降智
-								</span>
-							</div>
-
-							<div className="rounded-md border border-border/40 bg-card/60 p-2">
-								<span className="text-[10px] text-muted-foreground block">{isZh ? "账号差分组 (Diff)" : "Differential"}</span>
-								<span className="font-bold text-foreground">
-									{report.account.clean} 通过 / {report.account.degraded} 降智
-								</span>
-							</div>
-
-							<div className="rounded-md border border-border/40 bg-card/60 p-2">
-								<span className="text-[10px] text-muted-foreground block">{isZh ? "关联探针任务" : "Total Probes"}</span>
-								<span className="font-bold text-foreground">
-									{probes.data ? `${probes.data.length} 条测试` : "计算中"}
-								</span>
-							</div>
-						</div>
-					</div>
-				)}
-
-				{/* Section 4: Probe Tasks Log */}
-				<p className="text-xs text-muted-foreground">{t("guardProbes.replacementHelp")}</p>
-				{probeAccounts.isError && <LoadFailed retry={() => { void probeAccounts.refetch(); }} />}
-				<div className="rounded-lg border border-border/80 bg-card p-3 space-y-2">
-					<div className="flex items-center justify-between">
-						<h4 className="font-semibold text-foreground flex items-center gap-1.5">
-							<Activity className="size-4 text-primary" />
-							<span>{isZh ? "关联取证探针记录流水" : "Case Probes Log"}</span>
-						</h4>
-						<span className="text-[11px] font-mono text-muted-foreground">
-							{probes.data ? `${probes.data.length} 条探针` : "加载中..."}
-						</span>
-					</div>
-
-					{probes.isLoading ? (
-						<div className="flex justify-center py-4"><Spinner className="size-4" /></div>
-					) : !probes.data || probes.data.length === 0 ? (
-						<p className="text-[11px] text-muted-foreground py-3 text-center">{isZh ? "暂无关联探针流水记录" : "No probes recorded"}</p>
-					) : (
-						<div className="max-h-48 overflow-y-auto rounded-md border border-border/60 bg-muted/10 divide-y divide-border/50">
-							{probes.data.map((p) => {
-								const isExitJury = p.direction === "exit" || p.direction === "exit_jury";
-								const finding = getProbeFinding(p, t);
-								const targetAccountID = isExitJury ? p.juror : p.defendant;
-								const controlOutcome = p.control_outcome === "clean" ? "controlClean" : p.control_outcome === "degraded" ? "controlDegraded" : p.control_outcome ? "controlFailed" : "controlNotRun";
-
-								return (
-									<div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 p-2 text-xs">
-										<div className="flex flex-wrap items-center gap-2 min-w-0">
-											<span className="font-mono text-[11px] font-bold text-foreground">#{p.id}</span>
-											<Badge variant="outline" className={cn(
-												"text-[9px] px-1 py-0 font-mono",
-												isExitJury ? "text-primary border-primary/30 bg-primary/5" : "text-purple-600 border-purple-500/30 bg-purple-500/5"
-											)}>
-												{isExitJury ? (isZh ? "出口陪审" : "Jury") : (isZh ? "账号差分" : "Diff")}
-											</Badge>
-
-											<div className="flex flex-wrap min-w-0 items-center gap-1 text-[10px] text-muted-foreground">
-												<QualityAccountReference id={targetAccountID} accounts={accountsMap} className="max-w-[160px]" />
-												<ArrowRight className="size-2.5 shrink-0" />
-												<QualityExitReference node={p.node_id} epoch={p.epoch} nodes={nodesMap} ipByNode={ipByNode} className="max-w-[120px]" />
-												{p.control_account_id ? (
-													<span className="text-muted-foreground">
-														{t("guardProbes.controlOutcome", { outcome: t(`guardProbes.${controlOutcome}`) })}
-														<QualityAccountReference id={p.control_account_id} accounts={accountsMap} className="max-w-[150px]" />
-													</span>
-												) : null}
-											</div>
-										</div>
-
-										<div className="flex flex-wrap items-center gap-2">
-											<span className="text-[10px] text-muted-foreground truncate max-w-[150px]" title={finding.text}>
-												{finding.text}
-											</span>
-
-											<Badge
-												variant={p.result === "clean" ? "default" : p.result === "degraded" ? "destructive" : "secondary"}
-												className="text-[9px] px-1 py-0 font-mono shrink-0"
-											>
-												{finding.badge}
-											</Badge>
-										</div>
-									</div>
-								);
-							})}
-						</div>
-					)}
-				</div>
-
-				</>}
-
+				<CaseProofEvidence item={item} tasks={probes.data ?? []} loading={probes.isPending} error={probes.isError} retry={() => void probes.refetch()} accounts={accountsMap} nodes={nodesMap} />
 				{/* Section 5: Manual Review / Release Action */}
 				<div className="rounded-lg border border-border/80 bg-muted/20 p-3 space-y-2">
 					<h4 className="font-semibold text-foreground flex items-center gap-1.5">

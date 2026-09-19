@@ -18,7 +18,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/quality/court"
 	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
-	"github.com/chenyme/grok2api/backend/internal/quality/investigator"
+
 	"github.com/chenyme/grok2api/backend/internal/quality/management"
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -26,9 +26,9 @@ import (
 )
 
 type qualityRuntimeFixture struct {
-	Court        *court.Service
-	Investigator *investigator.Service
-	Evidence     *evidence.Store
+	Court *court.Service
+
+	Evidence *evidence.Store
 }
 
 func qualityServiceOn(t *testing.T, db *Database) (*management.Service, qualityRuntimeFixture) {
@@ -43,11 +43,11 @@ func qualityServiceOn(t *testing.T, db *Database) (*management.Service, qualityR
 		t.Fatal(err)
 	}
 	runtime := qualityRuntimeFixture{
-		Court:        court.New(court.DefaultConfig(), nil, ev, nil, nil),
-		Investigator: investigator.New(investigator.DefaultConfig(), nil, nil), Evidence: ev,
+		Court:    court.New(court.DefaultConfig(), nil, ev, nil, nil),
+		Evidence: ev,
 	}
 	t.Cleanup(func() { _ = runtime.Court.Close(context.Background()) })
-	service := management.New(NewSettingsDocumentRepository(db, management.SettingsKey), (management.Runtime{Court: runtime.Court, Investigator: runtime.Investigator, Evidence: runtime.Evidence}).Apply, nil)
+	service := management.New(NewSettingsDocumentRepository(db, management.SettingsKey), (management.Runtime{Court: runtime.Court, Evidence: runtime.Evidence}).Apply, nil)
 	if err := service.ReloadPersisted(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -63,15 +63,13 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 			b, runtimeB := qualityServiceOn(t, dbB)
 			before := a.Snapshot()
 			input := before.Config
-			input.AccountNeedExits, input.AccountSpanNodes = 5, 3
-			input.ExitNeedN, input.ExitNeedK, input.JurorsPerExit = 4, 3, 4
-			input.DifferentialExits, input.ProbeBudget = 3, 9
+
 			input.Retention, input.EvidenceWindow, input.InvestigationTimeout = "48h", "1h", "2m"
 			saved, err := a.Update(ctx, before.Revision, input)
 			if err != nil || saved.ApplyPending || saved.Revision != 1 || saved.AppliedRevision != 1 {
 				t.Fatalf("save=%+v err=%v", saved, err)
 			}
-			if runtimeA.Court.Config().AccountNeedExits != 5 || runtimeA.Investigator.Config().ProbeBudget != 9 || runtimeA.Evidence.Config().Retention != 48*time.Hour {
+			if runtimeA.Court.Config().InvestigationTimeout != 2*time.Minute || runtimeA.Evidence.Config().Retention != 48*time.Hour {
 				t.Fatal("runtime consumers did not apply")
 			}
 			if err := b.ReloadPersisted(ctx); err != nil {
@@ -91,18 +89,18 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			input = saved.Config
-			input.EvidenceWindow, input.ProbeBudget = "2h", 10
+			input.EvidenceWindow, input.InvestigationTimeout = "2h", "10m"
 			pending, err := a.Update(ctx, saved.Revision, input)
 			if err != nil || !pending.ApplyPending || pending.ApplyError == "" || pending.Revision != 2 || pending.AppliedRevision != 1 {
 				t.Fatalf("pending=%+v err=%v", pending, err)
 			}
-			if runtimeA.Evidence.Config().Window != time.Hour || runtimeA.Investigator.Config().ProbeBudget != 9 {
+			if runtimeA.Evidence.Config().Window != time.Hour || runtimeA.Court.Config().InvestigationTimeout != 2*time.Minute {
 				t.Fatal("failed evidence apply leaked later runtime changes")
 			}
 			// B can save and apply a newer revision while A is pending. A's recovery
 			// must read that newer policy, not roll back B or replay stale policy.
 			input = saved.Config
-			input.ProbeBudget = 11
+			input.InvestigationTimeout = "11m"
 			peer, err := b.Update(ctx, pending.Revision, input)
 			if err != nil || peer.ApplyPending || peer.Revision != 3 {
 				t.Fatalf("peer=%+v err=%v", peer, err)
@@ -114,7 +112,7 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := a.Snapshot()
-			if got.ApplyPending || got.Revision != 3 || got.AppliedRevision != 3 || runtimeA.Investigator.Config().ProbeBudget != 11 {
+			if got.ApplyPending || got.Revision != 3 || got.AppliedRevision != 3 || runtimeA.Court.Config().InvestigationTimeout != 11*time.Minute {
 				t.Fatalf("recovery=%+v", got)
 			}
 			// Retry an unchanged saved revision after the failure is removed.
@@ -146,7 +144,7 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 				}
 				before := a.Snapshot()
 				one, two := before.Config, before.Config
-				one.ProbeBudget, two.ProbeBudget = 20+round, 40+round
+				one.InvestigationTimeout, two.InvestigationTimeout = fmt.Sprintf("%dm", 20+round), fmt.Sprintf("%dm", 40+round)
 				start, results := make(chan struct{}), make(chan error, 2)
 				go func() { <-start; _, err := a.Update(ctx, before.Revision, one); results <- err }()
 				go func() { <-start; _, err := b.Update(ctx, before.Revision, two); results <- err }()
@@ -183,7 +181,7 @@ func TestQualitySettingsDurableApplyIntegration(t *testing.T) {
 			if a.Snapshot() != before {
 				t.Fatal("rejected write changed state")
 			}
-			t.Logf("two SQL connections, real evidence/court/investigator apply, failure recovery, restart, cancellation and eight CAS rounds passed; revision=%d", before.Revision)
+			t.Logf("two SQL connections, real evidence/court apply, failure recovery, restart, cancellation and eight CAS rounds passed; revision=%d", before.Revision)
 		})
 	}
 }
@@ -210,7 +208,7 @@ func TestQualitySettingsConcurrentApplyFailureDoesNotRollback(t *testing.T) {
 	go func() { _, err := a.Update(ctx, 0, management.DefaultConfig()); done <- err }()
 	<-entered
 	input := management.DefaultConfig()
-	input.ProbeBudget++
+	input.InvestigationTimeout = "17m0s"
 	saved, err := b.Update(ctx, 1, input)
 	close(finish)
 	if err != nil || saved.Revision != 2 {
@@ -223,7 +221,7 @@ func TestQualitySettingsConcurrentApplyFailureDoesNotRollback(t *testing.T) {
 	if err := a.ReloadPersisted(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.Snapshot(); got.Revision != 2 || got.Config.ProbeBudget != input.ProbeBudget {
+	if got := a.Snapshot(); got.Revision != 2 || got.Config.InvestigationTimeout != input.InvestigationTimeout {
 		t.Fatalf("peer overwritten: %+v", got)
 	}
 }
@@ -379,7 +377,7 @@ func TestQualitySettingsRedisReconcileIntegration(t *testing.T) {
 		}
 	}
 	input := a.Snapshot().Config
-	input.ProbeBudget = 16
+	input.InvestigationTimeout = "16m"
 	if _, err := a.Update(ctx, 0, input); err != nil {
 		t.Fatal(err)
 	}
@@ -393,18 +391,18 @@ func TestQualitySettingsRedisReconcileIntegration(t *testing.T) {
 			t.Fatal(ctx.Err())
 		}
 	}
-	if runtimeB.Investigator.Config().ProbeBudget != 16 {
+	if runtimeB.Court.Config().InvestigationTimeout != 16*time.Minute {
 		t.Fatal("notification failed to apply")
 	}
 	stopListening()
-	input.ProbeBudget = 17
+	input.InvestigationTimeout = "17m"
 	if _, err := a.Update(ctx, 1, input); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.ReloadPersisted(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if b.Snapshot().Revision != 2 || runtimeB.Investigator.Config().ProbeBudget != 17 {
+	if b.Snapshot().Revision != 2 || runtimeB.Court.Config().InvestigationTimeout != 17*time.Minute {
 		t.Fatal("lost notification prevented convergence")
 	}
 	t.Log("real Redis notification and notification-free SQL reconciliation passed")
@@ -432,7 +430,7 @@ func TestQualityRotationMigrationLegacyDefaultsAndNewDocuments(t *testing.T) {
 				t.Fatal("legacy implicit capacity default lost")
 			}
 			quality, _ := qualityServiceOn(t, db)
-			if quality.Snapshot().Config.ProbeBudget != 14 || quality.Snapshot().Config.AccountNeedExits != management.DefaultConfig().AccountNeedExits {
+			if quality.Snapshot().Config != management.DefaultConfig() {
 				t.Fatal("legacy parameter defaults changed")
 			}
 		})

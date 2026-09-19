@@ -266,9 +266,6 @@ type Service struct {
 	// qualityEvents 是权威质量回执落盘点(必须持久成功);与可丢弃的
 	// 观测遥测不同,这里的失败要按 hold 处理。
 	qualityEvents atomic.Pointer[qualityEventRecorder]
-	// nodeExitIPResolver 出口 IP 取证面(批6 第4步:调查局差分探针的
-	// 重摇 IP 验证,I8);nil=重摇差分一律不可采。
-	nodeExitIPResolver atomic.Pointer[nodeExitIPResolverValue]
 }
 
 // SetAccountQualityEligibility forwards the account eligibility seam onto

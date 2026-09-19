@@ -16,16 +16,8 @@
       },
       "id": 49,
       "live": {
-        "account_degraded_exits": 1,
-        "account_need_exits": 3,
-        "account_need_span_nodes": 2,
-        "account_span_nodes": 1,
         "case_id": 49,
         "defendant": 3068,
-        "exit_degraded": 1,
-        "exit_need_k": 3,
-        "exit_need_n": 4,
-        "exit_witnesses": 2,
         "pending_probes": 2,
         "waiting_reason": "等待本轮取证探针结论"
       },
@@ -67,16 +59,8 @@
       },
       "id": 48,
       "live": {
-        "account_degraded_exits": 2,
-        "account_need_exits": 3,
-        "account_need_span_nodes": 2,
-        "account_span_nodes": 2,
         "case_id": 48,
         "defendant": 3065,
-        "exit_degraded": 3,
-        "exit_need_k": 3,
-        "exit_need_n": 4,
-        "exit_witnesses": 3,
         "pending_probes": 1,
         "waiting_reason": "等待本轮取证探针结论"
       },

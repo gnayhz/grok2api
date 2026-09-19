@@ -15,7 +15,6 @@ import (
 func caseProofPolicy(defendant uint64, exit model.EpochKey, obs model.Observation, now time.Time, cfg Config) ExperimentPolicy {
 	p := ExperimentPolicy{Version: model.CaseProofVersion, DeadlineAt: now.Add(cfg.InvestigationTimeout)}
 	p.Experiment = model.NewProbeExperiment(obs)
-	p.Experiment.Version, p.Experiment.Sample = model.ResourceCheckVersion, "token-short"
 	plan := &model.ResourceCheckPlan{Kind: "account", ResourceID: defendant, DeadlineAt: p.DeadlineAt, Seed: rand.Uint64() >> 1,
 		Targets: []model.ResourceTarget{{Kind: "account", ResourceID: defendant}}, Accounts: []uint64{}, Nodes: []uint64{}}
 	p.Experiment.ResourceCheck = plan
@@ -76,7 +75,7 @@ func assessCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy, now t
 }
 
 func assessCurrentCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy, now time.Time, validate func(*model.ResourceCheckReport)) ExperimentReport {
-	r := ExperimentReport{Policy: policy, Reason: "insufficient_controls", Phase: "ready", AccountSupport: []string{}, ExitSupport: []string{}, Limitations: []string{}, AccountSuspicion: "none"}
+	r := ExperimentReport{Policy: policy, Reason: "insufficient_controls", Phase: "ready", Limitations: []string{}}
 	if policy.Version != model.CaseProofVersion || policy.Experiment.ResourceCheck == nil {
 		return r
 	}
@@ -85,7 +84,7 @@ func assessCurrentCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy
 			continue
 		}
 		if task.State == model.ProbePending || task.State == model.ProbeRunning {
-			r.Phase, r.Reason, r.Account.Pending = "collecting", "awaiting_probes", 1
+			r.Phase, r.Reason = "collecting", "awaiting_probes"
 		}
 		if task.ResourceCheck == nil {
 			continue
@@ -96,7 +95,9 @@ func assessCurrentCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy
 		// Old windows are useful history, not authority for a new restriction.
 		for i := range proof.Results {
 			p := &proof.Results[i]
-			if !now.Before(p.ValidUntil) {
+			if task.State != model.ProbeDone && task.State != model.ProbeRunning {
+				p.Outcome, p.Reason, p.Rule, p.Evidence = "inconclusive", "interrupted_tests", "", nil
+			} else if !now.Before(p.ValidUntil) {
 				p.Outcome, p.Reason, p.Rule, p.Evidence = "inconclusive", "window_expired", "", nil
 			}
 		}
@@ -104,7 +105,7 @@ func assessCurrentCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy
 			validate(&proof)
 		}
 		r.Proof = &proof
-		r.Account.Attempts = proof.Calls
+		accountBad, exitBad := false, false
 		for _, p := range proof.Results {
 			if p.Outcome == "inconclusive" {
 				r.Limitations = appendUnique(r.Limitations, p.Reason)
@@ -113,14 +114,12 @@ func assessCurrentCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy
 			if p.Kind == "account" {
 				r.AccountCleared = p.Outcome == "healthy"
 				if p.Outcome == "degraded" {
-					r.Account.ConfirmedDegraded = 1
-					r.AccountSupport = append(r.AccountSupport, "proved_account_bad")
+					accountBad = true
 				}
 			} else {
 				r.ExitCleared = p.Outcome == "healthy"
 				if p.Outcome == "degraded" {
-					r.Exit.ConfirmedDegraded = 1
-					r.ExitSupport = append(r.ExitSupport, "proved_exit_bad")
+					exitBad = true
 				}
 			}
 		}
@@ -128,11 +127,11 @@ func assessCurrentCaseProof(tasks []model.ProbeTaskView, policy ExperimentPolicy
 			return r
 		}
 		switch {
-		case r.Account.ConfirmedDegraded > 0 && r.Exit.ConfirmedDegraded > 0:
+		case accountBad && exitBad:
 			r.Verdict, r.Reason = model.VerdictBothGuilty, "proved_account_and_exit_bad"
-		case r.Account.ConfirmedDegraded > 0:
+		case accountBad:
 			r.Verdict, r.Reason = model.VerdictAccountGuilty, "proved_account_bad"
-		case r.Exit.ConfirmedDegraded > 0:
+		case exitBad:
 			r.Verdict, r.Reason = model.VerdictExitGuilty, "proved_exit_bad"
 		case r.AccountCleared && (len(proof.Results) == 1 || r.ExitCleared):
 			r.Reason = "proved_normal"
@@ -165,7 +164,7 @@ func (s *Service) advanceCaseProof(ctx context.Context, record model.CaseRecord,
 		}
 		prepared.DeadlineAt, prepared.Experiment.ResourceCheck.DeadlineAt = policy.DeadlineAt, policy.DeadlineAt
 		var envelope map[string]any
-		if err := json.Unmarshal([]byte(record.EvidenceJSON), &envelope); err != nil {
+		if err := decodeEvidence(record.EvidenceJSON, &envelope); err != nil {
 			return "", 0, err
 		}
 		envelope["policy"] = prepared
@@ -179,7 +178,7 @@ func (s *Service) advanceCaseProof(ctx context.Context, record model.CaseRecord,
 		policy = prepared
 	}
 	if len(tasks) == 0 && !expired && policy.Experiment.UnsupportedReason() == "" && s.dispatcher != nil {
-		n, err := s.dispatcher.DispatchForCase(ctx, DispatchSpec{Proof: true, CaseID: record.ID, Defendant: defendant, BaselineExit: baseline})
+		n, err := s.dispatcher.DispatchForCase(ctx, DispatchSpec{CaseID: record.ID, Defendant: defendant, BaselineExit: baseline})
 		return "", n, err
 	}
 	if expired {
@@ -241,7 +240,7 @@ func (s *Service) advanceCaseProof(ctx context.Context, record model.CaseRecord,
 	}
 	if r.AccountCleared || r.ExitCleared {
 		var envelope map[string]any
-		_ = json.Unmarshal([]byte(record.EvidenceJSON), &envelope)
+		_ = decodeEvidence(record.EvidenceJSON, &envelope)
 		if envelope == nil {
 			envelope = map[string]any{}
 		}
@@ -300,7 +299,7 @@ func (s *Service) advanceCaseProof(ctx context.Context, record model.CaseRecord,
 		}
 	}
 	var envelope map[string]any
-	_ = json.Unmarshal([]byte(record.EvidenceJSON), &envelope)
+	_ = decodeEvidence(record.EvidenceJSON, &envelope)
 	if envelope == nil {
 		envelope = map[string]any{}
 	}

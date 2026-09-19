@@ -103,13 +103,13 @@ for (const [domain, actions] of [["gateway", ["save", "reset", "rotation"]], ["g
     let root = reactDOM.createRoot(dom.window.document.getElementById("root")!);
     let mounted = true;
     t.after(async () => { if (mounted) await react.act(async () => root.unmount()); client.clear(); });
-    const content = domain === "tunables" ? react.createElement(router.MemoryRouter, { initialEntries: ["/guard/settings#tunables"] }, react.createElement(TunablesHarness)) : react.createElement(domain === "gateway" ? GatewayHarness : GuardHarness);
+    const content = domain === "tunables" ? react.createElement(router.MemoryRouter, { initialEntries: ["/guard/settings#detection"] }, react.createElement(TunablesHarness)) : react.createElement(domain === "gateway" ? GatewayHarness : GuardHarness);
     const element = react.createElement(query.QueryClientProvider, { client }, react.createElement(TooltipProvider, null, content));
     await react.act(async () => root.render(element));
     let result: Promise<unknown> | undefined;
     if (domain === "tunables") {
-      await until(() => Boolean(dom.window.document.getElementById("quality-tunable-retention")));
-      const input = dom.window.document.getElementById("quality-tunable-retention")!;
+      await until(() => Boolean(dom.window.document.getElementById("quality-detection-retention")));
+      const input = dom.window.document.getElementById("quality-detection-retention")!;
       await react.act(async () => {
         Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, "169h");
         input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));

@@ -66,6 +66,13 @@ func TestCaseProofSharesRulesIncludingConflictsPartialAndExpiry(t *testing.T) {
 			if got := assessCaseProof(tasks, policy, now.Add(model.ResourceCheckWindow)); got.Verdict != model.VerdictNone {
 				t.Fatal("expired proof convicted", got)
 			}
+			for _, state := range []model.ProbeTaskState{model.ProbeFailed, model.ProbeCancelled} {
+				tasks[0].State = state
+				got := assessCaseProof(tasks, policy, now)
+				if got.Verdict != model.VerdictNone || got.AccountCleared || got.ExitCleared {
+					t.Fatal("interrupted task made a resource decision", state, got)
+				}
+			}
 			tasks[0].State = model.ProbeRunning
 			if got := assessCaseProof(tasks, policy, now); got.Verdict != model.VerdictNone {
 				t.Fatal("unfinished search convicted", got)
@@ -119,9 +126,9 @@ func TestCaseProofDurableQueueFourWorldsAndManualRelease(t *testing.T) {
 				t.Fatal(cases, err)
 			}
 			m := &caseMeasurements{badAccount: tc.badAccount, badNode: tc.badNode}
-			e := investigator.NewProbeExecutor(b.registry, nil, nil)
+			e := investigator.NewProbeExecutor(b.registry)
 			e.SetResourceChecks(m, store)
-			worker := investigator.New(investigator.DefaultConfig(), store, b.evidence)
+			worker := investigator.New(store, b.evidence)
 			if err := worker.RunDueOnce(ctx, e, 1); err != nil {
 				t.Fatal(err)
 			}

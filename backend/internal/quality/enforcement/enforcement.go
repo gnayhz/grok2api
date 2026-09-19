@@ -1,5 +1,5 @@
 // Package enforcement observes versioned exit identities and applies the
-// quality court's dispositions. Court owns controlled-comparison decisions;
+// quality court's dispositions. Court owns resource-proof decisions;
 // admission rejection alone does not sentence an exit. A new IP epoch or an
 // explicit review can release the corresponding quality restrictions.
 //

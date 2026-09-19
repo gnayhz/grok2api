@@ -116,7 +116,7 @@ func TestFrozenProbeSelectsOriginalModelAndStandardProfile(t *testing.T) {
 	if err := json.Unmarshal(request.Body, &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Input != spec.Prompt() || body.Reasoning.Effort != "low" || len(body.Tools) != 0 || body.MaxOutput != 128 {
+	if body.Input != spec.Prompt() || body.Reasoning.Effort != "low" || len(body.Tools) != 0 || body.MaxOutput != 256 {
 		t.Fatalf("experiment changed: %+v", body)
 	}
 	resolver.routes = resolver.routes[:1]

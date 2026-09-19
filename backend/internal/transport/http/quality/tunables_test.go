@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
@@ -25,11 +26,17 @@ func TestQualityTunablesVersionedHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := management.New(relational.NewSettingsDocumentRepository(db, management.SettingsKey), nil, nil)
-	h := &Handler{deps: Deps{Tunables: service, RotationCapacity: func() int { return 12 }}}
+	h := &Handler{deps: Deps{Tunables: service}}
 	router := gin.New()
 	router.GET("/", h.getSettings)
 	router.PUT("/", h.putSettings)
 	call := func(method string, input any) (*httptest.ResponseRecorder, QualityTunables) {
+		if snapshot, ok := input.(QualityTunables); ok {
+			input = struct {
+				management.Config
+				Revision string `json:"revision"`
+			}{snapshot.Config, strconv.FormatUint(snapshot.Revision, 10)}
+		}
 		payload, err := json.Marshal(input)
 		if err != nil {
 			t.Fatal(err)
@@ -49,7 +56,7 @@ func TestQualityTunablesVersionedHTTP(t *testing.T) {
 		return rec, body.Data
 	}
 	rec, base := call(http.MethodGet, nil)
-	if rec.Code != 200 || base.Revision != 0 || base.ApplyPending || base.MaxRotationsPerHour != 12 {
+	if rec.Code != 200 || base.Revision != 0 || base.ApplyPending {
 		t.Fatalf("GET: %d %s", rec.Code, rec.Body)
 	}
 	rec, _ = call(http.MethodPut, base.Config)
@@ -64,14 +71,14 @@ func TestQualityTunablesVersionedHTTP(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("stale=%d", rec.Code)
 	}
-	invalidCapacity := saved
-	invalidCapacity.MaxRotationsPerHour = 99
-	rec, _ = call(http.MethodPut, invalidCapacity)
-	if rec.Code != 400 || service.Snapshot().Revision != 1 {
-		t.Fatal("quality was allowed to write network capacity")
+	for _, field := range []string{"probe_budget", "jurors_per_exit", "exit_need_n", "exit_need_k", "account_need_exits", "account_span_nodes", "differential_exits", "max_rotations_per_hour"} {
+		rec, _ = call(http.MethodPut, map[string]any{"revision": "1", field: 99})
+		if rec.Code != 400 || service.Snapshot().Revision != 1 {
+			t.Fatalf("retired field %s accepted: %d", field, rec.Code)
+		}
 	}
 	invalid := saved
-	invalid.ExitNeedK = 0
+	invalid.InvestigationTimeout = "invalid"
 	rec, _ = call(http.MethodPut, invalid)
 	if rec.Code != 400 || service.Snapshot().Revision != 1 {
 		t.Fatal("invalid policy changed settings")

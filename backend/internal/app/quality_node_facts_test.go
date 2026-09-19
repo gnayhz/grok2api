@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
 	"fmt"
 	"net/url"
@@ -15,7 +15,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
-	"github.com/chenyme/grok2api/backend/internal/quality/court"
+
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
@@ -176,20 +176,6 @@ func TestLegacyQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 				t.Fatalf("recoverable case missing: %d %v", len(cases), err)
 			}
 			id := cases[0].ID
-			// Preserve the deployed multi-comparison protocol for this legacy pool
-			// recovery test. New fixed-path proof cases are covered separately.
-			var envelope map[string]any
-			if err := json.Unmarshal([]byte(cases[0].EvidenceJSON), &envelope); err != nil {
-				t.Fatal(err)
-			}
-			envelope["policy"] = court.ExperimentPolicy{Version: court.ProtocolVersion, Experiment: model.NewProbeExperiment(obs), AccountPaths: 3, AccountNodes: 2, JurySize: 4, JuryDegraded: 3, TransportPaths: 3, MaxAccountAttempts: 6, MaxJuryAttempts: 8, DeadlineAt: cases[0].OpenedAt.Add(10 * time.Minute)}
-			raw, err := json.Marshal(envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := a.quality.UpdateInvestigationEvidence(ctx, id, string(raw)); err != nil {
-				t.Fatal(err)
-			}
 
 			store := registry.NewProbeTaskStore(a.quality)
 			if tasks, err := store.ListProbeTasksForCase(ctx, id); err != nil || len(tasks) != 0 {
@@ -208,55 +194,29 @@ func TestLegacyQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 			if stats, err := a.qualityCourt.Evaluate(ctx, time.Now()); err != nil || stats.Retried == 0 {
 				t.Fatalf("read recovery did not resume plan: %+v %v", stats, err)
 			}
-			tasks, err := store.ClaimPendingProbeTasks(ctx, 32)
-			if err != nil || len(tasks) < 6 {
-				t.Fatalf("missing real investigation tasks: %d %v", len(tasks), err)
+			tasks, err := store.ListProbeTasksForCase(ctx, id)
+			if err != nil || len(tasks) != 1 {
+				t.Fatalf("proof tasks=%d err=%v", len(tasks), err)
 			}
-			for _, task := range tasks {
-				if task.Direction == model.ProbeAccountDifferential && !allowed[task.DefendantNodeID] {
-					t.Fatalf("unusable historical/fleet candidate: %+v", task)
-				}
-				if !allowed[task.ControlNodeID] {
-					t.Fatalf("unusable control path: %+v", task)
-				}
-				identity := func(label string, accountID, nodeID, epoch uint64) attemptmeta.Identity {
-					value := obs.Attempt
-					value.ID = fmt.Sprintf("%s-%d", label, task.ID)
-					value.AccountID = accountID
-					value.Path = attemptmeta.Path{NodeID: nodeID, Epoch: epoch, Status: attemptmeta.PathRegistered}
-					value.Profile = task.Experiment.Profile()
-					return value
-				}
-				accountID := task.DefendantAccountID
-				outcome := model.ProbeResultClean
-				if task.Direction == model.ProbeExitJury {
-					accountID, outcome = task.JurorAccountID, model.ProbeResultDegraded
-				}
-				result := model.ProbeTaskResult{Outcome: outcome, VerifiedIPChange: true, PathKey: fmt.Sprintf("node-%d", task.DefendantNodeID), Attempt: identity("main", accountID, task.DefendantNodeID, task.DefendantEpoch), ControlOutcome: model.ProbeResultClean, ControlVerified: true, ControlPathKey: fmt.Sprintf("node-%d", task.ControlNodeID), ControlAttempt: identity("control", task.ControlAccountID, task.ControlNodeID, task.ControlEpoch)}
-				if err := store.CompleteProbeTask(ctx, task.ID, model.ProbeDone, result, time.Now()); err != nil {
-					t.Fatal(err)
+			plan := tasks[0].Experiment.ResourceCheck
+			if plan == nil {
+				t.Fatal("missing proof plan")
+			}
+			for _, node := range plan.Nodes {
+				if !allowed[node] {
+					t.Fatalf("unusable candidate %d", node)
 				}
 			}
-			// Existing measurements cannot turn an unreadable pool into fixed.
+			// Unreadable node facts do not permit new measurements or erase the hold.
 			if err := a.quality.DB().Exec("ALTER TABLE egress_nodes RENAME TO e12_unavailable_nodes").Error; err != nil {
 				t.Fatal(err)
 			}
 			missing = true
-			if _, err := a.qualityCourt.Evaluate(ctx, time.Now()); err == nil {
-				t.Fatal("unreadable node type became a ban decision")
-			}
 			record, _, err := a.quality.GetCase(ctx, id)
 			if err != nil || record.Status.Closed() || a.quality.ExitStateOfCurrentEpoch(baseline.ID).State != model.ExitRemanded {
-				t.Fatalf("type read failure changed disposition: %+v %v", record, err)
+				t.Fatal("pending proof lost hold", err)
 			}
 			restore()
-			if _, err := a.qualityCourt.Evaluate(ctx, time.Now()); err != nil {
-				t.Fatal(err)
-			}
-			record, _, err = a.quality.GetCase(ctx, id)
-			if err != nil || record.Verdict != model.VerdictExitGuilty || a.quality.ExitStateOfCurrentEpoch(baseline.ID).State != model.ExitRemanded || !a.quality.AccountEligible(defendant) {
-				t.Fatalf("pool verdict lost: %+v %v", record, err)
-			}
 			// The operational projection preserves not-found vs cancelled reads.
 			source := baseNodeSource{egress: a.egressOps}
 			if _, found, err := source.Profile(ctx, named["deleted"].ID); err != nil || found {

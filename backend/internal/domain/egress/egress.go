@@ -10,8 +10,7 @@ import (
 const LastErrorTransport = "transport error"
 
 // LastErrorExitIPQuality marks a node whose exit IP is quality-degraded
-// (degraded-model routing): the degraded account's RSC attribution came back
-// clean, so the exit IP is the suspect.
+// after a quality decision identifies the current exit as affected.
 const LastErrorExitIPQuality = "quality degraded (exit ip)"
 
 // Scope names the request-side traffic family. It describes upstream traffic,
@@ -54,37 +53,6 @@ type ExitAddresses struct {
 // Resolved reports whether at least one family address is known.
 func (e ExitAddresses) Resolved() bool {
 	return e.IPv4 != "" || e.IPv6 != ""
-}
-
-// KnownSameEgress answers the exclusion question: are these two nodes KNOWN
-// to share one real egress? It returns true only when at least one address
-// family is resolved on BOTH sides and every comparable family is equal.
-// Unknown never counts as "same": an unresolved family on either side, no
-// comparable family at all, or any differing family answers false.
-//
-// This mirrors the gateway's admissibility comparison (exitPathsDistinct)
-// with the opposite polarity: that check is conservative about admitting a
-// differential, so it treats "no comparable family" as distinct; this one is
-// conservative about dropping a candidate, so it excludes only on positive
-// equality of every observable family. A shared WARP-style CGNAT IPv4 with
-// distinct IPv6s is therefore not a known match. The answer is advisory —
-// it may come from a stale last-known snapshot, and the live per-node
-// verification remains the sole authority for admissibility.
-func KnownSameEgress(a, b ExitAddresses) bool {
-	comparable := false
-	if a.IPv4 != "" && b.IPv4 != "" {
-		comparable = true
-		if a.IPv4 != b.IPv4 {
-			return false
-		}
-	}
-	if a.IPv6 != "" && b.IPv6 != "" {
-		comparable = true
-		if a.IPv6 != b.IPv6 {
-			return false
-		}
-	}
-	return comparable
 }
 
 // Node is one proxy exit resource. It carries no scope: whether it serves

@@ -63,7 +63,7 @@ func TestResourceCheckExecutorCrossesOneVariableAndBoundsCalls(t *testing.T) {
 						m.badNode = 7
 					}
 				}
-				e := NewProbeExecutor(reg, nil, nil)
+				e := NewProbeExecutor(reg)
 				e.SetResourceChecks(m, &proofProgress{})
 				result, err := e.Execute(context.Background(), task)
 				if err != nil {
@@ -97,7 +97,7 @@ func TestResourceCheckExecutorRejectsWrongIdentityAndCancellation(t *testing.T) 
 				plan.Nodes = []uint64{11}
 				m.badNode = 11
 			}
-			e := NewProbeExecutor(reg, nil, nil)
+			e := NewProbeExecutor(reg)
 			e.SetResourceChecks(m, &proofProgress{})
 			r, _ := e.Execute(ctx, task)
 			if r.ResourceCheck.Outcome != "inconclusive" || m.calls > 5 {
@@ -124,7 +124,7 @@ func TestResourceCheckReservesBeforeCallingUpstream(t *testing.T) {
 	p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}}, MaxCalls: 5, Nodes: []uint64{11}}
 	task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 	m := &resourceMeasurements{}
-	e := NewProbeExecutor(reg, nil, nil)
+	e := NewProbeExecutor(reg)
 	e.SetResourceChecks(m, &proofProgress{fail: true})
 	if _, err := e.Execute(context.Background(), task); err == nil || m.calls != 0 {
 		t.Fatal("sent an unreserved request")
@@ -137,7 +137,7 @@ func TestResourceCheckBatchReusesAAndHandlesBadExit(t *testing.T) {
 		p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}, {Kind: "account", ResourceID: 8}}, Accounts: []uint64{101}, Nodes: []uint64{11, 12}, MaxCalls: 6}
 		task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 		m := &resourceMeasurements{badAccount: 7, badNode: badNode}
-		e := NewProbeExecutor(reg, nil, nil)
+		e := NewProbeExecutor(reg)
 		e.SetResourceChecks(m, &proofProgress{})
 		result, err := e.Execute(context.Background(), task)
 		if err != nil || result.ResourceCheck.Results[0].Outcome != "degraded" || result.ResourceCheck.Results[1].Outcome != "healthy" || m.calls > 5 {
@@ -154,7 +154,7 @@ func TestResourceCheckFourWorldsAcrossPlannerSeeds(t *testing.T) {
 				p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}, {Kind: "node", ResourceID: 11}}, Accounts: []uint64{101}, Nodes: []uint64{12}, MaxCalls: 6, Seed: seed}
 				task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 				m := &resourceMeasurements{badAccount: badAccount, badNode: badNode}
-				e := NewProbeExecutor(reg, nil, nil)
+				e := NewProbeExecutor(reg)
 				e.SetResourceChecks(m, &proofProgress{})
 				result, err := e.Execute(context.Background(), task)
 				wants := []string{"healthy", "healthy"}
@@ -193,7 +193,7 @@ func TestResourceCheckUnregisteredExitDoesNotSpendGeneration(t *testing.T) {
 		}
 		task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 		m := &resourceMeasurements{}
-		e := NewProbeExecutor(reg, nil, nil)
+		e := NewProbeExecutor(reg)
 		e.SetResourceChecks(m, &proofProgress{})
 		result, err := e.Execute(context.Background(), task)
 		wantCalls := 0
@@ -224,7 +224,7 @@ func TestResourceCheckLosingRegisteredExitInvalidatesResponse(t *testing.T) {
 	p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}}, Nodes: []uint64{11}, MaxCalls: 5}
 	task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 	m := &resourceMeasurements{}
-	e := NewProbeExecutor(state, nil, nil)
+	e := NewProbeExecutor(state)
 	e.SetResourceChecks(m, &proofProgress{})
 	result, err := e.Execute(context.Background(), task)
 	if err != nil || m.calls != 1 || result.ResourceCheck.Outcome != "inconclusive" || result.ResourceCheck.Reason != "conflicting_samples" {
@@ -262,7 +262,7 @@ func TestResourceCheckWriteFailureSettlesAtLastPersistedRevision(t *testing.T) {
 				t.Fatalf("claim: %v %v", tasks, err)
 			}
 			measurements := &resourceMeasurements{}
-			executor := NewProbeExecutor(reg, nil, nil)
+			executor := NewProbeExecutor(reg)
 			executor.SetResourceChecks(measurements, &failingResourceProgress{store: store, failAt: failAt})
 			result, err := executor.Execute(ctx, tasks[0])
 			if err == nil || measurements.calls != failAt-1 {

@@ -418,7 +418,6 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	// 同出口排除集(建议性前置过滤):差分比对候选若已知与 baseline 共享
 	// 真实出口,在派发前跳过,避免白耗一次探针并少一条可采证据。判定只是
 	// 预筛——gateway.verifySecondPath 的活体出口核实仍是可采性的唯一权威。
-	qualityCourtService.SetSameExit(managerExitIPResolver{Manager: egressManager}.KnownSameExit)
 	// 无罪即恢复:法院确认出口有过错、账号被洗清后,账号轴的质量标记与随之而来
 	// 的瞬态冷却立即解除,不必再等它自然到期。
 	installCourtReleaseNotification(qualityCourtService, accountService)
@@ -437,8 +436,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 		}
 	})
 	// 调查局真实探针执行器:网关质量探针 + 出口 IP 取证面。
-	gatewayService.SetNodeExitIPResolver(managerExitIPResolver{Manager: egressManager})
-	qualityProbeExecutorService := qualityinvestigator.NewProbeExecutor(qualityRegistry, gatewayService, logger)
+	qualityProbeExecutorService := qualityinvestigator.NewProbeExecutor(qualityRegistry)
 	// 守卫配置面(重写批5:G13 管辖勾选+I4 自检可见)+探针队列视图。
 	// requestRetry 的文件启停/预算是底座基线;管辖清单若有显式条目则
 	// 继承，否则沿用质量守卫的默认主力模型清单，避免空切片被误当成
@@ -588,7 +586,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	// Quality owns parameter policy; composition supplies persistence, apply and notification ports.
 	qualityTunables := qualitymanagement.New(
 		relational.NewSettingsDocumentRepository(database, qualitymanagement.SettingsKey),
-		(qualitymanagement.Runtime{Court: qualityCourtService, Investigator: qualityInvestigatorService, Evidence: qualityEvidenceStore}).Apply,
+		(qualitymanagement.Runtime{Court: qualityCourtService, Evidence: qualityEvidenceStore}).Apply,
 		notifySettings,
 	)
 	if err := qualityTunables.ReloadPersisted(ctx); err != nil {
@@ -609,7 +607,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	}
 	accountService.SetQualityStates(accountQualityStatesProvider{registry: qualityRegistry}.states)
 	qualityProbeExecutorService.SetResourceChecks(gateway.ResourceCheckMeasurer{Gateway: gatewayService, Paths: resourceCheckPaths{manager: egressManager, settings: settingsService}}, qualityProbeStore)
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTokens: security.RandomTokenSource{}, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accounthttp.Dependencies{Administration: accountService, Credentials: accountService, Maintenance: accountService, Onboarding: accountsyncapp.NewOnboarding(accountService, accountService, accountSyncService), DeviceOnboarding: accountSyncService, ModelSyncUpdates: accountSyncService}, Models: modelService, ClientKeys: clientKeyService, ClientAuthKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, MediaImporter: mediaImporter, Settings: settingsService, Egress: egressService, EgressLiveStats: liveEgressStats(egressManager), Updates: updateService, Quality: &qualityhttp.Deps{ResourceChecks: qualitymanagement.NewResourceChecks(qualityProbeStore, gatewayService, baseNodeSource{egress: egressService}), Queries: qualityQueries, Court: qualityCourtService, Enforcement: qualityEnforcementService, Guard: qualityGuardService, DialerDistribution: qualityDialerPolicy.SelectionDistribution, Tunables: qualityTunables, RotationCapacity: func() int { return egressService.RotationConfig().MaxGlobalPerHour }}, EgressQualityStates: egressQualityStatesProvider{registry: qualityRegistry}.states})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTokens: security.RandomTokenSource{}, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, TrustedProxies: cfg.Server.TrustedProxies, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accounthttp.Dependencies{Administration: accountService, Credentials: accountService, Maintenance: accountService, Onboarding: accountsyncapp.NewOnboarding(accountService, accountService, accountSyncService), DeviceOnboarding: accountSyncService, ModelSyncUpdates: accountSyncService}, Models: modelService, ClientKeys: clientKeyService, ClientAuthKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, MediaImporter: mediaImporter, Settings: settingsService, Egress: egressService, EgressLiveStats: liveEgressStats(egressManager), Updates: updateService, Quality: &qualityhttp.Deps{ResourceChecks: qualitymanagement.NewResourceChecks(qualityProbeStore, gatewayService, baseNodeSource{egress: egressService}), Queries: qualityQueries, Court: qualityCourtService, Enforcement: qualityEnforcementService, Guard: qualityGuardService, DialerDistribution: qualityDialerPolicy.SelectionDistribution, Tunables: qualityTunables}, EgressQualityStates: egressQualityStatesProvider{registry: qualityRegistry}.states})
 	logSecureCookiesHint(logger, cfg)
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	constructed = true

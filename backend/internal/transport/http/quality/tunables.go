@@ -2,7 +2,9 @@ package qualityhttp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,27 +20,19 @@ type TunablesStore interface {
 	Update(context.Context, uint64, management.Config) (management.Snapshot, error)
 }
 
-// QualityTunables keeps the existing flat response fields. Capacity is a
-// read-only projection; revision and apply status refer only to quality policy.
+// QualityTunables exposes lifecycle bounds and their durable/application revisions.
 type QualityTunables struct {
 	management.Config
-	MaxRotationsPerHour int               `json:"max_rotations_per_hour"`
-	Revision            uint64            `json:"revision,string"`
-	AppliedRevision     uint64            `json:"applied_revision,string"`
-	ApplyPending        bool              `json:"apply_pending"`
-	ApplyError          string            `json:"apply_error"`
-	UpdatedAt           time.Time         `json:"updated_at"`
-	Applied             management.Config `json:"applied"`
+	Revision        uint64            `json:"revision,string"`
+	AppliedRevision uint64            `json:"applied_revision,string"`
+	ApplyPending    bool              `json:"apply_pending"`
+	ApplyError      string            `json:"apply_error"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+	Applied         management.Config `json:"applied"`
 }
 
 func (h *Handler) tunablesDTO(state management.Snapshot) QualityTunables {
-	capacity := 0
-	if h.deps.RotationCapacity != nil {
-		capacity = h.deps.RotationCapacity()
-	}
-	return QualityTunables{Config: state.Config, MaxRotationsPerHour: capacity, Revision: state.Revision,
-		AppliedRevision: state.AppliedRevision, ApplyPending: state.ApplyPending, ApplyError: state.ApplyError,
-		UpdatedAt: state.UpdatedAt, Applied: state.Applied}
+	return QualityTunables{Config: state.Config, Revision: state.Revision, AppliedRevision: state.AppliedRevision, ApplyPending: state.ApplyPending, ApplyError: state.ApplyError, UpdatedAt: state.UpdatedAt, Applied: state.Applied}
 }
 
 func (h *Handler) getSettings(c *gin.Context) {
@@ -61,21 +55,23 @@ func (h *Handler) putSettings(c *gin.Context) {
 	}
 	var input struct {
 		management.Config
-		Revision            *string `json:"revision"`
-		MaxRotationsPerHour *int    `json:"max_rotations_per_hour"`
+		Revision *string `json:"revision"`
 	}
-	if err := c.ShouldBindJSON(&input); err != nil {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
 		response.Error(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		response.Error(c, http.StatusBadRequest, "invalid_request", "request must contain one settings object")
 		return
 	}
 	if input.Revision == nil {
 		response.Error(c, http.StatusPreconditionRequired, "quality_settings_rejected", "请刷新并携带 revision 保存质量参数")
 		return
 	}
-	if input.MaxRotationsPerHour != nil && (h.deps.RotationCapacity == nil || *input.MaxRotationsPerHour != h.deps.RotationCapacity()) {
-		response.Error(c, http.StatusBadRequest, "quality_settings_rejected", "轮换总容量请在出口轮换设置中修改")
-		return
-	}
+
 	revision, err := strconv.ParseUint(*input.Revision, 10, 64)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalid_request", "revision 必须是无符号整数的字符串")

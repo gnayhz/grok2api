@@ -22,39 +22,6 @@ func TestRoutingScopeMergesAssetsIntoParentFamily(t *testing.T) {
 	}
 }
 
-// TestKnownSameEgressExcludesOnlyKnownSharedAddresses 锚定排除集的判等极性:
-// 只有在两侧都解析出至少一个共同地址族、且所有可比族全部相等时才回答
-// "已知同一出口";未知永不等于相同,任一可比族不同即不是同一出口。
-// 共享 CGNAT IPv4 + 各自 IPv6 的 WARP 类出口必须判为不同。
-func TestKnownSameEgressExcludesOnlyKnownSharedAddresses(t *testing.T) {
-	tests := []struct {
-		name string
-		a, b ExitAddresses
-		want bool
-	}{
-		{name: "both families equal", a: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::1"}, b: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::1"}, want: true},
-		{name: "single family equal", a: ExitAddresses{IPv4: "198.51.100.10"}, b: ExitAddresses{IPv4: "198.51.100.10"}, want: true},
-		{name: "one family unknown but the comparable one equal", a: ExitAddresses{IPv4: "198.51.100.10"}, b: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::2"}, want: true},
-		{name: "ipv4 differs", a: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::1"}, b: ExitAddresses{IPv4: "203.0.113.7", IPv6: "2001:db8::1"}},
-		{name: "ipv6 differs", a: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::1"}, b: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::2"}},
-		{name: "shared cgnat ipv4 with distinct ipv6", a: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::1"}, b: ExitAddresses{IPv4: "198.51.100.10", IPv6: "2001:db8::2"}},
-		{name: "only one side resolved", a: ExitAddresses{IPv4: "198.51.100.10"}, b: ExitAddresses{}},
-		{name: "other side unresolved", a: ExitAddresses{}, b: ExitAddresses{IPv6: "2001:db8::1"}},
-		{name: "no comparable family", a: ExitAddresses{IPv4: "198.51.100.10"}, b: ExitAddresses{IPv6: "2001:db8::1"}},
-		{name: "both unresolved", a: ExitAddresses{}, b: ExitAddresses{}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := KnownSameEgress(test.a, test.b); got != test.want {
-				t.Fatalf("KnownSameEgress(%+v, %+v) = %v, want %v", test.a, test.b, got, test.want)
-			}
-			if got := KnownSameEgress(test.b, test.a); got != test.want {
-				t.Fatalf("KnownSameEgress(%+v, %+v) = %v, want %v (order-independent)", test.b, test.a, got, test.want)
-			}
-		})
-	}
-}
-
 func TestRequestScopesAndTrafficClasses(t *testing.T) {
 	scopes := RequestScopes()
 	if len(scopes) != 5 {

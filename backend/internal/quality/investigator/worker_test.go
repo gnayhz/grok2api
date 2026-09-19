@@ -32,7 +32,7 @@ func TestFreeProbeWorkerClaimsPastSlowTask(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	svc := New(DefaultConfig(), store, &memRecorder{})
+	svc := New(store, &memRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	release := make(chan struct{})
 	started := make(chan uint64, 5)

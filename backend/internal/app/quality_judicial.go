@@ -19,14 +19,9 @@ type qualityDispatcher struct {
 
 func (d qualityDispatcher) DispatchForCase(ctx context.Context, spec qualitycourt.DispatchSpec) (int, error) {
 	return d.service.DispatchForCase(ctx, qualityinvestigator.DispatchSpec{
-		Proof:           spec.Proof,
-		ControlAccounts: spec.ControlAccounts, ControlExits: spec.ControlExits,
-		CaseID:          spec.CaseID,
-		Defendant:       spec.Defendant,
-		BaselineExit:    spec.BaselineExit,
-		HealthyExits:    spec.HealthyExits,
-		CoRemandedExits: spec.CoRemandedExits,
-		Jurors:          spec.Jurors,
+		CaseID:       spec.CaseID,
+		Defendant:    spec.Defendant,
+		BaselineExit: spec.BaselineExit,
 	})
 }
 
@@ -39,16 +34,12 @@ func (s qualityEvidenceSource) SnapshotWindow(now time.Time) model.Snapshot {
 	return s.store.AttributionWindow(now)
 }
 
-func (s qualityEvidenceSource) CrossValidate(snapshot model.Snapshot) model.Estimate {
-	return s.store.CrossValidate(snapshot)
-}
-
 // bootstrapJudicialLayer wires the experiment queue and evaluator.
 func bootstrapJudicialLayer(qualityRegistry *qualityregistry.Registry, evidenceStore *qualityevidence.Store, logger *slog.Logger) (*qualitycourt.Service, *qualityinvestigator.Service, *qualityregistry.ProbeTaskStore) {
 	courtCfg := qualitycourt.DefaultConfig()
 	courtCfg.Logger = logger
 	probeStore := qualityregistry.NewProbeTaskStore(qualityRegistry)
-	investigatorService := qualityinvestigator.New(qualityinvestigator.DefaultConfig(), probeStore, evidenceRecorderAdapter{store: evidenceStore})
+	investigatorService := qualityinvestigator.New(probeStore, evidenceRecorderAdapter{store: evidenceStore})
 	courtService := qualitycourt.New(courtCfg, qualityRegistry,
 		qualityEvidenceSource{store: evidenceStore}, qualityDispatcher{service: investigatorService}, probeStore)
 	return courtService, investigatorService, probeStore

@@ -6,7 +6,7 @@ import { filterProbeRecords, getProbeFinding, probeReferences, probeResult, prob
 
 const now = Date.parse("2030-01-01T00:10:00Z");
 function task(id: number, outcomes: string[], state = "done"): QualityProbeTask {
-  return { id, case_id: 77, direction: "case_proof", defendant: 1, juror: 0, node_id: 8, epoch: 0, state, result: "error", detail: "proved_account_bad", created_at: "2030-01-01T00:00:00Z", finished_at: "2030-01-01T00:01:00Z",
+  return { id, case_id: 77, direction: "case_proof", defendant: 1, node_id: 8, epoch: 0, state, result: "error", detail: "proved_account_bad", created_at: "2030-01-01T00:00:00Z", finished_at: "2030-01-01T00:01:00Z",
     proof: { version: "resource-proof-v2", kind: "account", resource_id: "1", outcome: "inconclusive", reason: "", calls: 2, max_calls: 6, results: outcomes.map((outcome, i): ResourceProof => ({ kind: i ? "node" : "account", resource_id: i ? "8" : "1", outcome, reason: "", evidence: [], window: 1, valid_until: "2030-01-01T00:03:00Z" })) } };
 }
 

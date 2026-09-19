@@ -2,7 +2,7 @@
 //
 // New Build incidents freeze a bounded resource-proof investigation shared with
 // manual checks. Each party is decided by complete A/B observations and R1/R2/R3
-// certificates, never vote counts. Historical cases retain their frozen policy.
+// certificates, never vote counts. Retired protocols never execute or produce new verdicts.
 package court
 
 import (
@@ -16,7 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 )
 
-// Config contains lifecycle bounds and historical comparison thresholds.
+// Config contains investigation lifecycle bounds.
 // New proof investigations use the shared resource protocol;
 // EvaluateEvery is a process cadence, not a decision state.
 type Config struct {
@@ -27,34 +27,14 @@ type Config struct {
 	// evaluator closes using completed evidence without dispatching more work.
 	InvestigationTimeout time.Duration
 
-	// AccountNeedExits is the historical target of distinct comparison paths for a
-	// case. Missing controls are replaced within a finite attempt budget.
-	AccountNeedExits int
-	// AccountSpanNodes prevents several logical exits sharing one node from
-	// being treated as independent account evidence.
-	AccountSpanNodes int
-	// ExitNeedN is the number of independent Build jurors required for an exit
-	// verdict; ExitNeedK is the degraded majority threshold.
-	ExitNeedN int
-	ExitNeedK int
-	// JurorCount is the number of distinct Build accounts the dispatcher may
-	// use for the jury. It lets the court provide enough candidates when the
-	// investigator's jury setting is raised above quorum.
-	JurorCount int
-
 	Logger *slog.Logger
 }
 
-// DefaultConfig returns lifecycle defaults and legacy comparison settings.
+// DefaultConfig returns lifecycle defaults.
 func DefaultConfig() Config {
 	return Config{
 		EvaluateEvery:        15 * time.Second,
 		InvestigationTimeout: 10 * time.Minute,
-		AccountNeedExits:     3,
-		AccountSpanNodes:     2,
-		ExitNeedN:            4,
-		ExitNeedK:            3,
-		JurorCount:           4,
 	}
 }
 
@@ -65,31 +45,10 @@ func (c Config) normalized() Config {
 	if c.InvestigationTimeout <= 0 {
 		c.InvestigationTimeout = 10 * time.Minute
 	}
-	if c.AccountNeedExits <= 0 {
-		c.AccountNeedExits = 3
-	}
-	if c.AccountSpanNodes <= 0 {
-		c.AccountSpanNodes = 2
-	}
-	if c.ExitNeedN <= 0 {
-		c.ExitNeedN = 4
-	}
-	if c.ExitNeedK <= 0 {
-		c.ExitNeedK = 3
-	}
-	if c.JurorCount <= 0 {
-		c.JurorCount = 4
-	}
-	if c.ExitNeedK > c.ExitNeedN {
-		c.ExitNeedK = c.ExitNeedN
-	}
-	if c.AccountSpanNodes > c.AccountNeedExits {
-		c.AccountSpanNodes = c.AccountNeedExits
-	}
 	return c
 }
 
-// SetConfig hot-applies decision thresholds. The evaluation cadence and
+// SetConfig hot-applies lifecycle bounds. The evaluation cadence and
 // logger are process wiring and remain fixed after construction.
 func (s *Service) SetConfig(cfg Config) {
 	cfg = cfg.normalized()
@@ -113,25 +72,11 @@ type Dispatcher interface {
 	DispatchForCase(ctx context.Context, spec DispatchSpec) (int, error)
 }
 
-// DispatchSpec selects a shared proof task or historical comparison groups.
-// 与 investigator.DispatchSpec 保持字段同步,组合根 quality_judicial.go 逐字段复制。
+// DispatchSpec identifies the parties for one bounded proof task.
 type DispatchSpec struct {
-	Proof           bool
-	ControlAccounts []uint64
-	ControlExits    []model.EpochKey
-	CaseID          uint64
-	Defendant       uint64
-
-	// BaselineExit is the exit captured with the original degraded request.
-	// HealthyExits are comparison targets for the defendant account.
+	CaseID       uint64
+	Defendant    uint64
 	BaselineExit model.EpochKey
-	HealthyExits []model.EpochKey
-
-	// CoRemandedExits is the observed exit under jury examination. In the
-	// direct loop it contains at most the baseline exit.
-	CoRemandedExits []model.EpochKey
-	// Jurors are eligible Build accounts sampled for the jury group.
-	Jurors []uint64
 }
 
 // EvidenceSource provides the traffic window used for fallback incident
@@ -139,7 +84,6 @@ type DispatchSpec struct {
 // are evaluated from the finite task rows, not from a rolling window.
 type EvidenceSource interface {
 	SnapshotWindow(now time.Time) model.Snapshot
-	CrossValidate(snapshot model.Snapshot) model.Estimate
 }
 
 // LedgerSink records a classified degradation against the observed epoch.
@@ -160,7 +104,6 @@ type Service struct {
 	ledgerSink      LedgerSink
 	accountExists   AccountExists
 	proofCurrent    func(context.Context, model.ResourceSample) (bool, error)
-	sameExit        SameExit
 	accountReleased AccountReleased
 	logger          *slog.Logger
 
@@ -249,37 +192,6 @@ func (s *Service) notifyAccountReleased(ctx context.Context, accountID uint64) {
 	}
 }
 
-// SameExit answers the advisory exclusion question for comparison-exit
-// selection: are these two nodes KNOWN to share one real egress? true means
-// "do not spend a differential probe here" — never "the paths are
-// admissible". The court layer holds no egress-address knowledge itself; the
-// composition root adapts the egress snapshot into this seam. nil means "no
-// information" and must never exclude anything, and the live per-node path
-// verification remains the sole authority for admissibility.
-type SameExit func(ctx context.Context, nodeIDa, nodeIDb uint64) bool
-
-// SetSameExit installs the advisory same-exit exclusion set. nil restores the
-// "no information" state, which excludes nothing.
-func (s *Service) SetSameExit(check SameExit) {
-	s.mu.Lock()
-	s.sameExit = check
-	s.mu.Unlock()
-}
-
-// excludesKnownSameExit consults the seam for one candidate against the
-// baseline exit. A nil seam, a zero node ID, or any "unknown" answer from the
-// seam keeps today's behaviour (the candidate stays). The baseline node is
-// never excluded here: it is already filtered as a comparison target.
-func (s *Service) excludesKnownSameExit(ctx context.Context, baselineNodeID, candidateNodeID uint64) bool {
-	if baselineNodeID == 0 || candidateNodeID == 0 {
-		return false
-	}
-	s.mu.RLock()
-	check := s.sameExit
-	s.mu.RUnlock()
-	return check != nil && check(ctx, baselineNodeID, candidateNodeID)
-}
-
 // ReportDegraded is the synchronous case-opening boundary behind the
 // request-path reporter. It freezes both parties and queues the finite probe
 // round before returning. Its persistence and lock wait contribute to the
@@ -348,10 +260,8 @@ func (s *Service) reportDegraded(ctx context.Context, accountID uint64, exit mod
 		return nil
 	}
 	now := time.Now().UTC()
-	snapshot := source.SnapshotWindow(now)
-	estimate := source.CrossValidate(snapshot)
 	if caseID == 0 {
-		_, err = s.openCase(ctx, accountID, exit, estimate, now, observations...)
+		_, err = s.openCase(ctx, accountID, exit, now, observations...)
 		return err
 	}
 	return s.reassertExistingHolds(ctx, caseID, accountID, exit)
