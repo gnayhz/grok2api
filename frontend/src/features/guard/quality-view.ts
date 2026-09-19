@@ -281,43 +281,38 @@ export function probeResult(task: QualityProbeTask): "clean" | "degraded" | "err
 	if (task.state === "pending" || task.state === "running") return "running";
 	if (task.state === "cancelled") return "cancelled";
 	if (task.state === "failed") return "error";
-	if (task.direction === "case_proof") {
-		if (task.state !== "done") return "error";
-		const results = task.proof?.results ?? [];
-		if (results.some(result => result.outcome === "degraded")) return "degraded";
-		return results.length > 0 && results.every(result => result.outcome === "healthy") ? "clean" : "error";
-	}
-	return task.result === "clean" || task.result === "degraded" ? task.result : "error";
+	if (task.state !== "done") return "error";
+	const results = task.proof?.results ?? [];
+	if (results.some(result => result.outcome === "degraded")) return "degraded";
+	return results.length > 0 && results.every(result => result.outcome === "healthy") ? "clean" : "error";
 }
 
 export function probeReferences(task: QualityProbeTask): { accounts: string[]; nodes: string[] } {
 	const ids = (values: (string | number | undefined)[]) => [...new Set(values.filter(value => value && String(value) !== "0").map(String))];
 	return {
-		accounts: ids([task.defendant, task.juror, task.control_account_id,
+		accounts: ids([task.defendant,
 			...(task.proof?.results?.filter(p => p.kind === "account").map(p => p.resource_id) ?? []),
 			...(task.proof?.observations?.map(o => o.account_id) ?? [])]),
-		nodes: ids([task.node_id, task.baseline_node_id, task.control_node_id,
+		nodes: ids([task.node_id,
 			...(task.proof?.results?.filter(p => p.kind === "node").map(p => p.resource_id) ?? []),
 			...(task.proof?.observations?.map(o => o.node_id) ?? [])]),
 	};
 }
 
-export function filterProbeRecords(tasks: QualityProbeTask[], direction: string, result: string, search: string,
+export function filterProbeRecords(tasks: QualityProbeTask[], result: string, search: string,
 	accounts: Map<string, QualityAccountIdentity>, nodes: Map<string, QualityNodeIdentity>, ips: QualityExitIPIndex) {
 	const query = search.trim().toLowerCase();
 	return tasks.filter(task => {
-		if (direction !== "all" && task.direction !== direction || result !== "all" && probeResult(task) !== result) return false;
+		if (result !== "all" && probeResult(task) !== result) return false;
 		if (!query) return true;
 		const refs = probeReferences(task);
 		const fields = [String(task.id), `#${task.id}`, String(task.case_id), `#${task.case_id}`, task.experiment?.baseline.model,
 			...refs.accounts.flatMap(id => [id, `#${id}`, accounts.get(id)?.name, accounts.get(id)?.email]),
 			...refs.nodes.flatMap(id => [id, `#${id}`, nodes.get(id)?.name])];
 		// Only the recorded epoch may supply an IP, never a node's newer address.
-		for (const [node, epoch] of [[task.node_id, task.epoch], [task.baseline_node_id, task.baseline_epoch], [task.control_node_id, task.control_epoch]]) {
-			if (node && epoch !== undefined) {
-				const path = ips.get(node);
-				fields.push(path?.epochs.get(epoch) ?? (path?.currentEpoch === epoch ? path.current : undefined));
-			}
+		if (task.node_id && task.epoch !== undefined) {
+			const path = ips.get(task.node_id);
+			fields.push(path?.epochs.get(task.epoch) ?? (path?.currentEpoch === task.epoch ? path.current : undefined));
 		}
 		return fields.some(field => field?.toLowerCase().includes(query));
 	}).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
@@ -503,7 +498,10 @@ export function getProbeFinding(
 		if (task.state === "failed") return finding("proofInterrupted", "resultError", "warn");
 		const result = probeResult(task);
 		if (result === "clean") return finding("proofNormal", "proofNormalBadge", "ok");
-		if (result === "degraded") return finding("proofAbnormal", "proofAbnormalBadge", "bad");
+		if (result === "degraded") {
+			const bad = new Set(task.proof?.results?.filter(proof => proof.outcome === "degraded").map(proof => proof.kind));
+			return finding("proofAbnormal", bad.size > 1 ? "bothAbnormalBadge" : bad.has("account") ? "accountAbnormalBadge" : "exitAbnormalBadge", "bad");
+		}
 		return finding("proofInconclusive", "proofInconclusiveBadge", "warn");
 	}
 	if (task.state === "done" && task.result === "clean") return finding("findingClean", "resultClean", "ok");

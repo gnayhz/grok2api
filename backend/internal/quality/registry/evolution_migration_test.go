@@ -101,8 +101,8 @@ func TestUpgradeAddsLeasesAndRepairsExistingQueue(t *testing.T) {
 	if count, err := archive.Count(ctx); err != nil || count != 1 {
 		t.Fatalf("projection count=%d err=%v", count, err)
 	}
-	tasks, err := store.ListProbeTasks(ctx, 10)
-	if err != nil || len(tasks) != 2 || tasks[0].State != model.ProbeDone || tasks[1].State != model.ProbeCancelled {
+	tasks, err := store.ListProbeTasksForCase(ctx, 0)
+	if err != nil || len(tasks) != 2 || tasks[1].State != model.ProbeDone || tasks[0].State != model.ProbeCancelled {
 		t.Fatalf("tasks=%+v err=%v", tasks, err)
 	}
 	if tasks[0].Experiment.Version != "" || tasks[0].Attempt.ID != "" {

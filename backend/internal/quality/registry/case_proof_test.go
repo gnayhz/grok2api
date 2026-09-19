@@ -11,6 +11,45 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
+func TestRecentCaseProofsExcludeSingleMeasurementsBeforeLimit(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			opts, _ := resourceCheckDatabase(t, driver)
+			r, err := Open(ctx, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			now := time.Now().UTC()
+			rows := []qProbeTaskModel{
+				{ID: 1, Direction: "case_proof", CaseID: 81, CreatedAt: now.Add(time.Second)},
+				{ID: 2, Direction: "case_proof", CaseID: 82, CreatedAt: now},
+				{ID: 3, Direction: "case_proof", CaseID: 83, CreatedAt: now.Add(time.Second)},
+				{ID: 4, Direction: "account_differential", CaseID: 84, CreatedAt: now.Add(time.Minute)},
+				{ID: 5, Direction: "exit_jury", CaseID: 84, CreatedAt: now.Add(time.Minute)},
+				{ID: 6, Direction: "resource_check", CreatedAt: now.Add(time.Minute)},
+			}
+			if err := r.db.Create(&rows).Error; err != nil {
+				t.Fatal(err)
+			}
+			store := NewProbeTaskStore(r)
+			views, err := store.ListProbeTasks(ctx, 2)
+			if err != nil || len(views) != 2 || views[0].ID != 3 || views[1].ID != 1 {
+				t.Fatalf("recent proofs must filter before limiting and sort by time/id: %+v, %v", views, err)
+			}
+			all, err := store.ListProbeTasks(ctx, 0)
+			if err != nil || len(all) != 3 {
+				t.Fatalf("default feed: %+v, %v", all, err)
+			}
+			var count int64
+			if err := r.db.Model(&qProbeTaskModel{}).Count(&count).Error; err != nil || count != int64(len(rows)) {
+				t.Fatalf("listing must not delete evidence: %d, %v", count, err)
+			}
+		})
+	}
+}
+
 func TestCaseProofUpgradePreservesHistoryAndBothHolders(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {

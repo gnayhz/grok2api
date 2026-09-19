@@ -323,7 +323,7 @@ test("探针汇总窗口可参数化:调宽窗口后滑出结论回归计数(批
 	const now = Date.now();
 	const iso = (offsetMs: number) => new Date(now - offsetMs).toISOString();
 	const tasks = [
-		{ id: 1, case_id: 1, direction: "exit_jury", defendant: 1, juror: 2, state: "done", result: "degraded", detail: "", created_at: iso(45 * 60 * 1000), finished_at: iso(45 * 60 * 1000) },
+		{ id: 1, case_id: 1, direction: "case_proof", defendant: 1, juror: 0, state: "done", result: "error", proof: { results: [{ outcome: "degraded" }] }, detail: "", created_at: iso(45 * 60 * 1000), finished_at: iso(45 * 60 * 1000) },
 	] as unknown as Array<Parameters<typeof probeSummary>[0][number]>;
 	// 默认 30m 窗:已滑出不计。
 	strictEqual(probeSummary(tasks, now).degraded, 0);

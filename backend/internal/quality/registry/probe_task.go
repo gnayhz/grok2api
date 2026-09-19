@@ -205,13 +205,14 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 	})
 }
 
-// ListProbeTasks 列出最近探针任务(面板/调查局观测)。
+// ListProbeTasks lists current case-proof investigations for the test records page.
+// Filter before limiting so retired single measurements cannot displace reports.
 func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]model.ProbeTaskView, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	var rows []qProbeTaskModel
-	if err := s.registry.db.WithContext(ctx).Where("direction IN ?", []string{string(model.ProbeAccountDifferential), string(model.ProbeExitJury), string(model.ProbeCaseProof)}).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.registry.db.WithContext(ctx).Where("direction = ?", string(model.ProbeCaseProof)).Order("created_at DESC, id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	views := make([]model.ProbeTaskView, 0, len(rows))

@@ -107,7 +107,7 @@ func TestManagementHTTPPreservesFullProbeHistoryAndOptionalFields(t *testing.T) 
 	for _, tc := range []struct {
 		query string
 		count int
-	}{{"?limit=3", 3}, {"?limit=200", 200}, {"?limit=201", 50}, {"?limit=invalid", 50}, {"?case_id=" + strconv.FormatUint(id, 10) + "&limit=1", 205}} {
+	}{{"?limit=3", 0}, {"?limit=200", 0}, {"?limit=201", 0}, {"?limit=invalid", 0}, {"?case_id=" + strconv.FormatUint(id, 10) + "&limit=1", 205}} {
 		rows := get("/quality/probes" + tc.query)
 		if len(rows) != tc.count {
 			t.Fatalf("%s rows=%d want=%d", tc.query, len(rows), tc.count)
@@ -141,5 +141,36 @@ func TestManagementHTTPPreservesFullProbeHistoryAndOptionalFields(t *testing.T) 
 	}
 	if rows := get("/quality/probes?case_id=" + strconv.FormatUint(id, 10) + "&limit=1"); len(rows) != 205 {
 		t.Fatal("closed case lost task history")
+	}
+	// Exercise pagination limits with current investigations, one proof per case.
+	spec := model.ProbeExperiment{Version: model.ResourceCheckVersion, ResourceCheck: &model.ResourceCheckPlan{
+		Kind: "account", ResourceID: 42, MaxCalls: 5, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 42}},
+	}}
+	evidence, err := json.Marshal(map[string]any{"policy": map[string]any{"version": model.CaseProofVersion, "experiment": spec}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 205 {
+		caseID, err := reg.CreateCase(ctx, time.Now().UTC(), string(evidence))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tasks.CreateProbeTask(ctx, model.ProbeTask{CaseID: caseID, Direction: model.ProbeCaseProof, DefendantAccountID: 42}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		count int
+	}{{"?limit=3", 3}, {"?limit=200", 200}, {"?limit=201", 50}, {"?limit=invalid", 50}} {
+		rows := get("/quality/probes" + tc.query)
+		if len(rows) != tc.count {
+			t.Fatalf("%s rows=%d want=%d", tc.query, len(rows), tc.count)
+		}
+		for _, row := range rows {
+			if row["direction"] != "case_proof" {
+				t.Fatalf("retired measurement in current feed: %+v", row)
+			}
+		}
 	}
 }

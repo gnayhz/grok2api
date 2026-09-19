@@ -135,7 +135,7 @@ func TestCompleteProbeTaskDoesNotResurrectCancelled(t *testing.T) {
 	if !errors.Is(late, model.ErrProbeAlreadySettled) {
 		t.Fatalf("迟到结论必须被拒(ErrProbeAlreadySettled), got %v", late)
 	}
-	tasks, err := store.ListProbeTasks(ctx, 10)
+	tasks, err := store.ListProbeTasksForCase(ctx, 9)
 	if err != nil {
 		t.Fatal(err)
 	}

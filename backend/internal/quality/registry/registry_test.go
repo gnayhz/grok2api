@@ -173,7 +173,7 @@ func TestProbeTaskPersistsDifferentialBaseline(t *testing.T) {
 		claimed[0].DefendantNodeID != 107 || claimed[0].DefendantEpoch != 139 {
 		t.Fatalf("双路径字段未从库恢复: %+v", claimed[0])
 	}
-	views, err := store.ListProbeTasks(ctx, 10)
+	views, err := store.ListProbeTasksForCase(ctx, 41)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("views=%+v err=%v", views, err)
 	}
@@ -187,7 +187,7 @@ func TestProbeTaskPersistsDifferentialBaseline(t *testing.T) {
 	}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	views, err = store.ListProbeTasks(ctx, 10)
+	views, err = store.ListProbeTasksForCase(ctx, 41)
 	if err != nil || len(views) != 1 || !views[0].VerifiedIPChange {
 		t.Fatalf("差分 IP 验证标志必须持久化: views=%+v err=%v", views, err)
 	}
