@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/application/selector"
@@ -69,6 +71,13 @@ func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold Qualit
 	defer stop()
 	state := qualityScanState{kernel: hold.Kernel(), protocol: qualityProtocolResponses, startedAt: time.Now()}
 	firstVerdict := QualityWait
+	plainOutput := false
+	unexpectedOutput := false
+	checkItemType := func(kind string) {
+		if kind != "" && kind != "message" && kind != "reasoning" {
+			unexpectedOutput = true
+		}
+	}
 	stream := responseflow.FromReader(body)
 	if stream == nil {
 		return qualitymodel.AccountCheckSample{}, errors.New("canonical check stream unavailable")
@@ -76,6 +85,48 @@ func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold Qualit
 	err := stream.ConsumeLimit(qualityProbeCompletionBytes, func(event *responseflow.Event) error {
 		if event.HasData && !bytes.Equal(bytes.TrimSpace(event.Data), []byte("[DONE]")) {
 			observeQualityPayload(&state, event.Data)
+			var fact struct {
+				Type  string `json:"type"`
+				Delta string `json:"delta"`
+				Item  struct {
+					Type    string `json:"type"`
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"item"`
+				Response struct {
+					Output []struct {
+						Type    string `json:"type"`
+						Content []struct {
+							Type string `json:"type"`
+							Text string `json:"text"`
+						} `json:"content"`
+					} `json:"output"`
+				} `json:"response"`
+			}
+			if json.Unmarshal(event.Data, &fact) == nil {
+				checkItemType(fact.Item.Type)
+				if strings.Contains(fact.Type, "_call.") || strings.Contains(fact.Type, "_call_") {
+					unexpectedOutput = true
+				}
+				if fact.Type == "response.output_text.delta" && strings.TrimSpace(fact.Delta) != "" {
+					plainOutput = true
+				}
+				for _, v := range fact.Item.Content {
+					if v.Type == "output_text" && strings.TrimSpace(v.Text) != "" {
+						plainOutput = true
+					}
+				}
+				for _, item := range fact.Response.Output {
+					checkItemType(item.Type)
+					for _, v := range item.Content {
+						if v.Type == "output_text" && strings.TrimSpace(v.Text) != "" {
+							plainOutput = true
+						}
+					}
+				}
+			}
 			if firstVerdict == QualityWait {
 				firstVerdict, _ = state.streamVerdict(true)
 			}
@@ -95,6 +146,7 @@ func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold Qualit
 	}
 	fp := state.fingerprint(verdict, err)
 	sample := qualitymodel.AccountCheckSample{Outcome: qualitymodel.MeasurementError, Rule: fp.Rule,
+		PlainOutput: plainOutput, UnexpectedOutput: unexpectedOutput, Conflict: firstVerdict == QualityWithhold && fp.HasThinking,
 		Thinking: fp.HasThinking, Completed: fp.Completed && !fp.Failed, UsageReported: state.usage.Reported,
 		InputTokens: state.usage.InputTokens, ReasoningTokens: state.usage.ReasoningTokens}
 	if state.usage.CachedInputTokensReported {

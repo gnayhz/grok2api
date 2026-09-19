@@ -35,7 +35,7 @@ func (s *ProbeTaskStore) CreateAccountCheck(ctx context.Context, task model.Prob
 			return nil
 		}
 		var count int64
-		if err := active.Count(&count).Error; err != nil {
+		if err := active.Select("COALESCE(SUM(manual_slots), 0)").Scan(&count).Error; err != nil {
 			return err
 		}
 		if count >= int64(capacity) {

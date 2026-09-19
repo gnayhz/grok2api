@@ -58,6 +58,8 @@ func (m ResourceCheckMeasurer) MeasureResourceCheck(ctx context.Context, account
 		return sample
 	}
 	defer release()
+	generation := request.Credential.CredentialGeneration
+	sample.PathChecks = 1
 	before, family, binding, err := m.Paths.ProbeBuildTarget(ctx, request.Credential, nodeID)
 	if err != nil || before == "" {
 		return sample
@@ -67,12 +69,24 @@ func (m ResourceCheckMeasurer) MeasureResourceCheck(ctx context.Context, account
 	if result.CheckEvidence != nil {
 		sample = *result.CheckEvidence
 	}
+	sample.Generated = result.Attempt.ID != ""
+	sample.CredentialGeneration = generation
+	sample.PathChecks = 2
 	sample.Sample, sample.Attempt, sample.Outcome, sample.Failure = spec.Sample, result.Attempt, result.Outcome, result.Failure
 	sample.PathKey, sample.PathFamily, sample.PathBinding = before, family, binding
 	after, afterFamily, afterBinding, err := m.Paths.ProbeBuildTarget(ctx, request.Credential, nodeID)
 	sample.PathVerified = err == nil && before == after && family == afterFamily && binding == afterBinding && sample.Attempt.Path.NodeID == nodeID && !sample.Attempt.Path.Rotating
 	if !sample.PathVerified {
 		sample.Outcome, sample.Failure = model.MeasurementError, model.ProbeFailurePath
+		// A verified change breaks the window assumption; a failed trace is
+		// merely an unavailable measurement and supplies no negative evidence.
+		sample.Conflict = sample.Conflict || err == nil && after != "" && (before != after || family != afterFamily || binding != afterBinding)
+	}
+	current, identityErr := m.Gateway.accounts.Get(ctx, accountID)
+	sample.IdentityVerified = identityErr == nil && current.Credential.CredentialGeneration == generation && current.Credential.Provider == request.Credential.Provider && current.Credential.BuildRouteMode == request.Credential.BuildRouteMode
+	if !sample.IdentityVerified {
+		sample.Outcome, sample.Failure = model.MeasurementError, model.ProbeFailureIdentity
+		sample.Conflict = sample.Conflict || identityErr == nil
 	}
 	return sample
 }

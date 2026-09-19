@@ -3,7 +3,7 @@ package management
 import (
 	"context"
 	"errors"
-	"sort"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -19,7 +19,7 @@ type ResourceCheckGroup = model.ResourceCheckGroup
 type AccountCheckSample = model.AccountCheckSample
 
 type ResourceCheckStore interface {
-	CreateResourceCheck(context.Context, model.ProbeTask, int) (uint64, error)
+	CreateResourceCheckBatch(context.Context, []model.ProbeTask, int) ([]model.ResourceSubmission, error)
 	ListResourceChecks(context.Context, string, []uint64) ([]model.ResourceCheck, error)
 }
 type ResourceCheckPreparer interface {
@@ -36,11 +36,9 @@ func NewResourceChecks(store ResourceCheckStore, prepare ResourceCheckPreparer, 
 	return &ResourceChecks{store: store, prepare: prepare, nodes: nodes}
 }
 
-type CheckSubmission struct {
-	ResourceID uint64 `json:"resource_id"`
-	ID         uint64 `json:"id,omitempty"`
-	Error      string `json:"error,omitempty"`
-}
+type CheckSubmission = model.ResourceSubmission
+type ResourceObservation = model.ResourceObservation
+type ResourceProof = model.ResourceProof
 
 func validResources(kind string, ids []uint64) bool {
 	if kind != "account" && kind != "node" || len(ids) == 0 || len(ids) > 32 {
@@ -77,9 +75,11 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 			nodes = append(nodes, p.ID)
 		}
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i] < nodes[j] })
+	rand.Shuffle(len(nodes), func(i, j int) { nodes[i], nodes[j] = nodes[j], nodes[i] })
 	items := make([]CheckSubmission, 0, len(ids))
 	seen := map[uint64]bool{}
+	tasks := []model.ProbeTask{}
+	positions := []int{}
 	for _, id := range ids {
 		if seen[id] {
 			continue
@@ -103,7 +103,7 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 			items = append(items, item)
 			continue
 		}
-		sort.Slice(accounts, func(i, j int) bool { return accounts[i] < accounts[j] })
+		rand.Shuffle(len(accounts), func(i, j int) { accounts[i], accounts[j] = accounts[j], accounts[i] })
 		plan := &model.ResourceCheckPlan{Kind: kind, ResourceID: id, Accounts: []uint64{}, Nodes: []uint64{}}
 		if kind == "node" && !fixed[id] {
 			plan.UnavailableReason = "path_unverified"
@@ -113,7 +113,7 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 				continue
 			}
 			plan.Accounts = append(plan.Accounts, account)
-			if len(plan.Accounts) == 8 {
+			if len(plan.Accounts) == model.ResourceCheckMaxAccounts {
 				break
 			}
 		}
@@ -122,7 +122,7 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 				continue
 			}
 			plan.Nodes = append(plan.Nodes, node)
-			if len(plan.Nodes) == model.ResourceCheckMaxGroups {
+			if len(plan.Nodes) == model.ResourceCheckMaxNodes {
 				break
 			}
 		}
@@ -133,14 +133,21 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 		} else {
 			task.DefendantNodeID = id
 		}
-		item.ID, err = s.store.CreateResourceCheck(ctx, task, model.AccountCheckQueueLimit)
+		positions = append(positions, len(items))
+		tasks = append(tasks, task)
+		items = append(items, item)
+	}
+	if len(tasks) > 0 {
+		accepted, err := s.store.CreateResourceCheckBatch(ctx, tasks, model.AccountCheckQueueLimit)
 		if err != nil {
-			item.Error = "submission_failed"
-			if errors.Is(err, model.ErrCheckQueueFull) {
-				item.Error = "queue_full"
+			for _, pos := range positions {
+				items[pos].Error = "submission_failed"
+			}
+		} else {
+			for i, item := range accepted {
+				items[positions[i]] = item
 			}
 		}
-		items = append(items, item)
 	}
 	return items, nil
 }

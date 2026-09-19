@@ -3,108 +3,174 @@ package model
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 )
 
-func syntheticResourceSamples(account, node uint64, path string, thinking bool, delta int64) []AccountCheckSample {
-	items := []AccountCheckSample{}
-	for i, name := range []string{"token-short", "token-long", "token-short"} {
-		input := int64(100)
-		if i == 1 {
-			input += delta
-		}
-		outcome := MeasurementClean
-		if !thinking {
-			outcome = MeasurementDegraded
-		}
-		items = append(items, AccountCheckSample{Sample: name, Attempt: attemptmeta.Identity{ID: fmt.Sprintf("fictional-%d-%d-%d", account, node, i), AccountID: account, Path: attemptmeta.Path{NodeID: node, Epoch: 1}}, PathKey: path, PathVerified: true, PathBinding: 1, Thinking: thinking, Completed: true, UsageReported: true, InputTokens: input, Outcome: outcome})
+func proofObservation(id int, a, n uint64, class string) ResourceObservation {
+	s := AccountCheckSample{IdentityVerified: true, PathVerified: true, Completed: true, UsageReported: true, PlainOutput: true, PathKey: fmt.Sprintf("fictional-exit-%d", n), PathFamily: 4, Sample: "token-short", Outcome: MeasurementDegraded, Attempt: attemptmeta.Identity{ID: fmt.Sprintf("fictional-%d", id), AccountID: a, Path: attemptmeta.Path{NodeID: n, Status: attemptmeta.PathRegistered}}, InputTokens: 100}
+	if class == "A" {
+		s.Thinking = true
+		s.Outcome = MeasurementClean
 	}
-	return items
+	return ResourceObservation{ID: id, Window: 1, AccountID: a, NodeID: n, IdentityGroup: a, Class: class, Sample: s}
 }
-func syntheticResourceGroup(kind string, index int, thinking bool) ResourceCheckGroup {
-	account, node := uint64(100+index), uint64(10+index)
-	g := ResourceCheckGroup{ControlAccount: account, ControlNode: node, IdentityGroup: account, AccountID: account, NodeID: node}
-	path := fmt.Sprintf("fictional-path-%d", node)
-	g.Control = syntheticResourceSamples(account, node, path, true, 180)
-	if kind == "account" {
-		g.AccountID = 7
-	} else {
-		g.NodeID = 9
-		path = "fictional-target"
-	}
-	delta := int64(180)
-	if !thinking {
-		delta = 90
-	}
-	g.Samples = syntheticResourceSamples(g.AccountID, g.NodeID, path, thinking, delta)
-	after := g.Control[0]
-	after.Attempt.ID += "-after"
-	g.After = &after
-	return AssessResourceGroup(kind, g)
-}
-func TestResourceCheckAttributionRequiresIndependentControls(t *testing.T) {
-	for _, kind := range []string{"account", "node"} {
-		for _, tc := range []struct {
-			name     string
-			thinking bool
-			count    int
-			want     string
-		}{{"two healthy", true, 2, "healthy"}, {"two bad insufficient", false, 2, "inconclusive"}, {"three bad", false, 3, "degraded"}} {
-			t.Run(kind+"/"+tc.name, func(t *testing.T) {
-				r := ResourceCheckReport{Kind: kind}
-				for i := 0; i < tc.count; i++ {
-					r.Groups = append(r.Groups, syntheticResourceGroup(kind, i, tc.thinking))
+
+// The independent oracle enumerates every possible resource assignment.
+func TestResourceProofExhaustiveThreeByThree(t *testing.T) {
+	for pattern := 0; pattern < 19683; pattern++ {
+		r := ResourceCheckReport{Window: 1}
+		code := pattern
+		for a := uint64(1); a <= 3; a++ {
+			for n := uint64(1); n <= 3; n++ {
+				v := code % 3
+				code /= 3
+				if v > 0 {
+					class := "A"
+					if v == 2 {
+						class = "B"
+					}
+					r.Observations = append(r.Observations, proofObservation(len(r.Observations)+1, a, n, class))
 				}
-				if got := AssessResourceCheck(r); got.Outcome != tc.want {
-					t.Fatalf("%+v", got)
-				}
-			})
-		}
-	}
-}
-func TestResourceCheckRejectsConflictsAndUnverifiedEvidence(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		edit func(*ResourceCheckGroup)
-	}{
-		{"incomplete", func(g *ResourceCheckGroup) { g.Samples[1].Completed = false }},
-		{"usage absent", func(g *ResourceCheckGroup) { g.Samples[1].UsageReported = false }},
-		{"changed short", func(g *ResourceCheckGroup) { g.Samples[2].InputTokens++ }},
-		{"rotating path", func(g *ResourceCheckGroup) { g.Samples[1].PathVerified = false }},
-		{"changed binding", func(g *ResourceCheckGroup) { g.Samples[1].PathBinding++ }},
-		{"duplicate attempt", func(g *ResourceCheckGroup) { g.Samples[1].Attempt.ID = g.Samples[0].Attempt.ID }},
-		{"claimed tokens match", func(g *ResourceCheckGroup) { g.Samples[1].InputTokens = 280 }},
-		{"control changed", func(g *ResourceCheckGroup) { g.After.Thinking = false }},
-		{"control other path", func(g *ResourceCheckGroup) {
-			for i := range g.Control {
-				g.Control[i].PathKey = "different"
 			}
-			g.After.PathKey = "different"
-		}},
+		}
+		possible := []int{}
+		for world := 0; world < 64; world++ {
+			fits := true
+			for _, o := range r.Observations {
+				normal := (world&(1<<(o.AccountID-1))) == 0 && (world&(1<<(o.NodeID+2))) == 0
+				if (o.Class == "A") != normal {
+					fits = false
+					break
+				}
+			}
+			if fits {
+				possible = append(possible, world)
+			}
+		}
+		f := ResourceEvidence(r)
+		if f.Conflict != (len(possible) == 0) {
+			t.Fatalf("conflict pattern=%d", pattern)
+		}
+		if f.Conflict {
+			continue
+		}
+		for vertex := 0; vertex < 6; vertex++ {
+			allNormal, allBad := true, true
+			for _, w := range possible {
+				if w&(1<<vertex) == 0 {
+					allBad = false
+				} else {
+					allNormal = false
+				}
+			}
+			key := f.Accounts[uint64(vertex+1)]
+			if vertex >= 3 {
+				key = f.Nodes[uint64(vertex-2)]
+			}
+			if (f.Normal[key] != 0) != allNormal || (len(f.Bad[key]) > 0) != allBad {
+				t.Fatalf("pattern=%d vertex=%d", pattern, vertex)
+			}
+		}
+	}
+}
+func TestResourceProofConflictAliasesWindowsAndAuxiliaryTokens(t *testing.T) {
+	now := time.Now().UTC()
+	r := ResourceCheckReport{Window: 1, WindowStartedAt: now, Results: []ResourceProof{{ResourceTarget: ResourceTarget{Kind: "account", ResourceID: 1}}}, Observations: []ResourceObservation{proofObservation(1, 1, 8, "B"), proofObservation(2, 2, 8, "A")}}
+	r = AssessResourceProofs(r, now)
+	if r.Results[0].Outcome != "degraded" || len(r.Results[0].Evidence) != 2 {
+		t.Fatal(r.Results)
+	}
+	r.Observations = append(r.Observations, proofObservation(3, 1, 9, "A"))
+	r = AssessResourceProofs(r, now)
+	if r.Results[0].Reason != "conflicting_samples" {
+		t.Fatal("discarded counterevidence", r.Results)
+	}
+	r.Window = 2
+	r.WindowStartedAt = now
+	r = AssessResourceProofs(r, now)
+	if r.Results[0].Outcome != "inconclusive" {
+		t.Fatal("reused old normal evidence")
+	}
+	for _, class := range []string{"A", "B"} {
+		s := proofObservation(1, 1, 8, class).Sample
+		for _, tokens := range []int64{0, 100, 999} {
+			s.InputTokens = tokens
+			if ClassifyResourceSample(s) != class {
+				t.Fatal("token count used as identity")
+			}
+		}
+		s.UsageReported = false
+		if ClassifyResourceSample(s) != "unknown" {
+			t.Fatal("missing usage accepted")
+		}
+	}
+	alias := proofObservation(3, 1, 9, "A")
+	alias.Sample.PathKey = r.Observations[0].Sample.PathKey
+	r.Window = 1
+	r.Observations = append(r.Observations[:2], alias)
+	if !ResourceEvidence(r).Conflict {
+		t.Fatal("same exit hidden behind node alias")
+	}
+	duplicate := r.Observations[0]
+	duplicate.ID = 4
+	duplicate.Sample.Thinking = true
+	duplicate.Class = "A"
+	duplicate.Sample.Outcome = MeasurementClean
+	r.Observations = append(r.Observations[:2], duplicate)
+	if !ResourceEvidence(r).Conflict {
+		t.Fatal("same physical attempt overwritten")
+	}
+}
+
+func TestResourceProofRejectsIncompleteEvidenceAndIdentityDrift(t *testing.T) {
+	for _, mutate := range []func(*AccountCheckSample){
+		func(s *AccountCheckSample) { s.Completed = false },
+		func(s *AccountCheckSample) { s.IdentityVerified = false },
+		func(s *AccountCheckSample) { s.PathVerified = false },
+		func(s *AccountCheckSample) { s.PathFamily = 0 },
+		func(s *AccountCheckSample) { s.Attempt.Path.Status = attemptmeta.PathUnknown },
+		func(s *AccountCheckSample) { s.PlainOutput = false },
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := syntheticResourceGroup("account", 0, false)
-			tc.edit(&g)
-			if got := AssessResourceGroup("account", g); got.Outcome != "inconclusive" {
-				t.Fatalf("%+v", got)
-			}
-		})
+		o := proofObservation(1, 1, 1, "B")
+		mutate(&o.Sample)
+		if ClassifyResourceSample(o.Sample) != "unknown" {
+			t.Fatal("incomplete evidence classified as B")
+		}
+		if !ResourceEvidence(ResourceCheckReport{Window: 1, Observations: []ResourceObservation{o}}).Conflict {
+			t.Fatal("trusted invalid caller classification")
+		}
 	}
-	r := ResourceCheckReport{Kind: "account", Groups: []ResourceCheckGroup{syntheticResourceGroup("account", 0, false), syntheticResourceGroup("account", 1, false), syntheticResourceGroup("account", 2, false)}}
-	other := syntheticResourceGroup("account", 3, true)
-	other.Outcome = "inconclusive"
-	r.Groups = append(r.Groups, other)
-	if got := AssessResourceCheck(r); got.Reason != "conflicting_samples" {
-		t.Fatalf("counterevidence lost: %+v", got)
+	for _, mutate := range []func(*ResourceObservation){
+		func(o *ResourceObservation) { o.Sample.CredentialGeneration++ },
+		func(o *ResourceObservation) { o.Sample.PathBinding++ },
+		func(o *ResourceObservation) { o.IdentityGroup++ },
+	} {
+		a, b := proofObservation(1, 1, 1, "A"), proofObservation(2, 1, 1, "A")
+		mutate(&b)
+		if !ResourceEvidence(ResourceCheckReport{Window: 1, Observations: []ResourceObservation{a, b}}).Conflict {
+			t.Fatal("merged changing identity/path")
+		}
 	}
-	r = ResourceCheckReport{Kind: "account", Groups: []ResourceCheckGroup{syntheticResourceGroup("account", 0, false), syntheticResourceGroup("account", 0, false), syntheticResourceGroup("account", 0, false)}}
-	if got := AssessResourceCheck(r); got.Outcome != "inconclusive" {
-		t.Fatal("duplicate IP counted")
+}
+
+func TestResourceProofSharedIdentityAndClosedWindow(t *testing.T) {
+	now := time.Now().UTC()
+	r := ResourceCheckReport{Window: 1, WindowStartedAt: now, Observations: []ResourceObservation{proofObservation(1, 1, 2, "A")}, Results: []ResourceProof{
+		{ResourceTarget: ResourceTarget{Kind: "account", ResourceID: 1}, IdentityGroup: 1},
+		{ResourceTarget: ResourceTarget{Kind: "account", ResourceID: 3}, IdentityGroup: 1},
+		{ResourceTarget: ResourceTarget{Kind: "account", ResourceID: 4}, IdentityGroup: 4},
+	}}
+	r = AssessResourceProofs(r, now)
+	if r.Results[0].Outcome != "healthy" || r.Results[1].Outcome != "healthy" || r.Results[1].Evidence[0] != 1 {
+		t.Fatal("known aliases repeated the physical measurement", r.Results)
 	}
-	r = ResourceCheckReport{Kind: "node", Groups: []ResourceCheckGroup{syntheticResourceGroup("node", 0, false), syntheticResourceGroup("node", 1, false), syntheticResourceGroup("node", 2, false)}}
-	r.Groups[2].Samples[0].PathKey = "another-exit"
-	if got := AssessResourceCheck(r); got.Reason != "path_changed" {
-		t.Fatal("changed target aggregated")
+	r.Window, r.WindowStartedAt = 2, now.Add(ResourceCheckWindow)
+	r.Observations = append(r.Observations, proofObservation(2, 4, 2, "B"))
+	r.Observations[1].Window = 2
+	r = AssessResourceProofs(r, r.WindowStartedAt)
+	if r.Results[0].Outcome != "healthy" || r.Results[0].Window != 1 || r.Results[2].Outcome != "inconclusive" {
+		t.Fatal("historical certificate lost or stale anchor reused", r.Results)
 	}
 }

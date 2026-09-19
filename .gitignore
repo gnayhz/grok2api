@@ -7,7 +7,8 @@ Thumbs.db
 *.swo
 *~
 
-# Legacy private-note paths stay ignored; new work records belong outside the project.
+# User-requested project-local reports and drafts stay under ignored docs/local/.
+# Other private work records remain outside the project; never force-add them.
 # Local environment and secrets
 .env
 .env.*
@@ -17,6 +18,7 @@ Thumbs.db
 /config.local.yaml
 /config.*.local.yaml
 /docs/*
+/docs/local/
 /docs/rules/*
 /backend/docs/goal/
 *.har

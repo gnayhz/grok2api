@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { listModels } from "@/entities/model/model-api";
@@ -51,13 +51,28 @@ export function ResourceCheckDialog({ kind, targets, onClose }: { kind: Resource
 }
 
 function ResourceResult({ check, latest }: { check: ResourceCheck; latest: boolean }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   const { t } = useTranslation();
   const running = check.state === "pending" || check.state === "running";
+  const proof = check.report?.results?.find(p => p.kind === check.kind && p.resource_id === check.resource_id);
+  const expired = proof?.outcome === "healthy" && new Date(proof.valid_until).getTime() <= now;
   const outcome = running ? check.state : check.state === "done" ? check.report?.outcome ?? "inconclusive" : "inconclusive";
   return <div className="rounded-lg border p-3 space-y-2">
     <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm">{check.model} · #{check.id} · {new Date(check.created_at).toLocaleString()}</span><Badge variant={outcome === "degraded" ? "destructive" : "secondary"}>{t(`resourceChecks.outcome.${outcome}`)}</Badge></div>
+    {check.report?.version === "resource-quality-check-v1" && <p className="text-xs text-muted-foreground">{t("resourceChecks.historical")}</p>}
     <p className="text-sm">{running ? t("resourceChecks.accepted") : t(`resourceChecks.reason.${check.state === "done" ? check.report?.reason : "interrupted"}`, { defaultValue: t("resourceChecks.reason.measurement_unavailable") })}</p>
+    {expired && <p className="text-xs text-muted-foreground">{t("resourceChecks.expired")}</p>}
+    {proof && <p className="text-sm">{t("resourceChecks.proof", { rule: proof.rule || "—", evidence: proof.evidence.map(id => `#${id}`).join(", ") || "—" })}</p>}
     {check.report && <><p className="text-xs text-muted-foreground">{t("resourceChecks.progress", { calls: check.report.calls, max: check.report.max_calls })}</p><details open={latest}><summary className="cursor-pointer text-sm">{t("resourceChecks.evidence")}</summary><div className="mt-2 space-y-2">
+      {check.report.version === "resource-proof-v2" && <>
+        <p className="text-xs">{t("resourceChecks.consumption", { generations: check.report.generations ?? 0, paths: check.report.path_checks ?? 0 })}</p>
+        {check.report.observations?.map(o => <div key={o.id} className="rounded border p-2 text-xs space-y-1">
+          <p>{t("resourceChecks.observation", { id: o.id, account: o.account_id, node: o.node_id })} · {t(`resourceChecks.observationClass.${o.class}`, { defaultValue: o.class })}</p>
+          <p>{t(`resourceChecks.purpose.${o.purpose}`, { defaultValue: o.purpose })}</p>
+          <table className="w-full text-left"><thead><tr><th>{t("resourceChecks.phase")}</th><th>{t("resourceChecks.thinking")}</th><th>{t("resourceChecks.complete")}</th><th>{t("resourceChecks.path")}</th></tr></thead><tbody><SampleRow sample={o.sample} phase={`#${o.id}`} /></tbody></table>
+        </div>)}
+      </>}
       {check.report.groups.map((group, index) => <div key={index} className="rounded border p-2 text-xs space-y-2">
         <p>{t("resourceChecks.group", { index: index + 1, account: group.account_id, node: group.node_id })} · {t(`resourceChecks.outcome.${group.outcome}`)}</p>
         <p>{t(`resourceChecks.reason.${group.reason}`, { defaultValue: group.reason })}</p>

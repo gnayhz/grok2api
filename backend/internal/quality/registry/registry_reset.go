@@ -23,6 +23,7 @@ var stateTables = []string{
 	"q_case_party",
 	"q_incident_closure",
 	"q_observation",
+	"q_resource_check_target",
 	"q_probe_task",
 }
 

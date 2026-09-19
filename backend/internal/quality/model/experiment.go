@@ -68,8 +68,6 @@ func (s ProbeExperiment) Prompt() string {
 		switch s.Sample {
 		case "token-short":
 			return "Reply only OK. Data: " + strings.Repeat("a", 512)
-		case "token-long":
-			return "Reply only OK. Data: " + strings.Repeat("a", 2048)
 		}
 		return ""
 	}

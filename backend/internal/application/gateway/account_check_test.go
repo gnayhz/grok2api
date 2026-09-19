@@ -81,3 +81,30 @@ func TestAccountCheckRecordsActualRuleWithoutTreatingUsageAsThinking(t *testing.
 		})
 	}
 }
+
+func TestResourceCheckStreamRejectsRefusalToolsAndIncompleteResponses(t *testing.T) {
+	terminal := "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":123,\"output_tokens\":5}}}\n\n"
+	text := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n"
+	thinking := "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"fictional thinking\"}\n\n"
+	for _, tc := range []struct{ name, body, class string }{
+		{"normal", thinking + text + terminal, "A"},
+		{"no_thinking", text + terminal, "B"},
+		{"empty", terminal, "unknown"},
+		{"refusal", "data: {\"type\":\"response.refusal.delta\",\"delta\":\"fictional refusal\"}\n\n" + terminal, "unknown"},
+		{"unexpected_tool", "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\"}}\n\n" + text + terminal, "unknown"},
+		{"truncated", text, "unknown"},
+		{"late_thinking", text + thinking + terminal, "conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, resources := selector.NewAttemptResources(context.Background())
+			defer resources.Close()
+			body := resources.Own(responseflow.New(io.NopCloser(strings.NewReader(tc.body)), nil))
+			s, _ := readAccountCheckStream(ctx, body, QualityRetryRuntime{}, resources)
+			s.Sample, s.IdentityVerified, s.PathVerified, s.PathFamily, s.PathKey = "token-short", true, true, 4, "fictional-path"
+			s.Attempt = attemptmeta.Identity{ID: "fictional-probe", AccountID: 1, Path: attemptmeta.Path{NodeID: 2, Status: attemptmeta.PathRegistered}}
+			if got := qualitymodel.ClassifyResourceSample(s); got != tc.class {
+				t.Fatalf("got=%s want=%s sample=%+v", got, tc.class, s)
+			}
+		})
+	}
+}

@@ -18,6 +18,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) and [DEVELOPMENT.md](DEVELOPMENT.md) bef
 
 - Commit product code, required generated contracts, maintained tests, synthetic/minimal fixtures and durable project documentation.
 - Keep plans, task logs, review rounds, raw test/benchmark output, screenshots, traces, database exports and one-off probes outside the repository. Do not force-add ignored files.
+- When the user requests project-local reports and design drafts, keep them under ignored `docs/local/` with an index. Resource-quality reports and the active-probe design are indexed at `docs/local/resource-quality/README.md`; consult that index before continuing this work. Raw evidence and credentials remain in their existing private archives.
 - Never commit live credentials, private configuration, cookies, signed URLs, prompts/responses or identifying operational data. Tests are subject to the same rule; synthetic data should be visibly fictional.
 - Review staged content and run `python3 scripts/check-repository.py --staged`. Ignore rules do not remove tracked files or old commits. Do not push a development history containing private work records as a way to publish a clean final tree.
 - Preserve shared history unless rewriting it was explicitly requested. Make local, reviewable changes first; publishing/deploying must follow the user's authorized scope.

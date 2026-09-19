@@ -58,6 +58,9 @@ func (r *Registry) CleanExpiredCaseHistory(ctx context.Context, now time.Time) (
 			return res.Error
 		}
 		probes = res.RowsAffected
+		if err := tx.Where("NOT EXISTS (SELECT 1 FROM q_probe_task p WHERE p.id=q_resource_check_target.task_id)").Delete(&qResourceCheckTargetModel{}).Error; err != nil {
+			return err
+		}
 
 		partyRes := tx.Where("case_id IN (?)", expiredCases).
 			Delete(&qCasePartyModel{})

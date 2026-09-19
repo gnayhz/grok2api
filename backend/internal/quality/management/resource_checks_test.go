@@ -12,12 +12,20 @@ import (
 
 type resourceCheckFixture struct{ tasks []model.ProbeTask }
 
-func (f *resourceCheckFixture) CreateResourceCheck(_ context.Context, task model.ProbeTask, _ int) (uint64, error) {
-	if task.DefendantAccountID == 9 {
-		return 0, model.ErrCheckQueueFull
+func (f *resourceCheckFixture) CreateResourceCheckBatch(_ context.Context, tasks []model.ProbeTask, _ int) ([]model.ResourceSubmission, error) {
+	out := []model.ResourceSubmission{}
+	for _, task := range tasks {
+		p := task.Experiment.ResourceCheck
+		item := model.ResourceSubmission{ResourceID: p.ResourceID}
+		if p.ResourceID == 9 {
+			item.Error = "queue_full"
+		} else {
+			f.tasks = append(f.tasks, task)
+			item.ID = uint64(len(f.tasks))
+		}
+		out = append(out, item)
 	}
-	f.tasks = append(f.tasks, task)
-	return uint64(len(f.tasks)), nil
+	return out, nil
 }
 func (f *resourceCheckFixture) ListResourceChecks(context.Context, string, []uint64) ([]model.ResourceCheck, error) {
 	return []model.ResourceCheck{}, nil
@@ -46,7 +54,7 @@ func TestResourceCheckBatchReportsPartialAcceptanceAndFiltersCandidates(t *testi
 		t.Fatalf("%+v %v", items, err)
 	}
 	plan := f.tasks[0].Experiment.ResourceCheck
-	if len(plan.Accounts) != 2 || plan.Accounts[0] != 2 || len(plan.Nodes) != 1 || plan.Nodes[0] != 11 {
+	if len(plan.Accounts) != 2 || len(plan.Nodes) != 1 || plan.Nodes[0] != 11 {
 		t.Fatalf("%+v", plan)
 	}
 	items, err = service.Start(context.Background(), "node", []uint64{12}, "fictional-model")

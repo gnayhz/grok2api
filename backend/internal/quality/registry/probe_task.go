@@ -169,8 +169,11 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 		updates["check_report_json"] = string(reportJSON)
 	}
 	return s.registry.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&qProbeTaskModel{}).
-			Where("id = ? AND state = ? AND lease_owner = ? AND lease_until > ?", taskID, string(model.ProbeRunning), s.owner, time.Now().UTC()).Updates(updates)
+		q := tx.Model(&qProbeTaskModel{}).Where("id = ? AND state = ? AND lease_owner = ? AND lease_until > ?", taskID, string(model.ProbeRunning), s.owner, time.Now().UTC())
+		if result.ResourceCheck != nil && result.ResourceCheck.Version == model.ResourceCheckVersion {
+			q = q.Where("check_revision = ?", result.ResourceCheck.Revision)
+		}
+		res := q.Updates(updates)
 		if res.Error != nil {
 			return res.Error
 		}

@@ -109,8 +109,19 @@ type qIPEpochModel struct {
 
 func (qIPEpochModel) TableName() string { return "q_ip_epoch" }
 
+// qResourceCheckTargetModel indexes targets without owning a second queue.
+type qResourceCheckTargetModel struct {
+	TaskID     uint64 `gorm:"primaryKey;autoIncrement:false"`
+	Kind       string `gorm:"primaryKey;size:16;index:idx_q_resource_target,priority:1"`
+	ResourceID uint64 `gorm:"primaryKey;autoIncrement:false;index:idx_q_resource_target,priority:2"`
+}
+
+func (qResourceCheckTargetModel) TableName() string { return "q_resource_check_target" }
+
 // qProbeTaskModel 调查局任务队列(B3):方向/陪审员/被告,状态,结果。
 type qProbeTaskModel struct {
+	ManualSlots        int        `gorm:"not null;default:1"`
+	CheckRevision      uint64     `gorm:"not null;default:0"`
 	CheckReportJSON    string     `gorm:"type:text;not null;default:''"`
 	ProjectionVersion  int        `gorm:"not null;default:0;index"`
 	ExperimentJSON     string     `gorm:"type:text;not null;default:''"`
@@ -161,6 +172,7 @@ var qualitySchemaModels = append([]any{
 	&qNodeEpochModel{},
 	&qIncidentClosureModel{},
 	&qProbeTaskModel{},
+	&qResourceCheckTargetModel{},
 	&qProbeProjectionModel{},
 	&qStateRevisionModel{},
 	&qCoordinationModel{},

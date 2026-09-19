@@ -2,6 +2,7 @@ package investigator
 
 import (
 	"context"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
@@ -13,137 +14,132 @@ type ResourceCheckProgress interface {
 	SaveResourceCheckProgress(context.Context, uint64, model.ResourceCheckReport) error
 }
 
-func (e *ProbeExecutor) SetResourceChecks(measure ResourceCheckMeasurements, progress ResourceCheckProgress) {
-	e.resourceMeasurements, e.resourceProgress = measure, progress
+func (e *ProbeExecutor) SetResourceChecks(m ResourceCheckMeasurements, p ResourceCheckProgress) {
+	e.resourceMeasurements, e.resourceProgress = m, p
 }
 
 func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.ProbeTask) (model.ProbeTaskResult, error) {
-	plan := task.Experiment.ResourceCheck
-	report := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Outcome: "inconclusive", Reason: "insufficient_controls", MaxCalls: model.ResourceCheckMaxCalls, Groups: []model.ResourceCheckGroup{}}
-	finish := func(err error) (model.ProbeTaskResult, error) {
-		report = model.AssessResourceCheck(report)
-		result := model.ProbeTaskResult{ResourceCheck: &report, Outcome: model.ProbeResultError, Detail: report.Reason}
-		if report.Outcome == "healthy" {
-			result.Outcome = model.ProbeResultClean
+	p := task.Experiment.ResourceCheck
+	r := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Outcome: "inconclusive", Reason: "insufficient_controls", Groups: []model.ResourceCheckGroup{}, Observations: []model.ResourceObservation{}, Window: 1, WindowStartedAt: time.Now().UTC()}
+	finish := func(reason string, err error) (model.ProbeTaskResult, error) {
+		if reason != "" {
+			r.Reason = reason
+			for i := range r.Results {
+				if r.Results[i].Outcome == "inconclusive" && r.Results[i].UnavailableReason == "" {
+					r.Results[i].Reason = reason
+				}
+			}
 		}
-		if report.Outcome == "degraded" {
-			result.Outcome = model.ProbeResultDegraded
+		if p != nil {
+			r = model.ResourceReportFor(r, p.Kind, p.ResourceID)
 		}
-		return result, err
+		return model.ProbeTaskResult{ResourceCheck: &r, Outcome: model.ProbeResultError, Detail: r.Reason}, err
 	}
-	if plan == nil || task.CaseID != 0 || task.Experiment.Version != model.ResourceCheckVersion || task.Experiment.UnsupportedReason() != "" || e.resourceMeasurements == nil || e.state == nil {
-		return finish(nil)
+	if p == nil || len(p.Targets) == 0 || task.CaseID != 0 || task.Experiment.Version != model.ResourceCheckVersion || task.Experiment.UnsupportedReason() != "" || e.resourceMeasurements == nil || e.resourceProgress == nil || e.state == nil {
+		return finish("unsupported_experiment_version", nil)
 	}
-	report.Kind, report.ResourceID = plan.Kind, plan.ResourceID
-	if plan.UnavailableReason == "path_unverified" {
-		report.Reason = plan.UnavailableReason
-		return finish(nil)
+	r.Kind, r.ResourceID, r.MaxCalls = p.Kind, p.ResourceID, p.MaxCalls
+	if p.MaxCalls != len(p.Targets)+4 || len(p.Targets) > 32 {
+		return finish("invalid_budget", nil)
 	}
-	if plan.Kind != "account" && plan.Kind != "node" {
-		return finish(nil)
+	for _, t := range p.Targets {
+		r.Results = append(r.Results, model.ResourceProof{ResourceTarget: t, Outcome: "inconclusive", Reason: t.UnavailableReason})
 	}
-	if plan.Kind == "account" && task.DefendantAccountID != plan.ResourceID || plan.Kind == "node" && task.DefendantNodeID != plan.ResourceID {
-		return finish(nil)
-	}
+	save := func() error { r.Revision++; return e.resourceProgress.SaveResourceCheckProgress(ctx, task.ID, r) }
 	groupOf := func(id uint64) uint64 {
-		group, _ := e.state.IdentityGroupOf(id)
-		if group == 0 {
+		g, _ := e.state.IdentityGroupOf(id)
+		if g == 0 {
 			return id
 		}
-		return group
+		return g
 	}
-	accounts := []uint64{}
-	seenGroups := map[uint64]bool{}
-	if plan.Kind == "account" {
-		seenGroups[groupOf(plan.ResourceID)] = true
-	}
-	for _, id := range plan.Accounts {
-		group := groupOf(id)
-		if id != 0 && !seenGroups[group] {
-			accounts = append(accounts, id)
-			seenGroups[group] = true
+	for ctx.Err() == nil && r.Calls < r.MaxCalls {
+		now := time.Now().UTC()
+		if !now.Before(r.WindowStartedAt.Add(model.ResourceCheckWindow)) {
+			r.Window++
+			r.WindowStartedAt = now
 		}
-	}
-	if len(accounts) == 0 || len(plan.Nodes) == 0 {
-		return finish(nil)
-	}
-	seenAttempts := map[string]bool{}
-	var writeErr error
-	measure := func(account, node uint64, sampleName string) model.AccountCheckSample {
-		spec := task.Experiment
-		spec.Sample = sampleName
-		sample := e.resourceMeasurements.MeasureResourceCheck(e.identityContext(model.WithProbeExperiment(ctx, spec), account), account, node)
-		report.Calls++
-		if (sample.Outcome == model.MeasurementClean || sample.Outcome == model.MeasurementDegraded) && (sample.Sample != sampleName || sample.Attempt.ID == "" || sample.Attempt.AccountID != account || sample.Attempt.Path.NodeID != node || !spec.Matches(sample.Attempt) || seenAttempts[sample.Attempt.ID]) {
-			sample.Outcome, sample.Failure = model.MeasurementError, model.ProbeFailureIdentity
-		}
-		if sample.Attempt.ID != "" {
-			seenAttempts[sample.Attempt.ID] = true
-		}
-		return sample
-	}
-	save := func() {
-		if e.resourceProgress != nil && writeErr == nil {
-			writeErr = e.resourceProgress.SaveResourceCheckProgress(ctx, task.ID, model.AssessResourceCheck(report))
-		}
-	}
-	for index := 0; index < model.ResourceCheckMaxGroups && report.Calls < model.ResourceCheckMaxCalls && ctx.Err() == nil && writeErr == nil; index++ {
-		if plan.Kind == "account" && index >= len(plan.Nodes) || plan.Kind == "node" && index >= len(accounts) {
-			break
-		}
-		controlAccount := accounts[index%len(accounts)]
-		controlNode := plan.Nodes[index%len(plan.Nodes)]
-		g := model.ResourceCheckGroup{ControlAccount: controlAccount, ControlNode: controlNode, AccountID: controlAccount, NodeID: controlNode, IdentityGroup: groupOf(controlAccount), Control: []model.AccountCheckSample{}, Samples: []model.AccountCheckSample{}, Outcome: "inconclusive", Reason: "control_unavailable"}
-		if plan.Kind == "account" {
-			g.AccountID = plan.ResourceID
-		} else {
-			g.NodeID = plan.ResourceID
-		}
-		report.Groups = append(report.Groups, g)
-		pos := len(report.Groups) - 1
-		for _, name := range []string{"token-short", "token-long", "token-short"} {
-			if ctx.Err() != nil || writeErr != nil {
-				break
+		identityChanged := false
+		for i := range r.Results {
+			proof := &r.Results[i]
+			if proof.Kind != "account" || proof.Window != 0 && proof.Window != r.Window && proof.Outcome != "inconclusive" {
+				continue
 			}
-			g.Control = append(g.Control, measure(controlAccount, controlNode, name))
-			report.Groups[pos] = g
-			save()
-			if g.Control[len(g.Control)-1].Outcome != model.MeasurementClean {
-				break
+			group := groupOf(proof.ResourceID)
+			if proof.Window == r.Window && proof.IdentityGroup != 0 && proof.IdentityGroup != group {
+				identityChanged = true
+			}
+			proof.IdentityGroup = group
+		}
+		if identityChanged {
+			for i := range r.Results {
+				if r.Results[i].Window == r.Window {
+					r.Results[i].Outcome, r.Results[i].Reason, r.Results[i].Rule, r.Results[i].Evidence = "inconclusive", "identity_changed", "", []int{}
+				}
+			}
+			return finish("identity_changed", nil)
+		}
+		r = model.AssessResourceProofs(r, now)
+		if model.ResourceEvidence(r).Conflict {
+			return finish("conflicting_samples", nil)
+		}
+		pair, ok := nextResourcePair(*p, r, groupOf)
+		if !ok {
+			return finish("", nil)
+		}
+		g := groupOf(pair.account)
+		beforeEpoch, _, err := e.state.CurrentEpochAt(ctx, pair.node)
+		if err != nil {
+			return finish("measurement_unavailable", err)
+		}
+		r.Calls++
+		o := model.ResourceObservation{ID: r.Calls, Window: r.Window, AccountID: pair.account, NodeID: pair.node, IdentityGroup: g, Purpose: pair.purpose, Class: "pending", StartedAt: now}
+		r.Observations = append(r.Observations, o)
+		if err := save(); err != nil {
+			return finish("persistence_failed", err)
+		}
+		s := e.resourceMeasurements.MeasureResourceCheck(e.identityContext(model.WithProbeExperiment(ctx, task.Experiment), pair.account), pair.account, pair.node)
+		o.FinishedAt = time.Now().UTC()
+		afterEpoch, _, epochErr := e.state.CurrentEpochAt(ctx, pair.node)
+		if g != groupOf(pair.account) || epochErr != nil || beforeEpoch != afterEpoch || s.Attempt.ID != "" && (s.Attempt.Path.Epoch != beforeEpoch || s.Attempt.AccountID != pair.account || s.Attempt.Path.NodeID != pair.node || !task.Experiment.Matches(s.Attempt)) {
+			s.Conflict = s.Conflict || g != groupOf(pair.account) || epochErr == nil && beforeEpoch != afterEpoch
+			s.IdentityVerified = false
+			s.Outcome = model.MeasurementError
+			s.Failure = model.ProbeFailureIdentity
+			if s.Attempt.ID != "" && !task.Experiment.Matches(s.Attempt) {
+				s.Failure = model.ProbeFailureExperiment
 			}
 		}
-		_, class, valid := model.ResourceFingerprint(g.Control)
-		if !valid || class != "A" {
-			continue
+		o.Sample = s
+		o.Class = model.ClassifyResourceSample(s)
+		if !o.FinishedAt.Before(r.WindowStartedAt.Add(model.ResourceCheckWindow)) {
+			o.Class = "unknown"
+			// Keep certificates completed before this call as closed history.
+			// Neither the late measurement nor old anchors enter the new window.
+			r.Window++
+			r.WindowStartedAt = o.FinishedAt
 		}
-		for _, name := range []string{"token-short", "token-long", "token-short"} {
-			if ctx.Err() != nil || writeErr != nil {
-				break
-			}
-			g.Samples = append(g.Samples, measure(g.AccountID, g.NodeID, name))
-			report.Groups[pos] = g
-			save()
-			if g.Samples[len(g.Samples)-1].Outcome == model.MeasurementError {
-				break
-			}
+		r.Observations[len(r.Observations)-1] = o
+		if s.Generated {
+			r.Generations++
 		}
-		if ctx.Err() == nil && writeErr == nil {
-			s := measure(controlAccount, controlNode, "token-short")
-			g.After = &s
+		r.PathChecks += s.PathChecks
+		r = model.AssessResourceProofs(r, o.FinishedAt)
+		if err := save(); err != nil {
+			return finish("persistence_failed", err)
 		}
-		g = model.AssessResourceGroup(plan.Kind, g)
-		if g.IdentityGroup != groupOf(controlAccount) || plan.Kind == "account" && groupOf(controlAccount) == groupOf(plan.ResourceID) {
-			g.Outcome, g.Reason = "inconclusive", "identity_changed"
+		if model.ResourceEvidence(r).Conflict {
+			return finish("conflicting_samples", nil)
 		}
-		report.Groups[pos] = g
-		report = model.AssessResourceCheck(report)
-		save()
-		if report.Outcome != "inconclusive" || report.Reason == "conflicting_samples" || report.Reason == "calibration_changed" {
-			break
+		if epochErr != nil {
+			return finish("measurement_unavailable", epochErr)
+		}
+		if s.Failure == model.ProbeFailureExperiment {
+			return finish("measurement_unavailable", nil)
 		}
 	}
-	if writeErr != nil {
-		return finish(writeErr)
+	if ctx.Err() != nil {
+		return finish("interrupted", ctx.Err())
 	}
-	return finish(ctx.Err())
+	return finish("budget_exhausted", nil)
 }

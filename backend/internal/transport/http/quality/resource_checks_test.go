@@ -17,8 +17,12 @@ import (
 
 type resourceHTTPFixture struct{}
 
-func (resourceHTTPFixture) CreateResourceCheck(context.Context, model.ProbeTask, int) (uint64, error) {
-	return 41, nil
+func (resourceHTTPFixture) CreateResourceCheckBatch(_ context.Context, tasks []model.ProbeTask, _ int) ([]model.ResourceSubmission, error) {
+	out := []model.ResourceSubmission{}
+	for _, t := range tasks {
+		out = append(out, model.ResourceSubmission{ResourceID: t.Experiment.ResourceCheck.ResourceID, ID: 41})
+	}
+	return out, nil
 }
 func (resourceHTTPFixture) ListResourceChecks(context.Context, string, []uint64) ([]model.ResourceCheck, error) {
 	return []model.ResourceCheck{}, nil
@@ -68,8 +72,8 @@ func TestResourceCheckHTTPBatchAndQueryBounds(t *testing.T) {
 func TestResourceCheckHTTPKeepsLargeIdentitiesExact(t *testing.T) {
 	const id = uint64(9007199254740993)
 	const decimal = `"9007199254740993"`
-	sample := model.AccountCheckSample{PathBinding: id, Attempt: attemptmeta.Identity{AccountID: id, Revision: id, Path: attemptmeta.Path{NodeID: id, Epoch: id}}}
-	check := model.ResourceCheck{ID: id, ResourceID: id, Report: &model.ResourceCheckReport{ResourceID: id, Groups: []model.ResourceCheckGroup{{ControlAccount: id, ControlNode: id, AccountID: id, NodeID: id, IdentityGroup: id, Control: []model.AccountCheckSample{sample}, Samples: []model.AccountCheckSample{sample}, After: &sample}}}}
+	sample := model.AccountCheckSample{CredentialGeneration: id, PathBinding: id, Attempt: attemptmeta.Identity{AccountID: id, Revision: id, Path: attemptmeta.Path{NodeID: id, Epoch: id}}}
+	check := model.ResourceCheck{ID: id, ResourceID: id, Report: &model.ResourceCheckReport{Revision: id, ResourceID: id, Observations: []model.ResourceObservation{{AccountID: id, NodeID: id, IdentityGroup: id, Sample: sample}}, Results: []model.ResourceProof{{IdentityGroup: id, ResourceTarget: model.ResourceTarget{ResourceID: id}}}, Groups: []model.ResourceCheckGroup{{ControlAccount: id, ControlNode: id, AccountID: id, NodeID: id, IdentityGroup: id, Control: []model.AccountCheckSample{sample}, Samples: []model.AccountCheckSample{sample}, After: &sample}}}}
 	data, err := json.Marshal(checkDTO(check))
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +84,7 @@ func TestResourceCheckHTTPKeepsLargeIdentitiesExact(t *testing.T) {
 		if len(raw) > 0 && raw[0] == '{' && json.Unmarshal(raw, &object) == nil {
 			for key, value := range object {
 				switch key {
-				case "resource_id", "control_account", "control_node", "account_id", "node_id", "identity_group", "revision", "epoch", "path_binding":
+				case "resource_id", "control_account", "control_node", "account_id", "node_id", "identity_group", "revision", "epoch", "path_binding", "credential_generation":
 					if string(value) != decimal {
 						t.Errorf("%s lost precision or string encoding: %s", key, value)
 					}

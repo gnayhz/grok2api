@@ -136,9 +136,9 @@ func TestResourceCheckApplicationCrossAttributionAndProgress(t *testing.T) {
 			if err != nil || len(rows) != 1 || rows[0].Report == nil {
 				t.Fatalf("report %+v %v", rows, err)
 			}
-			want, wantCalls := "degraded", 21
+			want, wantCalls := "degraded", 2
 			if scenario == "healthy-account" {
-				want, wantCalls = "healthy", 14
+				want, wantCalls = "healthy", 1
 			}
 			if rows[0].State != model.ProbeDone || rows[0].Report.Outcome != want || int(calls.Load()) != wantCalls {
 				raw, _ := json.Marshal(rows[0])

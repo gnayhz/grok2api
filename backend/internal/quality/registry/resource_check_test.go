@@ -53,7 +53,7 @@ func TestResourceCheckQueueOwnershipProgressAndCompatibility(t *testing.T) {
 			if more, err := b.ClaimPendingProbeTasks(ctx, 8); err != nil || len(more) != 0 {
 				t.Fatalf("cross-owner capacity %v %v", more, err)
 			}
-			report := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Kind: "account", ResourceID: 11, Calls: 1, Outcome: "inconclusive", Groups: []model.ResourceCheckGroup{}}
+			report := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Kind: "account", ResourceID: 11, Revision: 1, MaxCalls: 5, Calls: 1, Outcome: "inconclusive", Groups: []model.ResourceCheckGroup{}}
 			if err := b.SaveResourceCheckProgress(ctx, first, report); !errors.Is(err, model.ErrProbeAlreadySettled) {
 				t.Fatalf("foreign progress %v", err)
 			}
@@ -123,6 +123,12 @@ func TestResourceCheckUpgradeFromAccountOnlyConstraint(t *testing.T) {
 			if err := db.Create(&old).Error; err != nil {
 				t.Fatal(err)
 			}
+			// The old resource protocol did not have batch capacity or CAS columns.
+			for _, column := range []string{"ManualSlots", "CheckRevision"} {
+				if err := db.Migrator().DropColumn(&qProbeTaskModel{}, column); err != nil {
+					t.Fatal(err)
+				}
+			}
 			for range 2 {
 				r, err := Open(context.Background(), opts)
 				if err != nil {
@@ -132,7 +138,7 @@ func TestResourceCheckUpgradeFromAccountOnlyConstraint(t *testing.T) {
 					t.Fatal(err)
 				}
 				var retained qProbeTaskModel
-				if err := r.DB().First(&retained, old.ID).Error; err != nil || retained.CheckReportJSON != old.CheckReportJSON {
+				if err := r.DB().First(&retained, old.ID).Error; err != nil || retained.CheckReportJSON != old.CheckReportJSON || retained.ManualSlots != 1 || retained.CheckRevision != 0 {
 					t.Fatal("old report lost", err)
 				}
 				for _, index := range []string{"idx_q_probe_task_case", "idx_q_probe_task_state_updated", "idx_q_probe_task_lease_owner", "idx_q_probe_task_lease_until"} {
@@ -141,6 +147,76 @@ func TestResourceCheckUpgradeFromAccountOnlyConstraint(t *testing.T) {
 					}
 				}
 				r.Close()
+			}
+		})
+	}
+}
+
+func TestResourceCheckBatchSharesOwnerAndCountsResourceSlots(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			opts, _ := accountCheckDatabase(t, driver)
+			a, err := Open(ctx, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			b, err := Open(ctx, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer b.Close()
+			first, second := NewProbeTaskStore(a), NewProbeTaskStore(b)
+			items, err := first.CreateResourceCheckBatch(ctx, []model.ProbeTask{resourceTask("account", 41), resourceTask("account", 42)}, 2)
+			if err != nil || len(items) != 2 || items[0].ID == 0 || items[0].ID != items[1].ID {
+				t.Fatalf("batch %+v %v", items, err)
+			}
+			if _, err := second.CreateAccountCheck(ctx, checkTask(43), 2); !errors.Is(err, model.ErrCheckQueueFull) {
+				t.Fatal("batch bypassed resource capacity", err)
+			}
+			duplicates, err := second.CreateResourceCheckBatch(ctx, []model.ProbeTask{resourceTask("account", 42)}, 2)
+			if err != nil || duplicates[0].ID != items[0].ID {
+				t.Fatal("duplicate batch", duplicates, err)
+			}
+			mismatch := resourceTask("account", 42)
+			mismatch.Experiment.Baseline.Model = "fictional-other-model"
+			wrong, err := second.CreateResourceCheckBatch(ctx, []model.ProbeTask{mismatch}, 2)
+			if err != nil || wrong[0].Error != "active_spec_conflict" {
+				t.Fatal("wrong model reused", wrong, err)
+			}
+			tasks, err := first.ClaimPendingProbeTasks(ctx, 8)
+			if err != nil || len(tasks) != 1 || len(tasks[0].Experiment.ResourceCheck.Targets) != 2 || tasks[0].Experiment.ResourceCheck.MaxCalls != 6 {
+				t.Fatal(tasks, err)
+			}
+			r := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Revision: 1, MaxCalls: 6, Calls: 1, Results: []model.ResourceProof{{ResourceTarget: model.ResourceTarget{Kind: "account", ResourceID: 41}, Outcome: "healthy", Reason: "proved_normal"}, {ResourceTarget: model.ResourceTarget{Kind: "account", ResourceID: 42}, Outcome: "inconclusive", Reason: "insufficient_controls"}}}
+			expanded := r
+			expanded.MaxCalls = 28
+			if err := first.SaveResourceCheckProgress(ctx, tasks[0].ID, expanded); !errors.Is(err, model.ErrProbeAlreadySettled) {
+				t.Fatal("writer expanded frozen budget", err)
+			}
+			if err := first.SaveResourceCheckProgress(ctx, tasks[0].ID, r); err != nil {
+				t.Fatal(err)
+			}
+			if err := first.SaveResourceCheckProgress(ctx, tasks[0].ID, r); !errors.Is(err, model.ErrProbeAlreadySettled) {
+				t.Fatal("stale revision accepted", err)
+			}
+			rows, err := second.ListResourceChecks(ctx, "account", []uint64{41, 42})
+			if err != nil || len(rows) != 2 || rows[0].Report.Outcome != "healthy" || rows[1].Report.Outcome != "inconclusive" {
+				t.Fatal("per-target projection", rows, err)
+			}
+			if err := a.DB().Model(&qProbeTaskModel{}).Where("id = ?", tasks[0].ID).Update("lease_until", time.Now().UTC().Add(-time.Second)).Error; err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.ReclaimStaleRunningProbes(ctx, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if next, err := second.ClaimPendingProbeTasks(ctx, 8); err != nil || len(next) != 0 {
+				t.Fatal("replayed lost batch", next, err)
+			}
+			r.Revision++
+			if err := first.SaveResourceCheckProgress(ctx, tasks[0].ID, r); !errors.Is(err, model.ErrProbeAlreadySettled) {
+				t.Fatal("expired owner wrote", err)
 			}
 		})
 	}
