@@ -4,7 +4,7 @@ import type { ResourceCheck, ResourceObservation, ResourceProof } from "./resour
 import { resourceEvidence, resourceFinding, resourceHistory, resourceNormalExpired, resourceObservations } from "./resource-check-presentation.ts";
 
 const proof: ResourceProof = { kind: "account", resource_id: "9007199254740993", outcome: "healthy", reason: "proved_normal", evidence: [2], window: 2, valid_until: "2026-01-01T00:03:00Z" };
-const check: ResourceCheck = { id: "9007199254740993", kind: "account", resource_id: proof.resource_id, model: "fictional-model", state: "done", created_at: "2026-01-01T00:00:00Z", report: { version: "resource-proof-v2", kind: "account", resource_id: proof.resource_id, outcome: "degraded", reason: "proved_account_bad", calls: 3, max_calls: 6, groups: [], results: [{ ...proof, resource_id: "9007199254740992", outcome: "degraded" }, proof] } };
+const check: ResourceCheck = { id: "9007199254740993", kind: "account", resource_id: proof.resource_id, model: "fictional-model", state: "done", created_at: "2026-01-01T00:00:00Z", report: { version: "resource-proof-v2", kind: "account", resource_id: proof.resource_id, outcome: "degraded", reason: "proved_account_bad", calls: 3, max_calls: 6, results: [{ ...proof, resource_id: "9007199254740992", outcome: "degraded" }, proof] } };
 
 test("batch findings select the exact target and keep provisional, failed and cancelled states", () => {
   assert.equal(resourceFinding(check), "healthy");

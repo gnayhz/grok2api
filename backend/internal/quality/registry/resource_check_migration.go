@@ -10,7 +10,7 @@ import (
 // Widen only the task direction constraint. GORM's SQLite table reconstruction
 // copies every existing column; PostgreSQL replaces the check in the same schema
 // transaction. Old reports, leases and projection identities are retained.
-func (r *Registry) migrateAccountCheckDirection(ctx context.Context) error {
+func (r *Registry) migrateResourceCheckDirection(ctx context.Context) error {
 	var definition string
 	db := r.db.WithContext(ctx)
 	var err error
@@ -19,7 +19,7 @@ func (r *Registry) migrateAccountCheckDirection(ctx context.Context) error {
 	} else {
 		err = db.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'q_probe_task'").Scan(&definition).Error
 	}
-	if err != nil || strings.Contains(definition, "'case_proof'") && strings.Contains(definition, "'resource_check'") && strings.Contains(definition, "'account_check'") {
+	if err != nil || strings.Contains(definition, "'case_proof'") && strings.Contains(definition, "'resource_check'") {
 		return err
 	}
 	return db.Transaction(func(tx *gorm.DB) error {

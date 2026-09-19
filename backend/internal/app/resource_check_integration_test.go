@@ -49,12 +49,12 @@ func TestResourceCheckApplicationCrossAttributionAndProgress(t *testing.T) {
 					return
 				}
 				bad := scenario == "bad-account" && r.Header.Get("Authorization") == "Bearer fictional-resource-0" || scenario == "bad-node" && r.Header.Get("X-Fictional-Path") == "1"
-				count, delta := 100, 180
-				if bad {
-					count, delta = 110, 90
+				if body.Input != "Reply only OK. Data: "+strings.Repeat("a", 512) {
+					t.Error("resource proof did not use the fixed short sample")
 				}
-				if strings.Count(body.Input, "a") > 1024 {
-					count += delta
+				count := 100
+				if bad {
+					count = 110
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"fictional-resource\",\"status\":\"in_progress\"}}\n\n")

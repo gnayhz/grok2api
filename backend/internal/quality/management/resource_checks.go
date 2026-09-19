@@ -15,8 +15,7 @@ import (
 // without importing the model package's evidence and attribution policy.
 type ResourceCheck = model.ResourceCheck
 type ResourceCheckReport = model.ResourceCheckReport
-type ResourceCheckGroup = model.ResourceCheckGroup
-type AccountCheckSample = model.AccountCheckSample
+type ResourceSample = model.ResourceSample
 
 type ResourceCheckStore interface {
 	CreateResourceCheckBatch(context.Context, []model.ProbeTask, int) ([]model.ResourceSubmission, error)
@@ -138,7 +137,7 @@ func (s *ResourceChecks) Start(ctx context.Context, kind string, ids []uint64, p
 		items = append(items, item)
 	}
 	if len(tasks) > 0 {
-		accepted, err := s.store.CreateResourceCheckBatch(ctx, tasks, model.AccountCheckQueueLimit)
+		accepted, err := s.store.CreateResourceCheckBatch(ctx, tasks, model.ResourceCheckQueueLimit)
 		if err != nil {
 			for _, pos := range positions {
 				items[pos].Error = "submission_failed"

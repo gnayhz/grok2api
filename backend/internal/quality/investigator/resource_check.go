@@ -8,7 +8,7 @@ import (
 )
 
 type ResourceCheckMeasurements interface {
-	MeasureResourceCheck(context.Context, uint64, uint64) model.AccountCheckSample
+	MeasureResourceCheck(context.Context, uint64, uint64) model.ResourceSample
 }
 type ResourceCheckProgress interface {
 	SaveResourceCheckProgress(context.Context, uint64, model.ResourceCheckReport) error
@@ -26,7 +26,7 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 		ctx, cancel = context.WithDeadline(ctx, p.DeadlineAt)
 		defer cancel()
 	}
-	r := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Outcome: "inconclusive", Reason: "insufficient_controls", Groups: []model.ResourceCheckGroup{}, Observations: []model.ResourceObservation{}, Window: 1, WindowStartedAt: time.Now().UTC()}
+	r := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Outcome: "inconclusive", Reason: "insufficient_controls", Observations: []model.ResourceObservation{}, Window: 1, WindowStartedAt: time.Now().UTC()}
 	finish := func(reason string, err error) (model.ProbeTaskResult, error) {
 		if reason != "" {
 			r.Reason = reason
@@ -51,7 +51,15 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 	for _, t := range p.Targets {
 		r.Results = append(r.Results, model.ResourceProof{ResourceTarget: t, Outcome: "inconclusive", Reason: t.UnavailableReason})
 	}
-	save := func() error { r.Revision++; return e.resourceProgress.SaveResourceCheckProgress(ctx, task.ID, r) }
+	save := func() error {
+		next := r
+		next.Revision++
+		if err := e.resourceProgress.SaveResourceCheckProgress(ctx, task.ID, next); err != nil {
+			return err
+		}
+		r.Revision = next.Revision
+		return nil
+	}
 	groupOf := func(id uint64) uint64 {
 		g, _ := e.state.IdentityGroupOf(id)
 		if g == 0 {
@@ -122,7 +130,7 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 		if err := save(); err != nil {
 			return finish("persistence_failed", err)
 		}
-		s := model.AccountCheckSample{Sample: task.Experiment.Sample, Outcome: model.MeasurementError, Failure: model.ProbeFailurePathRegistration}
+		s := model.ResourceSample{Sample: task.Experiment.Sample, Outcome: model.MeasurementError, Failure: model.ProbeFailurePathRegistration}
 		// A new node may await the independent epoch observer. No generation
 		// can become admissible yet; preserve the missing prerequisite and skip
 		// this node for the rest of the window instead of spending controls.
@@ -130,9 +138,9 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 			s = e.resourceMeasurements.MeasureResourceCheck(e.identityContext(model.WithProbeExperiment(ctx, task.Experiment), pair.account), pair.account, pair.node)
 		}
 		o.FinishedAt = time.Now().UTC()
-		afterEpoch, _, epochErr := e.state.CurrentEpochAt(ctx, pair.node)
-		if g != groupOf(pair.account) || epochErr != nil || beforeEpoch != afterEpoch || s.Attempt.ID != "" && (s.Attempt.Path.Epoch != beforeEpoch || s.Attempt.AccountID != pair.account || s.Attempt.Path.NodeID != pair.node || !task.Experiment.Matches(s.Attempt)) {
-			s.Conflict = s.Conflict || g != groupOf(pair.account) || epochErr == nil && beforeEpoch != afterEpoch
+		afterEpoch, afterRegistered, epochErr := e.state.CurrentEpochAt(ctx, pair.node)
+		if g != groupOf(pair.account) || epochErr != nil || registered && !afterRegistered || beforeEpoch != afterEpoch || s.Attempt.ID != "" && (s.Attempt.Path.Epoch != beforeEpoch || s.Attempt.AccountID != pair.account || s.Attempt.Path.NodeID != pair.node || !task.Experiment.Matches(s.Attempt)) {
+			s.Conflict = s.Conflict || g != groupOf(pair.account) || epochErr == nil && (beforeEpoch != afterEpoch || registered && !afterRegistered)
 			s.IdentityVerified = false
 			s.Outcome = model.MeasurementError
 			s.Failure = model.ProbeFailureIdentity

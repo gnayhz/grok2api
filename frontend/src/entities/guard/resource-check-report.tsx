@@ -43,9 +43,9 @@ export function ResourceCheckReport({ check, target, now }: { check: ResourceChe
   const expired = resourceNormalExpired(check, now);
   const Icon = running ? LoaderCircle : finding === "degraded" ? ShieldAlert : finding === "healthy" ? ShieldCheck : CircleHelp;
   const reason = (code?: string) => t(`resourceChecks.reason.${code || "measurement_unavailable"}`, { defaultValue: t("resourceChecks.reason.measurement_unavailable") });
-  const accountIDs = [...new Set([...observations.map(o => o.account_id), ...(report?.groups.flatMap(g => [g.account_id, g.control_account]) ?? [])])].filter(id => id && id !== "0").sort();
+  const accountIDs = [...new Set(observations.map(o => o.account_id))].filter(id => id && id !== "0").sort();
   const accounts = useQuery({ queryKey: ["accounts", "identities", accountIDs.join(",")], queryFn: ({ signal }) => getAccountIdentities(accountIDs, signal), enabled: accountIDs.length > 0, staleTime: 30000 });
-  const nodes = useQuery({ queryKey: ["egress-nodes", "operations-summary"], queryFn: ({ signal }) => listAllEgressNodes({}, signal), enabled: observations.length > 0 || !!report?.groups.length, staleTime: 15000 });
+  const nodes = useQuery({ queryKey: ["egress-nodes", "operations-summary"], queryFn: ({ signal }) => listAllEgressNodes({}, signal), enabled: observations.length > 0, staleTime: 15000 });
   const accountName = (id: string) => check.kind === "account" && id === target.id ? target.name : accounts.data?.items.find(a => a.id === id)?.name || `${copy.account} #${id}`;
   const nodeName = (id: string) => check.kind === "node" && id === target.id ? target.name : nodes.data?.items.find(n => n.id === id)?.name || `${copy.node} #${id}`;
   const duration = check.finished_at ? Math.max(0, Math.round((Date.parse(check.finished_at) - Date.parse(check.created_at)) / 1000)) : null;
@@ -68,7 +68,6 @@ export function ResourceCheckReport({ check, target, now }: { check: ResourceChe
       </dl>
     </section>
     {report && <p className="text-xs leading-5 text-muted-foreground">{copy.batchNote}</p>}
-    {report?.version === "resource-quality-check-v1" && <p className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-5">{copy.historical}</p>}
     {check.state === "done" && evidence.length > 0 && <section className="rounded-xl border bg-muted/15 p-4" aria-label={copy.basis}>
       <h3 className="flex items-center gap-2 font-semibold"><CircleHelp className="size-4 text-muted-foreground" />{copy.basis}</h3><p className="mt-2 leading-6 text-muted-foreground">{findingText}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs"><span className="text-muted-foreground">{copy.evidence}</span>{evidence.map(o => <button key={`${o.window}:${o.id}`} type="button" onClick={() => showStep(`${o.window}:${o.id}`)} className="rounded-md border bg-background px-2 py-1 font-medium hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring">{copy.step} {o.id}<ArrowDown className="ml-1 inline size-3" /></button>)}</div>
@@ -77,7 +76,7 @@ export function ResourceCheckReport({ check, target, now }: { check: ResourceChe
     <section className="space-y-3" aria-label={copy.process}>
       <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="font-semibold">{copy.process}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{copy.flowNote}</p></div>{observations.length > related.length && <Button variant="outline" size="sm" onClick={() => setShowAll(value => !value)}>{showAll ? copy.showRelevant : copy.all}</Button>}</div>
       {observations.length > related.length && <p className="text-xs text-muted-foreground">{showAll ? copy.all : copy.relevant} · {displayed.length} / {observations.length}</p>}
-      {!displayed.length && !report?.groups.length && <p role="status" className="rounded-xl border border-dashed p-5 text-center text-muted-foreground">{running ? copy.waiting : copy.noEvidence}</p>}
+      {!displayed.length && <p role="status" className="rounded-xl border border-dashed p-5 text-center text-muted-foreground">{running ? copy.waiting : copy.noEvidence}</p>}
       <ol className="space-y-3">{displayed.map(o => {
         const previous = observations[observations.indexOf(o) - 1];
         const comparable = previous?.window === o.window && previous.sample.path_verified && o.sample.path_verified && !!previous.sample.path_key && !!o.sample.path_key && previous.sample.path_family === o.sample.path_family;
@@ -93,9 +92,6 @@ export function ResourceCheckReport({ check, target, now }: { check: ResourceChe
           <p className="text-xs leading-5 text-muted-foreground">{note(o.class)}</p><SampleFacts sample={o.sample} />
         </li>;
       })}</ol>
-      {report?.groups.map((group, index) => <details key={index} className="rounded-xl border bg-card p-4"><summary className="cursor-pointer font-medium">{copy.legacyGroup} {index + 1}</summary><p className="mt-3 text-xs leading-5 text-muted-foreground">{reason(group.reason)}</p><div className="mt-3 space-y-3">
-        {[...group.control.map(sample => ({ sample, title: copy.legacyControl, account: group.control_account, node: group.control_node })), ...group.samples.map(sample => ({ sample, title: copy.legacyTarget, account: group.account_id, node: group.node_id })), ...(group.after ? [{ sample: group.after, title: copy.legacyAfter, account: group.control_account, node: group.control_node }] : [])].map(({ sample, title, account, node }, i) => <div key={i} className="rounded-lg bg-muted/30 p-3"><div className="flex flex-wrap justify-between gap-2 text-xs"><span>{title}</span><span>{!sample.completed ? copy.incomplete : sample.thinking ? copy.observations.A : copy.observations.B}</span></div><p className="mt-2 break-words text-xs">{accountName(account)} {copy.via} {nodeName(node)}</p><SampleFacts sample={sample} /></div>)}
-      </div></details>)}
     </section>
   </div>;
 }

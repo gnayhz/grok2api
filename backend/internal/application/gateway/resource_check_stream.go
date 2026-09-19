@@ -17,34 +17,23 @@ import (
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
-// PrepareAccountCheck freezes the requested Build model and current rule without
-// inventing a traffic incident. It performs no inference and changes no holds.
-func (s *Service) PrepareAccountCheck(ctx context.Context, accountID uint64, publicModel string) (qualitymodel.ProbeExperiment, error) {
-	spec := qualitymodel.ProbeExperiment{Version: qualitymodel.AccountCheckVersion, Sample: "brief-confirmation"}
-	view, err := s.accounts.Get(ctx, accountID)
-	if err != nil {
-		return spec, err
-	}
-	if view.Credential.Provider != account.ProviderBuild {
-		return spec, errors.New("quality checks require a Build account")
-	}
-	return s.prepareCheckModel(ctx, accountID, publicModel)
-}
-
+// PrepareResourceCheck freezes the requested Build model and current rule.
 func (s *Service) PrepareResourceCheck(ctx context.Context, kind string, id uint64, publicModel string) (qualitymodel.ProbeExperiment, error) {
-	var spec qualitymodel.ProbeExperiment
-	var err error
 	if kind == "account" {
-		spec, err = s.PrepareAccountCheck(ctx, id, publicModel)
-	} else {
-		spec, err = s.prepareCheckModel(ctx, 0, publicModel)
+		view, err := s.accounts.Get(ctx, id)
+		if err != nil {
+			return qualitymodel.ProbeExperiment{}, err
+		}
+		if view.Credential.Provider != account.ProviderBuild {
+			return qualitymodel.ProbeExperiment{}, errors.New("quality checks require a Build account")
+		}
+		return s.prepareCheckModel(ctx, id, publicModel)
 	}
-	spec.Version, spec.Sample = qualitymodel.ResourceCheckVersion, "token-short"
-	return spec, err
+	return s.prepareCheckModel(ctx, 0, publicModel)
 }
 
 func (s *Service) prepareCheckModel(ctx context.Context, accountID uint64, publicModel string) (qualitymodel.ProbeExperiment, error) {
-	spec := qualitymodel.ProbeExperiment{Version: qualitymodel.AccountCheckVersion, Sample: "brief-confirmation"}
+	spec := qualitymodel.ProbeExperiment{Version: qualitymodel.ResourceCheckVersion, Sample: "token-short"}
 	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
 	if err != nil {
 		return spec, err
@@ -63,10 +52,10 @@ func (s *Service) prepareCheckModel(ctx context.Context, accountID uint64, publi
 	return spec, ErrModelNotFound
 }
 
-// Manual diagnostics consume the bounded completed stream so usage can be
-// compared independently of early admission. They reuse the production event
-// interpretation, but a timeout or incomplete response never becomes a finding.
-func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold QualityRetryRuntime, resources *selector.AttemptResources) (qualitymodel.AccountCheckSample, error) {
+// Resource measurements consume the bounded completed stream independently
+// of early admission. The shared event interpretation retains thinking, usage
+// and completion as separate facts; failed responses cannot prove degradation.
+func readResourceCheckStream(ctx context.Context, body io.ReadCloser, hold QualityRetryRuntime, resources *selector.AttemptResources) (qualitymodel.ResourceSample, error) {
 	stop := context.AfterFunc(ctx, resources.Close)
 	defer stop()
 	state := qualityScanState{kernel: hold.Kernel(), protocol: qualityProtocolResponses, startedAt: time.Now()}
@@ -80,7 +69,7 @@ func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold Qualit
 	}
 	stream := responseflow.FromReader(body)
 	if stream == nil {
-		return qualitymodel.AccountCheckSample{}, errors.New("canonical check stream unavailable")
+		return qualitymodel.ResourceSample{}, errors.New("canonical check stream unavailable")
 	}
 	err := stream.ConsumeLimit(qualityProbeCompletionBytes, func(event *responseflow.Event) error {
 		if event.HasData && !bytes.Equal(bytes.TrimSpace(event.Data), []byte("[DONE]")) {
@@ -145,7 +134,7 @@ func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold Qualit
 		err = errors.New("successful completion not observed")
 	}
 	fp := state.fingerprint(verdict, err)
-	sample := qualitymodel.AccountCheckSample{Outcome: qualitymodel.MeasurementError, Rule: fp.Rule,
+	sample := qualitymodel.ResourceSample{Outcome: qualitymodel.MeasurementError, Rule: fp.Rule,
 		PlainOutput: plainOutput, UnexpectedOutput: unexpectedOutput, Conflict: firstVerdict == QualityWithhold && fp.HasThinking,
 		Thinking: fp.HasThinking, Completed: fp.Completed && !fp.Failed, UsageReported: state.usage.Reported,
 		InputTokens: state.usage.InputTokens, ReasoningTokens: state.usage.ReasoningTokens}
@@ -168,27 +157,4 @@ func readAccountCheckStream(ctx context.Context, body io.ReadCloser, hold Qualit
 		}
 	}
 	return sample, err
-}
-
-// MeasureAccountCheck uses the same pinned-account resources and production
-// scanner as court probes. Quality custody is bypassed only by that existing
-// verification channel; credentials, quota and concurrency remain authoritative.
-func (s *Service) MeasureAccountCheck(ctx context.Context, accountID uint64) qualitymodel.AccountCheckSample {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	spec, _ := qualitymodel.ProbeExperimentFromContext(ctx)
-	sample := qualitymodel.AccountCheckSample{Sample: spec.Sample}
-	request, release, result := s.prepareQualityProbe(ctx, accountID)
-	if result.Outcome == "" {
-		defer release()
-		// Each measurement has its own upstream session and cannot reuse a
-		// previous check's generated conversation state.
-		request.PromptCacheKey = "quality-check/" + s.newAuditEventID()
-		result = s.qualityProbeMeasurement(ctx, request, QualityRetryRuntime{CreatedTimeout: 10 * time.Second, EvidenceTimeout: 15 * time.Second})
-	}
-	if result.CheckEvidence != nil {
-		sample = *result.CheckEvidence
-	}
-	sample.Attempt, sample.Outcome, sample.Failure = result.Attempt, result.Outcome, result.Failure
-	return sample
 }

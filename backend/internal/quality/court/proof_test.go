@@ -17,7 +17,7 @@ func caseProofObservation(spec model.ProbeExperiment, id int, a, n uint64, class
 	actual := spec.Baseline
 	actual.ID, actual.AccountID, actual.Profile = fmt.Sprintf("fictional-proof-%d", id), a, spec.Profile()
 	actual.Path = attemptmeta.Path{NodeID: n, Status: attemptmeta.PathRegistered}
-	s := model.AccountCheckSample{Sample: "token-short", Generated: true, Completed: true, UsageReported: true, IdentityVerified: true, PathVerified: true, PlainOutput: true, PathKey: fmt.Sprintf("fictional-exit-%d", n), PathFamily: 4, Attempt: actual, Outcome: model.MeasurementDegraded}
+	s := model.ResourceSample{Sample: "token-short", Generated: true, Completed: true, UsageReported: true, IdentityVerified: true, PathVerified: true, PlainOutput: true, PathKey: fmt.Sprintf("fictional-exit-%d", n), PathFamily: 4, Attempt: actual, Outcome: model.MeasurementDegraded}
 	if class == "A" {
 		s.Thinking, s.Outcome = true, model.MeasurementClean
 	}
@@ -79,7 +79,7 @@ type caseMeasurements struct {
 	calls               int
 }
 
-func (m *caseMeasurements) MeasureResourceCheck(ctx context.Context, a, n uint64) model.AccountCheckSample {
+func (m *caseMeasurements) MeasureResourceCheck(ctx context.Context, a, n uint64) model.ResourceSample {
 	m.calls++
 	spec, _ := model.ProbeExperimentFromContext(ctx)
 	class := "A"
@@ -212,7 +212,7 @@ func TestCaseProofChecksOnlyCurrentCertificateIdentities(t *testing.T) {
 			store := registry.NewProbeTaskStore(b.registry)
 			s := newFixtureCourt(cfg, b.registry, storeSource{b.evidence}, simpleTaskDispatcher{store})
 			defer s.Close(ctx)
-			s.SetProofIdentityCheck(func(_ context.Context, sample model.AccountCheckSample) (bool, error) {
+			s.SetProofIdentityCheck(func(_ context.Context, sample model.ResourceSample) (bool, error) {
 				if tc.unavailable {
 					return false, errors.New("fictional facts unavailable")
 				}

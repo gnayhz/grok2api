@@ -20,11 +20,11 @@ type ResourceCheckMeasurer struct {
 	Paths   ResourceCheckPathResolver
 }
 
-func (m ResourceCheckMeasurer) MeasureResourceCheck(ctx context.Context, accountID, nodeID uint64) model.AccountCheckSample {
+func (m ResourceCheckMeasurer) MeasureResourceCheck(ctx context.Context, accountID, nodeID uint64) model.ResourceSample {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	spec, _ := model.ProbeExperimentFromContext(ctx)
-	sample := model.AccountCheckSample{Sample: spec.Sample, Outcome: model.MeasurementError, Failure: model.ProbeFailurePath}
+	sample := model.ResourceSample{Sample: spec.Sample, Outcome: model.MeasurementError, Failure: model.ProbeFailurePath}
 	if m.Gateway == nil || m.Paths == nil || nodeID == 0 {
 		return sample
 	}

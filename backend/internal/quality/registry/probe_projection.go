@@ -65,7 +65,7 @@ func (s *ProbeTaskStore) ProcessProbeProjections(ctx context.Context, limit int,
 // projection so upgrading does not manufacture duplicate historical samples.
 func (s *ProbeTaskStore) BackfillProbeProjections(ctx context.Context, limit int) (int, error) {
 	var rows []qProbeTaskModel
-	if err := s.registry.db.WithContext(ctx).Where("state = ? AND projection_version = 0 AND direction NOT IN ?", "done", manualProbeDirections).Order("id").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.registry.db.WithContext(ctx).Where("state = ? AND projection_version = 0 AND direction IN ?", "done", []string{string(model.ProbeAccountDifferential), string(model.ProbeExitJury)}).Order("id").Limit(limit).Find(&rows).Error; err != nil {
 		return 0, err
 	}
 	for _, row := range rows {

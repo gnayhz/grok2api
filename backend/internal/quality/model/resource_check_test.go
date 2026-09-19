@@ -9,7 +9,7 @@ import (
 )
 
 func proofObservation(id int, a, n uint64, class string) ResourceObservation {
-	s := AccountCheckSample{IdentityVerified: true, PathVerified: true, Completed: true, UsageReported: true, PlainOutput: true, PathKey: fmt.Sprintf("fictional-exit-%d", n), PathFamily: 4, Sample: "token-short", Outcome: MeasurementDegraded, Attempt: attemptmeta.Identity{ID: fmt.Sprintf("fictional-%d", id), AccountID: a, Path: attemptmeta.Path{NodeID: n, Status: attemptmeta.PathRegistered}}, InputTokens: 100}
+	s := ResourceSample{IdentityVerified: true, PathVerified: true, Completed: true, UsageReported: true, PlainOutput: true, PathKey: fmt.Sprintf("fictional-exit-%d", n), PathFamily: 4, Sample: "token-short", Outcome: MeasurementDegraded, Attempt: attemptmeta.Identity{ID: fmt.Sprintf("fictional-%d", id), AccountID: a, Path: attemptmeta.Path{NodeID: n, Status: attemptmeta.PathRegistered}}, InputTokens: 100}
 	if class == "A" {
 		s.Thinking = true
 		s.Outcome = MeasurementClean
@@ -125,13 +125,13 @@ func TestResourceProofConflictAliasesWindowsAndAuxiliaryTokens(t *testing.T) {
 }
 
 func TestResourceProofRejectsIncompleteEvidenceAndIdentityDrift(t *testing.T) {
-	for _, mutate := range []func(*AccountCheckSample){
-		func(s *AccountCheckSample) { s.Completed = false },
-		func(s *AccountCheckSample) { s.IdentityVerified = false },
-		func(s *AccountCheckSample) { s.PathVerified = false },
-		func(s *AccountCheckSample) { s.PathFamily = 0 },
-		func(s *AccountCheckSample) { s.Attempt.Path.Status = attemptmeta.PathUnknown },
-		func(s *AccountCheckSample) { s.PlainOutput = false },
+	for _, mutate := range []func(*ResourceSample){
+		func(s *ResourceSample) { s.Completed = false },
+		func(s *ResourceSample) { s.IdentityVerified = false },
+		func(s *ResourceSample) { s.PathVerified = false },
+		func(s *ResourceSample) { s.PathFamily = 0 },
+		func(s *ResourceSample) { s.Attempt.Path.Status = attemptmeta.PathUnknown },
+		func(s *ResourceSample) { s.PlainOutput = false },
 	} {
 		o := proofObservation(1, 1, 1, "B")
 		mutate(&o.Sample)
@@ -172,5 +172,33 @@ func TestResourceProofSharedIdentityAndClosedWindow(t *testing.T) {
 	r = AssessResourceProofs(r, r.WindowStartedAt)
 	if r.Results[0].Outcome != "healthy" || r.Results[0].Window != 1 || r.Results[2].Outcome != "inconclusive" {
 		t.Fatal("historical certificate lost or stale anchor reused", r.Results)
+	}
+}
+
+func TestResourceProofUnknownResponseCannotHideVerifiedPathDrift(t *testing.T) {
+	for _, change := range []string{"address", "binding", "epoch", "identity"} {
+		t.Run(change, func(t *testing.T) {
+			normal := proofObservation(1, 1, 8, "A")
+			failed := proofObservation(2, 1, 8, "A")
+			failed.Class = "unknown"
+			failed.Sample.Generated = true
+			failed.Sample.Completed = false
+			failed.Sample.Outcome = MeasurementError
+			switch change {
+			case "address":
+				failed.Sample.PathKey = "fictional-changed-exit"
+			case "binding":
+				failed.Sample.PathBinding++
+			case "epoch":
+				failed.Sample.Attempt.Path.Epoch++
+			case "identity":
+				failed.IdentityGroup++
+			}
+			negative := proofObservation(3, 2, 9, "B")
+			negative.Sample.PathKey = normal.Sample.PathKey
+			if !ResourceEvidence(ResourceCheckReport{Window: 1, Observations: []ResourceObservation{normal, failed, negative}}).Conflict {
+				t.Fatal("verified resource change disappeared because the response was incomplete")
+			}
+		})
 	}
 }

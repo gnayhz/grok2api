@@ -181,7 +181,7 @@ func (r *Registry) migrate(ctx context.Context) error {
 	if err := r.db.WithContext(ctx).AutoMigrate(qualitySchemaModels...); err != nil {
 		return fmt.Errorf("初始化质量层表: %w", err)
 	}
-	if err := r.migrateAccountCheckDirection(ctx); err != nil {
+	if err := r.migrateResourceCheckDirection(ctx); err != nil {
 		return err
 	}
 	if err := r.migrateCaseProof(ctx); err != nil {

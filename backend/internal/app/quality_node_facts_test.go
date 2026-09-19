@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestLegacyQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
@@ -27,6 +29,32 @@ func TestLegacyQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 			dsn := os.Getenv("TEST_POSTGRES_DSN")
 			if driver == "postgres" && dsn == "" {
 				t.Skip("requires isolated TEST_POSTGRES_DSN")
+			}
+			if driver == "postgres" {
+				// This test asserts the complete case set. Use its own schema so
+				// another application's accepted cases cannot pollute the fixture.
+				admin, err := pgx.Connect(ctx, dsn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = admin.Close(ctx) })
+				schema := fmt.Sprintf("quality_node_facts_%d", time.Now().UnixNano())
+				if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if _, err := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+						t.Error(err)
+					}
+				})
+				parsed, err := url.Parse(dsn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				query := parsed.Query()
+				query.Set("search_path", schema)
+				parsed.RawQuery = query.Encode()
+				dsn = parsed.String()
 			}
 			var path string
 			a := newLifecycleApplication(t, func(cfg *config.Config) {

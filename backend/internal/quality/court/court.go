@@ -159,7 +159,7 @@ type Service struct {
 	dispatcher      Dispatcher
 	ledgerSink      LedgerSink
 	accountExists   AccountExists
-	proofCurrent    func(context.Context, model.AccountCheckSample) (bool, error)
+	proofCurrent    func(context.Context, model.ResourceSample) (bool, error)
 	sameExit        SameExit
 	accountReleased AccountReleased
 	logger          *slog.Logger
@@ -210,7 +210,7 @@ func (s *Service) SetAccountExists(check AccountExists) {
 
 // SetProofIdentityCheck supplies current account/path generations without a
 // second upstream request. The source owns credential and binding facts.
-func (s *Service) SetProofIdentityCheck(check func(context.Context, model.AccountCheckSample) (bool, error)) {
+func (s *Service) SetProofIdentityCheck(check func(context.Context, model.ResourceSample) (bool, error)) {
 	s.mu.Lock()
 	s.proofCurrent = check
 	s.mu.Unlock()

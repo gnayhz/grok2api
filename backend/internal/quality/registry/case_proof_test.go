@@ -15,7 +15,7 @@ func TestCaseProofUpgradePreservesHistoryAndBothHolders(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
-			opts, db := accountCheckDatabase(t, driver)
+			opts, db := resourceCheckDatabase(t, driver)
 			if err := db.AutoMigrate(&qCaseModel{}); err != nil {
 				t.Fatal(err)
 			}
@@ -101,7 +101,7 @@ func TestCaseProofOwnerBudgetCancellationAndNoManualProjection(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
-			opts, _ := accountCheckDatabase(t, driver)
+			opts, _ := resourceCheckDatabase(t, driver)
 			r, err := Open(ctx, opts)
 			if err != nil {
 				t.Fatal(err)

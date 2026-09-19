@@ -9,7 +9,7 @@ import (
 )
 
 // ClassifyResourceSample interprets complete measurements, never token counts.
-func ClassifyResourceSample(s AccountCheckSample) string {
+func ClassifyResourceSample(s ResourceSample) string {
 	if s.Conflict {
 		return "conflict"
 	}
@@ -44,6 +44,7 @@ func ResourceEvidence(r ResourceCheckReport) ResourceFacts {
 	seen := map[string]ResourceObservation{}
 	bindings := map[uint64]string{}
 	generations := map[uint64]uint64{}
+	identities := map[uint64]string{}
 	edges := []resourceEdge{}
 	for _, o := range r.Observations {
 		if o.Window != r.Window {
@@ -53,13 +54,28 @@ func ResourceEvidence(r ResourceCheckReport) ResourceFacts {
 		if o.Class == "conflict" || class == "conflict" {
 			f.Conflict = true
 		}
-		// A failed generation can still carry verified current identity facts.
-		// Do not reuse an earlier anchor across a proven credential change.
-		if o.Sample.Generated && o.Sample.IdentityVerified && o.AccountID == o.Sample.Attempt.AccountID {
-			if gen, ok := generations[o.AccountID]; ok && gen != o.Sample.CredentialGeneration {
-				f.Conflict = true
+		s := o.Sample
+		a := fmt.Sprintf("a:%d", o.IdentityGroup)
+		e := fmt.Sprintf("e:%s:%d", s.PathKey, s.PathFamily)
+		// Response validity and verified resource identity are independent facts.
+		// An incomplete response cannot hide a changed anchor from this window.
+		if s.Attempt.ID != "" && (s.Generated || class == "A" || class == "B") {
+			if s.IdentityVerified && o.IdentityGroup != 0 && o.AccountID == s.Attempt.AccountID {
+				if gen, ok := generations[o.AccountID]; ok && gen != s.CredentialGeneration {
+					f.Conflict = true
+				}
+				if identity, ok := identities[o.AccountID]; ok && identity != a {
+					f.Conflict = true
+				}
+				generations[o.AccountID], identities[o.AccountID] = s.CredentialGeneration, a
 			}
-			generations[o.AccountID] = o.Sample.CredentialGeneration
+			if s.PathVerified && s.PathKey != "" && o.NodeID == s.Attempt.Path.NodeID && s.Attempt.Path.Status == attemptmeta.PathRegistered && (s.PathFamily == 4 || s.PathFamily == 6) {
+				binding := fmt.Sprintf("%s:%d:%d", e, s.PathBinding, s.Attempt.Path.Epoch)
+				if old, ok := bindings[o.NodeID]; ok && old != binding {
+					f.Conflict = true
+				}
+				bindings[o.NodeID] = binding
+			}
 		}
 		if o.Class != "A" && o.Class != "B" {
 			continue
@@ -68,7 +84,6 @@ func ResourceEvidence(r ResourceCheckReport) ResourceFacts {
 			f.Conflict = true
 			continue
 		}
-		s := o.Sample
 		if old, ok := seen[s.Attempt.ID]; ok {
 			if !reflect.DeepEqual(old.Sample, s) || old.AccountID != o.AccountID || old.NodeID != o.NodeID || old.IdentityGroup != o.IdentityGroup {
 				f.Conflict = true
@@ -76,20 +91,7 @@ func ResourceEvidence(r ResourceCheckReport) ResourceFacts {
 			continue
 		}
 		seen[s.Attempt.ID] = o
-		a := fmt.Sprintf("a:%d", o.IdentityGroup)
-		if gen, ok := generations[o.AccountID]; ok && gen != s.CredentialGeneration {
-			f.Conflict = true
-		}
-		generations[o.AccountID] = s.CredentialGeneration
-		e := fmt.Sprintf("e:%s:%d", s.PathKey, s.PathFamily)
-		binding := fmt.Sprintf("%s:%d:%d", e, s.PathBinding, s.Attempt.Path.Epoch)
-		if old, ok := f.Accounts[o.AccountID]; ok && old != a {
-			f.Conflict = true
-		}
-		if old, ok := bindings[o.NodeID]; ok && old != binding {
-			f.Conflict = true
-		}
-		f.Accounts[o.AccountID], f.Nodes[o.NodeID], bindings[o.NodeID] = a, e, binding
+		f.Accounts[o.AccountID], f.Nodes[o.NodeID] = a, e
 		edges = append(edges, resourceEdge{a, e, o})
 		if o.Class == "A" {
 			if f.Normal[a] == 0 {

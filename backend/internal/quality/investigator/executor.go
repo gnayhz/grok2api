@@ -44,9 +44,6 @@ func (e *ProbeExecutor) Execute(ctx context.Context, task model.ProbeTask) (mode
 	if err := ctx.Err(); err != nil {
 		return interrupted(model.ProbeTaskResult{}), err
 	}
-	if task.Direction == model.ProbeAccountCheck {
-		return e.executeAccountCheck(ctx, task)
-	}
 	if task.Direction == model.ProbeResourceCheck || task.Direction == model.ProbeCaseProof {
 		return e.executeResourceCheck(ctx, task)
 	}

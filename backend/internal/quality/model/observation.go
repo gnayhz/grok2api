@@ -130,7 +130,6 @@ type ProbeTask struct {
 // ProbeTaskResult 是探针结论的领域投影。
 type ProbeTaskResult struct {
 	ResourceCheck  *ResourceCheckReport
-	AccountCheck   *AccountCheckReport
 	Attempt        attemptmeta.Identity
 	ControlAttempt attemptmeta.Identity
 	Outcome        ProbeResult

@@ -3,10 +3,10 @@ package model
 import "time"
 
 const ResourceCheckVersion = "resource-proof-v2"
-const LegacyResourceCheckVersion = "resource-quality-check-v1"
 const ProbeResourceCheck ProbeDirection = "resource_check"
 const ProbeCaseProof ProbeDirection = "case_proof"
 const CaseProofVersion = "resource-proof-case-v1"
+const ResourceCheckQueueLimit = 32
 const ResourceCheckMaxAccounts = 8
 const ResourceCheckMaxNodes = 4
 const ResourceCheckTimeout = 12 * time.Minute
@@ -36,16 +36,16 @@ type ResourceSubmission struct {
 	Error      string `json:"error,omitempty"`
 }
 type ResourceObservation struct {
-	ID            int                `json:"id"`
-	Window        int                `json:"window"`
-	AccountID     uint64             `json:"account_id"`
-	NodeID        uint64             `json:"node_id"`
-	IdentityGroup uint64             `json:"identity_group"`
-	Purpose       string             `json:"purpose"`
-	Class         string             `json:"class"`
-	StartedAt     time.Time          `json:"started_at"`
-	FinishedAt    time.Time          `json:"finished_at"`
-	Sample        AccountCheckSample `json:"sample"`
+	ID            int            `json:"id"`
+	Window        int            `json:"window"`
+	AccountID     uint64         `json:"account_id"`
+	NodeID        uint64         `json:"node_id"`
+	IdentityGroup uint64         `json:"identity_group"`
+	Purpose       string         `json:"purpose"`
+	Class         string         `json:"class"`
+	StartedAt     time.Time      `json:"started_at"`
+	FinishedAt    time.Time      `json:"finished_at"`
+	Sample        ResourceSample `json:"sample"`
 }
 type ResourceProof struct {
 	ResourceTarget
@@ -57,22 +57,6 @@ type ResourceProof struct {
 	Window        int       `json:"window"`
 	ValidUntil    time.Time `json:"valid_until"`
 }
-type ResourceCheckGroup struct {
-	ControlAccount uint64               `json:"control_account"`
-	ControlNode    uint64               `json:"control_node"`
-	AccountID      uint64               `json:"account_id"`
-	NodeID         uint64               `json:"node_id"`
-	IdentityGroup  uint64               `json:"identity_group"`
-	Control        []AccountCheckSample `json:"control"`
-	Samples        []AccountCheckSample `json:"samples"`
-	After          *AccountCheckSample  `json:"after,omitempty"`
-	Outcome        string               `json:"outcome"`
-	Reason         string               `json:"reason"`
-	ControlDelta   int64                `json:"control_delta"`
-	Delta          int64                `json:"delta"`
-}
-
-// Groups decode historical reports only; v2 never executes the old protocol.
 type ResourceCheckReport struct {
 	Version         string                `json:"version"`
 	Kind            string                `json:"kind"`
@@ -88,7 +72,6 @@ type ResourceCheckReport struct {
 	PathChecks      int                   `json:"path_checks"`
 	Observations    []ResourceObservation `json:"observations"`
 	Results         []ResourceProof       `json:"results"`
-	Groups          []ResourceCheckGroup  `json:"groups"`
 }
 type ResourceCheck struct {
 	ID         uint64               `json:"id"`
@@ -99,8 +82,4 @@ type ResourceCheck struct {
 	CreatedAt  time.Time            `json:"created_at"`
 	FinishedAt *time.Time           `json:"finished_at,omitempty"`
 	Report     *ResourceCheckReport `json:"report,omitempty"`
-}
-
-func IsManualProbe(direction ProbeDirection) bool {
-	return direction == ProbeAccountCheck || direction == ProbeResourceCheck
 }

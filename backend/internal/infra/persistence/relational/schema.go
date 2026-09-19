@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
@@ -150,6 +151,11 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 		return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", postgresSchemaMigrationLockID).Error; err != nil {
 				return fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
+			}
+			// Catalog writers take namespace locks before table/row locks.
+			// Acquire the same locks before DDL, not during the later name backfill.
+			if err := lockModelNamespaces(tx, account.Providers()...); err != nil {
+				return fmt.Errorf("acquire model namespace migration locks: %w", err)
 			}
 			locked := &Database{db: tx, dialect: d.dialect}
 			return locked.initializeSchema(ctx)

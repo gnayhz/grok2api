@@ -27,7 +27,7 @@ func NewProbeExperiment(obs Observation) ProbeExperiment {
 }
 
 func (s ProbeExperiment) UnsupportedReason() string {
-	if s.Version == AccountCheckVersion || s.Version == ResourceCheckVersion {
+	if s.Version == ResourceCheckVersion {
 		if s.Baseline.Provider != "grok_build" || s.Baseline.Model == "" || s.Baseline.RuleVersion == "" || s.Prompt() == "" {
 			return "experiment_baseline_missing"
 		}
@@ -68,15 +68,6 @@ func (s ProbeExperiment) Prompt() string {
 		switch s.Sample {
 		case "token-short":
 			return "Reply only OK. Data: " + strings.Repeat("a", 512)
-		}
-		return ""
-	}
-	if s.Version == AccountCheckVersion {
-		switch s.Sample {
-		case "brief-confirmation":
-			return "Please reply with a brief greeting."
-		case "repeated-as":
-			return "Reply only OK. Data: " + strings.Repeat("a", 500)
 		}
 		return ""
 	}

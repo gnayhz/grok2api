@@ -109,8 +109,7 @@ func (s *ProbeTaskStore) ClaimPendingProbeTasks(ctx context.Context, limit int) 
 	}
 	var rows []qProbeTaskModel
 	if err := s.registry.db.WithContext(ctx).
-		Where("state = ?", string(model.ProbePending)).
-		Where("direction <> ? OR created_at >= ?", string(model.ProbeAccountCheck), time.Now().UTC().Add(-10*time.Minute)).
+		Where("state = ? AND direction IN ?", string(model.ProbePending), []string{string(model.ProbeAccountDifferential), string(model.ProbeExitJury), string(model.ProbeResourceCheck), string(model.ProbeCaseProof)}).
 		Where("direction <> ? OR created_at >= ?", string(model.ProbeResourceCheck), time.Now().UTC().Add(-model.ResourceCheckQueueTimeout)).
 		Order("id").Limit(max(limit, 64)).Find(&rows).Error; err != nil {
 		return nil, err
@@ -168,13 +167,6 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 		"control_path_key": result.ControlPathKey, "control_verified": result.ControlVerified,
 		"result": string(result.Outcome), "verified_ip_change": result.VerifiedIPChange, "detail": result.Detail,
 	}
-	if result.AccountCheck != nil {
-		reportJSON, err := json.Marshal(result.AccountCheck)
-		if err != nil {
-			return err
-		}
-		updates["check_report_json"] = string(reportJSON)
-	}
 	if result.ResourceCheck != nil {
 		reportJSON, err := json.Marshal(result.ResourceCheck)
 		if err != nil {
@@ -201,7 +193,7 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 		if err := tx.First(&row, "id = ?", taskID).Error; err != nil {
 			return err
 		}
-		if model.IsManualProbe(model.ProbeDirection(row.Direction)) || row.Direction == string(model.ProbeCaseProof) {
+		if row.Direction == string(model.ProbeResourceCheck) || row.Direction == string(model.ProbeCaseProof) {
 			return nil
 		}
 		obs := model.ProbeObservation(probeTaskFromRow(row), result, finishedAt)
@@ -219,7 +211,7 @@ func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]model
 		limit = 50
 	}
 	var rows []qProbeTaskModel
-	if err := s.registry.db.WithContext(ctx).Where("direction NOT IN ?", manualProbeDirections).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := s.registry.db.WithContext(ctx).Where("direction IN ?", []string{string(model.ProbeAccountDifferential), string(model.ProbeExitJury), string(model.ProbeCaseProof)}).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	views := make([]model.ProbeTaskView, 0, len(rows))

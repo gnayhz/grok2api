@@ -17,7 +17,7 @@ import (
 	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
-func TestAccountCheckDeadlineClosesThePhysicalReader(t *testing.T) {
+func TestResourceCheckDeadlineClosesThePhysicalReader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	body := newIdleQualityProbeBody()
@@ -25,10 +25,10 @@ func TestAccountCheckDeadlineClosesThePhysicalReader(t *testing.T) {
 	defer resources.Close()
 	stream := resources.Own(responseflow.New(body, nil))
 	done := make(chan struct{})
-	var sample qualitymodel.AccountCheckSample
+	var sample qualitymodel.ResourceSample
 	var err error
 	go func() {
-		sample, err = readAccountCheckStream(ctx, stream, QualityRetryRuntime{}, resources)
+		sample, err = readResourceCheckStream(ctx, stream, QualityRetryRuntime{}, resources)
 		close(done)
 	}()
 	select {
@@ -36,7 +36,7 @@ func TestAccountCheckDeadlineClosesThePhysicalReader(t *testing.T) {
 	case <-time.After(time.Second):
 		body.Close()
 		<-done
-		t.Fatal("account check left the physical reader blocked")
+		t.Fatal("resource check left the physical reader blocked")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) || sample.Outcome != qualitymodel.MeasurementError || sample.Completed {
 		t.Fatalf("timeout became a finding: %+v %v", sample, err)
@@ -48,7 +48,7 @@ func TestAccountCheckDeadlineClosesThePhysicalReader(t *testing.T) {
 	}
 }
 
-func TestAccountCheckRecordsActualRuleWithoutTreatingUsageAsThinking(t *testing.T) {
+func TestResourceCheckRecordsActualRuleWithoutTreatingUsageAsThinking(t *testing.T) {
 	terminal := "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":120,\"output_tokens\":12}}}\n\n"
 	for _, tc := range []struct {
 		name, body string
@@ -62,7 +62,7 @@ func TestAccountCheckRecordsActualRuleWithoutTreatingUsageAsThinking(t *testing.
 		{"missing_terminal", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n", qualitymodel.MeasurementError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := qualitymodel.ProbeExperiment{Version: qualitymodel.AccountCheckVersion, Sample: "brief-confirmation", Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "grok-4.6", RuleVersion: "fictional-rule"}}
+			spec := qualitymodel.ProbeExperiment{Version: qualitymodel.ResourceCheckVersion, Sample: "token-short", Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "grok-4.6", RuleVersion: "fictional-rule"}}
 			identity := spec.Baseline
 			identity.ID, identity.AccountID, identity.Profile = "fictional-check/1", 7, spec.Profile()
 			body := &countedBody{Reader: strings.NewReader(tc.body)}
@@ -99,7 +99,7 @@ func TestResourceCheckStreamRejectsRefusalToolsAndIncompleteResponses(t *testing
 			ctx, resources := selector.NewAttemptResources(context.Background())
 			defer resources.Close()
 			body := resources.Own(responseflow.New(io.NopCloser(strings.NewReader(tc.body)), nil))
-			s, _ := readAccountCheckStream(ctx, body, QualityRetryRuntime{}, resources)
+			s, _ := readResourceCheckStream(ctx, body, QualityRetryRuntime{}, resources)
 			s.Sample, s.IdentityVerified, s.PathVerified, s.PathFamily, s.PathKey = "token-short", true, true, 4, "fictional-path"
 			s.Attempt = attemptmeta.Identity{ID: "fictional-probe", AccountID: 1, Path: attemptmeta.Path{NodeID: 2, Status: attemptmeta.PathRegistered}}
 			if got := qualitymodel.ClassifyResourceSample(s); got != tc.class {

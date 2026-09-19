@@ -25,7 +25,6 @@ type Deps struct {
 	Court          *court.Service
 	Enforcement    *enforcement.Service
 	Guard          *guard.Service
-	AccountChecks  *management.AccountChecks
 	ResourceChecks *management.ResourceChecks
 	// DialerDistribution 拨号选择分布(G10;nil=拨号策略未注入)。
 	DialerDistribution func() map[string]map[uint64]uint64
@@ -67,8 +66,6 @@ func NewHandler(deps Deps) *Handler {
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/quality/resource-checks", h.postResourceChecks)
 	router.GET("/quality/resource-checks", h.getResourceChecks)
-	router.POST("/quality/accounts/:id/checks", h.postAccountCheck)
-	router.GET("/quality/accounts/:id/checks", h.getAccountChecks)
 	router.GET("/quality/overview", h.getOverview)
 	router.GET("/quality/court/cases", h.getCases)
 	router.POST("/quality/court/review", h.postReview)

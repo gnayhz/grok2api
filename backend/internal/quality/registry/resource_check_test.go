@@ -3,15 +3,16 @@ package registry
 import (
 	"context"
 	"errors"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 )
 
 func resourceTask(kind string, id uint64) model.ProbeTask {
-	task := checkTask(id)
+	task := model.ProbeTask{DefendantAccountID: id, Experiment: model.ProbeExperiment{Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 	task.Direction = model.ProbeResourceCheck
 	task.Experiment.Version = model.ResourceCheckVersion
 	task.Experiment.Sample = "token-short"
@@ -22,27 +23,27 @@ func resourceTask(kind string, id uint64) model.ProbeTask {
 	}
 	return task
 }
-func TestResourceCheckQueueOwnershipProgressAndCompatibility(t *testing.T) {
+func TestResourceCheckQueueOwnershipAndProgress(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
-			opts, _ := accountCheckDatabase(t, driver)
+			opts, _ := resourceCheckDatabase(t, driver)
 			r, err := Open(ctx, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer r.Close()
 			a, b := NewProbeTaskStore(r), NewProbeTaskStore(r)
-			first, err := a.CreateResourceCheck(ctx, resourceTask("account", 11), 4)
+			first, err := createResourceCheck(a, ctx, resourceTask("account", 11), 4)
 			if err != nil {
 				t.Fatal(err)
 			}
-			duplicate, err := b.CreateResourceCheck(ctx, resourceTask("account", 11), 4)
+			duplicate, err := createResourceCheck(b, ctx, resourceTask("account", 11), 4)
 			if err != nil || duplicate != first {
 				t.Fatalf("duplicate %d %v", duplicate, err)
 			}
 			for _, id := range []uint64{12, 13} {
-				if _, err := b.CreateResourceCheck(ctx, resourceTask("node", id), 4); err != nil {
+				if _, err := createResourceCheck(b, ctx, resourceTask("node", id), 4); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -53,7 +54,7 @@ func TestResourceCheckQueueOwnershipProgressAndCompatibility(t *testing.T) {
 			if more, err := b.ClaimPendingProbeTasks(ctx, 8); err != nil || len(more) != 0 {
 				t.Fatalf("cross-owner capacity %v %v", more, err)
 			}
-			report := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Kind: "account", ResourceID: 11, Revision: 1, MaxCalls: 5, Calls: 1, Outcome: "inconclusive", Groups: []model.ResourceCheckGroup{}}
+			report := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Kind: "account", ResourceID: 11, Revision: 1, MaxCalls: 5, Calls: 1, Outcome: "inconclusive"}
 			if err := b.SaveResourceCheckProgress(ctx, first, report); !errors.Is(err, model.ErrProbeAlreadySettled) {
 				t.Fatalf("foreign progress %v", err)
 			}
@@ -88,65 +89,43 @@ func TestResourceCheckQueueOwnershipProgressAndCompatibility(t *testing.T) {
 	}
 }
 
-func TestResourceCheckUpgradeFromAccountOnlyConstraint(t *testing.T) {
+func TestResourceCheckConcurrentBatchSubmissionSharesAcceptedWork(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
-			opts, db := accountCheckDatabase(t, driver)
-			if err := db.AutoMigrate(&qProbeTaskModel{}); err != nil {
-				t.Fatal(err)
-			}
-			// Simulate the previous deployed constraint while retaining reports.
-			if driver == "postgres" {
-				if err := db.Exec("ALTER TABLE q_probe_task DROP CONSTRAINT chk_q_probe_task_direction").Error; err != nil {
-					t.Fatal(err)
-				}
-				if err := db.Exec("ALTER TABLE q_probe_task ADD CONSTRAINT chk_q_probe_task_direction CHECK (direction IN ('account_differential','exit_jury','account_check'))").Error; err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				// Recreate only this empty disposable fixture with the exact old
-				// constraint. The real migration below must retain its report.
-				var schema string
-				if err := db.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'q_probe_task'").Scan(&schema).Error; err != nil {
-					t.Fatal(err)
-				}
-				if err := db.Migrator().DropTable(&qProbeTaskModel{}); err != nil {
-					t.Fatal(err)
-				}
-				schema = strings.ReplaceAll(schema, ",'resource_check'", "")
-				if err := db.Exec(schema).Error; err != nil {
-					t.Fatal(err)
-				}
-			}
-			now := time.Now().UTC()
-			old := qProbeTaskModel{Direction: "account_check", State: "done", CheckReportJSON: `{"version":"account-quality-check-v1","outcome":"inconclusive","samples":[]}`, CreatedAt: now, UpdatedAt: now}
-			if err := db.Create(&old).Error; err != nil {
-				t.Fatal(err)
-			}
-			// The old resource protocol did not have batch capacity or CAS columns.
-			for _, column := range []string{"ManualSlots", "CheckRevision"} {
-				if err := db.Migrator().DropColumn(&qProbeTaskModel{}, column); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for range 2 {
-				r, err := Open(context.Background(), opts)
+			opts, _ := resourceCheckDatabase(t, driver)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			stores := make([]*ProbeTaskStore, 2)
+			for i := range stores {
+				r, err := Open(ctx, opts)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := NewProbeTaskStore(r).CreateResourceCheck(context.Background(), resourceTask("node", 77), 32); err != nil {
-					t.Fatal(err)
+				defer r.Close()
+				stores[i] = NewProbeTaskStore(r)
+			}
+			var wg sync.WaitGroup
+			results := make([][]model.ResourceSubmission, len(stores))
+			errs := make([]error, len(stores))
+			for i := range stores {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					results[i], errs[i] = stores[i].CreateResourceCheckBatch(ctx, []model.ProbeTask{resourceTask("account", 41), resourceTask("account", 42)}, 1)
+				}()
+			}
+			wg.Wait()
+			for i := range stores {
+				if errs[i] != nil || len(results[i]) != 2 || results[i][0].ID == 0 || results[i][1].Error != "queue_full" {
+					t.Fatalf("results=%+v errors=%v", results, errs)
 				}
-				var retained qProbeTaskModel
-				if err := r.DB().First(&retained, old.ID).Error; err != nil || retained.CheckReportJSON != old.CheckReportJSON || retained.ManualSlots != 1 || retained.CheckRevision != 0 {
-					t.Fatal("old report lost", err)
-				}
-				for _, index := range []string{"idx_q_probe_task_case", "idx_q_probe_task_state_updated", "idx_q_probe_task_lease_owner", "idx_q_probe_task_lease_until"} {
-					if !r.DB().Migrator().HasIndex(&qProbeTaskModel{}, index) {
-						t.Fatal("index lost", index)
-					}
-				}
-				r.Close()
+			}
+			if results[0][0].ID != results[1][0].ID {
+				t.Fatal("simultaneous submission duplicated accepted work")
+			}
+			var count int64
+			if err := stores[0].registry.DB().Model(&qResourceCheckTargetModel{}).Count(&count).Error; err != nil || count != 1 {
+				t.Fatalf("partial submission leaked targets: %d %v", count, err)
 			}
 		})
 	}
@@ -156,7 +135,7 @@ func TestResourceCheckBatchSharesOwnerAndCountsResourceSlots(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
-			opts, _ := accountCheckDatabase(t, driver)
+			opts, _ := resourceCheckDatabase(t, driver)
 			a, err := Open(ctx, opts)
 			if err != nil {
 				t.Fatal(err)
@@ -172,7 +151,7 @@ func TestResourceCheckBatchSharesOwnerAndCountsResourceSlots(t *testing.T) {
 			if err != nil || len(items) != 2 || items[0].ID == 0 || items[0].ID != items[1].ID {
 				t.Fatalf("batch %+v %v", items, err)
 			}
-			if _, err := second.CreateAccountCheck(ctx, checkTask(43), 2); !errors.Is(err, model.ErrCheckQueueFull) {
+			if rejected, err := second.CreateResourceCheckBatch(ctx, []model.ProbeTask{resourceTask("account", 43)}, 2); err != nil || rejected[0].Error != "queue_full" {
 				t.Fatal("batch bypassed resource capacity", err)
 			}
 			duplicates, err := second.CreateResourceCheckBatch(ctx, []model.ProbeTask{resourceTask("account", 42)}, 2)
@@ -220,4 +199,21 @@ func TestResourceCheckBatchSharesOwnerAndCountsResourceSlots(t *testing.T) {
 			}
 		})
 	}
+}
+
+func createResourceCheck(s *ProbeTaskStore, ctx context.Context, task model.ProbeTask, capacity int) (uint64, error) {
+	items, err := s.CreateResourceCheckBatch(ctx, []model.ProbeTask{task}, capacity)
+	if err != nil {
+		return 0, err
+	}
+	if len(items) != 1 {
+		return 0, errors.New("resource batch missing result")
+	}
+	if items[0].Error == "queue_full" {
+		return 0, errors.New("queue_full")
+	}
+	if items[0].Error != "" {
+		return 0, errors.New(items[0].Error)
+	}
+	return items[0].ID, nil
 }

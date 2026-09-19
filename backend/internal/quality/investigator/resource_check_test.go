@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
@@ -18,7 +19,7 @@ type resourceMeasurements struct {
 	cancel              context.CancelFunc
 }
 
-func (m *resourceMeasurements) MeasureResourceCheck(ctx context.Context, account, node uint64) model.AccountCheckSample {
+func (m *resourceMeasurements) MeasureResourceCheck(ctx context.Context, account, node uint64) model.ResourceSample {
 	spec, _ := model.ProbeExperimentFromContext(ctx)
 	m.calls++
 	thinking := account != m.badAccount && node != m.badNode
@@ -41,7 +42,7 @@ func (m *resourceMeasurements) MeasureResourceCheck(ctx context.Context, account
 	if m.cancel != nil {
 		m.cancel()
 	}
-	return model.AccountCheckSample{IdentityVerified: true, PlainOutput: true, Generated: true, PathChecks: 2, Sample: spec.Sample, Attempt: actual, Outcome: outcome, Thinking: thinking, Completed: true, UsageReported: true, InputTokens: input, PathKey: fmt.Sprintf("fictional-path-%d", node), PathVerified: true, PathBinding: 1, PathFamily: 4}
+	return model.ResourceSample{IdentityVerified: true, PlainOutput: true, Generated: true, PathChecks: 2, Sample: spec.Sample, Attempt: actual, Outcome: outcome, Thinking: thinking, Completed: true, UsageReported: true, InputTokens: input, PathKey: fmt.Sprintf("fictional-path-%d", node), PathVerified: true, PathBinding: 1, PathFamily: 4}
 }
 func TestResourceCheckExecutorCrossesOneVariableAndBoundsCalls(t *testing.T) {
 	for _, kind := range []string{"account", "node"} {
@@ -205,5 +206,75 @@ func TestResourceCheckUnregisteredExitDoesNotSpendGeneration(t *testing.T) {
 		if mixed && result.ResourceCheck.Results[1].Outcome != "healthy" {
 			t.Fatal("unregistered exit prevented independent valid target")
 		}
+	}
+}
+
+type disappearingResourceEpoch struct {
+	ProbeState
+	reads int
+}
+
+func (s *disappearingResourceEpoch) CurrentEpochAt(context.Context, uint64) (uint64, bool, error) {
+	s.reads++
+	return 0, s.reads == 1, nil
+}
+
+func TestResourceCheckLosingRegisteredExitInvalidatesResponse(t *testing.T) {
+	state := &disappearingResourceEpoch{ProbeState: resourceCheckRegistry(t)}
+	p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}}, Nodes: []uint64{11}, MaxCalls: 5}
+	task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
+	m := &resourceMeasurements{}
+	e := NewProbeExecutor(state, nil, nil)
+	e.SetResourceChecks(m, &proofProgress{})
+	result, err := e.Execute(context.Background(), task)
+	if err != nil || m.calls != 1 || result.ResourceCheck.Outcome != "inconclusive" || result.ResourceCheck.Reason != "conflicting_samples" {
+		t.Fatalf("calls=%d report=%+v err=%v", m.calls, result.ResourceCheck, err)
+	}
+}
+
+type failingResourceProgress struct {
+	store         *registry.ProbeTaskStore
+	failAt, calls int
+}
+
+func (p *failingResourceProgress) SaveResourceCheckProgress(ctx context.Context, id uint64, report model.ResourceCheckReport) error {
+	p.calls++
+	if p.calls == p.failAt {
+		return errors.New("fictional transient write failure")
+	}
+	return p.store.SaveResourceCheckProgress(ctx, id, report)
+}
+
+func TestResourceCheckWriteFailureSettlesAtLastPersistedRevision(t *testing.T) {
+	for _, failAt := range []int{1, 2} {
+		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
+			ctx := context.Background()
+			reg := resourceCheckRegistry(t)
+			store := registry.NewProbeTaskStore(reg)
+			plan := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Nodes: []uint64{11}}
+			task := model.ProbeTask{Direction: model.ProbeResourceCheck, DefendantAccountID: 7, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: plan, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
+			submitted, err := store.CreateResourceCheckBatch(ctx, []model.ProbeTask{task}, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := store.ClaimPendingProbeTasks(ctx, 1)
+			if err != nil || len(tasks) != 1 {
+				t.Fatalf("claim: %v %v", tasks, err)
+			}
+			measurements := &resourceMeasurements{}
+			executor := NewProbeExecutor(reg, nil, nil)
+			executor.SetResourceChecks(measurements, &failingResourceProgress{store: store, failAt: failAt})
+			result, err := executor.Execute(ctx, tasks[0])
+			if err == nil || measurements.calls != failAt-1 {
+				t.Fatalf("continued after failed write: %d %v", measurements.calls, err)
+			}
+			if err := store.CompleteProbeTask(ctx, submitted[0].ID, model.ProbeFailed, result, time.Now()); err != nil {
+				t.Fatalf("failure could not settle: %v", err)
+			}
+			rows, err := store.ListResourceChecks(ctx, "account", []uint64{7})
+			if err != nil || len(rows) != 1 || rows[0].State != model.ProbeFailed || rows[0].Report.Generations != failAt-1 {
+				t.Fatalf("lost completion/evidence: %+v %v", rows, err)
+			}
+		})
 	}
 }

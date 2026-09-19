@@ -306,7 +306,7 @@ func (s *Service) runDue(ctx context.Context, executor Executor, limit int) (int
 			}
 			continue
 		}
-		if model.IsManualProbe(out.task.Direction) || out.task.Direction == model.ProbeCaseProof {
+		if out.task.Direction == model.ProbeResourceCheck || out.task.Direction == model.ProbeCaseProof {
 			// Full proof reports are retained on the task, never projected as
 			// ordinary traffic votes. The court alone settles case restrictions.
 			if err := s.settleProbe(out.task.ID, model.ProbeDone, out.result, now); err != nil && firstErr == nil {

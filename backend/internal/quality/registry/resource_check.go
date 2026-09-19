@@ -11,13 +11,11 @@ import (
 	"gorm.io/gorm"
 )
 
-var manualProbeDirections = []string{string(model.ProbeAccountCheck), string(model.ProbeResourceCheck)}
-
 // The generation owner has two shared measurement slots. A batch must wait in
 // the durable queue instead of having eight workers race for those two slots.
 func (s *ProbeTaskStore) claimResourceCheck(ctx context.Context, row qProbeTaskModel, now time.Time) (bool, error) {
 	if probeExperimentFromJSON(row.ExperimentJSON).Version != model.ResourceCheckVersion {
-		err := s.registry.db.WithContext(ctx).Model(&qProbeTaskModel{}).Where("id = ? AND state = ?", row.ID, "pending").Updates(map[string]any{"state": "cancelled", "detail": "historical protocol retired", "finished_at": now, "updated_at": now}).Error
+		err := s.registry.db.WithContext(ctx).Model(&qProbeTaskModel{}).Where("id = ? AND state = ?", row.ID, "pending").Updates(map[string]any{"state": "cancelled", "detail": "unsupported_experiment_version", "finished_at": now, "updated_at": now}).Error
 		return false, err
 	}
 	ctx, release, err := s.registry.Coordinate(ctx, "resource_check_workers")
@@ -54,24 +52,6 @@ func (s *ProbeTaskStore) claimResourceCheck(ctx context.Context, row qProbeTaskM
 	return claimed, err
 }
 
-// CreateResourceCheck is the single-resource entry into the batch transaction.
-func (s *ProbeTaskStore) CreateResourceCheck(ctx context.Context, task model.ProbeTask, capacity int) (uint64, error) {
-	items, err := s.CreateResourceCheckBatch(ctx, []model.ProbeTask{task}, capacity)
-	if err != nil {
-		return 0, err
-	}
-	if len(items) != 1 {
-		return 0, errors.New("resource batch missing result")
-	}
-	if items[0].Error == "queue_full" {
-		return 0, model.ErrCheckQueueFull
-	}
-	if items[0].Error != "" {
-		return 0, errors.New(items[0].Error)
-	}
-	return items[0].ID, nil
-}
-
 // One queue row owns a whole batch. A separate index links each target without
 // duplicating state, leases or measurements across per-resource workers.
 func (s *ProbeTaskStore) CreateResourceCheckBatch(ctx context.Context, tasks []model.ProbeTask, capacity int) ([]model.ResourceSubmission, error) {
@@ -88,7 +68,7 @@ func (s *ProbeTaskStore) CreateResourceCheckBatch(ctx context.Context, tasks []m
 			return nil, errors.New("batch specification mismatch")
 		}
 	}
-	ctx, release, err := s.registry.Coordinate(ctx, "account_checks")
+	ctx, release, err := s.registry.Coordinate(ctx, "resource_checks")
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +78,7 @@ func (s *ProbeTaskStore) CreateResourceCheckBatch(ctx context.Context, tasks []m
 		if err := checkCoordination(tx, ctx); err != nil {
 			return err
 		}
-		active := tx.Model(&qProbeTaskModel{}).Where("direction IN ? AND state IN ?", manualProbeDirections, []string{"pending", "running"})
+		active := tx.Model(&qProbeTaskModel{}).Where("direction = ? AND state IN ?", string(model.ProbeResourceCheck), []string{"pending", "running"})
 		var used int64
 		if err := active.Select("COALESCE(SUM(manual_slots),0)").Scan(&used).Error; err != nil {
 			return err
@@ -117,7 +97,7 @@ func (s *ProbeTaskStore) CreateResourceCheckBatch(ctx context.Context, tasks []m
 			}
 			seen[key] = true
 			var existing []qProbeTaskModel
-			q := tx.Where("direction = ? AND state IN ?", string(model.ProbeResourceCheck), []string{"pending", "running"}).Where("id IN (SELECT task_id FROM q_resource_check_target WHERE kind = ? AND resource_id = ?) OR (defendant_account_id = ? AND ? = 'account') OR (defendant_node_id = ? AND defendant_account_id = 0 AND ? = 'node')", p.Kind, p.ResourceID, p.ResourceID, p.Kind, p.ResourceID, p.Kind)
+			q := tx.Where("direction = ? AND state IN ?", string(model.ProbeResourceCheck), []string{"pending", "running"}).Where("id IN (SELECT task_id FROM q_resource_check_target WHERE kind = ? AND resource_id = ?)", p.Kind, p.ResourceID)
 			if err := q.Order("id DESC").Limit(1).Find(&existing).Error; err != nil {
 				return err
 			}
@@ -172,14 +152,14 @@ func (s *ProbeTaskStore) ListResourceChecks(ctx context.Context, kind string, id
 	items := []model.ResourceCheck{}
 	for _, id := range ids {
 		var rows []qProbeTaskModel
-		q := s.registry.db.WithContext(ctx).Where("direction = ?", string(model.ProbeResourceCheck)).Where("id IN (SELECT task_id FROM q_resource_check_target WHERE kind = ? AND resource_id = ?) OR (defendant_account_id = ? AND ? = 'account') OR (defendant_node_id = ? AND defendant_account_id = 0 AND ? = 'node')", kind, id, id, kind, id, kind)
+		q := s.registry.db.WithContext(ctx).Where("direction = ?", string(model.ProbeResourceCheck)).Where("id IN (SELECT task_id FROM q_resource_check_target WHERE kind = ? AND resource_id = ?)", kind, id)
 		if err := q.Order("id DESC").Limit(5).Find(&rows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
 			check := model.ResourceCheck{ID: row.ID, Kind: kind, ResourceID: id, Model: probeExperimentFromJSON(row.ExperimentJSON).Baseline.Model, State: model.ProbeTaskState(row.State), CreatedAt: row.CreatedAt, FinishedAt: row.FinishedAt}
 			var report model.ResourceCheckReport
-			if json.Unmarshal([]byte(row.CheckReportJSON), &report) == nil && (report.Version == model.ResourceCheckVersion || report.Version == model.LegacyResourceCheckVersion) {
+			if json.Unmarshal([]byte(row.CheckReportJSON), &report) == nil && report.Version == model.ResourceCheckVersion {
 				report = model.ResourceReportFor(report, kind, id)
 				check.Report = &report
 			}
@@ -224,4 +204,9 @@ func (s *ProbeTaskStore) SaveResourceCheckProgress(ctx context.Context, id uint6
 		return model.ErrProbeAlreadySettled
 	}
 	return nil
+}
+
+func (r *Registry) expirePendingResourceChecks(ctx context.Context) error {
+	now := time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&qProbeTaskModel{}).Where("state = ? AND direction = ? AND created_at < ?", "pending", string(model.ProbeResourceCheck), now.Add(-model.ResourceCheckQueueTimeout)).Updates(map[string]any{"state": "cancelled", "detail": "resource check queue deadline", "finished_at": now, "updated_at": now}).Error
 }

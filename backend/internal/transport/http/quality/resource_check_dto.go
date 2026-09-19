@@ -39,7 +39,6 @@ type resourceCheckReportDTO struct {
 	management.ResourceCheckReport
 	Revision     resourceID               `json:"revision"`
 	ResourceID   resourceID               `json:"resource_id"`
-	Groups       []resourceCheckGroupDTO  `json:"groups"`
 	Observations []resourceObservationDTO `json:"observations"`
 	Results      []resourceProofDTO       `json:"results"`
 }
@@ -55,19 +54,8 @@ type resourceProofDTO struct {
 	ResourceID    resourceID `json:"resource_id"`
 	IdentityGroup resourceID `json:"identity_group"`
 }
-type resourceCheckGroupDTO struct {
-	management.ResourceCheckGroup
-	ControlAccount resourceID               `json:"control_account"`
-	ControlNode    resourceID               `json:"control_node"`
-	AccountID      resourceID               `json:"account_id"`
-	NodeID         resourceID               `json:"node_id"`
-	IdentityGroup  resourceID               `json:"identity_group"`
-	Control        []resourceCheckSampleDTO `json:"control"`
-	Samples        []resourceCheckSampleDTO `json:"samples"`
-	After          *resourceCheckSampleDTO  `json:"after,omitempty"`
-}
 type resourceCheckSampleDTO struct {
-	management.AccountCheckSample
+	management.ResourceSample
 	CredentialGeneration resourceID              `json:"credential_generation"`
 	PathBinding          resourceID              `json:"path_binding,omitempty"`
 	Attempt              resourceCheckAttemptDTO `json:"attempt"`
@@ -84,25 +72,18 @@ type resourceCheckPathDTO struct {
 	Epoch  resourceID `json:"epoch,omitempty"`
 }
 
-func checkSampleDTO(s management.AccountCheckSample) resourceCheckSampleDTO {
-	return resourceCheckSampleDTO{AccountCheckSample: s, CredentialGeneration: resourceID(s.CredentialGeneration), PathBinding: resourceID(s.PathBinding), Attempt: resourceCheckAttemptDTO{
+func checkSampleDTO(s management.ResourceSample) resourceCheckSampleDTO {
+	return resourceCheckSampleDTO{ResourceSample: s, CredentialGeneration: resourceID(s.CredentialGeneration), PathBinding: resourceID(s.PathBinding), Attempt: resourceCheckAttemptDTO{
 		Identity: s.Attempt, AccountID: resourceID(s.Attempt.AccountID), Revision: resourceID(s.Attempt.Revision),
 		Path: resourceCheckPathDTO{Path: s.Attempt.Path, NodeID: resourceID(s.Attempt.Path.NodeID), Epoch: resourceID(s.Attempt.Path.Epoch)},
 	}}
-}
-func checkSamplesDTO(samples []management.AccountCheckSample) []resourceCheckSampleDTO {
-	items := make([]resourceCheckSampleDTO, 0, len(samples))
-	for _, sample := range samples {
-		items = append(items, checkSampleDTO(sample))
-	}
-	return items
 }
 func checkDTO(check management.ResourceCheck) resourceCheckDTO {
 	result := resourceCheckDTO{ResourceCheck: check, ID: resourceID(check.ID), ResourceID: resourceID(check.ResourceID)}
 	if check.Report == nil {
 		return result
 	}
-	result.Report = &resourceCheckReportDTO{ResourceCheckReport: *check.Report, Revision: resourceID(check.Report.Revision), ResourceID: resourceID(check.Report.ResourceID), Groups: []resourceCheckGroupDTO{}, Observations: []resourceObservationDTO{}, Results: []resourceProofDTO{}}
+	result.Report = &resourceCheckReportDTO{ResourceCheckReport: *check.Report, Revision: resourceID(check.Report.Revision), ResourceID: resourceID(check.Report.ResourceID), Observations: []resourceObservationDTO{}, Results: []resourceProofDTO{}}
 	for _, o := range check.Report.Observations {
 		result.Report.Observations = append(result.Report.Observations, resourceObservationDTO{ResourceObservation: o, AccountID: resourceID(o.AccountID), NodeID: resourceID(o.NodeID), IdentityGroup: resourceID(o.IdentityGroup), Sample: checkSampleDTO(o.Sample)})
 	}
@@ -111,14 +92,6 @@ func checkDTO(check management.ResourceCheck) resourceCheckDTO {
 			p.Evidence = []int{}
 		}
 		result.Report.Results = append(result.Report.Results, resourceProofDTO{ResourceProof: p, ResourceID: resourceID(p.ResourceID), IdentityGroup: resourceID(p.IdentityGroup)})
-	}
-	for _, group := range check.Report.Groups {
-		g := resourceCheckGroupDTO{ResourceCheckGroup: group, ControlAccount: resourceID(group.ControlAccount), ControlNode: resourceID(group.ControlNode), AccountID: resourceID(group.AccountID), NodeID: resourceID(group.NodeID), IdentityGroup: resourceID(group.IdentityGroup), Control: checkSamplesDTO(group.Control), Samples: checkSamplesDTO(group.Samples)}
-		if group.After != nil {
-			s := checkSampleDTO(*group.After)
-			g.After = &s
-		}
-		result.Report.Groups = append(result.Report.Groups, g)
 	}
 	return result
 }

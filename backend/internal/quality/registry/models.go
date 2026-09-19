@@ -131,7 +131,7 @@ type qProbeTaskModel struct {
 	ControlAttemptJSON string     `gorm:"type:text;not null;default:''"`
 	ID                 uint64     `gorm:"primaryKey;autoIncrement"`
 	CaseID             uint64     `gorm:"not null;default:0;index:idx_q_probe_task_case"`
-	Direction          string     `gorm:"size:32;not null;check:chk_q_probe_task_direction,direction IN ('account_differential','exit_jury','account_check','resource_check','case_proof')"`
+	Direction          string     `gorm:"size:32;not null;check:chk_q_probe_task_direction,direction IN ('account_differential','exit_jury','resource_check','case_proof')"`
 	DefendantAccountID uint64     `gorm:"not null;default:0"`
 	DefendantNodeID    uint64     `gorm:"not null;default:0"`
 	DefendantEpoch     uint64     `gorm:"not null;default:0"`
