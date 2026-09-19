@@ -8,6 +8,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 )
 
 type resourceMeasurements struct {
@@ -46,7 +47,7 @@ func TestResourceCheckExecutorCrossesOneVariableAndBoundsCalls(t *testing.T) {
 	for _, kind := range []string{"account", "node"} {
 		for _, bad := range []bool{false, true} {
 			t.Run(fmt.Sprint(kind, bad), func(t *testing.T) {
-				reg, _ := executorRegistries(t, "sqlite")
+				reg := resourceCheckRegistry(t)
 				plan := &model.ResourceCheckPlan{Kind: kind, ResourceID: 7, MaxCalls: 5, Targets: []model.ResourceTarget{{Kind: kind, ResourceID: 7}}, Accounts: []uint64{101, 102, 103, 104}, Nodes: []uint64{11, 12, 13, 14}}
 				task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: plan, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "grok-4.6", RuleVersion: "fictional-rule"}}}
 				m := &resourceMeasurements{}
@@ -81,7 +82,7 @@ func TestResourceCheckExecutorCrossesOneVariableAndBoundsCalls(t *testing.T) {
 func TestResourceCheckExecutorRejectsWrongIdentityAndCancellation(t *testing.T) {
 	for _, tc := range []string{"wrong", "duplicate", "cancel", "bad-control"} {
 		t.Run(tc, func(t *testing.T) {
-			reg, _ := executorRegistries(t, "sqlite")
+			reg := resourceCheckRegistry(t)
 			plan := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, MaxCalls: 5, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}}, Accounts: []uint64{101}, Nodes: []uint64{11, 12, 13, 14}}
 			task := model.ProbeTask{Direction: model.ProbeResourceCheck, DefendantAccountID: 7, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: plan, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "grok-4.6", RuleVersion: "fictional-rule"}}}
 			ctx, cancel := context.WithCancel(context.Background())
@@ -118,7 +119,7 @@ func (p *proofProgress) SaveResourceCheckProgress(_ context.Context, _ uint64, r
 	return nil
 }
 func TestResourceCheckReservesBeforeCallingUpstream(t *testing.T) {
-	reg, _ := executorRegistries(t, "sqlite")
+	reg := resourceCheckRegistry(t)
 	p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}}, MaxCalls: 5, Nodes: []uint64{11}}
 	task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
 	m := &resourceMeasurements{}
@@ -130,7 +131,7 @@ func TestResourceCheckReservesBeforeCallingUpstream(t *testing.T) {
 }
 
 func TestResourceCheckBatchReusesAAndHandlesBadExit(t *testing.T) {
-	reg, _ := executorRegistries(t, "sqlite")
+	reg := resourceCheckRegistry(t)
 	for _, badNode := range []uint64{0, 11} {
 		p := &model.ResourceCheckPlan{Kind: "account", ResourceID: 7, Targets: []model.ResourceTarget{{Kind: "account", ResourceID: 7}, {Kind: "account", ResourceID: 8}}, Accounts: []uint64{101}, Nodes: []uint64{11, 12}, MaxCalls: 6}
 		task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
@@ -145,7 +146,7 @@ func TestResourceCheckBatchReusesAAndHandlesBadExit(t *testing.T) {
 }
 
 func TestResourceCheckFourWorldsAcrossPlannerSeeds(t *testing.T) {
-	reg, _ := executorRegistries(t, "sqlite")
+	reg := resourceCheckRegistry(t)
 	for seed := uint64(0); seed < 40; seed++ {
 		for _, badAccount := range []uint64{0, 7} {
 			for _, badNode := range []uint64{0, 11} {
@@ -166,6 +167,43 @@ func TestResourceCheckFourWorldsAcrossPlannerSeeds(t *testing.T) {
 					t.Fatalf("seed=%d account=%d exit=%d calls=%d report=%+v err=%v", seed, badAccount, badNode, m.calls, result.ResourceCheck, err)
 				}
 			}
+		}
+	}
+}
+
+func resourceCheckRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+	r, _ := executorRegistries(t, "sqlite")
+	for _, id := range []uint64{7, 11, 12, 13, 14} {
+		if err := r.RecordExitIdentity(context.Background(), id, model.ExitIdentity{IPv4: fmt.Sprintf("192.0.2.%d", id)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return r
+}
+
+func TestResourceCheckUnregisteredExitDoesNotSpendGeneration(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		reg := resourceCheckRegistry(t)
+		p := &model.ResourceCheckPlan{Kind: "node", ResourceID: 99, Accounts: []uint64{101, 102}, Nodes: []uint64{11}, Targets: []model.ResourceTarget{{Kind: "node", ResourceID: 99}}, MaxCalls: 5}
+		if mixed {
+			p.Targets = append(p.Targets, model.ResourceTarget{Kind: "node", ResourceID: 11})
+			p.MaxCalls = 6
+		}
+		task := model.ProbeTask{Direction: model.ProbeResourceCheck, Experiment: model.ProbeExperiment{Version: model.ResourceCheckVersion, Sample: "token-short", ResourceCheck: p, Baseline: attemptmeta.Identity{Provider: "grok_build", Model: "fictional-model", RuleVersion: "fictional-rule"}}}
+		m := &resourceMeasurements{}
+		e := NewProbeExecutor(reg, nil, nil)
+		e.SetResourceChecks(m, &proofProgress{})
+		result, err := e.Execute(context.Background(), task)
+		wantCalls := 0
+		if mixed {
+			wantCalls = 1
+		}
+		if err != nil || m.calls != wantCalls || result.ResourceCheck.Results[0].Outcome != "inconclusive" || result.ResourceCheck.Results[0].Reason != "path_unregistered" {
+			t.Fatalf("mixed=%v calls=%d report=%+v err=%v", mixed, m.calls, result.ResourceCheck, err)
+		}
+		if mixed && result.ResourceCheck.Results[1].Outcome != "healthy" {
+			t.Fatal("unregistered exit prevented independent valid target")
 		}
 	}
 }

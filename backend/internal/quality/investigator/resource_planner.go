@@ -39,6 +39,7 @@ func nextResourcePair(p model.ResourceCheckPlan, r model.ResourceCheckReport, gr
 	}
 	tried := map[string]bool{}
 	blockedAccounts := map[uint64]bool{}
+	blockedNodes := map[uint64]bool{}
 	negativeAccounts, negativeNodes := map[uint64]int{}, map[uint64]int{}
 	for _, o := range r.Observations {
 		if o.Window != r.Window {
@@ -52,10 +53,13 @@ func nextResourcePair(p model.ResourceCheckPlan, r model.ResourceCheckReport, gr
 		if o.Sample.Failure == model.ProbeFailureAccount || o.Sample.Failure == model.ProbeFailureCredential || o.Sample.Failure == model.ProbeFailureConfiguration || o.Sample.Failure == model.ProbeFailurePolicy || o.Sample.Failure == model.ProbeFailureHTTPRejected {
 			blockedAccounts[group(o.AccountID)] = true
 		}
+		if o.Sample.Failure == model.ProbeFailurePathRegistration {
+			blockedNodes[o.NodeID] = true
+		}
 	}
 	eligible := remaining[:0]
 	for _, t := range remaining {
-		if t.Kind != "account" || !blockedAccounts[group(t.ResourceID)] {
+		if t.Kind == "account" && !blockedAccounts[group(t.ResourceID)] || t.Kind == "node" && !blockedNodes[t.ResourceID] {
 			eligible = append(eligible, t)
 		}
 	}
@@ -74,7 +78,7 @@ func nextResourcePair(p model.ResourceCheckPlan, r model.ResourceCheckReport, gr
 	best, score, tie := resourcePair{}, 0, uint64(0)
 	for _, a := range accounts {
 		for _, n := range nodes {
-			if a == 0 || n == 0 || blockedAccounts[group(a)] || tried[fmt.Sprintf("%d:%d", group(a), n)] {
+			if a == 0 || n == 0 || blockedAccounts[group(a)] || blockedNodes[n] || tried[fmt.Sprintf("%d:%d", group(a), n)] {
 				continue
 			}
 			ak, nk := fmt.Sprintf("a:%d", group(a)), f.Nodes[n]

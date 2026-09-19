@@ -22,6 +22,7 @@ export const resourceChecksZh = {
     proved_account_bad: "同出口有正常对照，目标账号为 B 型，证明账号方向异常。",
     proved_exit_bad: "同账号在其他出口正常，在目标出口为 B 型，证明出口方向异常。",
     budget_exhausted: "已达到批次尝试上限，仍缺少足够证明，不能归因。",
+    path_unregistered: "出口代际尚未登记，未向该出口发送生成请求。请完成出口连通性检测并等待登记后重试。",
     window_expired: "证据窗口已过期，需要新的正常对照。",
     persistence_failed: "证据保存失败，停止后续请求。",
     unsupported_experiment_version: "该历史检测协议不再执行，请重新提交检测。",
@@ -58,6 +59,7 @@ export const resourceChecksEn = {
   phase: "Measurement", thinking: "Thinking", complete: "Completed", path: "Path verification", unverified: "Unverified", controlPhase: "Control", targetPhase: "Target", afterPhase: "Control recheck",
   outcome: { healthy: "No resource risk detected", degraded: "Resource anomaly confirmed", inconclusive: "Inconclusive", pending: "Queued", running: "Checking" },
   reason: {
+    path_unregistered: "Exit identity is not registered yet; no generation was sent on that exit. Run its connectivity check and retry after registration.",
     proved_normal: "A valid A response proves both endpoints normal for this check.",
     proved_account_bad: "The target returned B while another account returned A on the same exit.",
     proved_exit_bad: "The same account returned A on another exit and B on the target exit.",

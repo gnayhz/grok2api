@@ -85,10 +85,15 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 		}
 		pair, ok := nextResourcePair(*p, r, groupOf)
 		if !ok {
+			for _, o := range r.Observations {
+				if o.Window == r.Window && o.Sample.Failure == model.ProbeFailurePathRegistration {
+					return finish("path_unregistered", nil)
+				}
+			}
 			return finish("", nil)
 		}
 		g := groupOf(pair.account)
-		beforeEpoch, _, err := e.state.CurrentEpochAt(ctx, pair.node)
+		beforeEpoch, registered, err := e.state.CurrentEpochAt(ctx, pair.node)
 		if err != nil {
 			return finish("measurement_unavailable", err)
 		}
@@ -98,7 +103,13 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 		if err := save(); err != nil {
 			return finish("persistence_failed", err)
 		}
-		s := e.resourceMeasurements.MeasureResourceCheck(e.identityContext(model.WithProbeExperiment(ctx, task.Experiment), pair.account), pair.account, pair.node)
+		s := model.AccountCheckSample{Sample: task.Experiment.Sample, Outcome: model.MeasurementError, Failure: model.ProbeFailurePathRegistration}
+		// A new node may await the independent epoch observer. No generation
+		// can become admissible yet; preserve the missing prerequisite and skip
+		// this node for the rest of the window instead of spending controls.
+		if registered {
+			s = e.resourceMeasurements.MeasureResourceCheck(e.identityContext(model.WithProbeExperiment(ctx, task.Experiment), pair.account), pair.account, pair.node)
+		}
 		o.FinishedAt = time.Now().UTC()
 		afterEpoch, _, epochErr := e.state.CurrentEpochAt(ctx, pair.node)
 		if g != groupOf(pair.account) || epochErr != nil || beforeEpoch != afterEpoch || s.Attempt.ID != "" && (s.Attempt.Path.Epoch != beforeEpoch || s.Attempt.AccountID != pair.account || s.Attempt.Path.NodeID != pair.node || !task.Experiment.Matches(s.Attempt)) {

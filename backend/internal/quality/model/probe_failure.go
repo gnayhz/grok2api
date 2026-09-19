@@ -13,6 +13,7 @@ const (
 	ProbeFailureCapacity         ProbeFailure = "local/prepare/capacity"
 	ProbeFailureIdentity         ProbeFailure = "local/verification/identity"
 	ProbeFailurePath             ProbeFailure = "local/verification/path"
+	ProbeFailurePathRegistration ProbeFailure = "local/verification/path_unregistered"
 	ProbeFailurePolicy           ProbeFailure = "local/prepare/policy"
 	ProbeFailureExperiment       ProbeFailure = "local/verification/experiment"
 	ProbeFailureInterrupted      ProbeFailure = "local/measurement/interrupted"
