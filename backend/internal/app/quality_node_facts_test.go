@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,12 +14,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/pkg/attemptmeta"
+	"github.com/chenyme/grok2api/backend/internal/quality/court"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/testsupport"
 )
 
-func TestQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
+func TestLegacyQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
@@ -146,6 +148,21 @@ func TestQualityNodeFactsDriveCourtAndEpochs(t *testing.T) {
 				t.Fatalf("recoverable case missing: %d %v", len(cases), err)
 			}
 			id := cases[0].ID
+			// Preserve the deployed multi-comparison protocol for this legacy pool
+			// recovery test. New fixed-path proof cases are covered separately.
+			var envelope map[string]any
+			if err := json.Unmarshal([]byte(cases[0].EvidenceJSON), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			envelope["policy"] = court.ExperimentPolicy{Version: court.ProtocolVersion, Experiment: model.NewProbeExperiment(obs), AccountPaths: 3, AccountNodes: 2, JurySize: 4, JuryDegraded: 3, TransportPaths: 3, MaxAccountAttempts: 6, MaxJuryAttempts: 8, DeadlineAt: cases[0].OpenedAt.Add(10 * time.Minute)}
+			raw, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.quality.UpdateInvestigationEvidence(ctx, id, string(raw)); err != nil {
+				t.Fatal(err)
+			}
+
 			store := registry.NewProbeTaskStore(a.quality)
 			if tasks, err := store.ListProbeTasksForCase(ctx, id); err != nil || len(tasks) != 0 {
 				t.Fatalf("unreadable candidates emitted tasks: %d %v", len(tasks), err)

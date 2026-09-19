@@ -2,9 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"testing"
 	"time"
 
@@ -62,7 +62,17 @@ func TestCourtCandidatesUseFrozenModelEligibility(t *testing.T) {
 	if len(dispatch.plans) != 1 {
 		t.Fatalf("plans=%+v", dispatch.plans)
 	}
-	jurors := dispatch.plans[0].Jurors
+	records, err := a.quality.ListOpenCases(ctx)
+	if err != nil || len(records) != 1 {
+		t.Fatal(records, err)
+	}
+	var envelope struct {
+		Policy court.ExperimentPolicy `json:"policy"`
+	}
+	if err := json.Unmarshal([]byte(records[0].EvidenceJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	jurors := envelope.Policy.Experiment.ResourceCheck.Accounts
 	if len(jurors) != 1 || jurors[0] != ids[1] {
 		t.Fatalf("frozen grok-4.6 jury=%v; want only capable account %d (unsupported account %d)", jurors, ids[1], ids[2])
 	}
@@ -172,19 +182,23 @@ func TestApplicationPersistsOnlyEligibleProbeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 6 {
-		t.Fatalf("expected two paths and four jurors: tasks=%d", len(tasks))
+	if len(tasks) != 1 || tasks[0].Direction != model.ProbeCaseProof {
+		t.Fatalf("expected one shared proof task: tasks=%d", len(tasks))
 	}
 	for _, task := range tasks {
-		if !reflect.DeepEqual(task.Experiment, model.NewProbeExperiment(obs)) {
+		if task.Experiment.Baseline != obs.Attempt || task.Experiment.Version != model.ResourceCheckVersion {
 			t.Fatal("persisted experiment changed")
 		}
-		if task.Direction == model.ProbeExitJury && !allowed[task.Juror] {
-			t.Fatalf("ineligible juror persisted: %+v", task)
+		plan := task.Experiment.ResourceCheck
+		if len(plan.Nodes) != 2 || len(plan.Accounts) != len(allowed) || plan.MaxCalls != 6 {
+			t.Fatalf("unexpected plan %+v", plan)
 		}
-		if task.ControlAccountID != 0 && !allowed[task.ControlAccountID] {
-			t.Fatalf("ineligible control persisted: %+v", task)
+		for _, id := range plan.Accounts {
+			if !allowed[id] {
+				t.Fatal("ineligible account in plan", id)
+			}
 		}
+
 		if task.State != model.ProbePending {
 			t.Fatalf("planning executed a measurement: %+v", task)
 		}

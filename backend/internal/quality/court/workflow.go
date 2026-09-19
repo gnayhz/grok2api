@@ -199,6 +199,9 @@ func rotateCases(records []model.CaseRecord, cursor uint64) []model.CaseRecord {
 
 func (s *Service) advanceExperiment(ctx context.Context, record model.CaseRecord, now time.Time, cfg Config) (model.Verdict, int, error) {
 	policy := casePolicy(record, cfg)
+	if policy.Version == model.CaseProofVersion {
+		return s.advanceCaseProof(ctx, record, policy, now)
+	}
 	// Upgrade old open cases once. Later settings changes cannot extend an
 	// existing hold or move the evidence thresholds underneath an experiment.
 	var envelope map[string]any

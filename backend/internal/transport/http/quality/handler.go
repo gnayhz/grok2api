@@ -145,10 +145,11 @@ func (h *Handler) selfCheckPayload() gin.H {
 
 // caseDTO 案件面板投影。
 type caseDTO struct {
-	ID       uint64    `json:"id"`
-	Status   string    `json:"status"`
-	Verdict  string    `json:"verdict"`
-	OpenedAt time.Time `json:"opened_at"`
+	Proof    *resourceCheckReportDTO `json:"proof,omitempty"`
+	ID       uint64                  `json:"id"`
+	Status   string                  `json:"status"`
+	Verdict  string                  `json:"verdict"`
+	OpenedAt time.Time               `json:"opened_at"`
 	// ClosedAt 可空指针必须 omitempty:Go 会把 nil 序列化成 null,而
 	// 前端 isOptional 只接受缺省(undefined)——null 直接解码失败
 	// (批8 契约测试抓出的羁押名单空列表第二根因)。
@@ -184,6 +185,9 @@ func (h *Handler) getCases(c *gin.Context) {
 		dto := caseDTO{ID: value.ID, Status: string(value.Status), Verdict: string(value.Verdict),
 			OpenedAt: value.OpenedAt, ClosedAt: value.ClosedAt, Parties: make([]partyDTO, 0, len(value.Parties)),
 			Evidence: value.Evidence, Live: value.Live}
+		if value.Proof != nil {
+			dto.Proof = checkDTO(management.ResourceCheck{Report: value.Proof}).Report
+		}
 		for _, party := range value.Parties {
 			dto.Parties = append(dto.Parties, partyDTO{Kind: string(party.Kind), AccountID: party.AccountID,
 				NodeID: party.NodeID, Epoch: party.Epoch, Role: string(party.Role), Disposition: string(party.Disposition)})
@@ -343,6 +347,9 @@ func (h *Handler) getProbes(c *gin.Context) {
 			"control_detail": task.ControlDetail, "control_path_key": task.ControlPathKey, "control_verified": task.ControlVerified,
 			"juror": task.Juror, "state": string(task.State), "result": string(task.Result),
 			"detail": task.Detail, "created_at": task.CreatedAt,
+		}
+		if task.ResourceCheck != nil {
+			item["proof"] = checkDTO(management.ResourceCheck{Report: task.ResourceCheck}).Report
 		}
 		// finished_at 可空指针必须缺席而非 null(前端 isOptional 只认
 		// undefined——批8 契约测试抓出)。

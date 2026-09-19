@@ -78,7 +78,7 @@ rg '目标规则或函数' backend/internal/architecture
 | 代理池、路由或出口管理 | `application/egress/`、`domain/egress/` | 当前事务中的回退图/引用合法性、订阅代际、敏感地址回显、前端网络草稿 |
 | 连接、TLS、HTTP/2、SOCKS、容量 | `infra/egress/`、对应 `pkg/` 网络组件 | socket/client/request/waiter 额度、活跃流隔离、EOF/取消、binding/health revision |
 | 响应质量准入 | `quality/guard/`、`domain/guard/`、gateway 的准入文件 | 规范事件解释、策略快照、内存预算、扣留与交付、未知/失败不得当降智票 |
-| 调查、案件、人工解除限制 | `quality/investigator/`、`court/`、`registry/`、`management/` | 受控对照、实际路径、证据协议、当前 epoch、其他案件持有的限制、原子结案 |
+| 调查、案件、人工解除限制 | `quality/investigator/`、`court/`、`registry/`、`management/` | 新案 case_proof 与主动检测共用完整观测及 R1/R2/R3；双方独立证明、both_guilty、180 秒窗口、原期限、当前 epoch、多案限制、原子结案；历史协议不改判 |
 | 账号/出口主动风控检测 | `quality/management`、`quality/investigator`、`quality/model`、`quality/registry`、gateway、egress 的目标路径探测与 `entities/guard` | 单批持久 owner、R1/R2/R3 证明、180 秒证据窗口、目标同域地址核实、预算预留与 revision CAS、独立账号/出口归因、只读案件限制、SQLite/PostgreSQL 兼容 |
 | 上传、图片、视频、下载或删除 | `application/media/`、`infra/mediafetch/`、gateway 媒体执行、`application/mediajob/` 生成事实 | SSRF、文件引用授权、暂存/claim、归档来源、恢复同一作业、计费与孤儿回收 |
 | TTS、STT 或实时语音 | gateway 的 voice 文件、`application/mediajob/voice_generation.go`、HTTP inference、Provider 语音实现 | 执行与双向通道归 gateway；输入格式/选项、终态完整性、生成与交付分离、取消后的用量 |
@@ -201,6 +201,10 @@ SQLite / PostgreSQL 通过现有受锁保护的启动迁移添加可空列，不
 旧 HTTP 客户端提交天数只在可精确表示时兼容；当前时长含小数天时，应升级客户端。先统一后端版本，再用新版管理端保存新时长；旧二进制不认识新字段，混合版本无法保证一致保留政策。回退前需将文件和持久字段恢复为旧版可表达形式，非整天时长需明确选择旧策略。
 
 保留 worker 每批读取权威设置；新设置影响下一批，不能撤回已经开始的删除事务。删除审计/尝试详情不得删除永久结算身份或重复增加 Key 的累计费用。
+
+### 案件证明协议的兼容要求
+
+新案件 `resource-proof-case-v1` 与主动 `resource-proof-v2` 共用测量/规划/归因，执行与限制由独立案件任务持有。SQLite/PostgreSQL 扩展任务方向 `case_proof` 和案件状态/裁决 `both_guilty` 的 CHECK，旧数据与报告保留。必须同步升级管理前后端、排空旧 worker；旧版不能识别双方限制持有关系，不能混跑或直接回退到旧二进制。新写入后应以兼容修复前进，不删除证据或业务数据回退。详见[质量模块的升级合同](backend/internal/quality/README.md#升级和回退)。
 
 ### 账号管理的质量筛选与身份引用
 

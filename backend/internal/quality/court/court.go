@@ -1,11 +1,8 @@
 // Package court implements the finite quality attribution loop.
 //
-// A classified Build degradation is one case. The case freezes the account
-// and the observed exit, dispatches one jury group on that exit and one
-// differential group on other exits. Failed/inadmissible paths may receive a
-// bounded replacement from an untested candidate. The case then closes with
-// an exit verdict, an account verdict, or insufficient evidence. Transport
-// failures never become quality votes.
+// New Build incidents freeze a bounded resource-proof investigation shared with
+// manual checks. Each party is decided by complete A/B observations and R1/R2/R3
+// certificates, never vote counts. Historical cases retain their frozen policy.
 package court
 
 import (
@@ -19,8 +16,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 )
 
-// Config contains the decision thresholds for one finite investigation
-// lifecycle. A lifecycle may include bounded replacement probes;
+// Config contains lifecycle bounds and historical comparison thresholds.
+// New proof investigations use the shared resource protocol;
 // EvaluateEvery is a process cadence, not a decision state.
 type Config struct {
 	EvaluateEvery time.Duration
@@ -30,7 +27,7 @@ type Config struct {
 	// evaluator closes using completed evidence without dispatching more work.
 	InvestigationTimeout time.Duration
 
-	// AccountNeedExits is the target number of distinct comparison paths for a
+	// AccountNeedExits is the historical target of distinct comparison paths for a
 	// case. Missing controls are replaced within a finite attempt budget.
 	AccountNeedExits int
 	// AccountSpanNodes prevents several logical exits sharing one node from
@@ -48,7 +45,7 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// DefaultConfig returns the production direct-loop policy.
+// DefaultConfig returns lifecycle defaults and legacy comparison settings.
 func DefaultConfig() Config {
 	return Config{
 		EvaluateEvery:        15 * time.Second,
@@ -116,9 +113,10 @@ type Dispatcher interface {
 	DispatchForCase(ctx context.Context, spec DispatchSpec) (int, error)
 }
 
-// DispatchSpec describes the two probe groups for one case.
+// DispatchSpec selects a shared proof task or historical comparison groups.
 // 与 investigator.DispatchSpec 保持字段同步,组合根 quality_judicial.go 逐字段复制。
 type DispatchSpec struct {
+	Proof           bool
 	ControlAccounts []uint64
 	ControlExits    []model.EpochKey
 	CaseID          uint64
@@ -161,6 +159,7 @@ type Service struct {
 	dispatcher      Dispatcher
 	ledgerSink      LedgerSink
 	accountExists   AccountExists
+	proofCurrent    func(context.Context, model.AccountCheckSample) (bool, error)
 	sameExit        SameExit
 	accountReleased AccountReleased
 	logger          *slog.Logger
@@ -206,6 +205,14 @@ type AccountExists func(ctx context.Context, accountID uint64) bool
 func (s *Service) SetAccountExists(check AccountExists) {
 	s.mu.Lock()
 	s.accountExists = check
+	s.mu.Unlock()
+}
+
+// SetProofIdentityCheck supplies current account/path generations without a
+// second upstream request. The source owns credential and binding facts.
+func (s *Service) SetProofIdentityCheck(check func(context.Context, model.AccountCheckSample) (bool, error)) {
+	s.mu.Lock()
+	s.proofCurrent = check
 	s.mu.Unlock()
 }
 

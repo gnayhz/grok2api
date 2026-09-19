@@ -13,9 +13,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// 调查局任务队列存储(B3 q_probe_task)。court 派发、investigator
-// 认领/入账;每个案件只有一轮核心差分/陪审任务,失败路径可由 court
-// 在同一有限生命周期内追加替代任务。
+// 调查局持久任务队列。新案件只持有一个共享证明任务；历史案件
+// 按其冻结的差分/陪审计划执行。court 派发，investigator 认领和入账。
 
 // ProbeTaskStore 实现 investigator.Store(任务/结论用 model 共享词汇)。
 type ProbeTaskStore struct {
@@ -37,7 +36,7 @@ func (s *ProbeTaskStore) CreateProbeTask(ctx context.Context, task model.ProbeTa
 				return err
 			}
 			// Queue insertion needs only its frozen case, not a state cache.
-			// The shared case lock serializes with settlement/cancellation.
+			// The case lock serializes duplicate insertion and settlement/cancellation.
 			store := &ProbeTaskStore{registry: &Registry{db: tx, inTransition: true}, owner: s.owner}
 			var err error
 			id, err = store.CreateProbeTask(ctx, task)
@@ -51,7 +50,7 @@ func (s *ProbeTaskStore) CreateProbeTask(ctx context.Context, task model.ProbeTa
 	// and every replacement. Dispatch callers cannot silently change it.
 	if task.CaseID != 0 {
 		var cases []qCaseModel
-		if err := s.registry.db.WithContext(ctx).Clauses(clause.Locking{Strength: "SHARE"}).Where("id = ?", task.CaseID).Limit(1).Find(&cases).Error; err != nil {
+		if err := s.registry.db.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", task.CaseID).Limit(1).Find(&cases).Error; err != nil {
 			return 0, err
 		}
 		if len(cases) > 0 {
@@ -67,6 +66,21 @@ func (s *ProbeTaskStore) CreateProbeTask(ctx context.Context, task model.ProbeTa
 				task.Experiment = envelope.Policy.Experiment
 			}
 		}
+		if task.Direction == model.ProbeCaseProof {
+			if len(cases) != 1 || task.Experiment.Version != model.ResourceCheckVersion || task.Experiment.ResourceCheck == nil {
+				return 0, model.ErrProbeAlreadySettled
+			}
+			var existing []qProbeTaskModel
+			if err := s.registry.db.WithContext(ctx).Where("case_id = ? AND direction = ?", task.CaseID, string(model.ProbeCaseProof)).Limit(1).Find(&existing).Error; err != nil {
+				return 0, err
+			}
+			if len(existing) != 0 {
+				return existing[0].ID, nil
+			}
+		}
+	}
+	if task.Direction == model.ProbeCaseProof && task.CaseID == 0 {
+		return 0, model.ErrProbeAlreadySettled
 	}
 	experimentJSON, err := json.Marshal(task.Experiment)
 	if err != nil {
@@ -107,7 +121,7 @@ func (s *ProbeTaskStore) ClaimPendingProbeTasks(ctx context.Context, limit int) 
 		if len(tasks) >= limit {
 			break
 		}
-		if row.Direction == string(model.ProbeResourceCheck) {
+		if row.Direction == string(model.ProbeResourceCheck) || row.Direction == string(model.ProbeCaseProof) {
 			claimed, err := s.claimResourceCheck(ctx, row, now)
 			if err != nil {
 				return tasks, err
@@ -187,7 +201,7 @@ func (s *ProbeTaskStore) CompleteProbeTask(ctx context.Context, taskID uint64, s
 		if err := tx.First(&row, "id = ?", taskID).Error; err != nil {
 			return err
 		}
-		if model.IsManualProbe(model.ProbeDirection(row.Direction)) {
+		if model.IsManualProbe(model.ProbeDirection(row.Direction)) || row.Direction == string(model.ProbeCaseProof) {
 			return nil
 		}
 		obs := model.ProbeObservation(probeTaskFromRow(row), result, finishedAt)
@@ -211,8 +225,9 @@ func (s *ProbeTaskStore) ListProbeTasks(ctx context.Context, limit int) ([]model
 	views := make([]model.ProbeTaskView, 0, len(rows))
 	for _, row := range rows {
 		views = append(views, model.ProbeTaskView{
-			Experiment: probeExperimentFromJSON(row.ExperimentJSON),
-			Attempt:    probeAttemptIdentity(row.AttemptJSON), ControlAttempt: probeAttemptIdentity(row.ControlAttemptJSON),
+			ResourceCheck: resourceReportFromJSON(row.CheckReportJSON),
+			Experiment:    probeExperimentFromJSON(row.ExperimentJSON),
+			Attempt:       probeAttemptIdentity(row.AttemptJSON), ControlAttempt: probeAttemptIdentity(row.ControlAttemptJSON),
 			ID: row.ID, CaseID: row.CaseID, Direction: model.ProbeDirection(row.Direction),
 			ControlAccountID: row.ControlAccountID, ControlNodeID: row.ControlNodeID, ControlEpoch: row.ControlEpoch,
 			FailureKind: row.FailureKind, PathKey: row.PathKey, ControlOutcome: model.ProbeResult(row.ControlOutcome),
@@ -239,8 +254,9 @@ func (s *ProbeTaskStore) ListProbeTasksForCase(ctx context.Context, caseID uint6
 	views := make([]model.ProbeTaskView, 0, len(rows))
 	for _, row := range rows {
 		views = append(views, model.ProbeTaskView{
-			Experiment: probeExperimentFromJSON(row.ExperimentJSON),
-			Attempt:    probeAttemptIdentity(row.AttemptJSON), ControlAttempt: probeAttemptIdentity(row.ControlAttemptJSON),
+			ResourceCheck: resourceReportFromJSON(row.CheckReportJSON),
+			Experiment:    probeExperimentFromJSON(row.ExperimentJSON),
+			Attempt:       probeAttemptIdentity(row.AttemptJSON), ControlAttempt: probeAttemptIdentity(row.ControlAttemptJSON),
 			ID: row.ID, CaseID: row.CaseID, Direction: model.ProbeDirection(row.Direction),
 			ControlAccountID: row.ControlAccountID, ControlNodeID: row.ControlNodeID, ControlEpoch: row.ControlEpoch,
 			FailureKind: row.FailureKind, PathKey: row.PathKey, ControlOutcome: model.ProbeResult(row.ControlOutcome),
@@ -253,6 +269,14 @@ func (s *ProbeTaskStore) ListProbeTasksForCase(ctx context.Context, caseID uint6
 		})
 	}
 	return views, nil
+}
+
+func resourceReportFromJSON(raw string) *model.ResourceCheckReport {
+	var report model.ResourceCheckReport
+	if json.Unmarshal([]byte(raw), &report) != nil || report.Version != model.ResourceCheckVersion {
+		return nil
+	}
+	return &report
 }
 
 // Legacy rows have no physical identity; never reconstruct one from task plans.

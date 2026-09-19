@@ -47,7 +47,7 @@ func (e *ProbeExecutor) Execute(ctx context.Context, task model.ProbeTask) (mode
 	if task.Direction == model.ProbeAccountCheck {
 		return e.executeAccountCheck(ctx, task)
 	}
-	if task.Direction == model.ProbeResourceCheck {
+	if task.Direction == model.ProbeResourceCheck || task.Direction == model.ProbeCaseProof {
 		return e.executeResourceCheck(ctx, task)
 	}
 	if task.Direction != model.ProbeAccountDifferential && task.Direction != model.ProbeExitJury {

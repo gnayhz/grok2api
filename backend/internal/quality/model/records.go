@@ -68,6 +68,7 @@ type AccountTransitionRequest struct {
 
 // ProbeTaskView 是探针任务的面板投影。
 type ProbeTaskView struct {
+	ResourceCheck    *ResourceCheckReport
 	Experiment       ProbeExperiment
 	Attempt          attemptmeta.Identity
 	ControlAttempt   attemptmeta.Identity

@@ -47,28 +47,28 @@ func TestToolTriggerDispatchesStandardProbes(t *testing.T) {
 	if err != nil || len(claimed) != len(tasks) {
 		t.Fatalf("claim=%d err=%v", len(claimed), err)
 	}
-	for _, task := range claimed {
-		actual := task.Experiment.Baseline
-		actual.Profile = task.Experiment.Profile()
-		actual.ID = fmt.Sprintf("fictional-probe-%d", task.ID)
-		actual.AccountID = task.DefendantAccountID
-		actual.Path = attemptmeta.Path{NodeID: task.DefendantNodeID, Epoch: task.DefendantEpoch, Status: attemptmeta.PathRegistered}
-		control := actual
-		control.ID += "/control"
-		control.AccountID = task.ControlAccountID
-		control.Path.NodeID, control.Path.Epoch = task.ControlNodeID, task.ControlEpoch
-		result := model.ProbeTaskResult{Outcome: model.ProbeResultClean, VerifiedIPChange: true,
-			ControlOutcome: model.ProbeResultClean, ControlVerified: true,
-			PathKey: fmt.Sprintf("fictional-path-%d", task.DefendantNodeID), ControlPathKey: fmt.Sprintf("fictional-path-%d", task.ControlNodeID)}
-		if task.Direction == model.ProbeExitJury {
-			actual.AccountID = task.JurorAccountID
-			result.Outcome = model.ProbeResultDegraded
-		}
-		result.Attempt, result.ControlAttempt = actual, control
-		if err := store.CompleteProbeTask(context.Background(), task.ID, model.ProbeDone, result, now.Add(20*time.Second)); err != nil {
-			t.Fatal(err)
-		}
+	if len(claimed) != 1 || claimed[0].Direction != model.ProbeCaseProof {
+		t.Fatal("not one shared proof task", claimed)
 	}
+	task := claimed[0]
+	report := caseProofReport(task.Experiment, now, []model.ResourceObservation{
+		caseProofObservation(task.Experiment, 1, 7, 3, "B"),
+		caseProofObservation(task.Experiment, 2, 7, 4, "A"),
+	})
+	report.Revision = 1
+	// Persist the two physical reservations separately, as the executor does.
+	report.Calls = 1
+	if err := store.SaveResourceCheckProgress(context.Background(), task.ID, report); err != nil {
+		t.Fatal(err)
+	}
+	report.Calls, report.Revision = 2, 2
+	if err := store.SaveResourceCheckProgress(context.Background(), task.ID, report); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteProbeTask(context.Background(), task.ID, model.ProbeDone, model.ProbeTaskResult{ResourceCheck: &report}, now.Add(20*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := s.Evaluate(context.Background(), now.Add(30*time.Second)); err != nil {
 		t.Fatal(err)
 	}

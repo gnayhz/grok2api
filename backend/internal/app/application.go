@@ -32,6 +32,7 @@ import (
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
@@ -57,6 +58,7 @@ import (
 	qualityinvestigator "github.com/chenyme/grok2api/backend/internal/quality/investigator"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
 	qualitymanagement "github.com/chenyme/grok2api/backend/internal/quality/management"
+	qualitymodel "github.com/chenyme/grok2api/backend/internal/quality/model"
 	qualityproxy "github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	qualityregistry "github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -382,7 +384,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	gatewayService.SetAccountQualityEligibility(qualityAccountEligibility{registry: qualityRegistry, journal: qualityJournal})
 	egressManager.SetExitEligibility(qualityExitEligibility{registry: qualityRegistry})
 	// 审判系:有限仲裁评估+调查局任务队列。立案即冻结状态并派发
-	// 一轮差分/陪审探针。
+	// 一个共享资源证明任务；旧案保留其冻结的历史协议。
 	qualityCourtService, qualityInvestigatorService, qualityProbeStore := bootstrapJudicialLayer(qualityRegistry, qualityEvidenceStore, logger)
 	owned.qualityCourt = qualityCourtService
 	qualityCourtService.SetProbeAccounts(gatewayService)
@@ -392,6 +394,26 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Applic
 	qualityCourtService.SetAccountExists(func(ctx context.Context, accountID uint64) bool {
 		_, err := accountService.Get(ctx, accountID)
 		return !errors.Is(err, accountapp.ErrNotFound)
+	})
+	qualityCourtService.SetProofIdentityCheck(func(ctx context.Context, sample qualitymodel.AccountCheckSample) (bool, error) {
+		credential, err := accountRepo.Get(ctx, sample.Attempt.AccountID)
+		if errors.Is(err, repository.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if credential.CredentialGeneration != sample.CredentialGeneration || string(credential.Provider) != sample.Attempt.Provider || credential.BuildRouteMode == accountdomain.BuildRouteXAI {
+			return false, nil
+		}
+		node, err := egressRepo.GetEgressNode(ctx, sample.Attempt.Path.NodeID)
+		if errors.Is(err, repository.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return node.BindingRevision == sample.PathBinding, nil
 	})
 	// 同出口排除集(建议性前置过滤):差分比对候选若已知与 baseline 共享
 	// 真实出口,在派发前跳过,避免白耗一次探针并少一条可采证据。判定只是

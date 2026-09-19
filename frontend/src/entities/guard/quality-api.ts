@@ -1,3 +1,4 @@
+import { resourceReportShape, type ResourceReport } from "./resource-check-api";
 import { apiRequest } from "@/shared/api/client";
 import { createValidatedDecoder, hasShape, isArrayOf, isBoolean, isNumber, isObject, isOptional, isString } from "@/shared/api/decoder";
 
@@ -32,6 +33,7 @@ export type QualityCaseLive = {
 };
 
 export type QualityCase = {
+	proof?: ResourceReport;
 	id: number;
 	status: string;
 	verdict: string;
@@ -79,6 +81,7 @@ export type QualityProbeTask = {
 	id: number;
 	case_id: number;
 	direction: string;
+	proof?: ResourceReport;
 	defendant: number;
 	node_id: number;
 	epoch: number;
@@ -99,6 +102,7 @@ export type ExperimentGroup = {
 	transport: number; unavailable: number; confirmed_degraded: number; confirmed_transport: number;
 };
 export type ExperimentReport = {
+	proof?: { calls: number; max_calls: number; generations: number };
 	policy: { experiment?: ProbeExperiment; version: string; account_paths: number; account_nodes: number; jury_size: number; jury_degraded: number;
 		transport_paths: number; max_account_attempts: number; max_jury_attempts: number; deadline_at: string };
 	verdict: string; reason: string; phase: string; account_suspicion: string;
@@ -127,6 +131,7 @@ export type QualityNodeView = {
 // 上线起从未显示过数据)。
 export const caseDecoder = createValidatedDecoder<{ items: QualityCase[] }>("quality cases", hasShape({
 	items: isArrayOf(hasShape({
+		proof: isOptional(resourceReportShape),
 		id: isNumber,
 		status: isString,
 		verdict: isString,
@@ -150,6 +155,7 @@ export const probeDecoder = createValidatedDecoder<{ items: QualityProbeTask[] }
 		id: isNumber,
 		case_id: isNumber,
 		direction: isString,
+		proof: isOptional(resourceReportShape),
 		defendant: isNumber,
 		node_id: isNumber,
 		epoch: isNumber,

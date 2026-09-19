@@ -20,6 +20,12 @@ func (e *ProbeExecutor) SetResourceChecks(m ResourceCheckMeasurements, p Resourc
 
 func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.ProbeTask) (model.ProbeTaskResult, error) {
 	p := task.Experiment.ResourceCheck
+	caseProof := task.Direction == model.ProbeCaseProof
+	if caseProof && p != nil && !p.DeadlineAt.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, p.DeadlineAt)
+		defer cancel()
+	}
 	r := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Outcome: "inconclusive", Reason: "insufficient_controls", Groups: []model.ResourceCheckGroup{}, Observations: []model.ResourceObservation{}, Window: 1, WindowStartedAt: time.Now().UTC()}
 	finish := func(reason string, err error) (model.ProbeTaskResult, error) {
 		if reason != "" {
@@ -35,7 +41,7 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 		}
 		return model.ProbeTaskResult{ResourceCheck: &r, Outcome: model.ProbeResultError, Detail: r.Reason}, err
 	}
-	if p == nil || len(p.Targets) == 0 || task.CaseID != 0 || task.Experiment.Version != model.ResourceCheckVersion || task.Experiment.UnsupportedReason() != "" || e.resourceMeasurements == nil || e.resourceProgress == nil || e.state == nil {
+	if p == nil || len(p.Targets) == 0 || (task.CaseID != 0) != caseProof || task.Experiment.Version != model.ResourceCheckVersion || task.Experiment.UnsupportedReason() != "" || e.resourceMeasurements == nil || e.resourceProgress == nil || e.state == nil {
 		return finish("unsupported_experiment_version", nil)
 	}
 	r.Kind, r.ResourceID, r.MaxCalls = p.Kind, p.ResourceID, p.MaxCalls
@@ -55,6 +61,19 @@ func (e *ProbeExecutor) executeResourceCheck(ctx context.Context, task model.Pro
 	}
 	for ctx.Err() == nil && r.Calls < r.MaxCalls {
 		now := time.Now().UTC()
+		if caseProof && task.BaselineNodeID != 0 {
+			epoch, known, err := e.state.CurrentEpochAt(ctx, task.BaselineNodeID)
+			if err != nil {
+				return finish("measurement_unavailable", err)
+			}
+			if !known || epoch != task.BaselineEpoch {
+				for i := range r.Results {
+					if r.Results[i].Kind == "node" && r.Results[i].ResourceID == task.BaselineNodeID {
+						r.Results[i].UnavailableReason = "baseline_epoch_changed"
+					}
+				}
+			}
+		}
 		if !now.Before(r.WindowStartedAt.Add(model.ResourceCheckWindow)) {
 			r.Window++
 			r.WindowStartedAt = now

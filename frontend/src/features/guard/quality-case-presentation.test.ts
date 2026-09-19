@@ -71,3 +71,13 @@ test("sentenced and released parties are never presented as healthy", () => {
  assert.equal(partyDispositionKey("released"), "experiment.dispositions.released");
  assert.equal(partyDispositionKey("unexpected"), "experiment.dispositions.unknown");
 });
+
+test("a dual verdict displays restrictions and preserves partial unknown releases", () => {
+ const both = example("sentenced", "sentenced");
+ both.status = both.verdict = "both_guilty";
+ assert.equal(caseDispositionKey(both), "bothRestricted");
+ const partial = example("sentenced", "released");
+ partial.status = partial.verdict = "account_guilty";
+ assert.equal(caseDispositionKey(partial), "accountRestricted");
+ assert.equal(partyDispositionKey(partial.parties[1].disposition), "experiment.dispositions.released");
+});

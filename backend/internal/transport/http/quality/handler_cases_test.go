@@ -458,3 +458,55 @@ func testManagementQueries(t *testing.T, reg *registry.Registry, configure func(
 	}
 	return management.NewQueries(deps)
 }
+
+func TestCaseProofHTTPPreservesLargeCertificateIdentity(t *testing.T) {
+	ctx := context.Background()
+	reg, err := registry.Open(ctx, registry.Options{Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "quality.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+	const id = uint64(9007199254740993)
+	now := time.Now().UTC()
+	proof := model.ResourceCheckReport{Version: model.ResourceCheckVersion, Results: []model.ResourceProof{{ResourceTarget: model.ResourceTarget{Kind: "account", ResourceID: id}, IdentityGroup: id, Outcome: "degraded", Rule: "R2", Evidence: []int{1, 2}}}}
+	raw, _ := json.Marshal(map[string]any{"assessment": map[string]any{"proof": proof}})
+	caseID, err := reg.OpenInvestigation(ctx, id, model.EpochKey{NodeID: 7}, now, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SettleInvestigation(ctx, caseID, model.VerdictBothGuilty, string(raw), now, true); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{deps: Deps{Queries: testManagementQueries(t, reg, nil)}}
+	router := gin.New()
+	router.GET("/cases", h.getCases)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/cases", nil))
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Items []struct {
+				Verdict string `json:"verdict"`
+				Proof   struct {
+					Results []struct {
+						ResourceID    string `json:"resource_id"`
+						IdentityGroup string `json:"identity_group"`
+						Rule          string `json:"rule"`
+					} `json:"results"`
+				} `json:"proof"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data.Items) != 1 || body.Data.Items[0].Verdict != "both_guilty" {
+		t.Fatal("dual verdict lost")
+	}
+	got := body.Data.Items[0].Proof.Results
+	if len(got) != 1 || got[0].ResourceID != "9007199254740993" || got[0].IdentityGroup != "9007199254740993" || got[0].Rule != "R2" {
+		t.Fatal("certificate identity rounded", got)
+	}
+}

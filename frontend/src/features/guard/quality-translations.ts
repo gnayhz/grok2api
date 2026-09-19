@@ -46,7 +46,7 @@ export const qualityZh = {
           jurisdictionHelp: "守卫介入的模型范围与自检状态;启用+空勾选会被拒绝"
         },
         settings: {
-          help: "先落库后热应用,保存后新案件使用新规则，已有案件保留立案时规则;时长格式如 45m/12h",
+          help: "新案件与主动检测共用证明规则：双方最多 6 次尝试，证明充分即停止。调查期限、留存设置继续生效；差分、陪审、票数和旧探针预算仅为历史协议兼容设置，不影响新案件。已有案件保留冻结规则。时长格式如 45m/12h",
           savedNote: "已生效",
           pendingNote: "设置已保存（版本 {{saved}}），正在重试应用；本实例已应用版本 {{applied}}。",
           changedNote: "设置已被其他会话更新。取消当前编辑后可载入最新设置。",
@@ -133,7 +133,7 @@ export const qualityEn = {
           jurisdictionHelp: "Model scope the guard engages, with self-check state; enabled + empty selection is rejected"
         },
         settings: {
-          help: "Persisted then hot-applied on save; durations like 45m/12h",
+          help: "New cases share active-check proof rules: at most 6 attempts for both parties, stopping when proved. Deadlines and retention still apply. Differential, jury, vote and legacy probe budgets do not govern new cases. Existing cases retain their frozen rules; durations like 45m/12h",
           savedNote: "Applied",
           pendingNote: "Saved version {{saved}} is awaiting application; this instance has applied version {{applied}}. Retrying automatically.",
           changedNote: "Another session updated these settings. Cancel your edits to load the latest settings.",

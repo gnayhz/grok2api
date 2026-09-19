@@ -1,3 +1,4 @@
+import { CaseProofEvidence } from "./case-proof-evidence";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	Activity,
@@ -78,6 +79,8 @@ function reportOf(item: QualityCase): ExperimentReport | undefined {
 function verdictKey(item: QualityCase) {
 	return item.status === "investigating"
 		? "pending"
+		: item.verdict === "both_guilty"
+			? "bothFinding"
 		: item.verdict === "account_guilty"
 			? "accountFinding"
 			: item.verdict === "exit_guilty"
@@ -88,7 +91,7 @@ function verdictKey(item: QualityCase) {
 function verdictTone(item: QualityCase) {
 	return item.status === "investigating"
 		? "warn"
-		: item.verdict === "account_guilty" || item.verdict === "exit_guilty"
+		: ["account_guilty", "exit_guilty", "both_guilty"].includes(item.verdict)
 			? "bad"
 			: "neutral";
 }
@@ -172,12 +175,12 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 			.filter((item) => {
 				if (filter === "open" && item.status !== "investigating") return false;
 				if (filter === "closed" && item.status === "investigating") return false;
-				if (filter === "exit_guilty" && item.verdict !== "exit_guilty") return false;
-				if (filter === "account_guilty" && item.verdict !== "account_guilty") return false;
+				if (filter === "exit_guilty" && !["exit_guilty", "both_guilty"].includes(item.verdict)) return false;
+				if (filter === "account_guilty" && !["account_guilty", "both_guilty"].includes(item.verdict)) return false;
 				if (filter === "cleared" && item.status === "investigating") return false;
 				if (
 					filter === "cleared" &&
-					item.verdict !== "inconclusive" &&
+					item.verdict !== "inconclusive" && item.verdict !== "insufficient" &&
 					item.verdict !== "dismissed"
 				)
 					return false;
@@ -399,19 +402,19 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 						{
 							id: "exit_guilty",
 							label: isZh ? "出口有罪" : "Exit Guilty",
-							count: (cases.data ?? []).filter((c) => c.verdict === "exit_guilty").length,
+							count: (cases.data ?? []).filter((c) => ["exit_guilty", "both_guilty"].includes(c.verdict)).length,
 							dot: "bg-rose-500",
 						},
 						{
 							id: "account_guilty",
 							label: isZh ? "账号有罪" : "Account Guilty",
-							count: (cases.data ?? []).filter((c) => c.verdict === "account_guilty").length,
+							count: (cases.data ?? []).filter((c) => ["account_guilty", "both_guilty"].includes(c.verdict)).length,
 							dot: "bg-purple-500",
 						},
 						{
 							id: "cleared",
 							label: isZh ? "已免罚结案" : "Cleared",
-							count: (cases.data ?? []).filter((c) => c.status !== "investigating" && (c.verdict === "inconclusive" || c.verdict === "dismissed")).length,
+							count: (cases.data ?? []).filter((c) => c.status !== "investigating" && (c.verdict === "inconclusive" || c.verdict === "insufficient" || c.verdict === "dismissed")).length,
 						},
 					].map((item) => (
 						<button
@@ -622,7 +625,7 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 
 									{/* Cross-Evidence Progress Gauge */}
 									<div className="mt-3 space-y-2 text-xs">
-										{report ? (
+										{report?.policy.version === "resource-proof-case-v1" ? (<p className="text-xs">{isZh ? "按最小证明归因" : "Attribution by minimal proof"} · {report.proof?.generations ?? 0} {isZh ? "次生成" : "generations"}</p>) : report ? (
 											<div className="space-y-1.5">
 												{/* Group 1: Exit Jury (固定出口 · 换正常账号) */}
 												<div className="flex items-center justify-between text-[11px]">
@@ -776,7 +779,7 @@ function CaseExperimentContent({
 		refetchInterval: item.status === "investigating" ? 5000 : false,
 	});
 
-	const probeAccounts = useAccountDirectory((probes.data ?? []).flatMap((probe) => [probe.defendant, probe.juror, probe.control_account_id ?? 0]));
+	const probeAccounts = useAccountDirectory((probes.data ?? []).flatMap((probe) => [probe.defendant, probe.juror, probe.control_account_id ?? 0, ...(probe.proof?.observations ?? []).map(o => Number(o.account_id))]));
 	const accountsMap = useMemo(() => new Map([
 		...caseAccountsMap,
 		...(probeAccounts.data?.items ?? []).map((value) => [Number(value.id), { name: value.name, email: value.email }] as const),
@@ -812,6 +815,8 @@ function CaseExperimentContent({
 		return Array.from(exitMap.entries()).map(([id, name]) => ({ id, name }));
 	}, [probes.data, nodesMap]);
 
+	const proofProtocol = report?.policy.version === "resource-proof-case-v1";
+
 	const tone = verdictTone(item);
 
 	return (
@@ -833,6 +838,9 @@ function CaseExperimentContent({
 			</DialogHeader>
 
 			<div className="min-w-0 space-y-4 py-2 text-xs">
+				{proofProtocol && <CaseProofEvidence item={item} tasks={probes.data ?? []} loading={probes.isPending} error={probes.isError} retry={() => void probes.refetch()} />}
+				{!proofProtocol && <>
+
 				{/* Section 1: Methodology & Accused Parties (100% Matching Section 1 in Probe Report) */}
 				<div className="rounded-lg border border-border/80 bg-muted/20 p-3">
 					<h4 className="font-semibold text-foreground mb-1.5 flex items-center gap-1.5">
@@ -1106,6 +1114,8 @@ function CaseExperimentContent({
 						</div>
 					)}
 				</div>
+
+				</>}
 
 				{/* Section 5: Manual Review / Release Action */}
 				<div className="rounded-lg border border-border/80 bg-muted/20 p-3 space-y-2">

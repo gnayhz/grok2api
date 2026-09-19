@@ -18,6 +18,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/quality/evidence"
 	"github.com/chenyme/grok2api/backend/internal/quality/journal"
 	"github.com/chenyme/grok2api/backend/internal/quality/model"
+	"github.com/chenyme/grok2api/backend/internal/quality/proxy"
 	"github.com/chenyme/grok2api/backend/internal/quality/registry"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -64,6 +65,18 @@ func eventRegistries(t *testing.T, driver string) (*registry.Registry, *registry
 	t.Cleanup(func() { second.Close() })
 	return first, second
 }
+
+type emptyProofCandidates struct{}
+
+func (emptyProofCandidates) QualityProbeAccounts(context.Context, model.ProbeExperiment) ([]uint64, error) {
+	return nil, nil
+}
+func (emptyProofCandidates) ListProfiles(context.Context) ([]proxy.NodeProfile, error) {
+	return nil, nil
+}
+func (emptyProofCandidates) Profile(context.Context, uint64) (proxy.NodeProfile, bool, error) {
+	return proxy.NodeProfile{}, false, nil
+}
 func eventServices(t *testing.T, reg *registry.Registry) (*Service, *journal.Store, *evidence.Store, *court.Service) {
 	t.Helper()
 	store := journal.New(reg.DB())
@@ -75,6 +88,8 @@ func eventServices(t *testing.T, reg *registry.Registry) (*Service, *journal.Sto
 	cfg.EvaluateEvery = time.Hour
 	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	judge := court.New(cfg, reg, qualityEvidenceSource{store: ev}, nil, registry.NewProbeTaskStore(reg))
+	judge.SetProbeAccounts(emptyProofCandidates{})
+	judge.SetNodes(emptyProofCandidates{})
 	t.Cleanup(func() { judge.Close(context.Background()) })
 	return New(store, ev, judge), store, ev, judge
 }

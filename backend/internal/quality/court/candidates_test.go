@@ -3,7 +3,6 @@ package court
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
@@ -40,7 +39,7 @@ func TestCourtCandidateFailurePreservesCaseAndFrozenExperiment(t *testing.T) {
 	fail := true
 	experiment := model.NewProbeExperiment(model.Observation{EventID: "incident", Attempt: attemptmeta.Identity{ID: "attempt", Provider: "grok_build", Model: "grok-4.6", RuleVersion: "v1", Profile: attemptmeta.Profile{Known: true, Protocol: "responses", ReasoningEffort: "high"}}})
 	s.SetProbeAccounts(probeAccountsFunc(func(_ context.Context, got model.ProbeExperiment) ([]uint64, error) {
-		if !reflect.DeepEqual(got, experiment) {
+		if got.Baseline != experiment.Baseline || got.TriggerEventID != experiment.TriggerEventID || got.Version != model.ResourceCheckVersion || got.Sample != "token-short" {
 			t.Errorf("experiment changed: %+v", got)
 		}
 		if fail {
@@ -84,7 +83,7 @@ func TestCourtCandidateFailurePreservesCaseAndFrozenExperiment(t *testing.T) {
 	if stats, err := s.Evaluate(ctx, time.Now()); err != nil || stats.Retried == 0 {
 		t.Fatalf("candidate read recovery did not dispatch: %+v %v", stats, err)
 	}
-	if len(dispatch.specs) != 2 {
+	if len(dispatch.specs) != 1 || !dispatch.specs[0].Proof {
 		t.Fatalf("replacement directions=%d", len(dispatch.specs))
 	}
 	for _, spec := range dispatch.specs {

@@ -110,6 +110,7 @@ func New(cfg Config, store Store, recorder Recorder) *Service {
 // DispatchSpec 一次派发的内容。
 // 与 court.DispatchSpec 保持字段同步,组合根 quality_judicial.go 逐字段复制。
 type DispatchSpec struct {
+	Proof           bool
 	ControlAccounts []uint64
 	ControlExits    []model.EpochKey
 	CaseID          uint64
@@ -135,6 +136,13 @@ type DispatchSpec struct {
 func (s *Service) DispatchForCase(ctx context.Context, spec DispatchSpec) (dispatched int, err error) {
 	if s.store == nil {
 		return 0, errors.New("investigator: task store 未接线")
+	}
+	if spec.Proof {
+		_, err := s.store.CreateProbeTask(ctx, model.ProbeTask{CaseID: spec.CaseID, Direction: model.ProbeCaseProof, DefendantAccountID: spec.Defendant, DefendantNodeID: spec.BaselineExit.NodeID, DefendantEpoch: spec.BaselineExit.Epoch, BaselineNodeID: spec.BaselineExit.NodeID, BaselineEpoch: spec.BaselineExit.Epoch})
+		if err != nil {
+			return 0, err
+		}
+		return 1, nil
 	}
 	cfg := s.config()
 	controls := spec.ControlAccounts
@@ -259,7 +267,7 @@ func (s *Service) runDue(ctx context.Context, executor Executor, limit int) (int
 				}
 			}()
 			timeout := 2 * time.Minute
-			if task.Direction == model.ProbeResourceCheck {
+			if task.Direction == model.ProbeResourceCheck || task.Direction == model.ProbeCaseProof {
 				timeout = model.ResourceCheckTimeout
 			}
 			taskCtx, taskCancel := context.WithTimeout(ctx, timeout)
@@ -298,8 +306,9 @@ func (s *Service) runDue(ctx context.Context, executor Executor, limit int) (int
 			}
 			continue
 		}
-		if model.IsManualProbe(out.task.Direction) {
-			// Manual reports have no court evidence projection or restriction.
+		if model.IsManualProbe(out.task.Direction) || out.task.Direction == model.ProbeCaseProof {
+			// Full proof reports are retained on the task, never projected as
+			// ordinary traffic votes. The court alone settles case restrictions.
 			if err := s.settleProbe(out.task.ID, model.ProbeDone, out.result, now); err != nil && firstErr == nil {
 				firstErr = err
 			}

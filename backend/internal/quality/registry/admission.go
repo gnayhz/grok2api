@@ -15,7 +15,7 @@ func (r *Registry) ExitAllowed(ctx context.Context, nodeID uint64) (bool, error)
 		UNION ALL SELECT 1 FROM q_case_party p JOIN q_case c ON c.id = p.case_id
 		WHERE p.kind = 'exit' AND p.node_id = ?
 		AND p.epoch = COALESCE((SELECT epoch FROM q_node_epoch WHERE node_id = ?), 0)
-		AND (p.disposition = 'sentenced' OR (p.disposition = 'remanded' AND c.status IN ('investigating', 'exit_guilty')))
+		AND (p.disposition = 'sentenced' OR (p.disposition = 'remanded' AND c.status IN ('investigating', 'exit_guilty', 'both_guilty')))
 	)`, nodeID, nodeID, nodeID, nodeID).Scan(&blocked).Error
 	return !blocked, err
 }

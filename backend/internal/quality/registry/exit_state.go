@@ -179,7 +179,7 @@ func (r *Registry) ReleaseExitIfUnheld(ctx context.Context, nodeID, epoch uint64
 		Joins("JOIN q_case AS cases ON cases.id = party.case_id").
 		Where("party.kind = ? AND party.node_id = ? AND party.epoch = ? AND party.disposition = ? AND cases.status IN ?",
 			string(model.PartyExit), nodeID, epoch, string(model.DispositionRemanded),
-			[]string{string(model.CaseInvestigating), string(model.CaseExitGuilty)}).
+			[]string{string(model.CaseInvestigating), string(model.CaseExitGuilty), string(model.CaseBothGuilty)}).
 		Order("party.case_id DESC").Limit(1).Find(&holders).Error; err != nil {
 		return err
 	}

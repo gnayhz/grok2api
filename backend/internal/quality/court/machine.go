@@ -89,6 +89,9 @@ func (s *Service) LiveCaseViews(ctx context.Context, now time.Time) ([]LiveCaseV
 			return nil, err
 		}
 		report := assessExperiment(tasks, policy)
+		if policy.Version == model.CaseProofVersion {
+			report = assessCaseProof(tasks, policy, now)
+		}
 		summary := planningProgressFor(report)
 		view.AccountDegradedExits = summary.DiffDegraded
 		view.AccountSpanNodes = summary.DiffSpanNodes
@@ -225,8 +228,10 @@ func (s *Service) openCase(ctx context.Context, defendant uint64, exit model.Epo
 	var opening map[string]any
 	_ = json.Unmarshal([]byte(evidenceJSON), &opening)
 	policy := policyFor(s.Config(), now)
+	var preparationErr error
 	if len(observations) > 0 {
-		policy.Experiment = model.NewProbeExperiment(observations[0])
+		policy = caseProofPolicy(defendant, exit, observations[0], now, s.Config())
+		policy.Experiment.ResourceCheck.UnavailableReason = "candidates_unavailable"
 	}
 	opening["policy"] = policy
 	raw, _ := json.Marshal(opening)
@@ -234,15 +239,34 @@ func (s *Service) openCase(ctx context.Context, defendant uint64, exit model.Epo
 	if err != nil {
 		return caseID, err
 	}
+	if len(observations) > 0 {
+		prepared, err := s.prepareCaseProof(ctx, defendant, exit, observations[0], now)
+		preparationErr = err
+		if err == nil {
+			prepared.DeadlineAt, prepared.Experiment.ResourceCheck.DeadlineAt = policy.DeadlineAt, policy.DeadlineAt
+			policy = prepared
+			opening["policy"] = policy
+			raw, err = json.Marshal(opening)
+			if err != nil {
+				return caseID, err
+			}
+			if err := s.registry.UpdateInvestigationEvidence(ctx, caseID, string(raw)); err != nil {
+				return caseID, err
+			}
+		}
+	}
 	if exit.NodeID != 0 && s.ledgerSink != nil {
 		if err := s.ledgerSink.RecordDegradeEvent(ctx, exit.NodeID, exit.Epoch, now); err != nil {
 			s.logger.Warn("court_ledger_write_failed", "case", caseID, "error", err)
 		}
 	}
-	if s.dispatcher != nil && (policy.Experiment.Version == "" || policy.Experiment.UnsupportedReason() == "") {
-		spec, err := s.dispatchSpecFor(ctx, caseID, defendant, exit, estimate, policy)
-		if err != nil {
-			return caseID, err
+	if preparationErr == nil && s.dispatcher != nil && (policy.Experiment.Version == "" || policy.Experiment.UnsupportedReason() == "") {
+		spec := DispatchSpec{Proof: true, CaseID: caseID, Defendant: defendant, BaselineExit: exit}
+		if policy.Version != model.CaseProofVersion {
+			spec, err = s.dispatchSpecFor(ctx, caseID, defendant, exit, estimate, policy)
+			if err != nil {
+				return caseID, err
+			}
 		}
 		if dispatched, err := s.dispatcher.DispatchForCase(ctx, spec); err != nil {
 			s.logger.Warn("court_dispatch_failed", "case", caseID, "error", err.Error())
@@ -252,5 +276,5 @@ func (s *Service) openCase(ctx context.Context, defendant uint64, exit model.Epo
 	}
 	s.logger.Info("court_case_opened", "case", caseID, "account", defendant,
 		"node", exit.NodeID, "epoch", exit.Epoch)
-	return caseID, nil
+	return caseID, preparationErr
 }

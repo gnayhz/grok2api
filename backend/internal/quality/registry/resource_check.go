@@ -31,11 +31,21 @@ func (s *ProbeTaskStore) claimResourceCheck(ctx context.Context, row qProbeTaskM
 			return err
 		}
 		var running int64
-		if err := tx.Model(&qProbeTaskModel{}).Where("direction = ? AND state = ? AND lease_until > ?", string(model.ProbeResourceCheck), "running", now).Count(&running).Error; err != nil {
+		if err := tx.Model(&qProbeTaskModel{}).Where("direction IN ? AND state = ? AND lease_until > ?", []string{string(model.ProbeResourceCheck), string(model.ProbeCaseProof)}, "running", now).Count(&running).Error; err != nil {
 			return err
 		}
 		if running >= 2 {
 			return nil
+		}
+		if row.Direction == string(model.ProbeCaseProof) {
+			plan := probeExperimentFromJSON(row.ExperimentJSON).ResourceCheck
+			var count int64
+			if err := tx.Model(&qCaseModel{}).Where("id = ? AND status = ?", row.CaseID, "investigating").Count(&count).Error; err != nil {
+				return err
+			}
+			if count != 1 || plan == nil || !now.Before(plan.DeadlineAt) {
+				return tx.Model(&qProbeTaskModel{}).Where("id = ? AND state = ?", row.ID, "pending").Updates(map[string]any{"state": "cancelled", "detail": "case_deadline_or_closed", "finished_at": now, "updated_at": now}).Error
+			}
 		}
 		result := tx.Model(&qProbeTaskModel{}).Where("id = ? AND state = ? AND created_at >= ?", row.ID, "pending", now.Add(-model.ResourceCheckQueueTimeout)).Updates(map[string]any{"state": "running", "updated_at": now, "lease_owner": s.owner, "lease_until": now.Add(ProbeLease)})
 		claimed = result.RowsAffected == 1
@@ -206,7 +216,7 @@ func (s *ProbeTaskStore) SaveResourceCheckProgress(ctx context.Context, id uint6
 	if err != nil {
 		return err
 	}
-	res := s.registry.db.WithContext(ctx).Model(&qProbeTaskModel{}).Where("id = ? AND direction = ? AND state = ? AND lease_owner = ? AND lease_until > ? AND check_revision = ?", id, string(model.ProbeResourceCheck), "running", s.owner, time.Now().UTC(), report.Revision-1).Updates(map[string]any{"check_report_json": string(data), "check_revision": report.Revision, "updated_at": time.Now().UTC()})
+	res := s.registry.db.WithContext(ctx).Model(&qProbeTaskModel{}).Where("id = ? AND direction IN ? AND state = ? AND lease_owner = ? AND lease_until > ? AND check_revision = ?", id, []string{string(model.ProbeResourceCheck), string(model.ProbeCaseProof)}, "running", s.owner, time.Now().UTC(), report.Revision-1).Updates(map[string]any{"check_report_json": string(data), "check_revision": report.Revision, "updated_at": time.Now().UTC()})
 	if res.Error != nil {
 		return res.Error
 	}

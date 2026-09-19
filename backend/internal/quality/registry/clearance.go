@@ -102,7 +102,7 @@ func releaseUnheldExit(tx *gorm.DB, next *cacheSnapshot, key model.EpochKey) err
 	}
 	var holder struct{ CaseID uint64 }
 	if err := tx.Table("q_case_party p").Select("p.case_id").Joins("JOIN q_case c ON c.id=p.case_id").
-		Where("p.kind = 'exit' AND p.node_id = ? AND p.epoch = ? AND p.disposition = 'remanded' AND c.status IN ('investigating','exit_guilty')", key.NodeID, key.Epoch).
+		Where("p.kind = 'exit' AND p.node_id = ? AND p.epoch = ? AND p.disposition = 'remanded' AND c.status IN ('investigating','exit_guilty','both_guilty')", key.NodeID, key.Epoch).
 		Order("p.case_id").Limit(1).Scan(&holder).Error; err != nil {
 		return err
 	}

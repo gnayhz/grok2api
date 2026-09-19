@@ -19,7 +19,7 @@ func (r *Registry) migrateAccountCheckDirection(ctx context.Context) error {
 	} else {
 		err = db.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'q_probe_task'").Scan(&definition).Error
 	}
-	if err != nil || strings.Contains(definition, "'resource_check'") {
+	if err != nil || strings.Contains(definition, "'case_proof'") && strings.Contains(definition, "'resource_check'") && strings.Contains(definition, "'account_check'") {
 		return err
 	}
 	return db.Transaction(func(tx *gorm.DB) error {

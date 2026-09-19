@@ -122,7 +122,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 			if manual {
 				if party.Kind == "account" && next.accounts[party.AccountID].CurrentCaseID == caseID && next.accounts[party.AccountID].State == model.AccountSentenced {
 					var holder struct{ CaseID uint64 }
-					if err := tx.Table("q_case_party p").Select("p.case_id").Joins("JOIN q_case c ON c.id=p.case_id").Where("p.kind='account' AND p.account_id=? AND p.case_id<>? AND p.disposition='sentenced' AND c.status='account_guilty'", party.AccountID, caseID).Limit(1).Scan(&holder).Error; err != nil {
+					if err := tx.Table("q_case_party p").Select("p.case_id").Joins("JOIN q_case c ON c.id=p.case_id").Where("p.kind='account' AND p.account_id=? AND p.case_id<>? AND p.disposition='sentenced' AND c.status IN ('account_guilty','both_guilty')", party.AccountID, caseID).Limit(1).Scan(&holder).Error; err != nil {
 						return err
 					}
 					entry := next.accounts[party.AccountID]
@@ -135,7 +135,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 				key := model.EpochKey{NodeID: party.NodeID, Epoch: party.Epoch}
 				if party.Kind == "exit" && next.exitStates[key].CurrentCaseID == caseID && next.exitStates[key].State == model.ExitBanned {
 					var holder struct{ CaseID uint64 }
-					if err := tx.Table("q_case_party p").Select("p.case_id").Joins("JOIN q_case c ON c.id=p.case_id").Where("p.kind='exit' AND p.node_id=? AND p.epoch=? AND p.case_id<>? AND p.disposition='sentenced' AND c.status='exit_guilty'", party.NodeID, party.Epoch, caseID).Limit(1).Scan(&holder).Error; err != nil {
+					if err := tx.Table("q_case_party p").Select("p.case_id").Joins("JOIN q_case c ON c.id=p.case_id").Where("p.kind='exit' AND p.node_id=? AND p.epoch=? AND p.case_id<>? AND p.disposition='sentenced' AND c.status IN ('exit_guilty','both_guilty')", party.NodeID, party.Epoch, caseID).Limit(1).Scan(&holder).Error; err != nil {
 						return err
 					}
 					entry := next.exitStates[key]
@@ -149,7 +149,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 
 			disposition := model.DispositionReleased
 			key := model.EpochKey{NodeID: party.NodeID, Epoch: party.Epoch}
-			if party.Kind == string(model.PartyAccount) && verdict == model.VerdictAccountGuilty {
+			if party.Kind == string(model.PartyAccount) && verdict.RestrictsAccount() {
 				disposition = model.DispositionSentenced
 			}
 			if party.Kind == string(model.PartyExit) {
@@ -157,7 +157,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 					disposition = model.DispositionWithdrawn
 				} else if party.ReviewReleased {
 					disposition = model.DispositionReleased
-				} else if verdict == model.VerdictExitGuilty {
+				} else if verdict.RestrictsExit() {
 					disposition = model.DispositionSentenced
 					if !banExit {
 						disposition = model.DispositionRemanded
@@ -180,7 +180,7 @@ func (r *Registry) SettleInvestigation(ctx context.Context, caseID uint64, verdi
 					}
 				}
 			} else if next.nodeEpoch[party.NodeID] == party.Epoch {
-				if verdict == model.VerdictExitGuilty && (disposition == model.DispositionSentenced || disposition == model.DispositionRemanded) {
+				if verdict.RestrictsExit() && (disposition == model.DispositionSentenced || disposition == model.DispositionRemanded) {
 					state := model.ExitRemanded
 					if banExit {
 						state = model.ExitBanned

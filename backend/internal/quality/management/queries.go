@@ -233,6 +233,7 @@ func (q *Queries) Matrix(ctx context.Context) (Matrix, error) {
 var ErrCaseParties = court.ErrReadCaseParties
 
 type Case struct {
+	Proof    *model.ResourceCheckReport
 	ID       uint64
 	Status   model.CaseStatus
 	Verdict  model.Verdict
@@ -266,6 +267,14 @@ func (q *Queries) Cases(ctx context.Context) ([]Case, error) {
 		// Legacy records may contain non-object evidence. Preserve their
 		// readable case/party history without inventing replacement evidence.
 		if record.EvidenceJSON != "" {
+			var assessment struct {
+				Assessment struct {
+					Proof *model.ResourceCheckReport `json:"proof"`
+				} `json:"assessment"`
+			}
+			if json.Unmarshal([]byte(record.EvidenceJSON), &assessment) == nil {
+				value.Proof = assessment.Assessment.Proof
+			}
 			var data map[string]any
 			if err := json.Unmarshal([]byte(record.EvidenceJSON), &data); err == nil && len(data) > 0 {
 				value.Evidence = data
@@ -274,6 +283,9 @@ func (q *Queries) Cases(ctx context.Context) ([]Case, error) {
 		if record.Status == model.CaseInvestigating {
 			if live, ok := liveByID[record.ID]; ok {
 				value.Live = &live
+				if live.Assessment != nil {
+					value.Proof = live.Assessment.Proof
+				}
 			}
 		}
 		values = append(values, value)

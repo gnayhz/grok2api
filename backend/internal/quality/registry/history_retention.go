@@ -50,7 +50,7 @@ func (r *Registry) CleanExpiredCaseHistory(ctx context.Context, now time.Time) (
 		// A case and its measurements share one retention unit. Any active
 		// restriction preserves its case, parties and tests for human review.
 		expiredCases := tx.Model(&qCaseModel{}).Select("id").Where("closed_at IS NOT NULL AND closed_at < ?", caseCutoff).
-			Where("verdict NOT IN ?", []string{"account_guilty", "exit_guilty"}).
+			Where("verdict NOT IN ?", []string{"account_guilty", "exit_guilty", "both_guilty"}).
 			Where("NOT EXISTS (SELECT 1 FROM q_account_state a WHERE a.current_case_id=q_case.id)").
 			Where("NOT EXISTS (SELECT 1 FROM q_exit_state e WHERE e.current_case_id=q_case.id)")
 		res := tx.Where("case_id IN (?) OR (updated_at < ? AND state IN ? AND NOT EXISTS (SELECT 1 FROM q_case c WHERE c.id=q_probe_task.case_id))", expiredCases, probeCutoff, terminalProbeStates).Delete(&qProbeTaskModel{})

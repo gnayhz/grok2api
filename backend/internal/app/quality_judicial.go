@@ -19,6 +19,7 @@ type qualityDispatcher struct {
 
 func (d qualityDispatcher) DispatchForCase(ctx context.Context, spec qualitycourt.DispatchSpec) (int, error) {
 	return d.service.DispatchForCase(ctx, qualityinvestigator.DispatchSpec{
+		Proof:           spec.Proof,
 		ControlAccounts: spec.ControlAccounts, ControlExits: spec.ControlExits,
 		CaseID:          spec.CaseID,
 		Defendant:       spec.Defendant,

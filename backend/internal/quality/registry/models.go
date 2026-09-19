@@ -53,8 +53,8 @@ func (qIdentityGroupModel) TableName() string { return "q_identity_group" }
 // verdict/status CHECK 中的 'dismissed' 仅兼容历史存量行,新写入路径不再产生该值。
 type qCaseModel struct {
 	ID           uint64    `gorm:"primaryKey;autoIncrement"`
-	Status       string    `gorm:"size:32;not null;check:chk_q_case_status,status IN ('investigating','account_guilty','exit_guilty','dismissed')"`
-	Verdict      string    `gorm:"size:32;not null;default:'';check:chk_q_case_verdict,verdict IN ('','account_guilty','exit_guilty','insufficient','dismissed')"`
+	Status       string    `gorm:"size:32;not null;check:chk_q_case_status,status IN ('investigating','account_guilty','exit_guilty','both_guilty','dismissed')"`
+	Verdict      string    `gorm:"size:32;not null;default:'';check:chk_q_case_verdict,verdict IN ('','account_guilty','exit_guilty','both_guilty','insufficient','dismissed')"`
 	EvidenceJSON string    `gorm:"type:text;not null;default:'';check:chk_q_case_evidence,length(evidence_json) <= 65536"`
 	OpenedAt     time.Time `gorm:"not null"`
 	ClosedAt     *time.Time
@@ -131,7 +131,7 @@ type qProbeTaskModel struct {
 	ControlAttemptJSON string     `gorm:"type:text;not null;default:''"`
 	ID                 uint64     `gorm:"primaryKey;autoIncrement"`
 	CaseID             uint64     `gorm:"not null;default:0;index:idx_q_probe_task_case"`
-	Direction          string     `gorm:"size:32;not null;check:chk_q_probe_task_direction,direction IN ('account_differential','exit_jury','account_check','resource_check')"`
+	Direction          string     `gorm:"size:32;not null;check:chk_q_probe_task_direction,direction IN ('account_differential','exit_jury','account_check','resource_check','case_proof')"`
 	DefendantAccountID uint64     `gorm:"not null;default:0"`
 	DefendantNodeID    uint64     `gorm:"not null;default:0"`
 	DefendantEpoch     uint64     `gorm:"not null;default:0"`

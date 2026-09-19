@@ -11,6 +11,7 @@ const (
 	CaseAccountGuilty CaseStatus = "account_guilty"
 	// CaseExitGuilty IP 有罪:被告出口按节点型 ban,账号全抹释放。
 	CaseExitGuilty CaseStatus = "exit_guilty"
+	CaseBothGuilty CaseStatus = "both_guilty"
 	// CaseDismissed 证据不足:双方释放并关闭案件。
 	CaseDismissed CaseStatus = "dismissed"
 )
@@ -30,6 +31,7 @@ const (
 	VerdictAccountGuilty Verdict = "account_guilty"
 	// VerdictExitGuilty 出口(IP)有罪。
 	VerdictExitGuilty Verdict = "exit_guilty"
+	VerdictBothGuilty Verdict = "both_guilty"
 	// VerdictInsufficient 证据不足:双方释放,案件关闭。
 	VerdictInsufficient Verdict = "insufficient"
 	// VerdictDismissed 仅兼容历史存量行,新写入路径不再产生该值。

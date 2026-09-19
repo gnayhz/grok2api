@@ -335,6 +335,7 @@ type CaseProbes = { account: QualityProbeTask[]; exit: QualityProbeTask[] };
 export function groupProbesByCase(probes: QualityProbeTask[]): Map<number, CaseProbes> {
 	const grouped = new Map<number, CaseProbes>();
 	for (const task of probes) {
+		if (task.direction === "case_proof") continue;
 		const entry = grouped.get(task.case_id) ?? { account: [], exit: [] };
 		if (task.direction === "account_differential") {
 			entry.account.push(task);
@@ -424,7 +425,7 @@ export function dispositionTone(disposition: string): "destructive" | "warning" 
 /** 裁决 → 徽章色调。与 quality-tribunal-view.tsx 里同名但按案件对象
  * 取值的 verdictTone 不同,这里是纯字符串状态的测试缝投影。 */
 export function testCaseVerdictTone(status: string): "destructive" | "warning" | "ok" | "muted" {
-	if (status === "account_guilty") {
+	if (status === "account_guilty" || status === "both_guilty") {
 		return "destructive";
 	}
 	if (status === "exit_guilty") {

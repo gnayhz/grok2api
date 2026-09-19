@@ -10,7 +10,7 @@ export function caseDispositionKey(item: QualityCase): string {
 		);
 	const account = held("account"),
 		exit = held("exit");
-	if (account && exit) return "bothHeld";
+	if (account && exit) return item.status === "investigating" ? "bothHeld" : "bothRestricted";
 	if (account)
 		return item.status === "investigating"
 			? "exitClearedAccountPending"

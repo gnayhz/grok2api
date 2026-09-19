@@ -5,6 +5,8 @@ import "time"
 const ResourceCheckVersion = "resource-proof-v2"
 const LegacyResourceCheckVersion = "resource-quality-check-v1"
 const ProbeResourceCheck ProbeDirection = "resource_check"
+const ProbeCaseProof ProbeDirection = "case_proof"
+const CaseProofVersion = "resource-proof-case-v1"
 const ResourceCheckMaxAccounts = 8
 const ResourceCheckMaxNodes = 4
 const ResourceCheckTimeout = 12 * time.Minute
@@ -13,6 +15,7 @@ const ResourceCheckWindow = 180 * time.Second
 
 // Candidate membership is never evidence of health.
 type ResourceCheckPlan struct {
+	DeadlineAt        time.Time        `json:"deadline_at,omitempty"`
 	UnavailableReason string           `json:"unavailable_reason,omitempty"`
 	Kind              string           `json:"kind"`
 	ResourceID        uint64           `json:"resource_id"`

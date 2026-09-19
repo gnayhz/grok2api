@@ -19,8 +19,8 @@ export const CreativeConsolePageModule = preloadableNamed(() => import("@/featur
 export const DashboardPageModule = preloadableNamed(() => import("@/features/dashboard/dashboard-page"), "DashboardPage", ["dashboard", "audits", "models", "console", "settings"]);
 export const ApiDocsPageModule = preloadableNamed(() => import("@/features/docs/api-docs-page"), "ApiDocsPage", ["docs"]);
 export const GalleryPageModule = preloadableNamed(() => import("@/features/media/gallery-page"), "GalleryPage", ["media"]);
-export const QualityConsoleModule = preloadableNamed(() => import("@/features/guard/quality-console"), "QualityConsole", ["quality", "experiment", "guardProbes", "ops", "settings", "network", "settingsForm"]);
-export const QualitySettingsPageModule = preloadableNamed(() => import("@/app/quality-settings-route"), "QualitySettingsRoute", ["quality", "experiment", "guardProbes", "ops", "settings", "network", "models", "settingsForm"]);
+export const QualityConsoleModule = preloadableNamed(() => import("@/features/guard/quality-console"), "QualityConsole", ["resourceChecks", "quality", "experiment", "guardProbes", "ops", "settings", "network", "settingsForm"]);
+export const QualitySettingsPageModule = preloadableNamed(() => import("@/app/quality-settings-route"), "QualitySettingsRoute", ["resourceChecks", "quality", "experiment", "guardProbes", "ops", "settings", "network", "models", "settingsForm"]);
 export const VideoGalleryPageModule = preloadableNamed(() => import("@/features/media/video-gallery-page"), "VideoGalleryPage", ["media"]);
 export const ModelsPageModule = preloadableNamed(() => import("@/features/models/models-page"), "ModelsPage", ["models", "console"]);
 export const ProxiesPageModule = preloadableNamed(() => import("@/features/proxies/proxies-page"), "ProxiesPage", ["resourceChecks", "network", "networkResources", "networkPools", "networkRouting", "ops", "settings", "settingsForm"]);

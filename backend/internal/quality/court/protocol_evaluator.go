@@ -22,19 +22,20 @@ type ExperimentGroup struct {
 }
 
 type ExperimentReport struct {
-	Policy           ExperimentPolicy `json:"policy"`
-	Verdict          model.Verdict    `json:"verdict"`
-	Reason           string           `json:"reason"`
-	Account          ExperimentGroup  `json:"account"`
-	Exit             ExperimentGroup  `json:"exit"`
-	AccountSupport   []string         `json:"account_support"`
-	ExitSupport      []string         `json:"exit_support"`
-	Limitations      []string         `json:"limitations"`
-	AccountSuspicion string           `json:"account_suspicion"`
-	AccountSpanNodes int              `json:"account_span_nodes"`
-	Phase            string           `json:"phase"`
-	AccountCleared   bool             `json:"account_cleared"`
-	ExitCleared      bool             `json:"exit_cleared"`
+	Proof            *model.ResourceCheckReport `json:"proof,omitempty"`
+	Policy           ExperimentPolicy           `json:"policy"`
+	Verdict          model.Verdict              `json:"verdict"`
+	Reason           string                     `json:"reason"`
+	Account          ExperimentGroup            `json:"account"`
+	Exit             ExperimentGroup            `json:"exit"`
+	AccountSupport   []string                   `json:"account_support"`
+	ExitSupport      []string                   `json:"exit_support"`
+	Limitations      []string                   `json:"limitations"`
+	AccountSuspicion string                     `json:"account_suspicion"`
+	AccountSpanNodes int                        `json:"account_span_nodes"`
+	Phase            string                     `json:"phase"`
+	AccountCleared   bool                       `json:"account_cleared"`
+	ExitCleared      bool                       `json:"exit_cleared"`
 }
 
 // assessExperiment keeps missing results, failures and confirmed repeated

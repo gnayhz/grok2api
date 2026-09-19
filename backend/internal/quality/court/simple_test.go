@@ -33,6 +33,10 @@ func (d *recordingSimpleTaskDispatcher) DispatchForCase(ctx context.Context, spe
 }
 
 func (d simpleTaskDispatcher) DispatchForCase(ctx context.Context, spec DispatchSpec) (int, error) {
+	if spec.Proof {
+		_, err := d.store.CreateProbeTask(ctx, model.ProbeTask{CaseID: spec.CaseID, Direction: model.ProbeCaseProof, DefendantAccountID: spec.Defendant, DefendantNodeID: spec.BaselineExit.NodeID, DefendantEpoch: spec.BaselineExit.Epoch, BaselineNodeID: spec.BaselineExit.NodeID, BaselineEpoch: spec.BaselineExit.Epoch})
+		return 1, err
+	}
 	count := 0
 	for _, exit := range spec.HealthyExits {
 		id, err := d.store.CreateProbeTask(ctx, model.ProbeTask{

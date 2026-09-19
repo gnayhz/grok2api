@@ -31,13 +31,14 @@ const sampleShape = hasShape({
 });
 const groupShape = hasShape({ control_account: isString, control_node: isString, account_id: isString, node_id: isString,
   control: isArrayOf(sampleShape), samples: isArrayOf(sampleShape), after: isOptional(sampleShape), outcome: isString, reason: isString, control_delta: isNumber, delta: isNumber });
+export const resourceReportShape = hasShape({ version: isString, kind: isOneOf("account", "node"), resource_id: isString, outcome: isOneOf("healthy", "degraded", "inconclusive"), reason: isString, calls: isNumber, max_calls: isNumber, groups: isArrayOf(groupShape),
+    observations: isOptional(isArrayOf(hasShape({id:isNumber, window:isNumber, account_id:isString, node_id:isString, purpose:isString, class:isString, sample:sampleShape}))),
+    results: isOptional(isArrayOf(hasShape({kind:isOneOf("account","node"),resource_id:isString,outcome:isString,reason:isString,rule:isOptional(isString),evidence:isArrayOf(isNumber),window:isNumber,valid_until:isString}))),
+    generations:isOptional(isNumber),path_checks:isOptional(isNumber) });
 export const resourceChecksDecoder = createValidatedDecoder<{ items: ResourceCheck[] }>("resource checks", hasShape({ items: isArrayOf(hasShape({
   id: isString, kind: isOneOf("account", "node"), resource_id: isString, model: isString,
   state: isOneOf("pending", "running", "done", "failed", "cancelled"), created_at: isString, finished_at: isOptional(isString),
-  report: isOptional(hasShape({ version: isString, kind: isOneOf("account", "node"), resource_id: isString, outcome: isOneOf("healthy", "degraded", "inconclusive"), reason: isString, calls: isNumber, max_calls: isNumber, groups: isArrayOf(groupShape),
-    observations: isOptional(isArrayOf(hasShape({id:isNumber, window:isNumber, account_id:isString, node_id:isString, purpose:isString, class:isString, sample:sampleShape}))),
-    results: isOptional(isArrayOf(hasShape({kind:isOneOf("account","node"),resource_id:isString,outcome:isString,reason:isString,rule:isOptional(isString),evidence:isArrayOf(isNumber),window:isNumber,valid_until:isString}))),
-    generations:isOptional(isNumber),path_checks:isOptional(isNumber) })),
+  report: isOptional(resourceReportShape),
 })) }));
 export type ResourceSubmission = { resource_id: string; id?: string; error?: string };
 export function fetchResourceChecks(kind: ResourceKind, ids: string[], signal?: AbortSignal): Promise<ResourceCheck[]> {

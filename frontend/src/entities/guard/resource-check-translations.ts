@@ -16,8 +16,9 @@ export const resourceChecksZh = {
   group: "第 {{index}} 组 · 账号 #{{account}} × 出口 #{{node}}", control: "正常对照候选：账号 #{{account}} × 出口 #{{node}}",
   vector: "目标输入：{{target}}；对照输入：{{control}}。目标差分 {{delta}}，对照差分 {{controlDelta}}。",
   phase: "测量", thinking: "可见思考", complete: "成功完成", path: "出口验证", unverified: "无法核实", controlPhase: "对照", targetPhase: "目标", afterPhase: "对照复查",
-  outcome: { healthy: "未发现资源风控异常", degraded: "确认资源异常", inconclusive: "无法判定", pending: "排队中", running: "检测中" },
+  outcome: { done: "已完成", cancelled: "已取消", failed: "未完成", healthy: "未发现资源风控异常", degraded: "确认资源异常", inconclusive: "无法判定", pending: "排队中", running: "检测中" },
   reason: {
+    resource_changed: "证据形成后账号凭据或出口配置发生变化，不能用于当前资源裁决。",
     proved_normal: "有效 A 型响应证明本次账号与出口均正常。",
     proved_account_bad: "同出口有正常对照，目标账号为 B 型，证明账号方向异常。",
     proved_exit_bad: "同账号在其他出口正常，在目标出口为 B 型，证明出口方向异常。",
@@ -57,8 +58,9 @@ export const resourceChecksEn = {
   group: "Group {{index}} · Account #{{account}} × Exit #{{node}}", control: "Control candidate: account #{{account}} × exit #{{node}}",
   vector: "Target input: {{target}}; control: {{control}}. Target delta {{delta}}, control delta {{controlDelta}}.",
   phase: "Measurement", thinking: "Thinking", complete: "Completed", path: "Path verification", unverified: "Unverified", controlPhase: "Control", targetPhase: "Target", afterPhase: "Control recheck",
-  outcome: { healthy: "No resource risk detected", degraded: "Resource anomaly confirmed", inconclusive: "Inconclusive", pending: "Queued", running: "Checking" },
+  outcome: { done: "Completed", cancelled: "Cancelled", failed: "Incomplete", healthy: "No resource risk detected", degraded: "Resource anomaly confirmed", inconclusive: "Inconclusive", pending: "Queued", running: "Checking" },
   reason: {
+    resource_changed: "Credentials or the exit binding changed after measurement; this proof cannot authorize a current finding.",
     path_unregistered: "Exit identity is not registered yet; no generation was sent on that exit. Run its connectivity check and retry after registration.",
     proved_normal: "A valid A response proves both endpoints normal for this check.",
     proved_account_bad: "The target returned B while another account returned A on the same exit.",
