@@ -9,8 +9,8 @@ export const experimentZh = {
 	},
 	facts: {
 		"proved_normal": "本轮有效观测证明资源正常。",
-		"proved_account_bad": "账号异常：B 与同出口 A 型正对照形成 R2 证明。",
-		"proved_exit_bad": "出口异常：同账号跨出口 B/A 形成 R3 证明。",
+		"proved_account_bad": "通过同一出口时，涉案账号缺少思考，对照账号思考正常，异常跟随账号。",
+		"proved_exit_bad": "同一个账号在涉案出口缺少思考，换出口后思考正常，异常跟随出口。",
 		"proved_account_and_exit_bad": "账号和出口分别形成异常证明，两方同时异常。",
 		"conflicting_samples": "观测与四态模型冲突，无法判定。",
 		"resource_changed": "账号凭据或出口配置已变更，旧证据不能用于当前裁决。",
@@ -72,8 +72,8 @@ export const experimentEn = {
 	},
 	facts: {
 		"proved_normal": "Valid observations establish normal resources in this window.",
-		"proved_account_bad": "Account abnormal: B and a same-exit A control form an R2 proof.",
-		"proved_exit_bad": "Exit abnormal: same-account B/A across exits form an R3 proof.",
+		"proved_account_bad": "On the same exit, the target lacked thinking while a comparison account showed thinking. The anomaly follows the account.",
+		"proved_exit_bad": "The same account lacked thinking on the incident exit and showed thinking after switching exits. The anomaly follows the exit.",
 		"proved_account_and_exit_bad": "Independent proofs establish both account and exit anomalies.",
 		"conflicting_samples": "Observations conflict with the four-state model; attribution is inconclusive.",
 		"resource_changed": "Credentials or the exit binding changed after measurement.",

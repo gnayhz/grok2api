@@ -212,12 +212,12 @@ export function QualityProbeView() {
 	return (
 		<div className="flex flex-col gap-5">
       {proofTasks.length > 0 && <section className="space-y-3">
-        <h3 className="text-sm font-semibold">{i18n.language.startsWith("zh") ? "案件证明任务" : "Case proof tasks"}</h3>
+        <h3 className="text-sm font-semibold">{i18n.language.startsWith("zh") ? "案件对照检测" : "Case comparison checks"}</h3>
         <div className="grid gap-3 lg:grid-cols-2">{proofTasks.map(task => <div key={task.id} className="space-y-2 rounded-xl border p-4 text-xs">
           <div className="flex justify-between gap-2"><Link className="font-semibold text-primary hover:underline" to={`/guard?case=${task.case_id}#tribunal`}>#{task.id} · {t("experiment.case", { id: task.case_id })}</Link><Badge variant="secondary">{t(`resourceChecks.outcome.${task.state}`, { defaultValue: task.state })}</Badge></div>
           {task.proof && <>
             <p>{t("resourceChecks.progress", { calls: task.proof.calls, max: task.proof.max_calls })} · {t("resourceChecks.consumption", { generations: task.proof.generations ?? 0, paths: task.proof.path_checks ?? 0 })}</p>
-            {task.proof.results?.map(p => <p key={`${p.kind}:${p.resource_id}`}>{p.kind === "account" ? (i18n.language.startsWith("zh") ? "账号" : "Account") : (i18n.language.startsWith("zh") ? "出口" : "Exit")} #{p.resource_id} · {t(`resourceChecks.outcome.${p.outcome}`)} · {p.rule || "—"}</p>)}
+            {task.proof.results?.map(p => <p key={`${p.kind}:${p.resource_id}`}>{p.kind === "account" ? (i18n.language.startsWith("zh") ? "账号" : "Account") : (i18n.language.startsWith("zh") ? "出口" : "Exit")} #{p.resource_id} · {t(`resourceChecks.outcome.${p.outcome}`)}</p>)}
           </>}
           <p className="text-muted-foreground">{i18n.language.startsWith("zh") ? "这里显示测量记录；当前裁决与限制请查看案件。" : "Measurement records; open the case for its verdict and restrictions."}</p>
         </div>)}</div>

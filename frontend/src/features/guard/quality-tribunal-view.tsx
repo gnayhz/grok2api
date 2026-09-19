@@ -625,7 +625,7 @@ export const QualityTribunalView = memo(function QualityTribunalView() {
 
 									{/* Cross-Evidence Progress Gauge */}
 									<div className="mt-3 space-y-2 text-xs">
-										{report?.policy.version === "resource-proof-case-v1" ? (<p className="text-xs">{isZh ? "按最小证明归因" : "Attribution by minimal proof"} · {report.proof?.generations ?? 0} {isZh ? "次生成" : "generations"}</p>) : report ? (
+										{report?.policy.version === "resource-proof-case-v1" ? (<p className="text-xs">{isZh ? "对照检测完成后归因" : "Attribution by comparison"} · {report.proof?.generations ?? 0} {isZh ? "次生成" : "generations"}</p>) : report ? (
 											<div className="space-y-1.5">
 												{/* Group 1: Exit Jury (固定出口 · 换正常账号) */}
 												<div className="flex items-center justify-between text-[11px]">
@@ -732,7 +732,7 @@ function CaseExperiment({
 }) {
 	return (
 		<Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
-			<DialogContent className="max-w-2xl max-h-[85vh] grid-cols-1 overflow-y-auto [overflow-wrap:anywhere]">
+			<DialogContent className="sm:max-w-4xl max-h-[90vh] grid-cols-1 overflow-y-auto [overflow-wrap:anywhere]">
 				<CaseExperimentContent
 					item={item}
 					accountsMap={accountsMap}
@@ -815,7 +815,7 @@ function CaseExperimentContent({
 		return Array.from(exitMap.entries()).map(([id, name]) => ({ id, name }));
 	}, [probes.data, nodesMap]);
 
-	const proofProtocol = report?.policy.version === "resource-proof-case-v1";
+	const proofProtocol = report?.policy.version === "resource-proof-case-v1" || Boolean(item.proof) || (item.evidence?.policy as { version?: string } | undefined)?.version === "resource-proof-case-v1";
 
 	const tone = verdictTone(item);
 
@@ -826,19 +826,19 @@ function CaseExperimentContent({
 				<div className="flex flex-wrap items-center justify-between gap-2 pr-6">
 					<DialogTitle className="flex min-w-0 items-start gap-2 text-base font-bold">
 						<Gavel className="size-5 shrink-0 text-primary" />
-						<span>{t("experiment.case", { id: item.id })} · {isZh ? "案情审讯报告" : "Forensic Attribution Report"}</span>
+						<span>{t("experiment.case", { id: item.id })} · {isZh ? "调查报告" : "Investigation report"}</span>
 					</DialogTitle>
-					<StatusPill tone={tone}>
+					{!proofProtocol && <StatusPill tone={tone}>
 						{t(`ops.${verdictKey(item)}`)}
-					</StatusPill>
+					</StatusPill>}
 				</div>
 				<p className="text-xs text-muted-foreground">
-					{isZh ? "立案时间：" : "Opened: "}{new Date(item.opened_at).toLocaleString()} · {t("experiment.protocol", { version: report?.policy.version || "1.0" })}
+					{isZh ? "立案时间：" : "Opened: "}{new Date(item.opened_at).toLocaleString(i18n.language)}{item.closed_at && <> · {isZh ? "结案时间：" : "Closed: "}{new Date(item.closed_at).toLocaleString(i18n.language)}</>}
 				</p>
 			</DialogHeader>
 
 			<div className="min-w-0 space-y-4 py-2 text-xs">
-				{proofProtocol && <CaseProofEvidence item={item} tasks={probes.data ?? []} loading={probes.isPending} error={probes.isError} retry={() => void probes.refetch()} />}
+				{proofProtocol && <CaseProofEvidence item={item} tasks={probes.data ?? []} loading={probes.isPending} error={probes.isError} retry={() => void probes.refetch()} accounts={accountsMap} nodes={nodesMap} />}
 				{!proofProtocol && <>
 
 				{/* Section 1: Methodology & Accused Parties (100% Matching Section 1 in Probe Report) */}
@@ -1134,7 +1134,7 @@ function CaseExperimentContent({
 							{manual.at && <p className="text-[10px] opacity-75 mt-0.5 font-mono">{new Date(manual.at).toLocaleString()}</p>}
 						</div>
 					) : (
-						<div className="flex gap-2">
+						<div className="flex flex-col gap-2 sm:flex-row">
 							<Input
 								value={reviewReason}
 								onChange={(e) => setReviewReason(e.target.value)}
